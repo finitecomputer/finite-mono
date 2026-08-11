@@ -56,6 +56,238 @@ export function groupAdminRuntimesByOwner<
   );
 }
 
+export type AdminRuntimeCapabilities = {
+  restart?: boolean;
+  recover_known_good_chat?: boolean;
+  runtime_upgrade?: boolean;
+};
+
+export type AdminUserSearchRuntime = {
+  project_id: string;
+  project_display_name: string;
+  owner_email?: string | null;
+  agent_runtime_id: string;
+  source_host_id: string;
+  source_machine_id: string;
+  runtime_artifact_id?: string | null;
+  runtime_artifact_version_label?: string | null;
+  runtime_status: string;
+  published_app_urls?: string[] | null;
+  runtime_capabilities?: AdminRuntimeCapabilities | null;
+};
+
+export type AdminUserSearchAccount = {
+  userId: string;
+  email: string;
+  grant: {
+    id: string;
+    user_id: string;
+    limit_profile_id: string;
+    status: string;
+    current_window_used_units: number;
+  };
+  apiKeys: Array<{
+    id: string;
+    grant_id: string;
+    project_id?: string | null;
+    agent_runtime_id?: string | null;
+    status: string;
+  }>;
+  projects: Array<{
+    id: string;
+    displayName: string;
+    agentRuntimeId?: string | null;
+  }>;
+};
+
+export type RuntimeFinitePrivateGrantSummary = {
+  grantId: string;
+  grantStatus: "active" | "revoked";
+  grantUserId: string;
+  limitProfileId: string;
+  currentWindowStartedAt: string | null;
+  currentWindowUsedUnits: number;
+  keyId: string;
+  keyStatus: "active" | "revoked";
+  keyProjectId: string | null;
+  keyAgentRuntimeId: string | null;
+  matchScope: "runtime" | "project";
+};
+
+export type AdminRuntimeFinitePrivateTarget = {
+  project_id: string;
+  agent_runtime_id: string;
+};
+
+export type AdminRuntimeFinitePrivateGrant = {
+  id: string;
+  user_id: string;
+  limit_profile_id: string;
+  status: "active" | "revoked";
+  current_window_started_at?: string | null;
+  current_window_used_units: number;
+};
+
+export type AdminRuntimeFinitePrivateApiKey = {
+  id: string;
+  grant_id: string;
+  project_id?: string | null;
+  agent_runtime_id?: string | null;
+  status: "active" | "revoked";
+  updated_at: string;
+};
+
+export type AdminRuntimeFinitePrivateState = {
+  grants: AdminRuntimeFinitePrivateGrant[];
+  apiKeys: AdminRuntimeFinitePrivateApiKey[];
+};
+
+export function adminRuntimeSupportsRestart(
+  runtime: { runtime_capabilities?: AdminRuntimeCapabilities | null } | null | undefined
+) {
+  return runtime?.runtime_capabilities?.restart === true;
+}
+
+export function adminRuntimeSupportsRecovery(
+  runtime: { runtime_capabilities?: AdminRuntimeCapabilities | null } | null | undefined
+) {
+  return runtime?.runtime_capabilities?.recover_known_good_chat === true;
+}
+
+export function adminRuntimeSupportsUpgrade(
+  runtime: { runtime_capabilities?: AdminRuntimeCapabilities | null } | null | undefined
+) {
+  return runtime?.runtime_capabilities?.runtime_upgrade === true;
+}
+
+/**
+ * Resolve the Finite Private key/grant most relevant to an admin runtime row.
+ * Runtime-scoped active keys win over project-scoped keys; otherwise the newest
+ * matching key is used so a tile can still explain revoked/replaced state.
+ */
+export function finitePrivateGrantSummaryForRuntime(
+  runtime: AdminRuntimeFinitePrivateTarget,
+  state: AdminRuntimeFinitePrivateState | null | undefined,
+): RuntimeFinitePrivateGrantSummary | null {
+  if (!state) {
+    return null;
+  }
+  const grantsById = new Map(state.grants.map((grant) => [grant.id, grant]));
+  const matchingKeys = state.apiKeys
+    .filter(
+      (key) =>
+        key.agent_runtime_id === runtime.agent_runtime_id ||
+        key.project_id === runtime.project_id,
+    )
+    .sort(
+      (left, right) =>
+        runtimeKeySortScore(runtime, right) - runtimeKeySortScore(runtime, left),
+    );
+  const key = matchingKeys[0];
+  if (!key) {
+    return null;
+  }
+  const grant = grantsById.get(key.grant_id);
+  if (!grant) {
+    return null;
+  }
+  return {
+    grantId: grant.id,
+    grantStatus: grant.status,
+    grantUserId: grant.user_id,
+    limitProfileId: grant.limit_profile_id,
+    currentWindowStartedAt: grant.current_window_started_at ?? null,
+    currentWindowUsedUnits: grant.current_window_used_units,
+    keyId: key.id,
+    keyStatus: key.status,
+    keyProjectId: key.project_id ?? null,
+    keyAgentRuntimeId: key.agent_runtime_id ?? null,
+    matchScope:
+      key.agent_runtime_id === runtime.agent_runtime_id ? "runtime" : "project",
+  };
+}
+
+function runtimeKeySortScore(
+  runtime: AdminRuntimeFinitePrivateTarget,
+  key: AdminRuntimeFinitePrivateApiKey,
+) {
+  let score = 0;
+  if (key.status === "active") {
+    score += 1_000_000_000_000_000;
+  }
+  if (key.agent_runtime_id === runtime.agent_runtime_id) {
+    score += 1_000_000_000_000;
+  } else if (key.project_id === runtime.project_id) {
+    score += 500_000_000_000;
+  }
+  const updatedAt = Date.parse(key.updated_at);
+  if (Number.isFinite(updatedAt)) {
+    score += updatedAt;
+  }
+  return score;
+}
+
+export function adminRuntimeMatchesSearch(
+  runtime: AdminUserSearchRuntime,
+  account: AdminUserSearchAccount | null | undefined,
+  query: string,
+  finitePrivate: RuntimeFinitePrivateGrantSummary | null | undefined = null,
+): boolean {
+  const tokens = adminSearchTokens(query);
+  if (tokens.length === 0) {
+    return true;
+  }
+  const haystack = adminSearchText([
+    runtime.project_id,
+    runtime.project_display_name,
+    runtime.owner_email,
+    runtime.agent_runtime_id,
+    runtime.source_host_id,
+    runtime.source_machine_id,
+    runtime.runtime_artifact_id,
+    runtime.runtime_artifact_version_label,
+    runtime.runtime_status,
+    runtime.published_app_urls,
+    account?.userId,
+    account?.email,
+    account?.grant.id,
+    account?.grant.user_id,
+    account?.grant.limit_profile_id,
+    account?.grant.limit_profile_id
+      ? finitePrivateProfileLabel(account.grant.limit_profile_id)
+      : null,
+    account?.grant.status,
+    account?.grant.current_window_used_units,
+    account?.apiKeys.map((apiKey) => [
+      apiKey.id,
+      apiKey.grant_id,
+      apiKey.project_id,
+      apiKey.agent_runtime_id,
+      apiKey.status,
+    ]),
+    account?.projects.map((project) => [
+      project.id,
+      project.displayName,
+      project.agentRuntimeId,
+    ]),
+    finitePrivate?.grantId,
+    finitePrivate?.grantUserId,
+    finitePrivate?.limitProfileId,
+    finitePrivate?.limitProfileId
+      ? finitePrivateProfileLabel(finitePrivate.limitProfileId)
+      : null,
+    finitePrivate?.grantStatus,
+    finitePrivate?.currentWindowStartedAt,
+    finitePrivate?.currentWindowUsedUnits,
+    finitePrivate?.keyId,
+    finitePrivate?.keyStatus,
+    finitePrivate?.keyProjectId,
+    finitePrivate?.keyAgentRuntimeId,
+    finitePrivate?.matchScope,
+  ]);
+  return tokens.every((token) => haystack.includes(token));
+}
+
 export function canAccessAdminOps(viewer: AdminOpsViewer | null | undefined): boolean {
   return Boolean(viewer?.isAdmin);
 }
@@ -207,6 +439,24 @@ function boundedWholeNumber(
     throw new Error(`${label} must be a whole number from ${minimum} to ${maximum}.`);
   }
   return parsed;
+}
+
+function adminSearchTokens(query: string) {
+  return query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+}
+
+function adminSearchText(values: unknown[]): string {
+  return values.map(adminSearchValue).filter(Boolean).join(" ").toLowerCase();
+}
+
+function adminSearchValue(value: unknown): string {
+  if (value == null) {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return value.map(adminSearchValue).filter(Boolean).join(" ");
+  }
+  return String(value);
 }
 
 export type OneTimeLaunchCodeActionState =

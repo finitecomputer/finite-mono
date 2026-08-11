@@ -5,9 +5,11 @@ import path from "node:path";
 
 import {
   ONE_TIME_KEY_WARNING,
+  adminRuntimeMatchesSearch,
   canAccessAdminOps,
   finitePrivateAccountForProject,
   finitePrivateAssignableProfiles,
+  finitePrivateGrantSummaryForRuntime,
   finitePrivateProfileLabel,
   groupAdminRuntimesByOwner,
   heartbeatAgeLabel,
@@ -65,6 +67,119 @@ test("Finite Private helpers keep the curated 1x/5x order and exact project corr
   assert.equal(finitePrivateAccountForProject(accounts, "project-missing"), null);
 });
 
+test("finitePrivateGrantSummaryForRuntime resolves the runtime-scoped active grant", () => {
+  const summary = finitePrivateGrantSummaryForRuntime(
+    { project_id: "project-a", agent_runtime_id: "runtime-a" },
+    {
+      grants: [
+        {
+          id: "fp_grant_project",
+          user_id: "user-project",
+          limit_profile_id: "finite-private-generous-v2",
+          status: "active",
+          current_window_started_at: "2026-07-02T10:00:00Z",
+          current_window_used_units: 111,
+        },
+        {
+          id: "fp_grant_runtime",
+          user_id: "user-runtime",
+          limit_profile_id: "finite-private-generous-5x-v1",
+          status: "active",
+          current_window_started_at: "2026-07-02T11:00:00Z",
+          current_window_used_units: 222,
+        },
+      ],
+      apiKeys: [
+        {
+          id: "fp_key_project",
+          grant_id: "fp_grant_project",
+          project_id: "project-a",
+          agent_runtime_id: null,
+          status: "active",
+          updated_at: "2026-07-02T12:00:00Z",
+        },
+        {
+          id: "fp_key_runtime",
+          grant_id: "fp_grant_runtime",
+          project_id: "project-a",
+          agent_runtime_id: "runtime-a",
+          status: "active",
+          updated_at: "2026-07-02T11:00:00Z",
+        },
+      ],
+    },
+  );
+
+  assert.deepEqual(summary, {
+    grantId: "fp_grant_runtime",
+    grantStatus: "active",
+    grantUserId: "user-runtime",
+    limitProfileId: "finite-private-generous-5x-v1",
+    currentWindowStartedAt: "2026-07-02T11:00:00Z",
+    currentWindowUsedUnits: 222,
+    keyId: "fp_key_runtime",
+    keyStatus: "active",
+    keyProjectId: "project-a",
+    keyAgentRuntimeId: "runtime-a",
+    matchScope: "runtime",
+  });
+});
+
+test("finitePrivateGrantSummaryForRuntime falls back to the newest matching project key", () => {
+  const summary = finitePrivateGrantSummaryForRuntime(
+    { project_id: "project-a", agent_runtime_id: "runtime-a" },
+    {
+      grants: [
+        {
+          id: "fp_grant_old",
+          user_id: "user-old",
+          limit_profile_id: "finite-private-generous-v2",
+          status: "revoked",
+          current_window_used_units: 10,
+        },
+        {
+          id: "fp_grant_new",
+          user_id: "user-new",
+          limit_profile_id: "finite-private-generous-5x-v1",
+          status: "revoked",
+          current_window_started_at: null,
+          current_window_used_units: 20,
+        },
+      ],
+      apiKeys: [
+        {
+          id: "fp_key_unrelated",
+          grant_id: "fp_grant_old",
+          project_id: "project-other",
+          agent_runtime_id: "runtime-other",
+          status: "active",
+          updated_at: "2026-07-02T13:00:00Z",
+        },
+        {
+          id: "fp_key_old",
+          grant_id: "fp_grant_old",
+          project_id: "project-a",
+          agent_runtime_id: null,
+          status: "revoked",
+          updated_at: "2026-07-02T10:00:00Z",
+        },
+        {
+          id: "fp_key_new",
+          grant_id: "fp_grant_new",
+          project_id: "project-a",
+          agent_runtime_id: null,
+          status: "revoked",
+          updated_at: "2026-07-02T12:00:00Z",
+        },
+      ],
+    },
+  );
+
+  assert.equal(summary?.grantId, "fp_grant_new");
+  assert.equal(summary?.keyId, "fp_key_new");
+  assert.equal(summary?.matchScope, "project");
+});
+
 test("admin runtimes group into one sorted card per owner", () => {
   const groups = groupAdminRuntimesByOwner([
     { owner_email: "z@example.test", project_id: "project-z" },
@@ -80,24 +195,125 @@ test("admin runtimes group into one sorted card per owner", () => {
   assert.equal(groups[1].email, "z@example.test");
 });
 
-test("admin page has three tabs and enriches user cards instead of separate grant/key lists", async () => {
-  const source = await readFile(
-    path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
-    "utf8"
+test("admin runtime search matches agent, box, user, grant, key, and profile fields", () => {
+  const runtime = {
+    owner_email: "agent@example.test",
+    project_id: "project_agent_m",
+    project_display_name: "Agent M",
+    agent_runtime_id: "runtime_agent_m",
+    source_host_id: "finite-lat-3",
+    source_machine_id: "finite-kata-b4a553a277f06141b934",
+    runtime_artifact_id: "artifact_agent",
+    runtime_artifact_version_label: "candidate",
+    runtime_status: "online",
+    published_app_urls: ["https://agent.example.test"],
+  };
+  const account = {
+    userId: "user_agent_m",
+    email: "agent@example.test",
+    grant: {
+      id: "fp_grant_agent_m",
+      user_id: "user_agent_m",
+      limit_profile_id: "finite-private-generous-5x-v1",
+      status: "active",
+      current_window_used_units: 8432,
+    },
+    apiKeys: [
+      {
+        id: "fp_key_agent_m",
+        grant_id: "fp_grant_agent_m",
+        project_id: "project_agent_m",
+        agent_runtime_id: "runtime_agent_m",
+        status: "active",
+      },
+    ],
+    projects: [
+      {
+        id: "project_agent_m",
+        displayName: "Agent M",
+        agentRuntimeId: "runtime_agent_m",
+      },
+    ],
+  };
+  const finitePrivateGrant = {
+    grantId: "fp_grant_agent_m",
+    grantStatus: "active" as const,
+    grantUserId: "user_agent_m",
+    limitProfileId: "finite-private-generous-5x-v1",
+    currentWindowStartedAt: "2026-07-02T12:00:00Z",
+    currentWindowUsedUnits: 8432,
+    keyId: "fp_key_agent_m",
+    keyStatus: "active" as const,
+    keyProjectId: "project_agent_m",
+    keyAgentRuntimeId: "runtime_agent_m",
+    matchScope: "runtime" as const,
+  };
+
+  assert.equal(adminRuntimeMatchesSearch(runtime, account, ""), true);
+  assert.equal(adminRuntimeMatchesSearch(runtime, account, "agent m"), true);
+  assert.equal(
+    adminRuntimeMatchesSearch(runtime, account, "kata-b4a553a277f06141b934"),
+    true
   );
-  assert.match(source, /<TabsTrigger value="users">Users<\/TabsTrigger>/u);
-  assert.match(source, /<TabsTrigger value="invites">Invites<\/TabsTrigger>/u);
+  assert.equal(
+    adminRuntimeMatchesSearch(runtime, account, "fp_grant_agent_m 5x"),
+    true
+  );
+  assert.equal(
+    adminRuntimeMatchesSearch(runtime, account, "fp_key_agent_m runtime_agent_m"),
+    true
+  );
+  assert.equal(
+    adminRuntimeMatchesSearch(runtime, null, "fp_grant_agent_m"),
+    false
+  );
+  assert.equal(
+    adminRuntimeMatchesSearch(
+      runtime,
+      null,
+      "fp_grant_agent_m 5x",
+      finitePrivateGrant,
+    ),
+    true
+  );
+  assert.equal(
+    adminRuntimeMatchesSearch(
+      runtime,
+      null,
+      "fp_key_agent_m runtime_agent_m",
+      finitePrivateGrant,
+    ),
+    true
+  );
+  assert.equal(adminRuntimeMatchesSearch(runtime, account, "agent missing"), false);
+});
+
+test("admin page has three tabs and enriches user cards instead of separate grant/key lists", async () => {
+  const [pageSource, usersPanelSource] = await Promise.all([
+    readFile(path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"), "utf8"),
+    readFile(
+      path.resolve(process.cwd(), "src/components/admin-users-panel.tsx"),
+      "utf8"
+    ),
+  ]);
+  assert.match(pageSource, /<TabsTrigger value="users">Users<\/TabsTrigger>/u);
+  assert.match(pageSource, /<TabsTrigger value="invites">Invites<\/TabsTrigger>/u);
   assert.match(
-    source,
+    pageSource,
     /<TabsTrigger value="finite-private">Finite Private<\/TabsTrigger>/u
   );
-  assert.match(source, /function ProvisionedUserCard/u);
-  assert.match(source, /function FinitePrivateAccountControls/u);
-  assert.match(source, />\s*Reset usage\s*</u);
-  assert.match(source, /AdminFinitePrivateProfileForm/u);
-  assert.match(source, /Finite Private details unavailable/u);
-  assert.doesNotMatch(source, /function AdminGrantList/u);
-  assert.doesNotMatch(source, /function AdminKeyList/u);
+  assert.match(pageSource, /<AdminUsersPanel result=\{runtimes\} finitePrivate=\{finitePrivate\} \/>/u);
+  assert.match(usersPanelSource, /function ProvisionedUserCard/u);
+  assert.match(usersPanelSource, /function FinitePrivateAccountControls/u);
+  assert.match(usersPanelSource, /Filter agents/u);
+  assert.match(usersPanelSource, /adminRuntimeMatchesSearch/u);
+  assert.match(usersPanelSource, /No agents match that filter/u);
+  assert.match(usersPanelSource, /adminOpsResetFinitePrivateWindowAction/u);
+  assert.match(usersPanelSource, />\s*Reset usage\s*</u);
+  assert.match(usersPanelSource, /AdminFinitePrivateProfileForm/u);
+  assert.match(usersPanelSource, /Finite Private details unavailable/u);
+  assert.doesNotMatch(pageSource + usersPanelSource, /function AdminGrantList/u);
+  assert.doesNotMatch(pageSource + usersPanelSource, /function AdminKeyList/u);
 });
 
 test("oneTimeKeyDisplay only renders for a real issued key", () => {
@@ -161,10 +377,10 @@ test("oneTimeKeyError surfaces only error states", () => {
 });
 
 test("admin runtime controls use exact fail-closed capabilities", async () => {
-  const [actionsSource, adminPageSource, upgradePageSource] = await Promise.all([
+  const [actionsSource, adminUsersSource, upgradePageSource] = await Promise.all([
     readFile(path.resolve(process.cwd(), "src/app/actions.ts"), "utf8"),
     readFile(
-      path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
+      path.resolve(process.cwd(), "src/components/admin-users-panel.tsx"),
       "utf8"
     ),
     readFile(
@@ -192,16 +408,16 @@ test("admin runtime controls use exact fail-closed capabilities", async () => {
     "export async function adminOpsRevokeFinitePrivateKeyAction"
   );
 
-  assert.doesNotMatch(adminPageSource, /supports_runtime_control/u);
+  assert.doesNotMatch(adminUsersSource, /supports_runtime_control/u);
   assert.doesNotMatch(upgradePageSource, /supports_runtime_control/u);
   assert.doesNotMatch(actionsSource, /supports_runtime_control/u);
 
-  assert.match(adminPageSource, /const canRestart = coreAdminRuntimeSupportsRestart\(runtime\)/u);
-  assert.match(adminPageSource, /disabled=\{!canRestart\}/u);
-  assert.match(adminPageSource, /const canRecover = coreAdminRuntimeSupportsRecovery\(runtime\)/u);
-  assert.match(adminPageSource, /disabled=\{!canRecover\}/u);
-  assert.match(adminPageSource, /const canUpgrade = coreAdminRuntimeSupportsUpgrade\(runtime\)/u);
-  assert.match(adminPageSource, /\{canUpgrade \? \(/u);
+  assert.match(adminUsersSource, /const canRestart = adminRuntimeSupportsRestart\(runtime\)/u);
+  assert.match(adminUsersSource, /disabled=\{!canRestart\}/u);
+  assert.match(adminUsersSource, /const canRecover = adminRuntimeSupportsRecovery\(runtime\)/u);
+  assert.match(adminUsersSource, /disabled=\{!canRecover\}/u);
+  assert.match(adminUsersSource, /const canUpgrade = adminRuntimeSupportsUpgrade\(runtime\)/u);
+  assert.match(adminUsersSource, /\{canUpgrade \? \(/u);
 
   assert.match(restartActionSource, /requireAdminViewer\("restart hosted runtimes"\)/u);
   assert.match(restartActionSource, /loadAdminRuntimeForAction\(projectId\)/u);
@@ -234,9 +450,9 @@ test("admin runtime controls use exact fail-closed capabilities", async () => {
     actionsSource,
     /adminOpsUpgradeRuntimeAction[\s\S]*requireAdminViewer\("upgrade hosted runtimes"\)[\s\S]*adminUpgradeCoreRuntime\([\s\S]*targetRuntimeArtifactId[\s\S]*redirect\("\/dashboard\/admin"\)/u
   );
-  assert.doesNotMatch(adminPageSource, /name="targetRuntimeArtifactId"/u);
+  assert.doesNotMatch(adminUsersSource, /name="targetRuntimeArtifactId"/u);
   assert.match(
-    adminPageSource,
+    adminUsersSource,
     /pathname: "\/dashboard\/admin\/runtime-upgrade"[\s\S]*query: \{ projectId: runtime\.project_id \}/u
   );
   assert.match(upgradePageSource, /canAccessAdminOps\(viewer\)/u);
