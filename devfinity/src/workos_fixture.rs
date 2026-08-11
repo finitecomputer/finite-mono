@@ -32,6 +32,11 @@ pub const CUSTOMER_SUBJECT: &str = "user_devfinity";
 pub const CUSTOMER_EMAIL: &str = "devfinity@finite.computer";
 pub const OPERATOR_SUBJECT: &str = "user_devfinity_operator";
 pub const OPERATOR_EMAIL: &str = "operator@finite.computer";
+// A second customer used by the ADR-0046 principal-grants slice: Alice (the
+// primary customer) invites Bob's account, so Bob needs a verified mailbox,
+// a WorkOS subject, and a mintable dashboard token just like her.
+pub const BOB_SUBJECT: &str = "user_devfinity_bob";
+pub const BOB_EMAIL: &str = "bob@finite.vip";
 const KEY_ID: &str = "devfinity-local-rsa-1";
 const LOCAL_ACCESS_TOKEN_TTL_SECONDS: usize = 24 * 60 * 60;
 
@@ -42,6 +47,7 @@ pub struct FixturePaths {
     pub api_key: PathBuf,
     pub customer_token: PathBuf,
     pub operator_token: PathBuf,
+    pub bob_token: PathBuf,
 }
 
 impl FixturePaths {
@@ -51,6 +57,7 @@ impl FixturePaths {
             api_key: root.join("workos-fixture-api-key"),
             customer_token: root.join("dashboard-customer.jwt"),
             operator_token: root.join("operator.jwt"),
+            bob_token: root.join("bob.jwt"),
             root,
         }
     }
@@ -77,6 +84,10 @@ pub fn prepare(paths: &FixturePaths, issuer: &str) -> Result<()> {
         &paths.operator_token,
         mint(&encoding, issuer, OPERATOR_SUBJECT, Some(OPERATOR_ORG_ID))?.as_bytes(),
     )?;
+    write_private(
+        &paths.bob_token,
+        mint(&encoding, issuer, BOB_SUBJECT, None)?.as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -86,6 +97,7 @@ pub fn prepare_if_missing(paths: &FixturePaths, issuer: &str) -> Result<()> {
         &paths.api_key,
         &paths.customer_token,
         &paths.operator_token,
+        &paths.bob_token,
     ]
     .into_iter()
     .all(|path| path.exists());
@@ -120,6 +132,14 @@ fn router(paths: &FixturePaths) -> Result<Router> {
             User {
                 id: OPERATOR_SUBJECT.into(),
                 email: OPERATOR_EMAIL.into(),
+                email_verified: true,
+            },
+        ),
+        (
+            BOB_SUBJECT.to_string(),
+            User {
+                id: BOB_SUBJECT.into(),
+                email: BOB_EMAIL.into(),
                 email_verified: true,
             },
         ),
@@ -298,6 +318,7 @@ mod tests {
             &paths.api_key,
             &paths.customer_token,
             &paths.operator_token,
+            &paths.bob_token,
         ] {
             let mode = fs::metadata(path)
                 .expect("fixture file metadata")
@@ -386,6 +407,14 @@ mod tests {
             assert_eq!(user["id"], CUSTOMER_SUBJECT);
             assert_eq!(user["email"], CUSTOMER_EMAIL);
             assert_eq!(user["email_verified"], true);
+
+            let bob: Value = ureq::get(&format!("{base}/user_management/users/{BOB_SUBJECT}"))
+                .set("authorization", &format!("Bearer {}", api_key.trim()))
+                .call()?
+                .into_json()?;
+            assert_eq!(bob["id"], BOB_SUBJECT);
+            assert_eq!(bob["email"], BOB_EMAIL);
+            assert_eq!(bob["email_verified"], true);
 
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
         })

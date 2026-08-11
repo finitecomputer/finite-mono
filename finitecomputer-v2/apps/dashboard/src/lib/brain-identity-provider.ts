@@ -14,6 +14,7 @@ const BRAIN_IDENTITY_OPERATIONS = new Set<BrainIdentityProviderRequest["operatio
   "authorizeBrainEvent",
   "openGrantPayload",
   "wrapGrantPayload",
+  "approveBrainAction",
 ]);
 
 export type BrainClientCapabilityAccount = {

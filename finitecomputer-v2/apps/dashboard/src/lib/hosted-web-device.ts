@@ -251,7 +251,8 @@ export type BrainIdentityProviderRequest = {
     | "authorizeHttpRequest"
     | "authorizeBrainEvent"
     | "openGrantPayload"
-    | "wrapGrantPayload";
+    | "wrapGrantPayload"
+    | "approveBrainAction";
   input: unknown;
 };
 

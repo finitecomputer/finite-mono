@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Boot a disposable devfinity stack and run the ADR-0046 principal-grants
+# slice (scripts/devfinity-adr46-slice) against it.
+#
+#   scripts/with-dev-env scripts/devfinity-adr46-slice-up
+#
+# Cold runs build the Rust workspace and the runtime image; expect tens of
+# minutes the first time (same order as the Brain product matrix). State and
+# logs land in .local-state/adr46-slice-<ts>/ and are preserved on failure.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo_root"
+
+state_dir="$repo_root/.local-state/adr46-slice-$(date +%s)"
+mkdir -p "$state_dir"
+
+read -r port_offset agent_port <<<"$(python3 - <<'PY'
+import socket
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+bases = [14200, 13002, 15432, 18787, 38918, 18789, 18788, 18790, 18002, 14199]
+offset = None
+for candidate in range(1000, 20000):
+    probes = []
+    try:
+        for base in bases:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", base + candidate))
+            probes.append(probe)
+        offset = candidate
+        break
+    except OSError:
+        continue
+    finally:
+        for probe in probes:
+            probe.close()
+if offset is None:
+    raise SystemExit("could not reserve a collision-free devfinity port offset")
+print(offset, free_port())
+PY
+)"
+
+echo "devfinity ADR-0046 slice state: $state_dir (port offset $port_offset)"
+
+cleanup() {
+  # A failed run can leave the runtime container behind; only remove Docker
+  # containers whose bind mounts resolve inside this run's state tree.
+  if command -v docker >/dev/null 2>&1; then
+    for id in $(docker ps -aq 2>/dev/null); do
+      if docker inspect "$id" 2>/dev/null \
+        | python3 -c '
+import json, sys
+mounts = json.load(sys.stdin)[0].get("Mounts", [])
+sys.exit(0 if any(str(m.get("Source") or "").startswith(sys.argv[1]) for m in mounts) else 1)
+' "$state_dir"; then
+        docker rm -f "$id" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+}
+trap cleanup EXIT
+
+# Bob's agent identity is driven by the host fbrain binary; build it before
+# the stack boot so the scenario never waits on a cold CLI build mid-flow.
+cargo build -p finite-brain-cli
+
+export DEVFINITY_STATE_DIR="$state_dir"
+export DEVFINITY_PORT_OFFSET="$port_offset"
+export DEVFINITY_RUNTIME_AGENT_PORT="$agent_port"
+export DEVFINITY_READY_TIMEOUT_SECS="${DEVFINITY_READY_TIMEOUT_SECS:-3600}"
+# The slice never drives a chat turn, so no real inference key is needed;
+# devfinity still requires the override to boot a chat-capable stack.
+export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE="finite-adr46-slice-non-secret"
+export FC_RUNNER_FINITE_PRIVATE_BASE_URL="http://127.0.0.1:9/v1"
+export FC_RUNNER_FINITE_PRIVATE_MODEL="finite-adr46-slice"
+
+cargo run -p devfinity -- \
+  --state-dir "$state_dir" \
+  up --docker-runtime --headless -- \
+  "$repo_root/scripts/devfinity-adr46-slice"
