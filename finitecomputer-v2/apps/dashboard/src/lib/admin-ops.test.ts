@@ -5,10 +5,14 @@ import path from "node:path";
 
 import {
   ONE_TIME_KEY_WARNING,
+  adminRuntimeMatchesSearch,
   canAccessAdminOps,
+  finitePrivateGrantSummaryForRuntime,
   heartbeatAgeLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
+  type AdminOpsFinitePrivateState,
+  type AdminOpsRuntime,
   type OneTimeKeyActionState,
 } from "./admin-ops";
 
@@ -91,11 +95,112 @@ test("oneTimeKeyError surfaces only error states", () => {
   );
 });
 
+test("finitePrivateGrantSummaryForRuntime resolves the runtime-scoped active grant", () => {
+  const runtime = adminRuntimeFixture();
+  const state: AdminOpsFinitePrivateState = {
+    grants: [
+      grantFixture("fp_grant_project", "user_project"),
+      grantFixture("fp_grant_runtime", "user_runtime"),
+    ],
+    apiKeys: [
+      {
+        id: "fp_key_project",
+        grant_id: "fp_grant_project",
+        project_id: runtime.project_id,
+        agent_runtime_id: null,
+        status: "active",
+        updated_at: "2026-07-02T12:10:00Z",
+      },
+      {
+        id: "fp_key_runtime",
+        grant_id: "fp_grant_runtime",
+        project_id: runtime.project_id,
+        agent_runtime_id: runtime.agent_runtime_id,
+        status: "active",
+        updated_at: "2026-07-02T12:00:00Z",
+      },
+    ],
+  };
+
+  const summary = finitePrivateGrantSummaryForRuntime(runtime, state);
+
+  assert.ok(summary);
+  assert.equal(summary.grantId, "fp_grant_runtime");
+  assert.equal(summary.grantUserId, "user_runtime");
+  assert.equal(summary.keyId, "fp_key_runtime");
+  assert.equal(summary.matchScope, "runtime");
+});
+
+test("finitePrivateGrantSummaryForRuntime falls back to the newest matching key", () => {
+  const runtime = adminRuntimeFixture();
+  const state: AdminOpsFinitePrivateState = {
+    grants: [
+      grantFixture("fp_grant_old", "user_old"),
+      grantFixture("fp_grant_new", "user_new"),
+    ],
+    apiKeys: [
+      {
+        id: "fp_key_old",
+        grant_id: "fp_grant_old",
+        project_id: runtime.project_id,
+        agent_runtime_id: null,
+        status: "revoked",
+        updated_at: "2026-07-02T12:00:00Z",
+      },
+      {
+        id: "fp_key_new",
+        grant_id: "fp_grant_new",
+        project_id: runtime.project_id,
+        agent_runtime_id: null,
+        status: "revoked",
+        updated_at: "2026-07-02T12:05:00Z",
+      },
+    ],
+  };
+
+  const summary = finitePrivateGrantSummaryForRuntime(runtime, state);
+
+  assert.ok(summary);
+  assert.equal(summary.grantId, "fp_grant_new");
+  assert.equal(summary.keyId, "fp_key_new");
+  assert.equal(summary.matchScope, "project");
+});
+
+test("adminRuntimeMatchesSearch filters by agent, Kata box, grant, and key", () => {
+  const runtime = adminRuntimeFixture();
+  const summary = finitePrivateGrantSummaryForRuntime(runtime, {
+    grants: [grantFixture("fp_grant_agent_m", "user_agent_m")],
+    apiKeys: [
+      {
+        id: "fp_key_agent_m",
+        grant_id: "fp_grant_agent_m",
+        project_id: runtime.project_id,
+        agent_runtime_id: runtime.agent_runtime_id,
+        status: "active",
+        updated_at: "2026-07-02T12:00:00Z",
+      },
+    ],
+  });
+
+  assert.equal(adminRuntimeMatchesSearch(runtime, summary, ""), true);
+  assert.equal(adminRuntimeMatchesSearch(runtime, summary, "agent kata-b4a553"), true);
+  assert.equal(adminRuntimeMatchesSearch(runtime, summary, "fp_grant_agent_m runtime"), true);
+  assert.equal(adminRuntimeMatchesSearch(runtime, summary, "fp_key_agent_m owner@example.test"), true);
+  assert.equal(adminRuntimeMatchesSearch(runtime, summary, "missing-token"), false);
+});
+
 test("admin runtime controls use exact fail-closed capabilities", async () => {
-  const [actionsSource, adminPageSource, upgradePageSource] = await Promise.all([
+  const [actionsSource, adminPageSource, adminPanelSource, upgradePageSource] = await Promise.all([
     readFile(path.resolve(process.cwd(), "src/app/actions.ts"), "utf8"),
     readFile(
       path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
+      "utf8"
+    ),
+    readFile(
+      path.resolve(
+        process.cwd(),
+        "src/components/admin-provisioned-boxes-panel.tsx"
+      ),
       "utf8"
     ),
     readFile(
@@ -124,15 +229,18 @@ test("admin runtime controls use exact fail-closed capabilities", async () => {
   );
 
   assert.doesNotMatch(adminPageSource, /supports_runtime_control/u);
+  assert.doesNotMatch(adminPanelSource, /supports_runtime_control/u);
   assert.doesNotMatch(upgradePageSource, /supports_runtime_control/u);
   assert.doesNotMatch(actionsSource, /supports_runtime_control/u);
 
-  assert.match(adminPageSource, /const canRestart = coreAdminRuntimeSupportsRestart\(runtime\)/u);
-  assert.match(adminPageSource, /disabled=\{!canRestart\}/u);
-  assert.match(adminPageSource, /const canRecover = coreAdminRuntimeSupportsRecovery\(runtime\)/u);
-  assert.match(adminPageSource, /disabled=\{!canRecover\}/u);
-  assert.match(adminPageSource, /const canUpgrade = coreAdminRuntimeSupportsUpgrade\(runtime\)/u);
-  assert.match(adminPageSource, /\{canUpgrade \? \(/u);
+  assert.match(adminPageSource, /<AdminProvisionedBoxesPanel/u);
+  assert.match(adminPageSource, /finitePrivateState=\{finitePrivate\.state\}/u);
+  assert.match(adminPanelSource, /const canRestart = runtimeSupports\(runtime, "restart"\)/u);
+  assert.match(adminPanelSource, /disabled=\{!canRestart\}/u);
+  assert.match(adminPanelSource, /const canRecover = runtimeSupports\(runtime, "recover_known_good_chat"\)/u);
+  assert.match(adminPanelSource, /disabled=\{!canRecover\}/u);
+  assert.match(adminPanelSource, /const canUpgrade = runtimeSupports\(runtime, "runtime_upgrade"\)/u);
+  assert.match(adminPanelSource, /\{canUpgrade \? \(/u);
 
   assert.match(restartActionSource, /requireAdminViewer\("restart hosted runtimes"\)/u);
   assert.match(restartActionSource, /loadAdminRuntimeForAction\(projectId\)/u);
@@ -167,7 +275,7 @@ test("admin runtime controls use exact fail-closed capabilities", async () => {
   );
   assert.doesNotMatch(adminPageSource, /name="targetRuntimeArtifactId"/u);
   assert.match(
-    adminPageSource,
+    adminPanelSource,
     /pathname: "\/dashboard\/admin\/runtime-upgrade"[\s\S]*query: \{ projectId: runtime\.project_id \}/u
   );
   assert.match(upgradePageSource, /canAccessAdminOps\(viewer\)/u);
@@ -189,6 +297,41 @@ test("admin runtime controls use exact fail-closed capabilities", async () => {
     /No\s+candidate is selected automatically\./u
   );
 });
+
+function adminRuntimeFixture(): AdminOpsRuntime {
+  return {
+    project_display_name: "Agent M",
+    owner_email: "owner@example.test",
+    project_id: "project_agent_m",
+    agent_runtime_id: "runtime_agent_m",
+    source_host_id: "finite-lat-3",
+    source_machine_id: "finite-kata-b4a553a277f06141b934",
+    runtime_artifact_id: "artifact_agent_m",
+    runtime_artifact_version_label: "candidate-2026-07-02",
+    runtime_status: "online",
+    last_heartbeat_at: "2026-07-02T12:00:00Z",
+    hermes_available: true,
+    published_app_urls: [],
+    active_finite_private_key_count: 1,
+    runtime_link_active: true,
+    runtime_capabilities: {
+      restart: true,
+      recover_known_good_chat: true,
+      runtime_upgrade: true,
+    },
+  };
+}
+
+function grantFixture(id: string, userId: string) {
+  return {
+    id,
+    user_id: userId,
+    limit_profile_id: "friend_daily",
+    status: "active" as const,
+    current_window_started_at: "2026-07-02T12:00:00Z",
+    current_window_used_units: 123,
+  };
+}
 
 function sourceBetween(source: string, start: string, end: string) {
   const startIndex = source.indexOf(start);

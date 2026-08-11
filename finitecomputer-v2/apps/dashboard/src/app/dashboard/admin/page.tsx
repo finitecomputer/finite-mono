@@ -1,22 +1,16 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
-  ActivityIcon,
   BanIcon,
-  ExternalLinkIcon,
   KeyRoundIcon,
   RotateCcwIcon,
-  ServerIcon,
   ShieldCheckIcon,
   WrenchIcon,
 } from "lucide-react";
 
 import {
-  adminOpsRecoverRuntimeAction,
   adminOpsRevokeLaunchCodeBatchAction,
   adminOpsRevokeFinitePrivateKeyAction,
   adminOpsResetFinitePrivateWindowAction,
-  adminOpsRestartRuntimeAction,
 } from "@/app/actions";
 import {
   AdminFriendKeyIssueForm,
@@ -24,27 +18,20 @@ import {
   AdminRotateKeyForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
-import { Button } from "@/components/ui/button";
+import { AdminProvisionedBoxesPanel } from "@/components/admin-provisioned-boxes-panel";
 import {
   canAccessAdminOps,
-  heartbeatAgeLabel,
   launchCodeHostingTierLabel,
 } from "@/lib/admin-ops";
 import {
-  coreAdminRuntimeSupportsRecovery,
-  coreAdminRuntimeSupportsRestart,
-  coreAdminRuntimeSupportsUpgrade,
   loadCoreAdminRuntimes,
   loadCoreFinitePrivateAdminState,
   loadCoreLaunchCodeBatches,
-  type CoreAdminRuntimeOverview,
-  type CoreAdminRuntimesResult,
   type CoreFinitePrivateAdminStateResult,
   type CoreFinitePrivateApiKey,
   type CoreFinitePrivateGrant,
   type CoreLaunchCodeBatchDetails,
   type CoreLaunchCodeBatchesResult,
-  type CoreRuntimeStatus,
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 
@@ -77,7 +64,10 @@ export default async function AdminOpsPage() {
         </div>
       </section>
 
-      <ProvisionedBoxesPanel result={runtimes} />
+      <AdminProvisionedBoxesPanel
+        result={runtimes}
+        finitePrivateState={finitePrivate.state}
+      />
       <LaunchCodeBatchesPanel result={launchCodeBatches} />
       <FinitePrivateOpsPanel result={finitePrivate} />
     </div>
@@ -179,164 +169,6 @@ function LaunchCodeBatchList({ batches }: { batches: CoreLaunchCodeBatchDetails[
 function formatAdminDate(value: string) {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : value;
-}
-
-function runtimeStatusPillClass(status: CoreRuntimeStatus) {
-  if (status === "online") {
-    return "border-emerald-400/40 text-emerald-400";
-  }
-  if (status === "offline") {
-    return "border-rose-400/40 text-rose-400";
-  }
-  if (status === "stale") {
-    return "border-amber-400/40 text-amber-400";
-  }
-  return "border-border text-muted-foreground";
-}
-
-function heartbeatLabel(lastHeartbeatAt: string | null | undefined) {
-  return heartbeatAgeLabel(lastHeartbeatAt, Date.now());
-}
-
-function ProvisionedBoxesPanel({ result }: { result: CoreAdminRuntimesResult }) {
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <ServerIcon className="size-5" />
-        </span>
-        <div>
-          <h2 className="ocean-utility-card__title">Provisioned boxes</h2>
-          <p className="text-sm text-muted-foreground">
-            Every agent runtime Core knows about, with restart and recovery
-            controls.
-          </p>
-        </div>
-      </div>
-
-      {!result.configured ? (
-        <div className="ocean-empty-state">
-          Finite Core is not configured: {result.missing.join(", ")}.
-        </div>
-      ) : result.error ? (
-        <div className="ocean-empty-state">{result.error}</div>
-      ) : !result.runtimes || result.runtimes.length === 0 ? (
-        <div className="ocean-empty-state">No provisioned boxes yet.</div>
-      ) : (
-        <div className="grid gap-3">
-          {result.runtimes.map((runtime) => (
-            <ProvisionedBoxRow key={runtime.agent_runtime_id} runtime={runtime} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
-  const canRestart = coreAdminRuntimeSupportsRestart(runtime);
-  const canRecover = coreAdminRuntimeSupportsRecovery(runtime);
-  const canUpgrade = coreAdminRuntimeSupportsUpgrade(runtime);
-
-  return (
-    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[minmax(0,1fr)_auto]">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-semibold text-foreground">
-            {runtime.project_display_name}
-          </span>
-          <span
-            className={`rounded-full border px-2 py-0.5 text-xs ${runtimeStatusPillClass(runtime.runtime_status)}`}
-          >
-            {runtime.runtime_status}
-          </span>
-          {!runtime.runtime_link_active ? (
-            <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-              unlinked
-            </span>
-          ) : null}
-        </div>
-        <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
-          <span className="truncate">
-            owner {runtime.owner_email ?? "unknown"}
-          </span>
-          <span className="truncate font-mono">
-            {runtime.source_host_id} / {runtime.source_machine_id}
-          </span>
-          <span className="truncate font-mono">
-            artifact {runtime.runtime_artifact_version_label ?? runtime.runtime_artifact_id ?? "none"}
-          </span>
-          <span>
-            heartbeat {heartbeatLabel(runtime.last_heartbeat_at)}
-            {" · "}
-            hermes {runtime.hermes_available == null ? "unknown" : runtime.hermes_available ? "yes" : "no"}
-            {" · "}
-            {runtime.active_finite_private_key_count} active FP key
-            {runtime.active_finite_private_key_count === 1 ? "" : "s"}
-          </span>
-          {runtime.published_app_urls.length > 0 ? (
-            <span className="flex flex-wrap items-center gap-2">
-              {runtime.published_app_urls.map((url) => (
-                <a
-                  key={url}
-                  className="inline-flex items-center gap-1 truncate underline"
-                  href={url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <ExternalLinkIcon className="size-3" aria-hidden />
-                  {url}
-                </a>
-              ))}
-            </span>
-          ) : null}
-        </div>
-      </div>
-      <div className="grid items-start gap-2">
-        <div className="flex flex-wrap items-start gap-2">
-          <form action={adminOpsRestartRuntimeAction}>
-            <input type="hidden" name="projectId" value={runtime.project_id} />
-            <ConfirmSubmitButton
-              variant="outline"
-              size="sm"
-              pendingLabel="Restarting..."
-              disabled={!canRestart}
-              confirmMessage={`Restart ${runtime.project_display_name} (${runtime.source_machine_id})?`}
-            >
-              <RotateCcwIcon />
-              Restart
-            </ConfirmSubmitButton>
-          </form>
-          <form action={adminOpsRecoverRuntimeAction}>
-            <input type="hidden" name="projectId" value={runtime.project_id} />
-            <ConfirmSubmitButton
-              variant="outline"
-              size="sm"
-              pendingLabel="Recovering..."
-              disabled={!canRecover}
-              confirmMessage={`Recover known-good chat runtime for ${runtime.project_display_name}?`}
-            >
-              <ActivityIcon />
-              Recover
-            </ConfirmSubmitButton>
-          </form>
-        </div>
-        {canUpgrade ? (
-          <Button asChild variant="outline" size="sm" className="w-fit">
-            <Link
-              href={{
-                pathname: "/dashboard/admin/runtime-upgrade",
-                query: { projectId: runtime.project_id },
-              }}
-            >
-              <ActivityIcon />
-              Upgrade
-            </Link>
-          </Button>
-        ) : null}
-      </div>
-    </div>
-  );
 }
 
 function FinitePrivateOpsPanel({
