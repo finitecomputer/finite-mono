@@ -302,6 +302,8 @@ jobs:
         run: nix develop --command just lat1-rollout-contract
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
+      - name: Self-hosted monitoring contract
+        run: nix develop --command just self-hosted-monitoring-contract
       - name: Kata Runner host anti-drift contract
         run: nix develop --command just runner-host-contract
       - name: Canonical read-only platform status contract

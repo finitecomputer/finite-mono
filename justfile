@@ -87,6 +87,12 @@ lat1-rollout-contract:
 lat1-healthcheck-contract:
     python3 scripts/check_lat1_healthcheck_contract.py
 
+# Digest pins, public probes, route exposure, and dashboard provisioning for
+# the dedicated Ubuntu monitoring VPS.
+self-hosted-monitoring-contract:
+    bash -n infra/monitoring/self-hosted/install-ubuntu infra/monitoring/self-hosted/verify
+    python3 scripts/check_self_hosted_monitoring_contract.py
+
 # Anti-drift contract: both Kata Runner hosts render one shared runner-role
 # module; evaluated env and unit fragments may differ only in the declared
 # per-host set.
