@@ -76,6 +76,9 @@ pub(crate) fn metadata_response_for_actor(
     stored
         .setup_incomplete_folder_ids
         .retain(|folder_id| visible_folder_ids.contains(folder_id));
+    stored.human_anchored_agent_authorities.clear();
+    stored.account_access_cohorts.clear();
+    stored.account_agent_exclusions.clear();
 
     metadata_response_with_mounts(stored, Vec::new())
 }
@@ -101,6 +104,63 @@ pub(crate) fn metadata_response_with_mounts(
                 created_at: relationship.created_at,
                 updated_at: relationship.updated_at,
             }),
+        personal_brain_agents: stored
+            .personal_brain_agents
+            .iter()
+            .map(|agent| PersonalBrainAgentResponse {
+                agent_npub: agent.agent_npub.to_string(),
+                agent_nip05: agent.agent_nip05.clone(),
+                display_name: agent.display_name.clone(),
+                status: agent.status.clone(),
+                roster_revision: agent.roster_revision,
+                blocker: agent.blocker.clone(),
+            })
+            .collect(),
+        human_anchored_agent_authorities: stored
+            .human_anchored_agent_authorities
+            .iter()
+            .map(|(agent, human)| HumanAnchoredAgentAuthorityResponse {
+                agent_npub: agent.to_string(),
+                human_npub: human.to_string(),
+                scope: "routine_administration".to_owned(),
+                status: "active".to_owned(),
+            })
+            .collect(),
+        account_access_cohorts: stored
+            .account_access_cohorts
+            .iter()
+            .map(|cohort| AccountAccessCohortResponse {
+                cohort_id: cohort.cohort_id.clone(),
+                human_npub: cohort.human_npub.to_string(),
+                human_email: cohort.human_email.clone(),
+                scope_kind: cohort.scope_kind.clone(),
+                folder_id: cohort.folder_id.as_ref().map(ToString::to_string),
+                provenance_kind: cohort.provenance_kind.clone(),
+                status: cohort.status.clone(),
+                participants: cohort
+                    .participants
+                    .iter()
+                    .map(|participant| AccountAccessCohortParticipantResponse {
+                        npub: participant.npub.to_string(),
+                        relationship: participant.relationship.clone(),
+                        nip05: participant.nip05.clone(),
+                        display_name: participant.display_name.clone(),
+                        status: participant.status.clone(),
+                        exclusion_reason: participant.exclusion_reason.clone(),
+                        brain_access_excluded: participant
+                            .excluded_folder_ids
+                            .iter()
+                            .any(String::is_empty),
+                        excluded_folder_ids: participant
+                            .excluded_folder_ids
+                            .iter()
+                            .filter(|folder_id| !folder_id.is_empty())
+                            .cloned()
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
         members: stored
             .brain
             .members
@@ -274,6 +334,9 @@ pub(crate) fn brain_invitation_response(
         folder_only: invitation.folder_only,
         claimed_by_npub: invitation.claimed_by_npub.map(|npub| npub.to_string()),
         identities: Vec::new(),
+        plan_id: None,
+        participants: Vec::new(),
+        excluded: Vec::new(),
         status: link_status_str(invitation.status).to_owned(),
         invite_code: invitation.invite_code,
         accept_path: invitation.accept_path,

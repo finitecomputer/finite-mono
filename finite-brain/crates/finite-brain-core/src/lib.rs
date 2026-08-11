@@ -963,6 +963,49 @@ pub fn bootstrap_organization_brain_with_requester(
     )
 }
 
+/// Build the converged account-cohort Organization shape: the human is the
+/// sole initial admin and every distinct current agent is a non-admin Member.
+pub fn bootstrap_organization_brain_with_account_cohort(
+    brain_id: impl Into<String>,
+    name: impl Into<String>,
+    human_user_id: impl Into<String>,
+    agent_user_ids: Vec<String>,
+) -> Result<BootstrapOutput, CoreError> {
+    let brain_id = BrainId::new(brain_id)?;
+    let name = DisplayName::new("brain_name", name)?;
+    let human = UserId::new(human_user_id)?;
+    let agents = agent_user_ids
+        .into_iter()
+        .map(UserId::new)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if agents.is_empty() || agents.contains(&human) {
+        return Err(CoreError::InvalidBootstrapInput {
+            reason: "Organization account cohort requires distinct human and agent principals"
+                .to_owned(),
+        });
+    }
+    let mut members = vec![BrainMember {
+        user_id: human.clone(),
+        folder_access: BTreeSet::new(),
+    }];
+    members.extend(agents.into_iter().map(|agent| BrainMember {
+        user_id: agent,
+        folder_access: BTreeSet::new(),
+    }));
+    Ok(BootstrapOutput {
+        brain: Brain {
+            id: brain_id,
+            kind: BrainKind::Organization,
+            name,
+            owner_user_id: None,
+            folders: Vec::new(),
+            members,
+            admins: vec![human],
+        },
+        required_key_grants: Vec::new(),
+    })
+}
+
 fn bootstrap_organization_brain_with_admins(
     brain_id: impl Into<String>,
     name: impl Into<String>,
@@ -1616,6 +1659,12 @@ pub enum AdminAccessAction {
     GrantFolderAccess,
     /// Remove explicit Folder access.
     RemoveFolderAccess,
+    /// Restrict one ready Personal Brain peer Agent from the whole Brain.
+    RestrictPersonalAgent,
+    /// Restore one ready Personal Brain peer Agent to the whole Brain.
+    RestorePersonalAgent,
+    /// Commit one reviewed internal-beta Account Access Cohort reconciliation.
+    ReconcileAccountCohort,
     /// Rotate a Folder Key.
     RotateFolderKey,
     /// Change Folder Access mode.
@@ -1634,6 +1683,9 @@ impl AdminAccessAction {
             Self::RemoveAdmin => "remove-admin",
             Self::GrantFolderAccess => "grant-folder-access",
             Self::RemoveFolderAccess => "remove-folder-access",
+            Self::RestrictPersonalAgent => "restrict-personal-agent",
+            Self::RestorePersonalAgent => "restore-personal-agent",
+            Self::ReconcileAccountCohort => "reconcile-account-cohort",
             Self::RotateFolderKey => "rotate-folder-key",
             Self::SetFolderAccessMode => "set-folder-access-mode",
             Self::DeleteFolder => "delete-folder",
@@ -1652,6 +1704,9 @@ impl TryFrom<&str> for AdminAccessAction {
             "remove-admin" => Ok(Self::RemoveAdmin),
             "grant-folder-access" => Ok(Self::GrantFolderAccess),
             "remove-folder-access" => Ok(Self::RemoveFolderAccess),
+            "restrict-personal-agent" => Ok(Self::RestrictPersonalAgent),
+            "restore-personal-agent" => Ok(Self::RestorePersonalAgent),
+            "reconcile-account-cohort" => Ok(Self::ReconcileAccountCohort),
             "rotate-folder-key" => Ok(Self::RotateFolderKey),
             "set-folder-access-mode" => Ok(Self::SetFolderAccessMode),
             "delete-folder" => Ok(Self::DeleteFolder),

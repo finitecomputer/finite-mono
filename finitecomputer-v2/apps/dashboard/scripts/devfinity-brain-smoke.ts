@@ -311,6 +311,7 @@ function revokeBrowserActor(machineId: string, brainId: string) {
     "set -euo pipefail",
     'agent="$(fbrain signer public-key)"',
     'target="$(fbrain brain metadata "$MATRIX_BRAIN_ID" --json | python3 -c \'import json,sys; agent=sys.argv[1]; print(next(value for value in json.load(sys.stdin).get("admins", []) if value != agent))\' "$agent")"',
+    'fbrain admin role grant admin --brain "$MATRIX_BRAIN_ID" --target "$agent" --json >/dev/null',
     'fbrain admin role revoke admin --brain "$MATRIX_BRAIN_ID" --target "$target" --json >/dev/null',
     'fbrain admin member remove --brain "$MATRIX_BRAIN_ID" --target "$target" --json >/dev/null',
   ].join("\n");
@@ -523,7 +524,19 @@ async function createOrganizationBrain(
       await loadBrainProductClient(page, url);
     },
   });
+  const createResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/v1/brains"),
+    { timeout: 30_000 },
+  );
   await brain.locator("#manageCreateOrganizationBrainButton").click();
+  const response = await createResponse;
+  if (!response.ok()) {
+    throw new Error(
+      `Organization Brain creation failed (${response.status()}): ${await response.text()}`,
+    );
+  }
   await assertEventually(
     async () => {
       const buttons = brain.locator("#manageBrainsList .brain-switch-button");

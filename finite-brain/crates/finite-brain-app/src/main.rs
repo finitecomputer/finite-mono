@@ -61,6 +61,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+    let requester_assertion_secret = std::env::var("FINITE_SITES_VIEWER_SESSION_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let smoke_nip07_secret = std::env::var("FINITE_BRAIN_SMOKE_NIP07_SECRET")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -129,6 +133,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 format!("invalid FINITE_BRAIN_SMOKE_NIP07_SECRET: {error}"),
             )
         })?;
+    }
+    if let Some(secret) = requester_assertion_secret {
+        state = state.with_authenticated_requester_assertion_secret(secret);
     }
     if let Some(email_proofs) = smoke_email_proofs {
         state = state

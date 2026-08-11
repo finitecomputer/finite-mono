@@ -271,7 +271,7 @@ check_native_requesting_user_site() {
   redemption_headers="$smoke_root/redemption.headers"
   revoke_json="$smoke_root/revoke.json"
   track_sensitive_dir "$smoke_root"
-  owner_email="devfinity@finite.computer"
+  owner_email="devfinity@finite.vip"
   session_key="finitechat:devfinity-sites-smoke:$run_id"
   umask 077
   mkdir -p "$agent_home" "$agent_finite_home" "$project_dir/site"
@@ -413,7 +413,7 @@ const output = response.outputs?.[0];
 if (
   response.slug !== process.argv[3] ||
   !response.requesting_user_npub?.startsWith("npub1") ||
-  response.owner_email !== "devfinity@finite.computer" ||
+  response.owner_email !== "devfinity@finite.vip" ||
   !output?.requesting_user_shared ||
   output.visibility !== "private"
 ) {

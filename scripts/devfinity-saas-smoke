@@ -763,21 +763,22 @@ run_brain_setup_matrix() {
 
   # Agent-first Organization setup is likewise a real authenticated Finite
   # Chat request. The skill must derive the requester from event.source.user_id
-  # and create both admins atomically through the built fbrain executable.
+  # and atomically create the human admin plus its non-admin account Agent
+  # with Human-Anchored Agent Authority through the built fbrain executable.
   reset_brain_setup_matrix_state
   create_topic_and_require_first_chat "Brain agent Organization"
   send_and_capture_reply \
     "Create an Organization Brain named '${org_name}'. Keep it empty; do not create example Folders or Pages." >/dev/null
-  agent_id="$(agent_visible_brain_id organization admin)"
-  assert_agent_brain_shape "$agent_id" 0 2
+  agent_id="$(agent_visible_brain_id organization member)"
+  assert_agent_brain_shape "$agent_id" 0 1
   browser_id="$(browser_brain_id assert-org-first "$agent_id")"
   [[ "$browser_id" == "$agent_id" ]] || { echo "agent-first Org Brain ids differ" >&2; return 1; }
   send_and_capture_reply \
     "Create an Organization Brain named '${org_name}' again. Do not create a duplicate if it already exists." >/dev/null
   # No reset or membership change since the converged wait above; the
   # duplicate request must not create a second Brain.
-  assert_agent_brain_list organization admin 1
-  assert_agent_brain_shape "$agent_id" 0 2
+  assert_agent_brain_list organization member 1
+  assert_agent_brain_shape "$agent_id" 0 1
 
   # Exercise the missing-domain-skill policy through the real managed Hermes
   # Runtime, terminal tool, fbrain executable, Brain server, and Working Tree.
@@ -855,9 +856,9 @@ run_brain_setup_matrix() {
   }
   # The browser created both same-name Brains after the reset above, so wait
   # for the Runtime supervisor to re-discover the new membership.
-  wait_for_agent_brain_list organization admin 2
-  assert_agent_brain_shape "$first_same_name_id" 0 2 "Matrix Same Name Org"
-  assert_agent_brain_shape "$second_same_name_id" 0 2 "Matrix Same Name Org"
+  wait_for_agent_brain_list organization member 2
+  assert_agent_brain_shape "$first_same_name_id" 0 1 "Matrix Same Name Org"
+  assert_agent_brain_shape "$second_same_name_id" 0 1 "Matrix Same Name Org"
   browser_id="$(browser_brain_id assert-org-first "$first_same_name_id")"
   [[ "$browser_id" == "$first_same_name_id" ]] || {
     echo "targeted open selected the wrong first same-name Brain" >&2
@@ -879,19 +880,19 @@ run_brain_setup_matrix() {
 
   reset_brain_setup_matrix_state
   browser_id="$(browser_brain_id create-org-agent "Matrix User Agent Org")"
-  agent_id="$(agent_visible_brain_id organization admin)"
+  agent_id="$(agent_visible_brain_id organization member)"
   [[ "$browser_id" == "$agent_id" ]] || { echo "user-first paired Org Brain ids differ" >&2; return 1; }
-  assert_agent_brain_shape "$agent_id" 0 2
+  assert_agent_brain_shape "$agent_id" 0 1
   brain_browser_smoke create-folder "Matrix User Org Folder" "$browser_id"
-  assert_agent_brain_shape "$agent_id" 1 2
+  assert_agent_brain_shape "$agent_id" 1 1
 
   reset_brain_setup_matrix_state
   browser_id="$(browser_brain_id create-org-human "Matrix Human Only Org")"
-  wait_for_agent_brain_list organization admin 0
+  wait_for_agent_brain_list organization member 0
   brain_browser_smoke create-folder "Matrix Human Only Folder" "$browser_id"
   # Membership is unchanged by a Folder create and the list already converged
   # above, so the immediate assert is sufficient here.
-  assert_agent_brain_list organization admin 0
+  assert_agent_brain_list organization member 0
 
   echo "devfinity real Hermes/managed-skill Brain setup/reconciliation matrix passed"
 }
@@ -1096,9 +1097,9 @@ JS
       grep -Fq "Organization Brain Working Tree" "$context"
       grep -Fq "Brain ID: \`$EXPECTED_BRAIN_ID\`" "$context"
       grep -Fq "Acting Member Identity: \`$EXPECTED_ACTOR\`" "$context"
-      grep -Fq "Acting Brain role: \`admin\`" "$context"
+      grep -Fq "Acting Brain role: \`member\`" "$context"
     '
-  record_brain_matrix_check organization-admin-context-and-open-workflow
+  record_brain_matrix_check organization-human-anchored-agent-context-and-open-workflow
 
   # A distinct valid signer has no relationship to this Brain. Its signed
   # request must fail without changing the authorized agent's durable state.
@@ -1112,7 +1113,7 @@ JS
     return 1
   fi
   test -s "$signer_failure_log"
-  assert_agent_brain_shape "$shared_brain_id" 0 2
+  assert_agent_brain_shape "$shared_brain_id" 0 1
 
   runtime_exec "$container_machine_id" fbrain folder create matrix-delete-root \
     --brain "$shared_brain_id" --name "Matrix delete root" --path matrix-delete-root --json >/dev/null
@@ -1320,11 +1321,20 @@ JS
     -e "LOCAL_CONFLICT_MARKER=$local_conflict_marker" -e "UNRELATED_MARKER=$unrelated_marker" \
     -w "$collaborator_tree" "$container_machine_id" /bin/bash -lc '
       for attempt in $(seq 1 300); do
-        count="$(fbrain conflicts --json | python3 -c '\''import json,sys; print(len(json.load(sys.stdin)))'\'')"
+        if ! conflicts="$(fbrain conflicts --json 2>/tmp/fbrain-matrix-conflicts.err)"; then
+          sleep 0.1
+          continue
+        fi
+        count="$(printf "%s" "$conflicts" | python3 -c '\''import json,sys; print(len(json.load(sys.stdin)))'\'')"
         test "$count" -gt 0 && grep -Fq "$UNRELATED_MARKER" matrix-revocation/unrelated-progress.md 2>/dev/null && break
         sleep 0.1
       done
-      test "$(fbrain conflicts --json | python3 -c '\''import json,sys; print(len(json.load(sys.stdin)))'\'')" -gt 0
+      if ! conflicts="$(fbrain conflicts --json 2>/tmp/fbrain-matrix-conflicts.err)"; then
+        cat /tmp/fbrain-matrix-conflicts.err >&2
+        cat /tmp/fbrain-matrix-collaborator-conflict.log >&2
+        exit 1
+      fi
+      test "$(printf "%s" "$conflicts" | python3 -c '\''import json,sys; print(len(json.load(sys.stdin)))'\'')" -gt 0
       grep -Fq "$LOCAL_CONFLICT_MARKER" matrix-revocation/browser-revocation.md
       grep -Fq "$UNRELATED_MARKER" matrix-revocation/unrelated-progress.md
       kill "$(cat /tmp/fbrain-matrix-collaborator.pid)"
@@ -1899,7 +1909,7 @@ const requiredChecks = [
   "browser-revocation-clears-projection",
   "agent-revocation-preserves-tree",
   "personal-context-and-open-workflow",
-  "organization-admin-context-and-open-workflow",
+  "organization-human-anchored-agent-context-and-open-workflow",
   "organization-member-context-and-open-workflow",
   "asset-reference-without-inline-bytes",
 ];

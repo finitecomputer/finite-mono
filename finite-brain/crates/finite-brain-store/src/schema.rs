@@ -195,10 +195,484 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 22)? {
+            tx.execute_batch(SCHEMA_V22)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![22, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 23)? {
+            tx.execute_batch(SCHEMA_V23)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![23, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 24)? {
+            tx.execute_batch(SCHEMA_V24)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![24, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 25)? {
+            tx.execute_batch(SCHEMA_V25)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![25, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 26)? {
+            tx.execute_batch(&pending_cohort_capacity_guard_schema())?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![26, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 }
+
+const SCHEMA_V25: &str = r#"
+CREATE TABLE brain_member_independent_sources (
+    brain_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('direct_npub', 'legacy')),
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, user_id, source_kind, source_id),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
+
+fn pending_cohort_capacity_guard_schema() -> String {
+    let limits = BRAIN_CAPACITY_ENVELOPE;
+    format!(
+        r#"
+DROP TRIGGER IF EXISTS capacity_brain_members;
+DROP TRIGGER IF EXISTS capacity_sync_records;
+DROP TRIGGER IF EXISTS capacity_folder_access;
+DROP TRIGGER IF EXISTS capacity_folder_key_grants;
+DROP TRIGGER IF EXISTS capacity_brain_invitations;
+
+CREATE VIEW active_pending_cohort_member_reservations AS
+SELECT DISTINCT invitation.brain_id,
+       json_extract(participant.value, '$.npub') AS user_id
+FROM cohort_invitation_plans plan
+JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+     json_each(plan.participants_json) participant
+WHERE invitation.status = 'pending'
+  AND julianday(invitation.expires_at) > julianday('now')
+  AND plan.scope_kind = 'brain';
+
+CREATE VIEW active_pending_cohort_access_reservations AS
+SELECT DISTINCT candidate.brain_id, candidate.folder_id, candidate.user_id
+FROM (
+    SELECT invitation.brain_id, plan.folder_id,
+           json_extract(participant.value, '$.npub') AS user_id
+    FROM cohort_invitation_plans plan
+    JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+         json_each(plan.participants_json) participant
+    WHERE invitation.status = 'pending'
+      AND julianday(invitation.expires_at) > julianday('now')
+      AND plan.scope_kind = 'folder'
+    UNION
+    SELECT invitation.brain_id, folder.value,
+           json_extract(participant.value, '$.npub') AS user_id
+    FROM cohort_invitation_plans plan
+    JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+         json_each(plan.participants_json) participant,
+         json_each(invitation.initial_folder_access_json) folder
+    WHERE invitation.status = 'pending'
+      AND julianday(invitation.expires_at) > julianday('now')
+      AND plan.scope_kind = 'brain'
+) candidate;
+
+CREATE VIEW active_pending_cohort_grant_reservations AS
+SELECT DISTINCT invitation.brain_id, grant.folder_id, grant.key_version,
+       grant.recipient_npub
+FROM cohort_invitation_grants grant
+JOIN brain_invitations invitation ON invitation.id = grant.invitation_id
+WHERE invitation.status = 'pending'
+  AND julianday(invitation.expires_at) > julianday('now');
+
+CREATE TRIGGER capacity_brain_members
+BEFORE INSERT ON brain_members
+WHEN (
+    (SELECT COUNT(*) FROM brain_members WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_member_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM brain_members current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.user_id = reservation.user_id
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_member_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.user_id = NEW.user_id
+    ))
+) >= {members}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_members:{members}');
+END;
+
+CREATE TRIGGER capacity_folder_access
+BEFORE INSERT ON folder_access
+WHEN (
+    (SELECT COUNT(*) FROM folder_access WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_access_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_access current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.user_id = reservation.user_id
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_access_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.folder_id = NEW.folder_id
+          AND reservation.user_id = NEW.user_id
+    ))
+) >= {folder_access_entries}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_access_entries:{folder_access_entries}');
+END;
+
+CREATE TRIGGER capacity_folder_key_grants
+BEFORE INSERT ON folder_key_grants
+WHEN (
+    (SELECT COUNT(*) FROM folder_key_grants WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_grant_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_key_grants current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.key_version = reservation.key_version
+             AND current.recipient_npub = reservation.recipient_npub
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_grant_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.folder_id = NEW.folder_id
+          AND reservation.key_version = NEW.key_version
+          AND reservation.recipient_npub = NEW.recipient_npub
+    ))
+) >= {folder_key_grants}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_key_grants:{folder_key_grants}');
+END;
+
+CREATE TRIGGER capacity_sync_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+AND (
+    (SELECT COUNT(*) FROM brain_record_index
+     WHERE brain_id = NEW.brain_id
+       AND COALESCE(json_extract(payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone') +
+    (SELECT COUNT(*) FROM active_pending_cohort_grant_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_key_grants current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.key_version = reservation.key_version
+             AND current.recipient_npub = reservation.recipient_npub
+       ))
+) >= {ordinary_sync_records}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:sync_records:{ordinary_sync_records}');
+END;
+
+CREATE TRIGGER capacity_brain_invitations
+BEFORE INSERT ON brain_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM brain_invitations
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+      AND julianday(expires_at) > julianday('now')
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_invitations:{invitations}');
+END;
+"#,
+        members = limits.members,
+        folder_access_entries = limits.folder_access_entries,
+        folder_key_grants = limits.folder_key_grants,
+        ordinary_sync_records = limits.sync_records - limits.folders,
+        invitations = limits.invitations,
+    )
+}
+
+const SCHEMA_V24: &str = r#"
+CREATE TABLE invitation_cohort_conversion_receipts (
+    invitation_id TEXT PRIMARY KEY NOT NULL,
+    plan_id TEXT NOT NULL UNIQUE,
+    backup_reference TEXT NOT NULL,
+    converted_by_npub TEXT NOT NULL,
+    converted_at TEXT NOT NULL,
+    FOREIGN KEY (invitation_id) REFERENCES brain_invitations(id) ON DELETE CASCADE
+);
+"#;
+
+const SCHEMA_V22: &str = r#"
+DROP INDEX IF EXISTS brain_invitations_pending_npub_target;
+DROP INDEX IF EXISTS brain_invitations_pending_email_brain_target;
+DROP INDEX IF EXISTS brain_invitations_pending_email_folder_target;
+
+ALTER TABLE brain_invitations RENAME TO brain_invitations_v21;
+
+CREATE TABLE brain_invitations (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    user_id TEXT,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('npub', 'email_bootstrap', 'account_cohort')),
+    invited_email TEXT,
+    invite_unwrap_npub TEXT,
+    bootstrap_payload_hash TEXT,
+    bootstrap_wrapped_event_json TEXT,
+    bootstrap_authorization_event_json TEXT,
+    bootstrap_scope_json TEXT NOT NULL DEFAULT '[]',
+    claimed_by_npub TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+    invite_code TEXT NOT NULL UNIQUE,
+    accept_path TEXT NOT NULL,
+    initial_folder_access_json TEXT NOT NULL,
+    created_by_npub TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    accepted_at TEXT,
+    folder_only INTEGER NOT NULL DEFAULT 0 CHECK (folder_only IN (0, 1)),
+    CHECK (
+        (target_kind = 'npub' AND user_id IS NOT NULL AND invited_email IS NULL) OR
+        (target_kind IN ('email_bootstrap', 'account_cohort') AND invited_email IS NOT NULL)
+    ),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+INSERT INTO brain_invitations (
+    id, brain_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+    bootstrap_payload_hash, bootstrap_wrapped_event_json,
+    bootstrap_authorization_event_json, bootstrap_scope_json, claimed_by_npub,
+    status, invite_code, accept_path, initial_folder_access_json,
+    created_by_npub, expires_at, created_at, updated_at, accepted_at, folder_only
+)
+SELECT id, brain_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+       bootstrap_payload_hash, bootstrap_wrapped_event_json,
+       bootstrap_authorization_event_json, bootstrap_scope_json, claimed_by_npub,
+       status, invite_code, accept_path, initial_folder_access_json,
+       created_by_npub, expires_at, created_at, updated_at, accepted_at, folder_only
+FROM brain_invitations_v21;
+
+DROP TABLE brain_invitations_v21;
+
+CREATE UNIQUE INDEX brain_invitations_pending_npub_target
+    ON brain_invitations(brain_id, user_id)
+    WHERE status = 'pending' AND target_kind = 'npub';
+CREATE UNIQUE INDEX brain_invitations_pending_email_brain_target
+    ON brain_invitations(brain_id, invited_email)
+    WHERE status = 'pending'
+      AND target_kind IN ('email_bootstrap', 'account_cohort')
+      AND folder_only = 0;
+CREATE UNIQUE INDEX brain_invitations_pending_email_folder_target
+    ON brain_invitations(brain_id, invited_email, initial_folder_access_json)
+    WHERE status = 'pending'
+      AND target_kind IN ('email_bootstrap', 'account_cohort')
+      AND folder_only = 1;
+
+CREATE TABLE cohort_invitation_plans (
+    invitation_id TEXT PRIMARY KEY NOT NULL,
+    plan_id TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL,
+    human_email TEXT NOT NULL,
+    roster_revision INTEGER NOT NULL,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('brain', 'folder')),
+    folder_id TEXT,
+    participants_json TEXT NOT NULL,
+    exclusions_json TEXT NOT NULL,
+    key_versions_json TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((scope_kind = 'brain' AND folder_id IS NULL) OR
+           (scope_kind = 'folder' AND folder_id IS NOT NULL)),
+    FOREIGN KEY (invitation_id) REFERENCES brain_invitations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE cohort_invitation_grants (
+    invitation_id TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version >= 1),
+    issuer_npub TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    format TEXT NOT NULL,
+    wrapped_event_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    record_event_id TEXT NOT NULL,
+    record_payload_json TEXT NOT NULL,
+    record_event_kind INTEGER NOT NULL,
+    PRIMARY KEY (invitation_id, grant_id),
+    UNIQUE (invitation_id, folder_id, key_version, recipient_npub),
+    FOREIGN KEY (invitation_id) REFERENCES brain_invitations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE brain_invitation_email_deliveries (
+    invitation_id TEXT PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'failed')),
+    attempted_at TEXT NOT NULL,
+    delivered_at TEXT,
+    error TEXT,
+    FOREIGN KEY (invitation_id) REFERENCES brain_invitations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_access_cohorts (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    human_npub TEXT NOT NULL,
+    human_email TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('brain', 'folder')),
+    folder_id TEXT,
+    provenance_kind TEXT NOT NULL,
+    provenance_id TEXT NOT NULL,
+    roster_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (brain_id, provenance_kind, provenance_id),
+    CHECK ((scope_kind = 'brain' AND folder_id IS NULL) OR
+           (scope_kind = 'folder' AND folder_id IS NOT NULL)),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_access_cohort_participants (
+    cohort_id TEXT NOT NULL,
+    participant_npub TEXT NOT NULL,
+    relationship TEXT NOT NULL CHECK (relationship IN ('human', 'account_agent')),
+    nip05 TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'excluded', 'revoked')),
+    exclusion_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cohort_id, participant_npub),
+    FOREIGN KEY (cohort_id) REFERENCES account_access_cohorts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_access_cohort_audit (
+    id TEXT PRIMARY KEY NOT NULL,
+    cohort_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    anchoring_human_npub TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY (cohort_id) REFERENCES account_access_cohorts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE human_anchored_agent_authorities (
+    cohort_id TEXT NOT NULL,
+    brain_id TEXT NOT NULL,
+    human_npub TEXT NOT NULL,
+    agent_npub TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cohort_id, agent_npub),
+    FOREIGN KEY (cohort_id) REFERENCES account_access_cohorts(id) ON DELETE CASCADE,
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_invitation_dismissals (
+    invitation_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    hidden INTEGER NOT NULL CHECK (hidden IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (invitation_id, account_id),
+    FOREIGN KEY (invitation_id) REFERENCES brain_invitations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_access_cohort_exclusions (
+    cohort_id TEXT NOT NULL,
+    participant_npub TEXT NOT NULL,
+    folder_id TEXT,
+    reason TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cohort_id, participant_npub, folder_id),
+    FOREIGN KEY (cohort_id) REFERENCES account_access_cohorts(id) ON DELETE CASCADE
+);
+
+-- Additive replacement for the legacy singular personal_agents row. The
+-- singular row remains readable during rollout; every new writer also records
+-- the complete desired/ready set here.
+CREATE TABLE personal_brain_agents (
+    brain_id TEXT NOT NULL,
+    agent_npub TEXT NOT NULL,
+    agent_nip05 TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('desired', 'ready', 'blocked', 'revoked')),
+    roster_revision INTEGER NOT NULL,
+    blocker TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, agent_npub),
+    UNIQUE (brain_id, agent_nip05),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_agent_departure_facts (
+    fact_id TEXT NOT NULL,
+    brain_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    agent_nip05 TEXT NOT NULL,
+    agent_npub TEXT,
+    departure_kind TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    applied_at TEXT,
+    result_json TEXT,
+    PRIMARY KEY (fact_id, brain_id),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE TABLE account_cohort_reconciliation_plans (
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    plan_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'blocked', 'committed')),
+    created_at TEXT NOT NULL,
+    committed_at TEXT
+);
+"#;
+
+const SCHEMA_V23: &str = r#"
+ALTER TABLE account_access_cohorts
+ADD COLUMN account_id TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE authenticated_human_intents (
+    event_id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    human_npub TEXT NOT NULL,
+    acting_agent_npub TEXT NOT NULL,
+    target_agent_npub TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('restrict', 'restore')),
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('brain', 'folder')),
+    folder_id TEXT,
+    event_json TEXT NOT NULL,
+    consumed_at TEXT NOT NULL,
+    CHECK ((scope_kind = 'brain' AND folder_id IS NULL) OR
+           (scope_kind = 'folder' AND folder_id IS NOT NULL)),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
 
 const SCHEMA_V21: &str = r#"
 -- V6 created this index before V10 renamed vault_invitations to
@@ -1565,13 +2039,28 @@ mod tests {
             .unwrap();
         assert_eq!(preserved_payload, r#"{"ciphertext":"preserved"}"#);
 
+        let legacy_member_source: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM brain_member_independent_sources
+                    WHERE brain_id = 'legacy-organization'
+                      AND user_id = 'npub-owner'
+                      AND source_kind = 'legacy'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!legacy_member_source);
+
         let latest_version: i64 = store
             .conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 21);
+        assert_eq!(latest_version, 26);
 
         let old_table_count: i64 = store
             .conn

@@ -55,7 +55,7 @@ const runnerToken = `local-runner-token-${runId}`;
 const usageToken = `local-usage-token-${runId}`;
 const workosClientId = "client_devfinity";
 const workosOperatorOrgId = "org_devfinity_operator";
-const workosCustomerEmail = "devfinity@finite.computer";
+const workosCustomerEmail = "devfinity@finite.vip";
 const postgresContainer =
   process.env.FC_STRIPE_BILLING_E2E_POSTGRES_CONTAINER?.trim() ||
   `finite-v2-stripe-e2e-${runId}`;

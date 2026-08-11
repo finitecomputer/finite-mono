@@ -30,6 +30,7 @@ def main() -> None:
             health["unit"].removesuffix(".service"),
             *health["services"],
             *health["probes"].values(),
+            *health["required_capabilities"].values(),
         ],
     )
 

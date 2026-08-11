@@ -359,16 +359,19 @@ impl IdentityStore {
         pubkey: &str,
         now: u64,
     ) -> Result<(), StoreError> {
-        let existing: Option<String> = tx
+        let existing: Option<(String, Option<u64>)> = tx
             .query_row(
-                "SELECT pubkey FROM vip_email_bindings WHERE email = ?1",
+                "SELECT pubkey, disabled_at FROM vip_email_bindings WHERE email = ?1",
                 params![&parsed.email],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some(existing_pubkey) = existing {
+        if let Some((existing_pubkey, disabled_at)) = existing {
             if existing_pubkey != pubkey {
                 return Err(StoreError::Conflict("vip_email_already_bound"));
+            }
+            if disabled_at.is_some() {
+                return Err(StoreError::Conflict("vip_email_binding_disabled"));
             }
         } else {
             tx.execute(
@@ -438,14 +441,41 @@ impl IdentityStore {
         pubkey: &str,
         now: u64,
     ) -> Result<(), StoreError> {
+        self.bind_workos_account_principal_and_vip_email(workos_user_id, pubkey, None, now)
+    }
+
+    pub fn bind_workos_account_principal_and_vip_email(
+        &self,
+        workos_user_id: &str,
+        pubkey: &str,
+        vip_email: Option<&str>,
+        now: u64,
+    ) -> Result<(), StoreError> {
         if !valid_workos_user_id(workos_user_id) {
             return Err(StoreError::Validation("invalid_workos_user_id"));
         }
         if !hex::is_hex32(pubkey) {
             return Err(StoreError::Validation("invalid_user_npub"));
         }
+        let vip_email = vip_email
+            .map(|email| parse_email(email).ok_or(StoreError::Validation("malformed email")))
+            .transpose()?;
         let mut conn = self.conn.lock().expect("store mutex never poisoned");
         let tx = conn.transaction()?;
+        Self::bind_workos_account_principal_in_transaction(&tx, workos_user_id, pubkey, now)?;
+        if let Some(vip_email) = &vip_email {
+            Self::bind_vip_email_in_transaction(&tx, vip_email, pubkey, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn bind_workos_account_principal_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        workos_user_id: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
         let existing_by_account: Option<String> = tx
             .query_row(
                 "SELECT pubkey FROM workos_account_principals WHERE workos_user_id = ?1",
@@ -485,7 +515,6 @@ impl IdentityStore {
              ON CONFLICT(pubkey) DO NOTHING",
             params![pubkey, now],
         )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -1095,6 +1124,10 @@ pub fn router(state: AuthorityState) -> Router {
             post(operator_resolve_brain_user),
         )
         .route(
+            "/api/v1/operator/brain/participant-resolution",
+            post(operator_resolve_brain_participants),
+        )
+        .route(
             "/api/v1/operator/disable-binding",
             post(operator_disable_binding),
         )
@@ -1688,14 +1721,24 @@ async fn operator_bind_account_principal(
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_user_npub"),
     };
     let pubkey = hex::encode(&pubkey_bytes);
-    match state.store.bind_workos_account_principal(
+    let verified_email = match request.verified_email.as_deref() {
+        Some(email) => match parse_email(email) {
+            Some(email) if email.domain == state.config.finite_vip_domain => Some(email.email),
+            Some(_) => None,
+            None => return api_error(StatusCode::BAD_REQUEST, "invalid_verified_email"),
+        },
+        None => None,
+    };
+    match state.store.bind_workos_account_principal_and_vip_email(
         request.workos_user_id.trim(),
         &pubkey,
+        verified_email.as_deref(),
         state.clock.now(),
     ) {
         Ok(()) => Json(serde_json::json!({
             "workosUserId": request.workos_user_id.trim(),
             "userNpub": npub::encode(&pubkey_bytes),
+            "verifiedEmail": verified_email,
         }))
         .into_response(),
         Err(StoreError::Conflict(code)) => api_error(StatusCode::CONFLICT, code),
@@ -1718,10 +1761,25 @@ async fn operator_resolve_brain_agent(
     };
     let pubkey = hex::encode(&pubkey_bytes);
     let active = match state.store.vip_bindings_by_pubkey(&pubkey) {
-        Ok(bindings) => bindings
-            .into_iter()
-            .filter(|binding| !binding.disabled())
-            .collect::<Vec<_>>(),
+        Ok(bindings) => {
+            let mut active = Vec::new();
+            for binding in bindings.into_iter().filter(|binding| !binding.disabled()) {
+                match state
+                    .store
+                    .is_managed_agent_nip05(&binding.email, &binding.pubkey)
+                {
+                    Ok(true) => active.push(binding),
+                    Ok(false) => {}
+                    Err(error) => {
+                        return api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            store_error_code(&error),
+                        );
+                    }
+                }
+            }
+            active
+        }
         Err(error) => {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
         }
@@ -1767,6 +1825,124 @@ async fn operator_resolve_brain_user(
         "userNpub": npub::encode(&pubkey_bytes),
     }))
     .into_response()
+}
+
+async fn operator_resolve_brain_participants(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorResolveBrainParticipantsRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_operator(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    let workos_user_id = request.workos_user_id.trim();
+    if !valid_workos_user_id(workos_user_id) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_workos_user_id");
+    }
+    let Some(human_mailbox) =
+        normalize_finite_vip_email(&request.human_mailbox, &state.config.finite_vip_domain)
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_human_mailbox");
+    };
+    let account_pubkey = match state.store.workos_account_principal(workos_user_id) {
+        Ok(Some(pubkey)) => pubkey,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "user_principal_not_bound"),
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    };
+    let mailbox_binding = match state.store.vip_binding_by_email(&human_mailbox) {
+        Ok(Some(binding)) if !binding.disabled() => binding,
+        Ok(_) => return api_error(StatusCode::NOT_FOUND, "human_mailbox_not_bound"),
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    };
+    if mailbox_binding.pubkey != account_pubkey {
+        return api_error(StatusCode::CONFLICT, "human_mailbox_account_conflict");
+    }
+    match state
+        .store
+        .is_managed_agent_nip05(&human_mailbox, &account_pubkey)
+    {
+        Ok(true) => return api_error(StatusCode::CONFLICT, "human_mailbox_is_agent_name"),
+        Ok(false) => {}
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    }
+    let Some(human_pubkey) = hex::decode32(&account_pubkey) else {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey");
+    };
+    if request.managed_agent_names.len() > MAX_BRAIN_ACCOUNT_AGENTS {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "managed_agent_fanout_exceeded",
+        );
+    }
+    let mut seen_names = std::collections::BTreeSet::new();
+    let mut seen_principals = std::collections::BTreeSet::from([account_pubkey]);
+    let mut agents = Vec::with_capacity(request.managed_agent_names.len());
+    for requested_name in request.managed_agent_names {
+        let Some(name) =
+            normalize_finite_vip_email(&requested_name, &state.config.finite_vip_domain)
+        else {
+            return api_error(StatusCode::BAD_REQUEST, "invalid_managed_agent_name");
+        };
+        if !seen_names.insert(name.clone()) {
+            return api_error(StatusCode::BAD_REQUEST, "duplicate_managed_agent_name");
+        }
+        let binding = match state.store.vip_binding_by_email(&name) {
+            Ok(Some(binding)) if !binding.disabled() => binding,
+            Ok(_) => return api_error(StatusCode::NOT_FOUND, "managed_agent_name_not_bound"),
+            Err(error) => {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+            }
+        };
+        match state.store.is_managed_agent_nip05(&name, &binding.pubkey) {
+            Ok(true) => {}
+            Ok(false) => {
+                return api_error(StatusCode::CONFLICT, "agent_name_is_human_mailbox");
+            }
+            Err(error) => {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+            }
+        }
+        if !seen_principals.insert(binding.pubkey.clone()) {
+            return api_error(StatusCode::CONFLICT, "duplicate_participant_principal");
+        }
+        let Some(pubkey) = hex::decode32(&binding.pubkey) else {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey");
+        };
+        agents.push(BrainParticipantResolution {
+            relationship: "account_agent",
+            name: friendly_identity_name(&name),
+            nip05: name,
+            npub: npub::encode(&pubkey),
+        });
+    }
+    Json(OperatorResolveBrainParticipantsResponse {
+        human: BrainParticipantResolution {
+            relationship: "human",
+            name: friendly_identity_name(&human_mailbox),
+            nip05: human_mailbox,
+            npub: npub::encode(&human_pubkey),
+        },
+        agents,
+    })
+    .into_response()
+}
+
+fn friendly_identity_name(email: &str) -> String {
+    let local = email
+        .split_once('@')
+        .map(|(local, _)| local)
+        .unwrap_or(email);
+    let mut characters = local.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => local.to_owned(),
+    }
 }
 
 async fn operator_disable_binding(
@@ -2106,6 +2282,8 @@ struct OperatorBindAgentEmailResponse {
 struct OperatorBindAccountPrincipalRequest {
     workos_user_id: String,
     user_npub: String,
+    #[serde(default)]
+    verified_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2118,6 +2296,30 @@ struct OperatorResolveBrainAgentRequest {
 #[serde(rename_all = "camelCase")]
 struct OperatorResolveBrainUserRequest {
     workos_user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorResolveBrainParticipantsRequest {
+    workos_user_id: String,
+    human_mailbox: String,
+    managed_agent_names: Vec<String>,
+}
+
+const MAX_BRAIN_ACCOUNT_AGENTS: usize = 64;
+
+#[derive(Debug, Serialize)]
+struct OperatorResolveBrainParticipantsResponse {
+    human: BrainParticipantResolution,
+    agents: Vec<BrainParticipantResolution>,
+}
+
+#[derive(Debug, Serialize)]
+struct BrainParticipantResolution {
+    relationship: &'static str,
+    name: String,
+    nip05: String,
+    npub: String,
 }
 
 #[derive(Debug, Serialize)]

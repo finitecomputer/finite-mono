@@ -81,6 +81,7 @@ impl BrainStore {
                 &required,
                 &rotation.grants,
                 Some(owner_npub),
+                false,
             )?;
             let live_objects = self
                 .load_current_objects(brain_id)?

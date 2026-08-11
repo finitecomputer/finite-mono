@@ -13,6 +13,68 @@ fn invitation_json<T: serde::Serialize>(value: T) -> Result<Json<serde_json::Val
     })
 }
 
+pub(crate) async fn list_account_invitations_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<AccountInvitationsQuery>,
+) -> Result<Json<AccountInvitationInboxResponse>, ApiError> {
+    let actor = UserId::new(validate_request_auth(
+        &state, &headers, &method, &uri, None,
+    )?)?;
+    let invitations = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let mut items = Vec::new();
+        for (invitation, hidden) in store.list_account_invitations(&actor, query.include_hidden)? {
+            let mut response = brain_invitation_response(invitation);
+            attach_invitation_public_url(&state, &mut response);
+            enrich_brain_invitation_identities(&store, &mut response)?;
+            items.push(AccountInvitationInboxItemResponse {
+                invitation: response,
+                hidden,
+            });
+        }
+        items
+    };
+    Ok(Json(AccountInvitationInboxResponse { invitations }))
+}
+
+pub(crate) async fn set_account_invitation_visibility_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(invitation_id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<AccountInvitationInboxItemResponse>, ApiError> {
+    let actor = UserId::new(validate_request_auth(
+        &state,
+        &headers,
+        &method,
+        &uri,
+        Some(&body),
+    )?)?;
+    let request: SetAccountInvitationVisibilityRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let now = server_timestamp(&state);
+    let invitation = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        store.set_account_invitation_hidden(&invitation_id, &actor, request.hidden, &now)?;
+        store.load_brain_invitation(&invitation_id)?
+    };
+    let mut response = brain_invitation_response(invitation);
+    attach_invitation_public_url(&state, &mut response);
+    {
+        let store = state.store.lock().map_err(lock_error)?;
+        enrich_brain_invitation_identities(&store, &mut response)?;
+    }
+    Ok(Json(AccountInvitationInboxItemResponse {
+        invitation: response,
+        hidden: request.hidden,
+    }))
+}
+
 pub(crate) async fn get_invitation_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -38,7 +100,14 @@ pub(crate) async fn get_invitation_handler(
         let store = state.store.lock().map_err(lock_error)?;
         let invitation = store.load_brain_invitation(&invitation_id)?;
         let stored = store.load_brain(&invitation.brain_id)?;
-        let is_target = invitation.user_id.as_ref() == Some(&actor);
+        let is_target = invitation.user_id.as_ref() == Some(&actor)
+            || store
+                .load_cohort_invitation_plan(&invitation_id)?
+                .is_some_and(|plan| {
+                    plan.participants
+                        .iter()
+                        .any(|participant| participant.npub == actor)
+                });
         if !is_target {
             ensure_brain_admin(&stored, actor.as_str())?;
         }
@@ -59,6 +128,7 @@ pub(crate) async fn accept_invitation_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath(invitation_id): AxumPath<String>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !brain_invitation_id(&invitation_id) {
         return accept_share_link_handler(
@@ -72,13 +142,41 @@ pub(crate) async fn accept_invitation_handler(
         .and_then(|Json(value)| invitation_json(value));
     }
     let actor = UserId::new(validate_request_auth(
-        &state, &headers, &method, &uri, None,
+        &state,
+        &headers,
+        &method,
+        &uri,
+        (!body.is_empty()).then_some(&body),
     )?)?;
+    let narrowing: AcceptAccountCohortInvitationRequest = if body.is_empty() {
+        AcceptAccountCohortInvitationRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?
+    };
     let now = server_timestamp(&state);
     let invitation = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.load_brain_invitation(&invitation_id)?
+    };
+    let departures = if invitation.target_kind == BrainInvitationTargetKind::AccountCohort {
+        permanent_departures_for_cohort_invitation(&state, &invitation_id).await?
+    } else {
+        BTreeMap::new()
+    };
+    validate_acceptance_narrowing(&narrowing.removed_participants, &departures)?;
+    let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let invitation = store.load_brain_invitation(&invitation_id)?;
-        store.accept_brain_invitation_by_code(&invitation.invite_code, &actor, &now)?
+        if invitation.target_kind == BrainInvitationTargetKind::AccountCohort {
+            store.accept_account_cohort_invitation_by_code(
+                &invitation.invite_code,
+                &actor,
+                &departures,
+                &now,
+            )?
+        } else {
+            store.accept_brain_invitation_by_code(&invitation.invite_code, &actor, &now)?
+        }
     };
     let mut response = brain_invitation_response(invitation);
     attach_invitation_public_url(&state, &mut response);

@@ -4,6 +4,14 @@ Status: hard-cut draft implementation spec
 Source snapshot: Rust hard-cut branch `feature/rust-portable-v1-core`; see
 the source map at the end of this document.
 
+Account access amendment: the normative account-agent, invitation, Personal
+Brain, Organization Brain bootstrap, and mixed-version rules in
+[Account-Agent Access Cohorts And Multi-Agent Personal Brains](account-agent-access-cohorts-spec.md)
+and ADR-0045 amend the corresponding Portable v1 rules below. This document
+incorporates those rules where they affect the portable data and authorization
+model; implementations must not recreate the superseded singular Personal
+Agent or human-only email invitation behavior.
+
 This document describes FiniteBrain Portable v1 at the level needed to
 reimplement its data model, cryptographic records, authorization checks, and
 sync behavior in another programming language.
@@ -219,10 +227,12 @@ A Brain is the top-level privacy container.
 Personal Brain:
 
 - Has exactly one owner identity in `ownerUserId` and starts empty.
-- May have exactly one distinct Personal Agent. Brain automatically issues the
-  owner and Personal Agent current grants for every Folder.
+- Tracks the owner's live Account Agent Set as a Personal Brain Agent Set.
+  Brain automatically issues the owner and every ready Personal Brain Agent
+  current grants for every Folder.
 - Does not use ordinary organization membership/admin lists for its owner or
-  Personal Agent. Explicit restricted-Folder sharing remains separate.
+  Personal Brain Agents. The human remains sole owner, agents sign as distinct
+  principals, and explicit external sharing remains separate.
 
 Organization Brain:
 
@@ -492,20 +502,25 @@ Brain bootstrap is the first atomic access-control boundary.
 Personal Brain bootstrap:
 
 - Atomically create one empty `kind: "personal"` Brain, with the User Nostr
-  Identity as sole owner and one distinct Personal Agent.
-- User-first setup resolves the Managed Agent Email before writing state.
+  Identity as sole owner and the owner's current eligible Account Agent Set as
+  the desired Personal Brain Agent Set.
+- User-first setup resolves the owner and Account Agent Roster before writing
+  state.
 - Agent-first setup uses `POST /_admin/personal-brain-bootstrap`; Brain derives
   the owner through Core account association and Finite Identity. The caller
   cannot supply an owner, and Chat supplies no Brain authorization.
-- Both paths converge on the same Brain and relationship. Exact retries by the
-  established Personal Agent are idempotent; another agent fails closed.
+- Both paths converge on the same Brain and desired set. Exact retries by any
+  eligible account agent are idempotent. Personal Brain Agent Readiness may
+  complete after agent launch and does not block Chat or unrelated work.
 
 Organization Brain bootstrap:
 
 - Atomically create one empty Brain with `kind: "organization"`.
-- Add every initial admin as both Brain Member and Brain Admin. Agent-created
-  bootstrap includes both the signing Agent Principal and authenticated human
-  requester; direct Product Client creation includes the signing human.
+- Add the authenticated human requester as the initial Brain Member and Brain
+  Admin. Include a snapshot of every current eligible account agent as a Brain
+  Member with Human-Anchored Agent Authority; do not copy independent admin
+  roles to the agents. Agent-created and direct Product Client creation produce
+  the same shape.
 - Create no Folder Keys or Folder Key Grants until an authorized admin creates
   a Folder.
 
@@ -911,9 +926,12 @@ Access is binary:
 For any current Folder Key version, recipients are:
 
 - `all_members`: all Brain Members plus all Brain Admins.
-- `restricted`: the Personal Brain owner, plus members listed for that Folder,
-  plus all Organization Brain Admins.
-- `owner`: the Personal Brain owner.
+- `restricted`: for a Personal Brain, the owner and every ready Personal Brain
+  Agent except durable scoped exclusions, plus explicitly listed external
+  participants; for an Organization Brain, listed Members and Guests plus all
+  Brain Admins.
+- `owner`: for a Personal Brain, the owner and every ready Personal Brain Agent
+  except durable scoped exclusions.
 - `admin_only`: all Brain Admins. In the current helper this is satisfied by
   always adding admins after mode-specific recipients.
 
@@ -954,14 +972,22 @@ Removing Folder Access:
 - Requires a signed access-change authorization from the same controlling Brain
   authority.
 
-### 6.5 Personal Agent Access
+### 6.5 Personal Brain Agent Access
 
-The Personal Agent has full operational access to every current and future
-Personal Brain Folder, but is never the owner. New Folder creation always wraps
-the key for the owner and current Personal Agent. Only the human owner can
-replace or remove the Personal Agent. That operation rotates every current
-Folder Key, re-encrypts live objects, swaps or vacates the role, and commits
-atomically. It does not claim to erase plaintext or prior keys already retained.
+Every eligible account-owned agent belongs to the desired Personal Brain Agent
+Set and has full operational access to every current and future Personal Brain
+Folder, but is never the owner. New Folder creation always wraps the key for
+the owner and every ready Personal Brain Agent. A new agent may launch and chat
+while Brain prepares grants; Brain work remains unavailable to that agent until
+every current Folder is readable, and existing participants remain available.
+
+A permanent account-agent departure removes cohort-derived authority and
+rotates every affected current Folder Key atomically. Temporary stops,
+restarts, relocation, and health failures do not change access. A human may ask
+one agent to restrict or restore another, but the operation requires one-use
+Authenticated Human Intent bound to the server-derived action and records both the authorizing
+human and acting agent. No operation claims to erase plaintext or prior keys
+already retained.
 
 ### 6.6 Folder Key Rotation
 
@@ -1392,15 +1418,24 @@ encrypted object routes.
 
 ## 11. Brain Invitations
 
-A Brain Invitation lets one targeted npub become a Brain Member. It does not by
-itself grant Folder Keys.
+A Brain Invitation targets one human-facing Finite VIP Mailbox Address and
+resolves it to one fixed Invitation Participant Set: the human User Nostr
+Identity plus the approved snapshot of eligible account-owned Agent Principals.
+The mailbox address is an addressing and relationship boundary, never a shared
+signer. Each agent's readable Managed Agent NIP-05 remains a NIP-05 Name rather
+than an email-delivery target. Exact-principal invitations remain an explicit
+advanced path.
 
 Invitation shape:
 
 ```json
 {
-  "id": "invitation-npub...",
-  "userId": "npub...",
+  "id": "invitation-account...",
+  "targetEmail": "paul@finite.vip",
+  "participants": [
+    { "userId": "npub-human...", "relationship": "human" },
+    { "userId": "npub-waffle...", "relationship": "account_agent" }
+  ],
   "status": "pending | accepted | revoked",
   "initialFolderAccess": [{ "folderId": "strategy" }],
   "inviteCode": "invite-<32 hex chars>",
@@ -1412,25 +1447,41 @@ Invitation shape:
 Rules:
 
 - Only Brain Admins invite organization members.
-- Invitation Links are singleton handles for one npub. They are not reusable
-  public join links.
-- The target User must authorize with Nostr before viewing or accepting.
-- Opening a link as the wrong User returns unavailable, not organization
-  details.
-- Accepting the link adds the target as a Brain Member and applies initial
-  Folder Access metadata.
-- Folder Key Grants for restricted Folders still need to be issued through the
-  normal grant flow.
+- Preflight resolves the human and eligible Account Agent Set, verifies every
+  participant and required grant, and either commits the full set or returns a
+  reduced-set proposal that requires explicit inviter approval.
+- A Finite VIP Mailbox Address uses this cohort path even when ordinary NIP-05
+  resolution already finds the human npub. Exact-principal access requires an
+  explicit raw npub target; a mailbox-shaped target is never silently collapsed
+  to one human principal after cohort-write cutover.
+- Invitation Links are singleton handles for one account-level participant set.
+  They are not reusable public join links.
+- Pending invitation uniqueness includes invitation kind and exact resource
+  scope. Distinct Brain and Folder invitations to the same mailbox may coexist;
+  an exact same-scope retry returns the prior invitation and does not redeliver
+  email.
+- The target human or an included agent must authorize with its own Nostr key
+  before viewing or accepting. An included agent also presents its current
+  verified account relationship and acts only after the human asks.
+- Opening a link as an unrelated principal returns unavailable, not Brain or
+  participant details.
+- Accepting atomically adds the approved set as Brain Members, applies initial
+  Folder Access, and installs every prepared current Folder Key Grant. Folder
+  Invitations perform the same transition as Folder-only Guests.
+- Participant principals, encrypted grants, cohort provenance, and the acting
+  principal are part of the atomic acceptance result.
 
 ### 11.1 Invitation Lifecycle
 
-Invitation Links are npub-bound, singleton, and single-use.
+Invitation Links are account-bound, participant-set-bound, singleton, and
+single-use.
 
 States:
 
-- `pending`: link can be viewed only by the targeted npub and accepted before
-  `expiresAt`.
-- `accepted`: target npub has accepted; the link MUST NOT be accepted again.
+- `pending`: the same Account Invitation Inbox record can be viewed only by the
+  targeted human or included agents and accepted before `expiresAt`.
+- `accepted`: one authorized participant has accepted the fixed set; the link
+  MUST NOT be accepted again.
 - `revoked`: a Brain Admin has invalidated the link; the link MUST NOT reveal
   organization details to the target after revocation.
 - `expired`: derived state when `expiresAt` is in the past; expired links MUST
@@ -1438,18 +1489,21 @@ States:
 
 Lifecycle rules:
 
-- A link is baked for one target npub at creation time.
-- The accepting signer npub MUST equal the invitation `userId`.
+- A link is baked for one target email and exact participant set at creation
+  time. Agents created later do not inherit the invitation.
+- The accepting signer npub MUST equal one approved participant and, for an
+  agent, still verify as account-owned by the anchoring human.
+- If an approved agent permanently departs before acceptance, explicit
+  acceptance narrowing may remove it. Narrowing MUST NOT add participants.
 - Accept is idempotent only for server retries of the same acceptance request.
-  A completed accepted link cannot onboard a second session, second npub, or
-  second membership action.
+  A completed accepted link cannot onboard a second set or membership action.
 - Revocation before acceptance prevents membership creation.
 - Revocation after acceptance disables the delivery handle only. Removing the
   accepted member is a separate membership/access change.
-- Initial Folder Access metadata does not by itself prove the member can open a
-  Folder. The required Folder Key Grants must exist and be openable.
-- If grant issuance fails during accept, the server MUST surface setup
-  incomplete instead of pretending the Folder is usable.
+- Initial Folder Access metadata does not by itself prove any participant can
+  open a Folder. Every required Folder Key Grant must exist and be openable.
+- If grant installation fails during accept, the complete acceptance rolls
+  back instead of pretending the Folder is usable.
 
 ## 12. Sharing And Mounts
 
@@ -1471,7 +1525,9 @@ The source Folder remains canonical:
 
 ### 12.2 Personal Folder Mount
 
-A Personal Folder Mount is a visible reference for one User.
+A Personal Folder Mount is a visible reference in one Personal Brain. Its
+destination participants are the human owner and every ready Personal Brain
+Agent unless destination governance records an explicit scoped exclusion.
 
 ```json
 {
@@ -1492,9 +1548,8 @@ Mount ids are deterministic:
 personal-mount-<first 8 bytes sha256(ownerNpub + "\n" + sourceBrainId + "\n" + sourceFolderId)>
 ```
 
-A Personal Folder Mount does not grant Folder Access. The User must still be a
-member of the source Brain for that Shared Folder and have a valid Folder Key
-Grant.
+A Personal Folder Mount does not grant Folder Access. Every destination
+participant must still have source Folder Access and a valid Folder Key Grant.
 
 Prototype boundary: the current server-side Personal Folder Mount validator
 accepts organization source Brains only. ADR 0043 and the domain model allow
@@ -2249,6 +2304,25 @@ Hard-cut rule:
   records are preserved rather than scanned, migrated, or deleted.
 - Implementations MAY build explicit import or migration tooling for old data,
   but MUST NOT make those paths the default secure flow.
+
+Account-cohort cutover rule:
+
+- Existing internal-beta human access is reconciled quietly into key-complete
+  Account Access Cohorts. A Member unit is one Brain and every Folder that
+  human can access; a Folder-only Guest unit is one Folder. Metadata-only
+  membership backfill is not completion.
+- Pending Finite VIP mailbox invitations retain their identifier, expiry,
+  invitation kind, and exact resource scope while gaining a fixed participant
+  set and prepared grants without email redelivery. Until conversion commits,
+  acceptance fails explicitly rather than creating human-only access. Pending
+  explicit-npub invitations remain exact-principal offers.
+- Reconciliation requires a dry run, synthetic-state proof, a backup and
+  rollback boundary, and atomic commit per unit. A blocked unit leaves its
+  prior access unchanged and retryable and sends no invitation or email.
+- After cohort cutover, older clients retain compatible read, sync, and Chat
+  behavior. Invitation, membership, Folder access, singular Personal Agent,
+  and collaboration writes that could recreate legacy state MUST return an
+  explicit update-required result.
 
 Version strings:
 

@@ -22,6 +22,356 @@ pub(crate) async fn folder_access_handler(
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Folder not found"))?;
     Ok(Json(response))
 }
+
+pub(crate) async fn grant_account_cohort_folder_access_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<GrantAccountCohortFolderAccessResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor_id = UserId::new(actor.clone())?;
+    let request: GrantAccountCohortFolderAccessRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    let preview_request = PreviewBrainInvitationRequest {
+        target_email: request.target_email.clone(),
+        folder_only: true,
+        initial_folder_access: vec![folder_id.to_string()],
+        expires_at: request.expires_at.clone(),
+        approved_exclusions: request.approved_exclusions.clone(),
+    };
+    let (preview, account_id) =
+        build_invitation_preview(&state, &actor, &brain_id, preview_request, false).await?;
+    if preview.plan_id != request.plan_id {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Folder access plan is stale; review the returned preflight again",
+        ));
+    }
+    let expected_exclusions = preview
+        .excluded
+        .iter()
+        .map(|excluded| canonical_email(&excluded.nip05))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let approved_exclusions = request
+        .approved_exclusions
+        .iter()
+        .map(|nip05| canonical_email(nip05))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if expected_exclusions != approved_exclusions
+        || request.approved_exclusions.len() != approved_exclusions.len()
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the exact reduced participant set requires explicit approval",
+        ));
+    }
+    if !preview.capacity.fits {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the preflight participant set exceeds Brain capacity",
+        ));
+    }
+    let expected_grants = preview
+        .participants
+        .iter()
+        .map(|participant| {
+            (
+                folder_id.to_string(),
+                preview.key_versions[0].key_version,
+                participant.npub.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let provided_grants = request
+        .participant_grants
+        .iter()
+        .map(|request| {
+            canonical_npub_from_public_key_input(&request.grant.recipient_npub).map(|recipient| {
+                (
+                    request.folder_id.clone(),
+                    request.grant.key_version,
+                    recipient,
+                )
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if provided_grants != expected_grants
+        || request.participant_grants.len() != expected_grants.len()
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "participant grants must exactly match the Folder access preflight",
+        ));
+    }
+    let created_at = server_timestamp(&state);
+    let grants =
+        bootstrap_grant_requests_to_metadata(&request.participant_grants, &actor, &created_at)?;
+    let human_npub = preview
+        .participants
+        .iter()
+        .find(|participant| participant.relationship == "human")
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "cohort human is missing"))?
+        .npub
+        .clone();
+    let (event, payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &brain_id,
+        &actor,
+        AdminAccessAction::GrantFolderAccess,
+        Some(&folder_id),
+        Some(&human_npub),
+        Some(preview.key_versions[0].key_version),
+    )?;
+    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
+    let participants = preview
+        .participants
+        .iter()
+        .map(|participant| {
+            Ok(StoredCohortParticipant {
+                relationship: participant.relationship.clone(),
+                name: participant.name.clone(),
+                nip05: participant.nip05.clone(),
+                npub: UserId::new(participant.npub.clone())?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let cohort = BootstrapAccountCohort {
+        account_id,
+        human_email: preview.target_email.clone(),
+        roster_revision: preview.roster_revision,
+        participants,
+    };
+    let operation_id = generated_link_id(
+        "folder-cohort-access",
+        &[brain_id.as_str(), folder_id.as_str(), &preview.plan_id],
+        16,
+    );
+    let (outcome, mut metadata) = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let outcome = store.grant_account_cohort_folder_access(
+            &brain_id,
+            &folder_id,
+            &operation_id,
+            &cohort,
+            &actor_id,
+            &grants,
+            &control_records,
+            &created_at,
+        )?;
+        let stored = store.load_brain(&brain_id)?;
+        let mut metadata = metadata_response(stored);
+        enrich_metadata_identities(&store, &mut metadata)?;
+        (outcome, metadata)
+    };
+    metadata.identities.retain(|identity| {
+        preview
+            .participants
+            .iter()
+            .any(|participant| participant.npub == identity.npub)
+            || metadata.members.contains(&identity.npub)
+    });
+    for participant in &preview.participants {
+        state.publish_access_update_for(&brain_id, &participant.npub);
+    }
+    Ok(Json(GrantAccountCohortFolderAccessResponse {
+        brain_id: brain_id.to_string(),
+        folder_id: folder_id.to_string(),
+        target_email: preview.target_email,
+        outcome: match outcome {
+            GrantAccountCohortFolderAccessOutcome::Granted => "granted",
+            GrantAccountCohortFolderAccessOutcome::AlreadyApplied => "already_applied",
+        }
+        .to_owned(),
+        participants: preview.participants,
+        excluded: preview.excluded,
+        metadata,
+    }))
+}
+
+fn account_cohort_folder_removal_preview(
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    target_email: &str,
+    plan: &AccountCohortFolderRemovalPlan,
+) -> Result<PreviewAccountCohortFolderRemovalResponse, ApiError> {
+    let participants = plan
+        .participants
+        .iter()
+        .map(|participant| InvitationPlanParticipantResponse {
+            relationship: participant.relationship.clone(),
+            name: participant.name.clone(),
+            nip05: participant.nip05.clone(),
+            npub: participant.npub.to_string(),
+            ready: true,
+        })
+        .collect::<Vec<_>>();
+    let binding = serde_json::json!({
+        "brainId": brain_id.as_str(),
+        "folderId": folder_id.as_str(),
+        "targetEmail": target_email,
+        "cohortIds": plan.cohort_ids,
+        "sourceOrigins": plan.source_origins,
+        "removedParticipantNpubs": plan.removed_participant_npubs,
+        "independentlyRetainedNpubs": plan.independently_retained_npubs,
+        "requiredRecipientNpubs": plan.required_recipient_npubs,
+        "currentKeyVersion": plan.current_key_version,
+        "newKeyVersion": plan.new_key_version,
+    });
+    let bytes = serde_json::to_vec(&binding).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "plan serialization failed",
+        )
+    })?;
+    Ok(PreviewAccountCohortFolderRemovalResponse {
+        plan_id: format!("cohort-removal-plan-{:x}", Sha256::digest(bytes)),
+        brain_id: brain_id.to_string(),
+        folder_id: folder_id.to_string(),
+        target_email: target_email.to_owned(),
+        participants,
+        removed_participant_npubs: plan
+            .removed_participant_npubs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        independently_retained_npubs: plan
+            .independently_retained_npubs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        required_recipient_npubs: plan
+            .required_recipient_npubs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        current_key_version: plan.current_key_version,
+        new_key_version: plan.new_key_version,
+    })
+}
+
+pub(crate) async fn preview_account_cohort_folder_removal_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<PreviewAccountCohortFolderRemovalResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: PreviewAccountCohortFolderRemovalRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let target_email = canonical_email(&request.target_email)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    let plan = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        store.plan_account_cohort_folder_access_removal(&brain_id, &folder_id, &target_email)?
+    };
+    Ok(Json(account_cohort_folder_removal_preview(
+        &brain_id,
+        &folder_id,
+        &target_email,
+        &plan,
+    )?))
+}
+
+pub(crate) async fn remove_account_cohort_folder_access_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<RemoveAccountCohortFolderAccessResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor_id = UserId::new(actor.clone())?;
+    let request: RemoveAccountCohortFolderAccessRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let target_email = canonical_email(&request.target_email)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    let plan = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        store.plan_account_cohort_folder_access_removal(&brain_id, &folder_id, &target_email)?
+    };
+    let preview =
+        account_cohort_folder_removal_preview(&brain_id, &folder_id, &target_email, &plan)?;
+    if request.plan_id != preview.plan_id || request.new_key_version != plan.new_key_version {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Folder access removal plan is stale; review a fresh preflight",
+        ));
+    }
+    let updated_at = server_timestamp(&state);
+    let grants =
+        grant_requests_to_metadata(&request.grants, &folder_id, &actor, None, &updated_at)?;
+    let human_npub = plan
+        .participants
+        .iter()
+        .find(|participant| participant.relationship == "human")
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "cohort human is missing"))?;
+    let (event, payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &brain_id,
+        &actor,
+        AdminAccessAction::RemoveFolderAccess,
+        Some(&folder_id),
+        Some(human_npub.npub.as_str()),
+        Some(plan.new_key_version),
+    )?;
+    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
+    let reencrypted_records = rotation_records_from_requests(
+        &brain_id,
+        &folder_id,
+        &actor,
+        plan.new_key_version,
+        request.reencrypted_records,
+    )?;
+    let metadata = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        store.remove_account_cohort_folder_access(
+            &brain_id,
+            &folder_id,
+            &plan,
+            &actor_id,
+            &grants,
+            &reencrypted_records,
+            &control_records,
+            &updated_at,
+        )?;
+        let stored = store.load_brain(&brain_id)?;
+        let mut metadata = metadata_response(stored);
+        enrich_metadata_identities(&store, &mut metadata)?;
+        metadata
+    };
+    for npub in plan
+        .removed_participant_npubs
+        .iter()
+        .chain(plan.independently_retained_npubs.iter())
+    {
+        state.publish_access_update_for(&brain_id, npub.as_str());
+    }
+    Ok(Json(RemoveAccountCohortFolderAccessResponse {
+        brain_id: brain_id.to_string(),
+        folder_id: folder_id.to_string(),
+        target_email,
+        removed_participant_npubs: preview.removed_participant_npubs,
+        independently_retained_npubs: preview.independently_retained_npubs,
+        new_key_version: plan.new_key_version,
+        metadata,
+    }))
+}
 use finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
 use finite_brain_store::FolderDeletionExpectation;
 
@@ -274,17 +624,54 @@ pub(crate) async fn grant_folder_access_handler(
     body: Bytes,
 ) -> Result<Json<GrantFolderAccessResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    reject_legacy_finite_vip_principal_write(&target_npub)?;
     let request: GrantFolderAccessRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
-    let current_key_version = {
+    let actor_id = UserId::new(actor.clone())?;
+    let (current_key_version, peer_restore, authenticated_human_intent) = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, &actor)?;
-        folder_current_key_version(&stored, &folder_id)?
+        let peer_change = personal_peer_agent_change(&stored, &actor_id, &target);
+        let peer_restore = peer_change
+            && stored
+                .account_agent_exclusions
+                .contains(&(target.clone(), folder_id.to_string()));
+        let authenticated_human_intent = match (peer_restore, request.authenticated_human_intent) {
+            (true, Some(value)) => Some(validate_authenticated_human_intent_value(
+                &state,
+                value,
+                &stored,
+                &brain_id,
+                &actor_id,
+                &target,
+                "restore",
+                Some(&folder_id),
+                state.auth_now_unix_seconds(),
+            )?),
+            (true, None) => {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "restoring a peer Personal Brain Agent requires Authenticated Human Intent",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "Authenticated Human Intent was supplied for an operation that does not consume it",
+                ));
+            }
+            (false, None) => None,
+        };
+        (
+            folder_current_key_version(&stored, &folder_id)?,
+            peer_restore,
+            authenticated_human_intent,
+        )
     };
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
@@ -314,13 +701,31 @@ pub(crate) async fn grant_folder_access_handler(
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, &actor)?;
-        let outcome = store.grant_folder_access_with_control_records(
-            &brain_id,
-            &folder_id,
-            &target,
-            &grant,
-            &control_records,
-        )?;
+        let outcome = if peer_restore {
+            store.restore_personal_agent_folder_access_with_control_records(
+                &brain_id,
+                &folder_id,
+                &target,
+                &grant,
+                &control_records,
+                authenticated_human_intent.as_ref().ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "missing validated Authenticated Human Intent",
+                    )
+                })?,
+                &grant_created_at,
+            )?;
+            GrantFolderAccessOutcome::Granted
+        } else {
+            store.grant_folder_access_with_control_records(
+                &brain_id,
+                &folder_id,
+                &target,
+                &grant,
+                &control_records,
+            )?
+        };
         let stored = store.load_brain(&brain_id)?;
         let mut metadata = metadata_response(stored);
         enrich_metadata_identities(&store, &mut metadata)?;
@@ -345,6 +750,7 @@ pub(crate) async fn remove_folder_access_handler(
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    reject_legacy_finite_vip_principal_write(&target_npub)?;
     let request: RemoveFolderAccessRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     validate_folder_rotation_fanout(
@@ -358,11 +764,38 @@ pub(crate) async fn remove_folder_access_handler(
     let folder_id = FolderId::new(folder_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
-    {
+    let actor_id = UserId::new(actor.clone())?;
+    let authenticated_human_intent = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, &actor)?;
-    }
+        if personal_peer_agent_change(&stored, &actor_id, &target) {
+            let value = request.authenticated_human_intent.ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "restricting a peer Personal Brain Agent requires Authenticated Human Intent",
+                )
+            })?;
+            Some(validate_authenticated_human_intent_value(
+                &state,
+                value,
+                &stored,
+                &brain_id,
+                &actor_id,
+                &target,
+                "restrict",
+                Some(&folder_id),
+                state.auth_now_unix_seconds(),
+            )?)
+        } else if request.authenticated_human_intent.is_some() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Authenticated Human Intent was supplied for an operation that does not consume it",
+            ));
+        } else {
+            None
+        }
+    };
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         &brain_id,
@@ -413,7 +846,7 @@ pub(crate) async fn remove_folder_access_handler(
     let notification_state = state.clone();
     let notification_brain_id = brain_id.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.rotate_folder_key_for_access_removal_with_control_records(
+        store.rotate_folder_key_for_access_removal_with_control_records_and_intent(
             brain_id,
             &folder_id,
             &target,
@@ -422,6 +855,7 @@ pub(crate) async fn remove_folder_access_handler(
             &reencrypted_records,
             &updated_at,
             &control_records,
+            authenticated_human_intent.as_ref(),
         )
     })?;
     notification_state.publish_access_update_for(&notification_brain_id, target.as_str());

@@ -80,7 +80,7 @@ export async function POST(request: Request) {
       );
     }
     const account = {
-      email: null,
+      email: session.verifiedEmail,
       workosUserId: session.workosUserId,
       emailVerified: true,
       source: "workos" as const,

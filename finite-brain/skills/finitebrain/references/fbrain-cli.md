@@ -33,7 +33,7 @@ fbrain [--config-dir <path>] doctor
 fbrain repair
 fbrain auth status|import [--file <path>]|login <email>|redeem <email> <token>
 fbrain signer status|public-key|sign|encrypt|decrypt
-fbrain daemon status|start|stop|logs|tick|watch
+fbrain daemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]
 fbrain sync status|now [--summary]
 fbrain open personal [path]
 fbrain open <brain-id> [path]
@@ -45,7 +45,7 @@ fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disab
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list
-fbrain brain list|create|bootstrap-personal|metadata|export
+fbrain brain list|create|bootstrap-personal|reconcile-personal-agents|reconcile-cohort|convert-invitation|apply-agent-departure|restrict-agent|restore-agent|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
@@ -63,6 +63,33 @@ the empty user-owned Personal Brain and establishes the authenticated agent as
 its Personal Agent through Brain's account-bound authority. Direct `brain
 create` is for Organization Brains and is not a substitute for this Personal
 Agent bootstrap flow.
+
+Personal Brain admission is also best-effort background work in `daemon
+supervise`: it checks the current account roster at startup and every five
+minutes, then a currently ready owner or agent prepares the missing current
+Folder grants. A Brain-specific key or authority blocker is recorded in that
+Brain's activity and does not stop Chat, Runtime readiness, sync for other
+Brains, or unrelated tools. `brain reconcile-personal-agents` runs the same
+operation on demand.
+
+Internal-beta cohort migration is explicitly two-step and recoverable:
+
+```sh
+fbrain brain reconcile-cohort --brain <brain-id> --human-email paul@finite.vip
+fbrain brain reconcile-cohort --brain <brain-id> --human-email paul@finite.vip \
+  --commit --backup-reference <pre-reconciliation-backup>
+fbrain brain convert-invitation --brain <brain-id> --invitation <invitation-id> \
+  --backup-reference <pre-conversion-backup>
+```
+
+`reconcile-cohort` is a read-only dry run unless `--commit` is present. It
+reports the exact participant and missing-grant plan, capacity blockers,
+independent Agent access, and pending invitation conversions. Conversion keeps
+the pending invitation's ID, code, expiry, Brain-or-Folder scope, and existing
+delivery receipt; it never sends another email. A legacy pending
+`@finite.vip` mailbox invite returns update-required until conversion is
+complete. Explicit raw-npub and unresolved external-mailbox offers keep their
+bounded legacy semantics.
 
 ## Identity
 

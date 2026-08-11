@@ -371,6 +371,9 @@ export function hostedDeviceHeaders(
     authorization: `Bearer ${config.apiToken}`,
     "x-finite-workos-user-id": account.workosUserId,
   });
+  if (account.email) {
+    headers.set("x-finite-workos-email", account.email.toLowerCase());
+  }
   if (contentType) {
     headers.set("content-type", "application/json");
   }

@@ -1,7 +1,7 @@
 # Use Standing Agent Authority For Brain Bootstrap
 
-Status: accepted 2026-07-16. Supersedes ADR-0020's one-use user-approved
-Personal Brain Bootstrap Authorization.
+Status: superseded 2026-08-07 by ADR-0045. Superseded ADR-0020's one-use
+user-approved Personal Brain Bootstrap Authorization.
 
 An authenticated account-bound Agent Principal has standing Agent Bootstrap
 Authority to create its user's single user-owned Personal Brain and atomically

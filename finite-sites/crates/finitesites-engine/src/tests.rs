@@ -248,8 +248,10 @@ fn hosted_requester_assertion_binds_exact_human_and_agent_without_mutating_dry_r
                 agent_npub: OWNER.to_owned(),
             },
             NOW,
+            Some(b"requester-assertion-test-secret"),
         )
         .unwrap();
+    assert!(assertion.assertion.contains('.'));
     let mut request = project_request("hosted-owner", "hosted-owner", false, true);
     request.requesting_user_npub = Some(OTHER_OWNER.to_owned());
     request.owner_email = Some("paul@finite.vip".to_owned());

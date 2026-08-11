@@ -195,9 +195,11 @@ Folder-local `_index.md`, `config.md`, and `log.md` files when present.
 If you want to understand, run, or modify FiniteBrain itself, see
 [`development.md`](development.md).
 
-The core implementation contract is the FiniteBrain Portable v1 specification:
+The core implementation contract is the FiniteBrain Portable v1 specification,
+as amended by the account-agent access cohort specification:
 
 - [`docs/specs/finitebrain-portability-spec.md`](docs/specs/finitebrain-portability-spec.md)
+- [`docs/specs/account-agent-access-cohorts-spec.md`](docs/specs/account-agent-access-cohorts-spec.md)
 
 This repository is the active Rust implementation target and includes the
 first-party Product Client prototype served at `/client`. The previous

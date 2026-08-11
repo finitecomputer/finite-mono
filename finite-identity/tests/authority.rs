@@ -406,6 +406,7 @@ async fn brain_resolves_account_bound_agent_and_user_principals_without_private_
         serde_json::json!({
             "workosUserId": "user_workos_owner",
             "userNpub": user_npub,
+            "verifiedEmail": "owner@finite.computer",
         }),
         &operator_headers,
     )
@@ -413,6 +414,7 @@ async fn brain_resolves_account_bound_agent_and_user_principals_without_private_
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bound["workosUserId"], "user_workos_owner");
     assert_eq!(bound["userNpub"], user_npub);
+    assert!(bound["verifiedEmail"].is_null());
     assert!(bound.get("privateKey").is_none());
 
     let (status, agent) = json_request_with_headers(
@@ -454,6 +456,126 @@ async fn brain_resolves_account_bound_agent_and_user_principals_without_private_
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["error"], "workos_account_already_bound");
+}
+
+#[tokio::test]
+async fn brain_resolves_one_human_mailbox_and_several_managed_agent_names_as_distinct_principals() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let human = LocalIdentityKey::from_secret(BOB_SECRET).unwrap();
+    let waffle = LocalIdentityKey::from_secret([6_u8; 32]).unwrap();
+    let biscuit = LocalIdentityKey::from_secret([7_u8; 32]).unwrap();
+    let (status, bound) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/account-principal-bindings",
+        serde_json::json!({
+            "workosUserId": "user_paul",
+            "userNpub": npub::encode(&hex::decode32(human.pubkey()).unwrap()),
+            "verifiedEmail": "Paul@Finite.VIP",
+        }),
+        &[("x-finite-operator-token", OPERATOR_TOKEN)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bound}");
+    assert_eq!(bound["verifiedEmail"], "paul@finite.vip");
+    let human_npub = npub::encode(&hex::decode32(human.pubkey()).unwrap());
+    let (status, not_agent) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/brain/agent-resolution",
+        serde_json::json!({ "agentNpub": human_npub }),
+        &[("x-finite-operator-token", OPERATOR_TOKEN)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{not_agent}");
+    assert_eq!(not_agent["error"], "agent_principal_not_bound");
+    for (email, key) in [
+        ("waffle@finite.vip", &waffle),
+        ("biscuit@finite.vip", &biscuit),
+    ] {
+        let (status, body) = json_request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/operator/agent-email-bindings",
+            serde_json::json!({
+                "email": email,
+                "agent_npub": npub::encode(&hex::decode32(key.pubkey()).unwrap()),
+            }),
+            &[("x-finite-operator-token", OPERATOR_TOKEN)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, resolved) = json_request_with_headers(
+        app,
+        "POST",
+        "/api/v1/operator/brain/participant-resolution",
+        serde_json::json!({
+            "workosUserId": "user_paul",
+            "humanMailbox": "paul@finite.vip",
+            "managedAgentNames": ["waffle@finite.vip", "biscuit@finite.vip"],
+        }),
+        &[("x-finite-operator-token", OPERATOR_TOKEN)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["human"]["relationship"], "human");
+    assert_eq!(resolved["human"]["nip05"], "paul@finite.vip");
+    assert_eq!(resolved["human"]["npub"], human_npub);
+    assert_eq!(resolved["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(resolved["agents"][0]["relationship"], "account_agent");
+    assert_eq!(resolved["agents"][0]["nip05"], "waffle@finite.vip");
+    assert_eq!(resolved["agents"][1]["nip05"], "biscuit@finite.vip");
+    let principals = [
+        resolved["human"]["npub"].as_str().unwrap(),
+        resolved["agents"][0]["npub"].as_str().unwrap(),
+        resolved["agents"][1]["npub"].as_str().unwrap(),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(principals.len(), 3);
+    let serialized = resolved.to_string().to_ascii_lowercase();
+    for forbidden in ["private_key", "secret", "nsec"] {
+        assert!(!serialized.contains(forbidden));
+    }
+}
+
+#[tokio::test]
+async fn account_and_verified_mailbox_binding_is_atomic_on_mailbox_conflict() {
+    let (app, store, _mailer, _clock) = fixture();
+    let existing = LocalIdentityKey::from_secret(BOB_SECRET).unwrap();
+    let candidate = LocalIdentityKey::from_secret([8_u8; 32]).unwrap();
+    store
+        .bind_vip_email("paul@finite.vip", existing.pubkey(), NOW)
+        .unwrap();
+
+    let (status, conflict) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/account-principal-bindings",
+        serde_json::json!({
+            "workosUserId": "user_candidate",
+            "userNpub": npub::encode(&hex::decode32(candidate.pubkey()).unwrap()),
+            "verifiedEmail": "paul@finite.vip",
+        }),
+        &[("x-finite-operator-token", OPERATOR_TOKEN)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"], "vip_email_already_bound");
+
+    let (status, missing) = json_request_with_headers(
+        app,
+        "POST",
+        "/api/v1/operator/brain/user-resolution",
+        serde_json::json!({ "workosUserId": "user_candidate" }),
+        &[("x-finite-operator-token", OPERATOR_TOKEN)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error"], "user_principal_not_bound");
 }
 
 #[tokio::test]

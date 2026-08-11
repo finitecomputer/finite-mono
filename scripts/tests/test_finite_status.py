@@ -84,6 +84,7 @@ class FiniteStatusTests(unittest.TestCase):
             self.assertIn(f"Lat1 Straggler Agent {index:02d}", output)
         for index in range(1, 22):
             self.assertIn(f"Lat3 Straggler Agent {index:02d}", output)
+        self.assertIn("HTTP finite-brain-cohort-writes", output)
 
     def test_json_has_four_sections_and_red_exit(self) -> None:
         result = subprocess.run(
@@ -106,6 +107,21 @@ class FiniteStatusTests(unittest.TestCase):
         )
         self.assertEqual(payload["overall_status"], "red")
         self.assertEqual(payload["exit_code"], 1)
+
+    def test_missing_brain_cohort_write_capability_is_red(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["probes"]["finite-brain-cohort-writes"] = "FAIL"
+        now = finite_status.parse_time(raw["now"])
+        report = finite_status.build_report(raw, now)
+        host_health = report["sections"]["host_health"]
+
+        self.assertEqual(host_health["status"], "red")
+        capability_probe = next(
+            probe
+            for probe in host_health["http_probes"]
+            if probe["name"] == "finite-brain-cohort-writes"
+        )
+        self.assertEqual(capability_probe["status"], "red")
 
     def test_exit_precedence_is_red_then_unknown_then_green(self) -> None:
         sections = {

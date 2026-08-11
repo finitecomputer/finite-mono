@@ -66,6 +66,7 @@ pub(crate) async fn ensure_organization_admin_handler(
     }
 
     let brain_id = BrainId::new(brain_id)?;
+    reject_legacy_finite_vip_principal_write(&request.target_npub)?;
     let target_identity = resolve_and_record_identity(&state, &request.target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let (event, payload) = validate_admin_access_change_value(

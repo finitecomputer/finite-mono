@@ -36,6 +36,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify release version and compatibility declaration
+        shell: bash
+        run: |
+          manifests=(
+            finite-brain/crates/finite-brain-app/Cargo.toml
+            finite-brain/crates/finite-brain-cli/Cargo.toml
+            finite-brain/crates/finite-brain-core/Cargo.toml
+            finite-brain/crates/finite-brain-server/Cargo.toml
+            finite-brain/crates/finite-brain-store/Cargo.toml
+          )
+          versions="$({
+            for manifest in "${manifests[@]}"; do
+              awk -F '"' '/^version = / { print $2; exit }' "$manifest"
+            done
+          } | sort -u)"
+          test "$(printf '%s\n' "$versions" | wc -l | tr -d ' ')" -eq 1
+          version="$versions"
+          test "$GITHUB_REF_NAME" = "fbrain/v${version}"
+          awk '
+            /^\[field\.fbrain-cli\]$/ { in_fbrain = 1; next }
+            /^\[/ { in_fbrain = 0 }
+            in_fbrain { print }
+          ' compat/matrix.toml | grep -Fq '"v'"${version}"'"'
+          echo "verified $GITHUB_REF_NAME across all Finite Brain crates and compat/matrix.toml"
+
       - name: Install Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal

@@ -13,6 +13,7 @@ pub use email::validate_email;
 
 use thiserror::Error;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
     AuthRegisterResponse, GitAuthResponse, HostedRequesterAssertionRequest,
@@ -1370,15 +1371,29 @@ impl Engine {
         &mut self,
         request: &HostedRequesterAssertionRequest,
         now: u64,
+        signing_secret: Option<&[u8]>,
     ) -> Result<HostedRequesterAssertionResponse, EngineError> {
         let email = validate_email(&request.email)?;
         let requester_pubkey = npub::pubkey_from_hex_or_npub(&request.requester_npub)?;
         let agent_pubkey = npub::pubkey_from_hex_or_npub(&request.agent_npub)?;
         let requester_npub = npub::encode_npub(&requester_pubkey)?;
         let agent_npub = npub::encode_npub(&agent_pubkey)?;
-        let assertion = hex::encode(&ids::random_32());
-        let assertion_hash = hex::encode(&Sha256::digest(assertion.as_bytes()));
         let expires_at = now + 10 * 60;
+        let nonce = hex::encode(&ids::random_32());
+        let assertion = if let Some(secret) = signing_secret {
+            let email_hash = hex::encode(&Sha256::digest(email.as_bytes()));
+            let claims = format!(
+                "finite-requester-v1|{expires_at}|{email_hash}|{requester_pubkey}|{agent_pubkey}|{nonce}"
+            );
+            let encoded = URL_SAFE_NO_PAD.encode(claims.as_bytes());
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(secret).map_err(|_| EngineError::NotAuthorized)?;
+            mac.update(encoded.as_bytes());
+            format!("{encoded}.{}", hex::encode(&mac.finalize().into_bytes()))
+        } else {
+            nonce
+        };
+        let assertion_hash = hex::encode(&Sha256::digest(assertion.as_bytes()));
         self.store.create_hosted_requester_assertion(
             &assertion_hash,
             &email,

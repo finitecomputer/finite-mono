@@ -46,7 +46,12 @@ impl BrainStore {
                     folder_id: grant.folder_id.to_string(),
                 })?;
             validate_grant_metadata(grant)?;
-            validate_grant_issuer(&stored.brain, grant, None)?;
+            validate_grant_issuer(
+                &stored.brain,
+                grant,
+                None,
+                has_brain_operational_authority(&stored, &grant.issuer_npub),
+            )?;
             if grant.key_version != folder.current_key_version {
                 return Err(StoreError::BrokenInvariant {
                     reason: "collaboration grant key version must match current Folder key version"
@@ -255,9 +260,19 @@ impl BrainStore {
             .personal_agent
             .as_ref()
             .map(|relationship| &relationship.agent_npub);
-        let required =
+        let mut required =
             required_recipients(&stored.brain, folder, &access_user_ids, personal_agent)?;
-        validate_folder_grants(&stored.brain, folder, &required, grants, personal_agent)?;
+        extend_account_agent_recipients(&mut required, &stored, folder_id);
+        validate_folder_grants(
+            &stored.brain,
+            folder,
+            &required,
+            grants,
+            personal_agent,
+            grants
+                .iter()
+                .all(|grant| has_brain_operational_authority(&stored, &grant.issuer_npub)),
+        )?;
 
         let tx = self.conn.transaction()?;
         for grant in grants {
@@ -307,6 +322,7 @@ impl BrainStore {
                 .personal_agent
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
+            has_brain_operational_authority(&stored, &grant.issuer_npub),
         )?;
         if grant.folder_id != *folder_id {
             return Err(StoreError::BrokenInvariant {
@@ -329,7 +345,7 @@ impl BrainStore {
             .get(folder_id)
             .cloned()
             .unwrap_or_default();
-        let effective_access = required_recipients(
+        let mut effective_access = required_recipients(
             &stored.brain,
             &folder,
             &current_access,
@@ -338,6 +354,7 @@ impl BrainStore {
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
         )?;
+        extend_account_agent_recipients(&mut effective_access, &stored, folder_id);
         let current_grant_exists = stored.grants.iter().any(|existing| {
             existing.folder_id == *folder_id
                 && existing.key_version == folder.current_key_version
@@ -392,7 +409,9 @@ impl BrainStore {
                 &grant.created_at,
             )?;
         }
-        insert_grant(&tx, brain_id, grant)?;
+        if !current_grant_exists {
+            insert_grant(&tx, brain_id, grant)?;
+        }
         for input in control_records {
             sync_records::validate_sync_conflict(&tx, brain_id, input)?;
             let sequence = sync_records::next_sequence(&tx, brain_id)?;
@@ -400,6 +419,140 @@ impl BrainStore {
         }
         tx.commit()?;
         Ok(GrantFolderAccessOutcome::Granted)
+    }
+
+    /// Restore one ready Personal Brain peer Agent to a previously excluded
+    /// Folder. The human intent and grant become durable in the same commit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_personal_agent_folder_access_with_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        folder_id: &FolderId,
+        agent_npub: &UserId,
+        grant: &FolderKeyGrantMetadata,
+        control_records: &[SyncRecordInput],
+        intent: &AuthenticatedHumanIntentRecord,
+        updated_at: &str,
+    ) -> Result<(), StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        let owner =
+            stored
+                .brain
+                .owner_user_id
+                .as_ref()
+                .ok_or_else(|| StoreError::BrokenInvariant {
+                    reason: "peer Agent restoration requires a Personal Brain".to_owned(),
+                })?;
+        if stored.brain.kind != BrainKind::Personal
+            || intent.human_npub != *owner
+            || intent.acting_agent_npub == *agent_npub
+            || intent.target_agent_npub != *agent_npub
+            || intent.operation != "restore"
+            || intent.scope_kind != "folder"
+            || intent.folder_id.as_ref() != Some(folder_id)
+            || !stored
+                .personal_brain_agents
+                .iter()
+                .any(|agent| agent.agent_npub == *agent_npub && agent.status == "ready")
+            || !stored
+                .account_agent_exclusions
+                .contains(&(agent_npub.clone(), folder_id.to_string()))
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Brain peer Agent restoration is not authorized for this scope"
+                    .to_owned(),
+            });
+        }
+        let folder = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id == *folder_id)
+            .ok_or_else(|| StoreError::MissingFolder {
+                folder_id: folder_id.to_string(),
+            })?;
+        validate_grant_metadata(grant)?;
+        if grant.folder_id != *folder_id
+            || grant.key_version != folder.current_key_version
+            || grant.recipient_npub != *agent_npub
+            || grant.issuer_npub != intent.acting_agent_npub
+            || !has_brain_operational_authority(&stored, &grant.issuer_npub)
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "peer Agent restoration grant does not match current authority and key"
+                    .to_owned(),
+            });
+        }
+        if control_records.len() != 2 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "peer Agent restoration requires grant and access-change records"
+                    .to_owned(),
+            });
+        }
+        validate_folder_key_grant_control_records(
+            std::slice::from_ref(grant),
+            &control_records[..1],
+        )?;
+        let tx = self.conn.transaction()?;
+        consume_authenticated_human_intent(&tx, brain_id, intent)?;
+        let changed = tx.execute(
+            r#"
+            UPDATE account_access_cohort_exclusions
+            SET active = 0, updated_at = ?4
+            WHERE participant_npub = ?2 AND folder_id = ?3 AND active = 1
+              AND cohort_id IN (
+                  SELECT id FROM account_access_cohorts
+                  WHERE brain_id = ?1 AND status = 'active'
+              )
+            "#,
+            params![
+                brain_id.as_str(),
+                agent_npub.as_str(),
+                folder_id.as_str(),
+                updated_at
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "peer Agent Folder exclusion was already cleared".to_owned(),
+            });
+        }
+        insert_grant(&tx, brain_id, grant)?;
+        sync_records::append_sync_records(&tx, brain_id, control_records)?;
+        for cohort in stored.account_access_cohorts.iter().filter(|cohort| {
+            cohort.status == "active"
+                && cohort.participants.iter().any(|participant| {
+                    participant.npub == *agent_npub && participant.relationship == "account_agent"
+                })
+        }) {
+            tx.execute(
+                r#"
+                INSERT INTO account_access_cohort_audit (
+                    id, cohort_id, action, actor_npub, anchoring_human_npub,
+                    detail_json, occurred_at
+                ) VALUES (?1, ?2, 'participant_folder_restored', ?3, ?4, ?5, ?6)
+                ON CONFLICT(id) DO NOTHING
+                "#,
+                params![
+                    format!(
+                        "audit-{}-{}-{}-restored",
+                        cohort.cohort_id, folder_id, intent.event_id
+                    ),
+                    cohort.cohort_id,
+                    intent.acting_agent_npub.as_str(),
+                    intent.human_npub.as_str(),
+                    serde_json::json!({
+                        "folderId": folder_id.as_str(),
+                        "participantNpub": agent_npub.as_str(),
+                        "humanIntentEventId": intent.event_id,
+                    })
+                    .to_string(),
+                    updated_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Remove explicit Folder access by rotating the Folder Key and re-encrypting live objects.
@@ -439,6 +592,32 @@ impl BrainStore {
         updated_at: &str,
         control_records: &[SyncRecordInput],
     ) -> Result<(), StoreError> {
+        self.rotate_folder_key_for_access_removal_with_control_records_and_intent(
+            brain_id,
+            folder_id,
+            removed_user_id,
+            new_key_version,
+            grants,
+            reencrypted_records,
+            updated_at,
+            control_records,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rotate_folder_key_for_access_removal_with_control_records_and_intent(
+        &mut self,
+        brain_id: &BrainId,
+        folder_id: &FolderId,
+        removed_user_id: &UserId,
+        new_key_version: u32,
+        grants: &[FolderKeyGrantMetadata],
+        reencrypted_records: &[FolderObjectRevisionSyncRecord],
+        updated_at: &str,
+        control_records: &[SyncRecordInput],
+        authenticated_human_intent: Option<&AuthenticatedHumanIntentRecord>,
+    ) -> Result<(), StoreError> {
         validate_folder_rotation_fanout(
             FolderRotationOperation::FolderAccessRemoval,
             [FolderRotationFanout {
@@ -465,11 +644,7 @@ impl BrainStore {
             .get(folder_id)
             .cloned()
             .unwrap_or_default();
-        if !remaining_access.remove(removed_user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "folder access target does not currently have access".to_owned(),
-            });
-        }
+        let had_explicit_access = remaining_access.remove(removed_user_id);
         if folder_access_has_mount_source(&self.conn, brain_id, folder_id, removed_user_id)? {
             return Err(StoreError::BrokenInvariant {
                 reason: "Folder access target still receives this Folder through an active Mount; remove the target from that Mount before rotating explicit Folder access"
@@ -477,24 +652,55 @@ impl BrainStore {
             });
         }
 
+        let applicable_cohort_ids = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && (cohort.scope_kind == "brain"
+                        || cohort.folder_id.as_ref() == Some(folder_id))
+                    && cohort.participants.iter().any(|participant| {
+                        participant.npub == *removed_user_id
+                            && participant.relationship == "account_agent"
+                            && participant.status == "active"
+                    })
+            })
+            .map(|cohort| cohort.cohort_id.clone())
+            .collect::<Vec<_>>();
+        if !had_explicit_access && applicable_cohort_ids.is_empty() {
+            return Err(StoreError::BrokenInvariant {
+                reason: "folder access target does not currently have access".to_owned(),
+            });
+        }
+
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = new_key_version;
+        let mut post_removal = stored.clone();
+        if !applicable_cohort_ids.is_empty() {
+            post_removal
+                .account_agent_exclusions
+                .insert((removed_user_id.clone(), folder_id.to_string()));
+        }
         let personal_agent = stored
             .personal_agent
             .as_ref()
             .map(|relationship| &relationship.agent_npub);
-        let required = required_recipients(
+        let mut required = required_recipients(
             &stored.brain,
             &rotated_folder,
             &remaining_access,
             personal_agent,
         )?;
+        extend_account_agent_recipients(&mut required, &post_removal, folder_id);
         validate_folder_grants(
             &stored.brain,
             &rotated_folder,
             &required,
             grants,
             personal_agent,
+            grants
+                .iter()
+                .all(|grant| has_brain_operational_authority(&stored, &grant.issuer_npub)),
         )?;
 
         let live_objects = self
@@ -505,6 +711,9 @@ impl BrainStore {
         validate_rotation_records(&live_objects, reencrypted_records)?;
 
         let tx = self.conn.transaction()?;
+        if let Some(intent) = authenticated_human_intent {
+            consume_authenticated_human_intent(&tx, brain_id, intent)?;
+        }
         tx.execute(
             "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
             params![
@@ -513,6 +722,56 @@ impl BrainStore {
                 removed_user_id.as_str()
             ],
         )?;
+        for cohort_id in &applicable_cohort_ids {
+            tx.execute(
+                r#"
+                INSERT INTO account_access_cohort_exclusions (
+                    cohort_id, participant_npub, folder_id, reason, active,
+                    created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'targeted_folder_revocation', 1, ?4, ?4)
+                ON CONFLICT(cohort_id, participant_npub, folder_id) DO UPDATE SET
+                    reason = excluded.reason,
+                    active = 1,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    cohort_id,
+                    removed_user_id.as_str(),
+                    folder_id.as_str(),
+                    updated_at
+                ],
+            )?;
+            tx.execute(
+                r#"
+                INSERT INTO account_access_cohort_audit (
+                    id, cohort_id, action, actor_npub, anchoring_human_npub,
+                    detail_json, occurred_at
+                )
+                SELECT ?1, ?2, 'participant_folder_revoked', ?3, human_npub,
+                       ?4, ?5
+                FROM account_access_cohorts WHERE id = ?2
+                ON CONFLICT(id) DO NOTHING
+                "#,
+                params![
+                    format!(
+                        "audit-{cohort_id}-{}-{}-revoked-v{new_key_version}",
+                        folder_id, removed_user_id
+                    ),
+                    cohort_id,
+                    grants
+                        .first()
+                        .map(|grant| grant.issuer_npub.as_str())
+                        .unwrap_or(removed_user_id.as_str()),
+                    serde_json::json!({
+                        "folderId": folder_id.as_str(),
+                        "participantNpub": removed_user_id.as_str(),
+                        "newKeyVersion": new_key_version,
+                    })
+                    .to_string(),
+                    updated_at,
+                ],
+            )?;
+        }
         tx.execute(
             "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
             params![brain_id.as_str(), folder_id.as_str(), new_key_version],
@@ -557,6 +816,24 @@ impl BrainStore {
         )
     }
 
+    pub fn member_removal_participants(
+        &self,
+        brain_id: &BrainId,
+        target: &UserId,
+    ) -> Result<BTreeSet<UserId>, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        self.member_removal_participants_preserving_independent(&stored, target)
+    }
+
+    pub fn member_removal_access_plan(
+        &self,
+        brain_id: &BrainId,
+        target: &UserId,
+    ) -> Result<MemberRemovalAccessPlan, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        self.member_removal_access_plan_for_stored(&stored, target)
+    }
+
     /// Remove a Member and append every affected Brain's signed control records atomically.
     #[allow(clippy::too_many_arguments)]
     pub fn remove_member_with_rotations_and_control_records(
@@ -583,17 +860,24 @@ impl BrainStore {
                 })),
         )?;
         let stored = self.load_brain(brain_id)?;
-        if stored.brain.admins.contains(removed_user_id) {
+        let access_plan = self.member_removal_access_plan_for_stored(&stored, removed_user_id)?;
+        let removed_user_ids = access_plan.removed_members;
+        let folder_access_removals = access_plan.folder_access_removals;
+        if removed_user_ids
+            .iter()
+            .any(|removed| stored.brain.admins.contains(removed))
+        {
             return Err(StoreError::BrokenInvariant {
                 reason: "remove admin role before removing member".to_owned(),
             });
         }
-        if !stored
-            .brain
-            .members
-            .iter()
-            .any(|member| member.user_id == *removed_user_id)
-        {
+        if removed_user_ids.iter().any(|removed| {
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == *removed)
+        }) {
             return Err(StoreError::BrokenInvariant {
                 reason: "brain member does not exist".to_owned(),
             });
@@ -601,7 +885,29 @@ impl BrainStore {
         let mut post_removal_brain = stored.brain.clone();
         post_removal_brain
             .members
-            .retain(|member| member.user_id != *removed_user_id);
+            .retain(|member| !removed_user_ids.contains(&member.user_id));
+        let mut post_removal = stored.clone();
+        post_removal.brain = post_removal_brain.clone();
+        for (folder_id, removed_access) in &folder_access_removals {
+            if let Some(access) = post_removal.folder_access.get_mut(folder_id) {
+                access.retain(|participant| !removed_access.contains(participant));
+            }
+        }
+        for cohort in &mut post_removal.account_access_cohorts {
+            if cohort.status == "active"
+                && cohort.scope_kind == "brain"
+                && cohort.participants.iter().any(|participant| {
+                    participant.relationship == "human"
+                        && participant.status == "active"
+                        && participant.npub == *removed_user_id
+                })
+            {
+                cohort.status = "revoked".to_owned();
+                for participant in &mut cohort.participants {
+                    participant.status = "revoked".to_owned();
+                }
+            }
+        }
         let personal_agent = stored
             .personal_agent
             .as_ref()
@@ -614,7 +920,11 @@ impl BrainStore {
                 .cloned()
                 .unwrap_or_default();
             if required_recipients(&stored.brain, folder, &access, personal_agent)?
-                .contains(removed_user_id)
+                .iter()
+                .any(|recipient| removed_user_ids.contains(recipient))
+                || folder_access_removals
+                    .get(&folder.id)
+                    .is_some_and(|participants| !participants.is_empty())
             {
                 expected_folders.insert(folder.id.clone());
             }
@@ -629,11 +939,14 @@ impl BrainStore {
                     .to_owned(),
             });
         }
-        let expected_mounts = self
-            .list_active_destination_mounts_for_participant(brain_id, removed_user_id)?
-            .into_iter()
-            .map(|connection| connection.id)
-            .collect::<BTreeSet<_>>();
+        let mut expected_mounts = BTreeSet::new();
+        for removed in &removed_user_ids {
+            expected_mounts.extend(
+                self.list_active_destination_mounts_for_participant(brain_id, removed)?
+                    .into_iter()
+                    .map(|connection| connection.id),
+            );
+        }
         let supplied_mounts = mount_rotations
             .iter()
             .map(|rotation| rotation.connection_id.clone())
@@ -666,21 +979,28 @@ impl BrainStore {
                 .get(&rotation.folder_id)
                 .cloned()
                 .unwrap_or_default();
-            remaining_access.remove(removed_user_id);
+            if let Some(removed_access) = folder_access_removals.get(&rotation.folder_id) {
+                remaining_access.retain(|recipient| !removed_access.contains(recipient));
+            }
             let mut rotated_folder = folder.clone();
             rotated_folder.current_key_version = rotation.new_key_version;
-            let required = required_recipients(
+            let mut required = required_recipients(
                 &post_removal_brain,
                 &rotated_folder,
                 &remaining_access,
                 personal_agent,
             )?;
+            extend_account_agent_recipients(&mut required, &post_removal, &folder.id);
             validate_folder_grants(
                 &post_removal_brain,
                 &rotated_folder,
                 &required,
                 &rotation.grants,
                 personal_agent,
+                rotation
+                    .grants
+                    .iter()
+                    .all(|grant| has_brain_operational_authority(&stored, &grant.issuer_npub)),
             )?;
             let live_objects = current_objects
                 .iter()
@@ -695,14 +1015,17 @@ impl BrainStore {
             let connection = self.load_shared_folder_connection(&rotation.connection_id)?;
             if connection.destination_brain_id != *brain_id
                 || connection.status != SharedFolderConnectionStatus::Active
-                || !connection.member_npubs.contains(removed_user_id)
+                || !connection
+                    .member_npubs
+                    .iter()
+                    .any(|member| removed_user_ids.contains(member))
             {
                 return Err(StoreError::BrokenInvariant {
                     reason: "member removal Mount rotation does not match active destination participation"
                         .to_owned(),
                 });
             }
-            let must_revoke = connection.destination_admin_npub == *removed_user_id;
+            let must_revoke = removed_user_ids.contains(&connection.destination_admin_npub);
             if rotation.revoke_mount != must_revoke {
                 return Err(StoreError::BrokenInvariant {
                     reason: if must_revoke {
@@ -733,10 +1056,12 @@ impl BrainStore {
             }
             let removed = if must_revoke {
                 connection.managed_access_npubs.clone()
-            } else if connection.managed_access_npubs.contains(removed_user_id) {
-                BTreeSet::from([removed_user_id.clone()])
             } else {
-                BTreeSet::new()
+                connection
+                    .managed_access_npubs
+                    .intersection(&removed_user_ids)
+                    .cloned()
+                    .collect()
             };
             if removed.is_empty() {
                 mounted_removals.push((connection, removed));
@@ -772,7 +1097,7 @@ impl BrainStore {
             }
             let mut rotated_folder = folder.clone();
             rotated_folder.current_key_version = rotation.new_key_version;
-            let required = required_recipients(
+            let mut required = required_recipients(
                 &source.brain,
                 &rotated_folder,
                 &remaining_access,
@@ -781,6 +1106,7 @@ impl BrainStore {
                     .as_ref()
                     .map(|relationship| &relationship.agent_npub),
             )?;
+            extend_account_agent_recipients(&mut required, &source, &folder.id);
             validate_connection_rotation_grants(
                 &rotated_folder,
                 &required,
@@ -797,6 +1123,40 @@ impl BrainStore {
         }
 
         let tx = self.conn.transaction()?;
+        let revoked_invitation_sources = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *removed_user_id
+                    })
+                    && cohort.provenance_kind == "invitation"
+            })
+            .map(|cohort| cohort.provenance_id.clone())
+            .collect::<BTreeSet<_>>();
+        for source_id in &revoked_invitation_sources {
+            tx.execute(
+                "DELETE FROM folder_access_sources WHERE brain_id = ?1 AND source_kind = 'invitation' AND source_id = ?2",
+                params![brain_id.as_str(), source_id],
+            )?;
+        }
+        tx.execute(
+            r#"
+            DELETE FROM folder_access
+            WHERE brain_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM folder_access_sources source
+                  WHERE source.brain_id = folder_access.brain_id
+                    AND source.folder_id = folder_access.folder_id
+                    AND source.user_id = folder_access.user_id
+              )
+            "#,
+            params![brain_id.as_str()],
+        )?;
         for rotation in rotations {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -894,19 +1254,93 @@ impl BrainStore {
                     params![rotation.connection_id, updated_at],
                 )?;
             } else {
-                tx.execute(
-                    "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
-                    params![rotation.connection_id, removed_user_id.as_str()],
-                )?;
+                for removed in &removed_user_ids {
+                    tx.execute(
+                        "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
+                        params![rotation.connection_id, removed.as_str()],
+                    )?;
+                }
             }
         }
+        for removed in &removed_user_ids {
+            tx.execute(
+                "DELETE FROM brain_member_independent_sources WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+        }
+        let removed_human_cohort_ids = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *removed_user_id
+                    })
+            })
+            .map(|cohort| cohort.cohort_id.clone())
+            .collect::<Vec<_>>();
+        for cohort_id in &removed_human_cohort_ids {
+            tx.execute(
+                "UPDATE account_access_cohorts SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+            tx.execute(
+                "UPDATE account_access_cohort_participants SET status = 'revoked', exclusion_reason = 'anchoring_human_removed', updated_at = ?2 WHERE cohort_id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+            tx.execute(
+                "UPDATE human_anchored_agent_authorities SET status = 'revoked', updated_at = ?2 WHERE cohort_id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+        }
         tx.execute(
-            "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), removed_user_id.as_str()],
+            r#"
+            UPDATE account_access_cohort_participants
+            SET status = 'revoked', exclusion_reason = 'targeted_brain_revocation',
+                updated_at = ?3
+            WHERE participant_npub = ?2
+              AND relationship = 'account_agent'
+              AND cohort_id IN (
+                  SELECT id FROM account_access_cohorts
+                  WHERE brain_id = ?1 AND status = 'active'
+              )
+            "#,
+            params![brain_id.as_str(), removed_user_id.as_str(), updated_at],
         )?;
         tx.execute(
-            "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), removed_user_id.as_str()],
+            r#"
+            UPDATE human_anchored_agent_authorities
+            SET status = 'revoked', updated_at = ?3
+            WHERE brain_id = ?1 AND agent_npub = ?2 AND status = 'active'
+            "#,
+            params![brain_id.as_str(), removed_user_id.as_str(), updated_at],
+        )?;
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO account_access_cohort_exclusions (
+                cohort_id, participant_npub, folder_id, reason, active,
+                created_at, updated_at
+            )
+            SELECT participant.cohort_id, participant.participant_npub, '',
+                   'targeted_brain_revocation', 1, ?3, ?3
+            FROM account_access_cohort_participants participant
+            JOIN account_access_cohorts cohort ON cohort.id = participant.cohort_id
+            WHERE cohort.brain_id = ?1
+              AND participant.participant_npub = ?2
+              AND participant.relationship = 'account_agent'
+            "#,
+            params![brain_id.as_str(), removed_user_id.as_str(), updated_at],
         )?;
         for (record_brain_id, control_records) in control_records_by_brain {
             sync_records::append_sync_records(&tx, record_brain_id, control_records)?;
@@ -914,6 +1348,169 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
+
+    fn member_removal_participants_preserving_independent(
+        &self,
+        stored: &StoredBrain,
+        target: &UserId,
+    ) -> Result<BTreeSet<UserId>, StoreError> {
+        let target_cohorts = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *target
+                    })
+            })
+            .map(|cohort| cohort.cohort_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let candidates = member_removal_participants(stored, target);
+        let mut removed = BTreeSet::new();
+        for participant in candidates {
+            if &participant == target {
+                removed.insert(participant);
+                continue;
+            }
+            let independent = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM brain_member_independent_sources WHERE brain_id = ?1 AND user_id = ?2)",
+                    params![stored.brain.id.as_str(), participant.as_str()],
+                    |row| row.get::<_, bool>(0),
+                )?;
+            let other_cohort = stored.account_access_cohorts.iter().any(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && !target_cohorts.contains(cohort.cohort_id.as_str())
+                    && cohort.participants.iter().any(|candidate| {
+                        candidate.relationship == "account_agent"
+                            && candidate.status == "active"
+                            && candidate.npub == participant
+                    })
+            });
+            let independent_admin = stored.brain.admins.contains(&participant);
+            if !independent && !other_cohort && !independent_admin {
+                removed.insert(participant);
+            }
+        }
+        Ok(removed)
+    }
+
+    fn member_removal_access_plan_for_stored(
+        &self,
+        stored: &StoredBrain,
+        target: &UserId,
+    ) -> Result<MemberRemovalAccessPlan, StoreError> {
+        let removed_members =
+            self.member_removal_participants_preserving_independent(stored, target)?;
+        let target_cohorts = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *target
+                    })
+            })
+            .collect::<Vec<_>>();
+        let retained_cohort_agents = target_cohorts
+            .iter()
+            .flat_map(|cohort| &cohort.participants)
+            .filter(|participant| {
+                participant.relationship == "account_agent"
+                    && participant.status == "active"
+                    && !removed_members.contains(&participant.npub)
+            })
+            .map(|participant| participant.npub.clone())
+            .collect::<BTreeSet<_>>();
+        let revoked_invitation_sources = target_cohorts
+            .iter()
+            .filter(|cohort| cohort.provenance_kind == "invitation")
+            .map(|cohort| cohort.provenance_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut statement = self.conn.prepare(
+            "SELECT folder_id, user_id, source_kind, source_id FROM folder_access_sources WHERE brain_id = ?1",
+        )?;
+        let sources = statement
+            .query_map(params![stored.brain.id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut removals = BTreeMap::<FolderId, BTreeSet<UserId>>::new();
+        for (folder_id, participants) in &stored.folder_access {
+            for participant in participants {
+                if removed_members.contains(participant) {
+                    removals
+                        .entry(folder_id.clone())
+                        .or_default()
+                        .insert(participant.clone());
+                    continue;
+                }
+                if !retained_cohort_agents.contains(participant) {
+                    continue;
+                }
+                let matching = sources.iter().filter(|(source_folder, source_user, _, _)| {
+                    source_folder == folder_id.as_str() && source_user == participant.as_str()
+                });
+                let mut revoked = false;
+                let mut retained = false;
+                for (_, _, source_kind, source_id) in matching {
+                    if source_kind == "invitation"
+                        && revoked_invitation_sources.contains(source_id.as_str())
+                    {
+                        revoked = true;
+                    } else {
+                        retained = true;
+                    }
+                }
+                if revoked && !retained {
+                    removals
+                        .entry(folder_id.clone())
+                        .or_default()
+                        .insert(participant.clone());
+                }
+            }
+        }
+        Ok(MemberRemovalAccessPlan {
+            removed_members,
+            folder_access_removals: removals,
+        })
+    }
+}
+
+fn member_removal_participants(stored: &StoredBrain, target: &UserId) -> BTreeSet<UserId> {
+    let mut removed = BTreeSet::from([target.clone()]);
+    for cohort in &stored.account_access_cohorts {
+        let target_is_human = cohort.status == "active"
+            && cohort.scope_kind == "brain"
+            && cohort.participants.iter().any(|participant| {
+                participant.relationship == "human"
+                    && participant.status == "active"
+                    && participant.npub == *target
+            });
+        if target_is_human {
+            removed.extend(
+                cohort
+                    .participants
+                    .iter()
+                    .filter(|participant| participant.status == "active")
+                    .map(|participant| participant.npub.clone()),
+            );
+        }
+    }
+    removed
 }
 
 fn validate_folder_grant_control_records(
