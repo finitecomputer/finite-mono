@@ -79,8 +79,8 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
     await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
-    await page.getByText(/fp_grant_1/u).waitFor({ state: "visible" });
-    await page.getByText(/fp_key_1/u).waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
+    await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Finite Private" }).click();
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Invites" }).click();
@@ -400,6 +400,59 @@ function usageProject() {
 
 function finitePrivateAdminState() {
   return {
+    accounts: [
+      {
+        userId: "user_private",
+        email: "private@finite.vip",
+        grant: {
+          id: "fp_grant_1",
+          user_id: "user_private",
+          limit_profile_id: "finite-private-generous-v2",
+          status: "active",
+          current_window_started_at: "2026-05-28T12:00:00Z",
+          current_window_used_units: 84,
+          created_at: "2026-05-28T12:00:00Z",
+          updated_at: "2026-05-28T12:01:00Z",
+        },
+        apiKeys: [
+          {
+            id: "fp_key_1",
+            grant_id: "fp_grant_1",
+            project_id: "project_private",
+            agent_runtime_id: "runtime_private",
+            key_hash: "hash-only",
+            status: "active",
+            created_at: "2026-05-28T12:00:00Z",
+            updated_at: "2026-05-28T12:01:00Z",
+          },
+        ],
+        projects: [
+          {
+            id: "project_private",
+            displayName: "Private Agent",
+            agentRuntimeId: "runtime_private",
+          },
+        ],
+      },
+    ],
+    profiles: [
+      {
+        id: "finite-private-generous-v2",
+        burst_window_seconds: 18_000,
+        burst_limit_units: 100_000_000,
+        weekly_limit_units: null,
+        created_at: "2026-05-28T12:00:00Z",
+        updated_at: "2026-05-28T12:01:00Z",
+      },
+      {
+        id: "finite-private-generous-5x-v1",
+        burst_window_seconds: 18_000,
+        burst_limit_units: 500_000_000,
+        weekly_limit_units: null,
+        created_at: "2026-05-28T12:00:00Z",
+        updated_at: "2026-05-28T12:01:00Z",
+      },
+    ],
     grants: [
       {
         id: "fp_grant_1",
