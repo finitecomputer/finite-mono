@@ -32,38 +32,21 @@ use crate::{
     UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
     normalize_source_host_id,
 };
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use finite_core::{
-    CreateRelayChatConversationInput, CreateRelayEventInput, RelayBridgeDevice,
-    RelayChatAttachmentData, RelayResult, RelayStore, SendRelayChatMessageInput,
-    StoreRelayChatLogInput, StoreRelayChatSnapshotInput, StoreRelayResultInput,
-    StoreRelayStatusSnapshotInput, UpdateRelayChatConversationInput,
-};
-use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::convert::Infallible;
 use std::env;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 use subtle::ConstantTimeEq;
-use tokio::sync::{Notify, broadcast};
-use tokio::time::{Instant, timeout};
 
 const SERVICE_AUTH_HEADER: &str = "authorization";
 const WORKOS_USER_ID_HEADER: &str = "x-finite-workos-user-id";
 const WORKOS_EMAIL_HEADER: &str = "x-finite-workos-email";
 const WORKOS_EMAIL_VERIFIED_HEADER: &str = "x-finite-workos-email-verified";
-const RELAY_MAX_REQUEST_BODY_BYTES: usize = 48 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct CoreApiState {
@@ -77,9 +60,6 @@ pub struct CoreApiState {
     /// New owner retirement requests are default-off independently of Runner
     /// capability so a rollout can be stopped without stranding in-flight work.
     runtime_retirement_enabled: bool,
-    relay_store: RelayStore,
-    result_waiters: RelayWaiters,
-    chat_watchers: ChatWatchers,
 }
 
 #[derive(Debug)]
@@ -459,65 +439,6 @@ pub struct SettleFinitePrivateReservationRequest {
     pub now: Option<String>,
 }
 
-#[derive(Clone, Default)]
-struct RelayWaiters {
-    inner: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
-}
-
-#[derive(Clone, Default)]
-struct ChatWatchers {
-    inner: Arc<Mutex<HashMap<String, broadcast::Sender<()>>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventsQuery {
-    after: Option<String>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatInboxQuery {
-    #[serde(rename = "projectAgentId")]
-    project_agent_id: String,
-    after: Option<u64>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResultQuery {
-    #[serde(rename = "waitMs")]
-    wait_ms: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatMessagesQuery {
-    #[serde(rename = "projectAgentId")]
-    project_agent_id: Option<String>,
-    #[serde(rename = "bridgeAccountId")]
-    bridge_account_id: String,
-    #[serde(rename = "bridgeDeviceId")]
-    bridge_device_id: String,
-    limit: Option<usize>,
-    before: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatConversationsQuery {
-    #[serde(rename = "bridgeAccountId")]
-    bridge_account_id: String,
-    #[serde(rename = "bridgeDeviceId")]
-    bridge_device_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatStreamQuery {
-    #[serde(rename = "bridgeAccountId")]
-    bridge_account_id: String,
-    #[serde(rename = "bridgeDeviceId")]
-    bridge_device_id: String,
-    since: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeResponse {
     pub email: String,
@@ -738,7 +659,10 @@ impl From<AgentCreationRequest> for AgentCreationRequestSummary {
 }
 
 pub fn router(store: CoreStore, auth: CoreAuth) -> Router {
-    router_with_relay_state_dir(store, auth, default_relay_state_dir())
+    let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    router_with_runtime_upgrades(store, auth, runtime_upgrades_enabled)
 }
 
 /// Build the public API with a trusted deployment-level placement override.
@@ -759,28 +683,15 @@ pub fn router_with_agent_creation_placement(
     router_with_runtime_upgrades_and_agent_creation_placement(
         store,
         auth,
-        default_relay_state_dir(),
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
         agent_creation_placement,
     )
 }
 
-pub fn router_with_relay_state_dir(
-    store: CoreStore,
-    auth: CoreAuth,
-    relay_state_dir: impl Into<PathBuf>,
-) -> Router {
-    let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
-    router_with_runtime_upgrades(store, auth, relay_state_dir, runtime_upgrades_enabled)
-}
-
 pub fn router_with_runtime_upgrades(
     store: CoreStore,
     auth: CoreAuth,
-    relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
 ) -> Router {
     let runtime_retirement_enabled = env::var("FC_CORE_ENABLE_RUNTIME_RETIREMENT")
@@ -789,7 +700,6 @@ pub fn router_with_runtime_upgrades(
     router_with_runtime_features(
         store,
         auth,
-        relay_state_dir,
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
     )
@@ -798,14 +708,12 @@ pub fn router_with_runtime_upgrades(
 pub fn router_with_runtime_features(
     store: CoreStore,
     auth: CoreAuth,
-    relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
     runtime_retirement_enabled: bool,
 ) -> Router {
     router_with_runtime_upgrades_and_agent_creation_placement(
         store,
         auth,
-        relay_state_dir,
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
         None,
@@ -815,7 +723,6 @@ pub fn router_with_runtime_features(
 fn router_with_runtime_upgrades_and_agent_creation_placement(
     store: CoreStore,
     auth: CoreAuth,
-    relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
     runtime_retirement_enabled: bool,
     agent_creation_placement: Option<RuntimePlacement>,
@@ -829,9 +736,6 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         agent_creation_placement,
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
-        relay_store: RelayStore::new(relay_state_dir.into()),
-        result_waiters: RelayWaiters::default(),
-        chat_watchers: ChatWatchers::default(),
     };
 
     Router::new()
@@ -1043,75 +947,11 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         )
         .route("/api/core/v1/me/projects", get(projects))
         .route("/api/finite/v1/heartbeat", post(runtime_heartbeat))
-        .route("/api/finite/v1/events", get(runtime_events))
-        .route(
-            "/api/finite/v1/events/{event_id}/ack",
-            post(runtime_ack_event),
-        )
-        .route("/api/finite/v1/results", post(runtime_store_result))
-        .route("/api/finite/v1/chat/inbox", get(runtime_chat_inbox))
-        .route("/api/finite/v1/chat/snapshot", post(runtime_chat_snapshot))
-        .route(
-            "/api/finite/v1/chat/log/messages",
-            post(runtime_chat_log_messages),
-        )
-        .route("/api/finite/v1/chat/blobs/{sha256}", put(runtime_chat_blob))
-        .route(
-            "/api/finite/v1/chat/attachments/{attachment_id}",
-            get(runtime_chat_attachment),
-        )
-        .route(
-            "/api/finite/v1/status/snapshots",
-            post(runtime_status_snapshot),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/events",
-            post(admin_create_event),
-        )
         .route(
             "/api/finite/v1/machines/{machine_id}/heartbeat",
             get(runtime_heartbeat_for_machine),
         )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/results/{event_id}",
-            get(admin_wait_result),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/snapshot",
-            get(admin_chat_snapshot),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/conversations",
-            get(admin_chat_conversations).post(admin_create_chat_conversation),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/conversations/{conversation_id}",
-            put(admin_update_chat_conversation),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/conversations/{conversation_id}/messages",
-            get(admin_chat_messages).post(admin_send_chat_message),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/attachments/{attachment_id}",
-            get(admin_chat_attachment),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/status/snapshots/{state_key}",
-            get(admin_status_snapshot),
-        )
-        .route(
-            "/api/finite/v1/machines/{machine_id}/chat/stream",
-            get(admin_chat_stream),
-        )
-        .layer(DefaultBodyLimit::max(RELAY_MAX_REQUEST_BODY_BYTES))
         .with_state(state)
-}
-
-fn default_relay_state_dir() -> PathBuf {
-    env::var_os("FC_CORE_RELAY_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/finite-saas-core/relay"))
 }
 
 fn optional_env_value(name: &str) -> Option<String> {
@@ -2380,124 +2220,7 @@ async fn runtime_heartbeat(
     let token =
         bearer_token(&headers).ok_or_else(|| ApiError::unauthorized("missing runtime token"))?;
     let heartbeat = state.store.record_runtime_heartbeat(&token).await?;
-    let _ = state.relay_store.heartbeat(&heartbeat.machine_id)?;
     Ok(Json(heartbeat))
-}
-
-async fn runtime_events(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Query(query): Query<EventsQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let events =
-        state
-            .relay_store
-            .claim_events(&machine_id, query.after.as_deref(), query.limit)?;
-    Ok(Json(serde_json::to_value(events)?))
-}
-
-async fn runtime_ack_event(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(event_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let ack = state.relay_store.ack_event(&machine_id, &event_id)?;
-    Ok(Json(serde_json::to_value(ack)?))
-}
-
-async fn runtime_store_result(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<StoreRelayResultInput>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let event_id = input.event_id.clone();
-    let result = state.relay_store.store_result(&machine_id, &input)?;
-    state.result_waiters.notify_result(&machine_id, &event_id);
-    Ok(Json(serde_json::to_value(result)?))
-}
-
-async fn runtime_chat_inbox(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Query(query): Query<ChatInboxQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let page = state.relay_store.chat_inbox(
-        &machine_id,
-        &query.project_agent_id,
-        query.after,
-        query.limit,
-    )?;
-    Ok(Json(serde_json::to_value(page)?))
-}
-
-async fn runtime_chat_snapshot(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<StoreRelayChatSnapshotInput>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let snapshot = state.relay_store.store_chat_snapshot(&machine_id, &input)?;
-    state.chat_watchers.notify(&machine_id);
-    Ok(Json(serde_json::to_value(snapshot)?))
-}
-
-async fn runtime_chat_log_messages(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<StoreRelayChatLogInput>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let ack = state.relay_store.store_chat_log(&machine_id, &input)?;
-    if ack.stored > 0 {
-        state.chat_watchers.notify(&machine_id);
-    }
-    Ok(Json(serde_json::to_value(ack)?))
-}
-
-async fn runtime_chat_blob(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(sha256): Path<String>,
-    body: Bytes,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let ack = state
-        .relay_store
-        .store_chat_blob(&machine_id, &sha256, &body)?;
-    Ok(Json(serde_json::to_value(ack)?))
-}
-
-async fn runtime_chat_attachment(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(attachment_id): Path<String>,
-) -> Result<Response, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let bridge = runtime_bridge_device(&machine_id);
-    let Some(attachment) =
-        state
-            .relay_store
-            .read_chat_attachment(&machine_id, &attachment_id, &bridge)?
-    else {
-        return Err(ApiError::not_found("attachment not found"));
-    };
-    Ok(chat_attachment_response(attachment))
-}
-
-async fn runtime_status_snapshot(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<StoreRelayStatusSnapshotInput>,
-) -> Result<Json<Value>, ApiError> {
-    let machine_id = authenticate_runtime_machine(&state, &headers).await?;
-    let snapshot = state
-        .relay_store
-        .store_status_snapshot(&machine_id, &input)?;
-    Ok(Json(serde_json::to_value(snapshot)?))
 }
 
 async fn runtime_heartbeat_for_machine(
@@ -2514,202 +2237,6 @@ async fn runtime_heartbeat_for_machine(
     ))
 }
 
-async fn admin_create_event(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-    Json(input): Json<CreateRelayEventInput>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    if input.scope.is_none() {
-        let kind = input.kind.trim();
-        let kind = if kind.is_empty() {
-            "relay command"
-        } else {
-            kind
-        };
-        return Err(ApiError::bad_request(format!(
-            "{kind} requires explicit command scope"
-        )));
-    }
-    let event = state.relay_store.create_event(&machine_id, &input)?;
-    Ok(Json(serde_json::to_value(event)?))
-}
-
-async fn admin_wait_result(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, event_id)): Path<(String, String)>,
-    Query(query): Query<ResultQuery>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let wait_ms = query.wait_ms.unwrap_or(0).min(60_000);
-    let result = wait_for_relay_result(&state, machine_id, event_id, wait_ms).await?;
-    match result {
-        Some(result) => Ok(Json(serde_json::to_value(result)?)),
-        None => Err(ApiError::not_found("result not available")),
-    }
-}
-
-async fn admin_chat_snapshot(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    match state.relay_store.read_chat_snapshot(&machine_id)? {
-        Some(snapshot) => Ok(Json(serde_json::to_value(snapshot)?)),
-        None => Err(ApiError::not_found("chat snapshot not found")),
-    }
-}
-
-async fn admin_chat_conversations(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-    Query(query): Query<ChatConversationsQuery>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let bridge = RelayBridgeDevice {
-        bridge_account_id: query.bridge_account_id,
-        bridge_device_id: query.bridge_device_id,
-    };
-    let threads = state.relay_store.chat_threads(&machine_id, &bridge)?;
-    Ok(Json(serde_json::to_value(threads)?))
-}
-
-async fn admin_create_chat_conversation(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-    Json(input): Json<CreateRelayChatConversationInput>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let thread = state
-        .relay_store
-        .create_chat_conversation(&machine_id, &input)?;
-    state.chat_watchers.notify(&machine_id);
-    Ok(Json(serde_json::to_value(thread)?))
-}
-
-async fn admin_update_chat_conversation(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, conversation_id)): Path<(String, String)>,
-    Json(input): Json<UpdateRelayChatConversationInput>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let thread =
-        state
-            .relay_store
-            .update_chat_conversation(&machine_id, &conversation_id, &input)?;
-    state.chat_watchers.notify(&machine_id);
-    Ok(Json(serde_json::to_value(thread)?))
-}
-
-async fn admin_chat_messages(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, conversation_id)): Path<(String, String)>,
-    Query(query): Query<ChatMessagesQuery>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let bridge = RelayBridgeDevice {
-        bridge_account_id: query.bridge_account_id,
-        bridge_device_id: query.bridge_device_id,
-    };
-    let page = if let Some(project_agent_id) = query.project_agent_id.as_deref() {
-        state.relay_store.chat_message_page(
-            &machine_id,
-            project_agent_id,
-            &conversation_id,
-            &bridge,
-            query.limit,
-            query.before.as_deref(),
-        )?
-    } else {
-        state.relay_store.chat_message_page_for_machine(
-            &machine_id,
-            &conversation_id,
-            &bridge,
-            query.limit,
-            query.before.as_deref(),
-        )?
-    };
-    Ok(Json(serde_json::to_value(page)?))
-}
-
-async fn admin_send_chat_message(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, conversation_id)): Path<(String, String)>,
-    Json(input): Json<SendRelayChatMessageInput>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let message = state
-        .relay_store
-        .send_chat_message(&machine_id, &conversation_id, &input)?;
-    state.chat_watchers.notify(&machine_id);
-    Ok(Json(serde_json::to_value(message)?))
-}
-
-async fn admin_chat_attachment(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, attachment_id)): Path<(String, String)>,
-    Query(query): Query<ChatStreamQuery>,
-) -> Result<Response, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let bridge = RelayBridgeDevice {
-        bridge_account_id: query.bridge_account_id,
-        bridge_device_id: query.bridge_device_id,
-    };
-    let Some(attachment) =
-        state
-            .relay_store
-            .read_chat_attachment(&machine_id, &attachment_id, &bridge)?
-    else {
-        return Err(ApiError::not_found("attachment not found"));
-    };
-    Ok(chat_attachment_response(attachment))
-}
-
-async fn admin_status_snapshot(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path((machine_id, state_key)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    match state
-        .relay_store
-        .read_status_snapshot(&machine_id, &state_key)?
-    {
-        Some(snapshot) => Ok(Json(serde_json::to_value(snapshot)?)),
-        None => Err(ApiError::not_found("status snapshot not found")),
-    }
-}
-
-async fn admin_chat_stream(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-    Query(query): Query<ChatStreamQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let receiver = state.chat_watchers.subscribe(&machine_id);
-    let bridge = RelayBridgeDevice {
-        bridge_account_id: query.bridge_account_id,
-        bridge_device_id: query.bridge_device_id,
-    };
-    let since = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .or(query.since);
-    let stream = chat_ledger_stream(state, machine_id, bridge, receiver, since);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
 async fn projects(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -2721,250 +2248,6 @@ async fn projects(
             .visible_projects_for_workos_user(&identity.workos_user_id)
             .await?,
     )))
-}
-
-async fn authenticate_runtime_machine(
-    state: &CoreApiState,
-    headers: &HeaderMap,
-) -> Result<String, ApiError> {
-    let token =
-        bearer_token(headers).ok_or_else(|| ApiError::unauthorized("missing runtime token"))?;
-    let heartbeat = state.store.record_runtime_heartbeat(&token).await?;
-    let _ = state.relay_store.heartbeat(&heartbeat.machine_id)?;
-    Ok(heartbeat.machine_id)
-}
-
-async fn wait_for_relay_result(
-    state: &CoreApiState,
-    machine_id: String,
-    event_id: String,
-    wait_ms: u64,
-) -> Result<Option<RelayResult>, ApiError> {
-    if let Some(result) = state.relay_store.wait_result(&machine_id, &event_id)? {
-        return Ok(Some(result));
-    }
-    if wait_ms == 0 {
-        return Ok(None);
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(wait_ms);
-    loop {
-        let notify = state.result_waiters.notify_for(&machine_id, &event_id);
-        if let Some(result) = state.relay_store.wait_result(&machine_id, &event_id)? {
-            state.result_waiters.remove(&machine_id, &event_id);
-            return Ok(Some(result));
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            state.result_waiters.remove(&machine_id, &event_id);
-            return Ok(None);
-        }
-
-        if timeout(deadline.saturating_duration_since(now), notify.notified())
-            .await
-            .is_err()
-        {
-            state.result_waiters.remove(&machine_id, &event_id);
-            return Ok(None);
-        }
-    }
-}
-
-fn chat_ledger_stream(
-    state: CoreApiState,
-    machine_id: String,
-    bridge: RelayBridgeDevice,
-    receiver: broadcast::Receiver<()>,
-    since: Option<String>,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    stream::unfold(
-        (state, machine_id, bridge, receiver, since, true),
-        |(state, machine_id, bridge, mut receiver, mut cursor, mut poll_now)| async move {
-            loop {
-                if !poll_now {
-                    match receiver.recv().await {
-                        Ok(()) => {}
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => return None,
-                    }
-                }
-
-                let event = match state.relay_store.chat_stream_event(
-                    &machine_id,
-                    &bridge,
-                    cursor.as_deref(),
-                ) {
-                    Ok(Some(update)) => {
-                        let event_name = if update.reset {
-                            "chat.ledger_snapshot"
-                        } else {
-                            "chat.ledger_update"
-                        };
-                        cursor = Some(update.cursor.clone());
-                        Event::default()
-                            .event(event_name)
-                            .id(update.cursor.clone())
-                            .data(
-                                serde_json::to_string(&update).unwrap_or_else(|_| "{}".to_string()),
-                            )
-                    }
-                    Ok(None) if cursor.is_some() => {
-                        poll_now = false;
-                        continue;
-                    }
-                    Ok(None) => Event::default()
-                        .event("chat.empty")
-                        .data(json!({ "machineId": &machine_id }).to_string()),
-                    Err(error) => Event::default()
-                        .event("chat.error")
-                        .data(json!({ "error": error.to_string() }).to_string()),
-                };
-
-                return Some((
-                    Ok(event),
-                    (state, machine_id, bridge, receiver, cursor, false),
-                ));
-            }
-        },
-    )
-}
-
-fn runtime_bridge_device(machine_id: &str) -> RelayBridgeDevice {
-    assert!(!machine_id.trim().is_empty());
-    RelayBridgeDevice {
-        bridge_account_id: format!("runtime:{machine_id}"),
-        bridge_device_id: "finitec".to_string(),
-    }
-}
-
-fn chat_attachment_response(attachment: RelayChatAttachmentData) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_str(&attachment.mime_type)
-            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
-    );
-    headers.insert(
-        "cache-control",
-        HeaderValue::from_static("private, max-age=60"),
-    );
-    headers.insert(
-        "content-disposition",
-        HeaderValue::from_str(&inline_content_disposition(&attachment.name))
-            .unwrap_or_else(|_| HeaderValue::from_static("inline; filename=\"attachment\"")),
-    );
-    (StatusCode::OK, headers, attachment.bytes).into_response()
-}
-
-fn inline_content_disposition(filename: &str) -> String {
-    let fallback = ascii_header_filename(filename);
-    let encoded = percent_encode_header_value(filename.trim());
-    format!("inline; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
-}
-
-fn ascii_header_filename(filename: &str) -> String {
-    let sanitized = filename
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        "attachment".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn percent_encode_header_value(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::new();
-    for byte in value.as_bytes() {
-        let keep = byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~');
-        if keep {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push('%');
-            encoded.push(HEX[(byte >> 4) as usize] as char);
-            encoded.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-    }
-    assert!(encoded.len() >= value.len());
-    encoded
-}
-
-impl RelayWaiters {
-    fn notify_for(&self, machine_id: &str, event_id: &str) -> Arc<Notify> {
-        let key = Self::key(machine_id, event_id);
-        let mut inner = self.lock();
-        inner
-            .entry(key)
-            .or_insert_with(|| Arc::new(Notify::new()))
-            .clone()
-    }
-
-    fn notify_result(&self, machine_id: &str, event_id: &str) {
-        let notify = {
-            let inner = self.lock();
-            inner.get(&Self::key(machine_id, event_id)).cloned()
-        };
-        if let Some(notify) = notify {
-            notify.notify_waiters();
-        }
-    }
-
-    fn remove(&self, machine_id: &str, event_id: &str) {
-        self.lock().remove(&Self::key(machine_id, event_id));
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Notify>>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn key(machine_id: &str, event_id: &str) -> String {
-        format!("{machine_id}:{event_id}")
-    }
-}
-
-impl ChatWatchers {
-    fn subscribe(&self, machine_id: &str) -> broadcast::Receiver<()> {
-        let sender = {
-            let mut inner = self.lock();
-            inner
-                .entry(machine_id.to_string())
-                .or_insert_with(|| {
-                    let (sender, _) = broadcast::channel(128);
-                    sender
-                })
-                .clone()
-        };
-        sender.subscribe()
-    }
-
-    fn notify(&self, machine_id: &str) {
-        let sender = {
-            let inner = self.lock();
-            inner.get(machine_id).cloned()
-        };
-        if let Some(sender) = sender {
-            let _ = sender.send(());
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, broadcast::Sender<()>>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 }
 
 #[derive(Debug)]
@@ -5776,236 +5059,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_api_serves_runtime_chat_relay_endpoints() {
-        with_isolated_postgres(|db| async move {
-            let relay_dir = tempfile::tempdir().unwrap();
-            let store = db.store.clone();
-            let launch_code = issue_test_launch_code(&store).await;
-            let app = router_with_relay_state_dir(store, test_auth(), relay_dir.path());
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "kind": "oci_image",
-                                "reference": format!(
-                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                    "a".repeat(64)
-                                ),
-                                "versionLabel": "v1",
-                                "stateSchemaVersion": "state-v1",
-                                "baseImage": "python:3.11-trixie",
-                                "promoted": true,
-                                "now": "2026-05-25T12:00:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/me/agent-creation-requests")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_chat",
-                                    "chat@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "displayName": "Chat Agent",
-                                "launchCode": launch_code.clone(),
-                                "idempotencyKey": "chat-submit-1"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let created: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-            let project_agent_id = format!("agent_{}", created.project.id);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/agent-creation-requests/lease")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "leaseSeconds": 300,
-                                "now": "2026-05-25T13:00:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
-            let lease = lease.unwrap();
-
-            let runtime_token = "runtime-token-1";
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!(
-                            "/api/core/v1/agent-creation-requests/{}/runtime",
-                            lease.request.id
-                        ))
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "sourceHostId": "oslo-host-1",
-                                "sourceMachineId": "oslo-agent-001",
-                                "runtimeArtifactId": "artifact-v1",
-                                "stateSchemaVersion": "state-v1",
-                                "runtimeRelayTokenHash": crate::runtime_relay_token_hash(runtime_token).unwrap(),
-                                "displayName": "Chat Agent",
-                                "runtimeHost": "oslo-host-1",
-                                "runtimeStatus": "unknown",
-                                "hermesAvailable": true,
-                                "publishedAppUrls": [],
-                                "now": "2026-05-25T13:00:30Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!(
-                            "/api/finite/v1/chat/inbox?projectAgentId={project_agent_id}&after=0&limit=10"
-                        ))
-                        .header("authorization", "Bearer runtime-token-1")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let inbox: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(inbox["machineId"], "oslo-agent-001");
-            assert_eq!(inbox["events"].as_array().unwrap().len(), 0);
-
-            let snapshot = serde_json::json!({
-                "users": [],
-                "machines": [{ "id": "oslo-agent-001" }],
-                "project_agents": [{ "id": project_agent_id }],
-                "sites": [],
-                "skills": [],
-                "capabilities": []
-            });
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/finite/v1/chat/snapshot")
-                        .header("authorization", "Bearer runtime-token-1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({ "snapshot": snapshot }).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/finite/v1/chat/log/messages")
-                        .header("authorization", "Bearer runtime-token-1")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "projectAgentId": project_agent_id,
-                                "threads": [{
-                                    "id": "topic-1",
-                                    "project_agent_id": project_agent_id,
-                                    "created_by": "runtime",
-                                    "title": "Smoke",
-                                    "created_at": "2026-05-25T13:00:00Z",
-                                    "last_activity_at": "2026-05-25T13:00:00Z",
-                                    "message_count": 0
-                                }],
-                                "messages": []
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/finite/v1/machines/oslo-agent-001/chat/snapshot")
-                        .header("authorization", "Bearer core-token")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn trusted_server_configuration_can_place_local_agent_creation() {
         with_isolated_postgres(|db| async move {
             let store = db.store.clone();
@@ -6521,7 +5574,7 @@ mod tests {
     }
 
     fn admin_router(store: CoreStore) -> Router {
-        router_with_runtime_upgrades(store, test_auth(), default_relay_state_dir(), true)
+        router_with_runtime_upgrades(store, test_auth(), true)
     }
 
     fn identity_headers(email: &str, verified: &str) -> Vec<(String, String)> {
@@ -6578,12 +5631,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_upgrade_first_use_gate_is_fail_closed_without_blocking_restart() {
         with_isolated_postgres(|db| async move {
-            let app = router_with_runtime_upgrades(
-                db.store.clone(),
-                test_auth(),
-                default_relay_state_dir(),
-                false,
-            );
+            let app = router_with_runtime_upgrades(db.store.clone(), test_auth(), false);
             let admin = operator_identity_headers("admin@finite.vip");
             let (upgrade_status, upgrade_body) = send_json(
                 &app,
@@ -6618,13 +5666,7 @@ mod tests {
     async fn runtime_retirement_product_gate_is_independently_fail_closed() {
         with_isolated_postgres(|db| async move {
             let user = identity_headers("owner@finite.vip", "true");
-            let disabled = router_with_runtime_features(
-                db.store.clone(),
-                test_auth(),
-                default_relay_state_dir(),
-                true,
-                false,
-            );
+            let disabled = router_with_runtime_features(db.store.clone(), test_auth(), true, false);
             let (disabled_status, disabled_body) = send_json(
                 &disabled,
                 "POST",
@@ -6641,13 +5683,7 @@ mod tests {
                     .contains("not enabled")
             );
 
-            let enabled = router_with_runtime_features(
-                db.store.clone(),
-                test_auth(),
-                default_relay_state_dir(),
-                true,
-                true,
-            );
+            let enabled = router_with_runtime_features(db.store.clone(), test_auth(), true, true);
             let (enabled_status, _) = send_json(
                 &enabled,
                 "POST",

@@ -92,7 +92,6 @@ in
     pname = "finite-saas-core";
     dir = "finitecomputer-v2/crates/finite-saas-core";
     sourcePaths = [
-      "finitecomputer-v2/crates/finite-core"
       "finitecomputer-v2/crates/finite-saas-core"
     ];
   };
@@ -100,7 +99,6 @@ in
     pname = "finite-saas-runner";
     dir = "finitecomputer-v2/crates/finite-saas-runner";
     sourcePaths = [
-      "finitecomputer-v2/crates/finite-core"
       "finitecomputer-v2/crates/finite-saas-core"
       "finitecomputer-v2/crates/finite-saas-runner"
     ];

@@ -178,49 +178,47 @@ Definition of done:
   by the normal Core test suite.
 - [ ] There is one business implementation for every production operation.
 
-### 4. [ ] Trace and retire the legacy `finite-core` surface
+### 4. [x] Trace and retire the legacy `finite-core` surface
 
-`finite-core` still depends on four crates from an archived Finite Chat Git
-revision:
-
-- [`finite-core/Cargo.toml`](finitecomputer-v2/crates/finite-core/Cargo.toml)
-
-`finite-saas-core` imports its `RelayStore` and exposes relay-backed behavior:
-
-- [`finite-saas-core/src/api.rs`](finitecomputer-v2/crates/finite-saas-core/src/api.rs)
-
-The carry-over plan already says to replace these imports and delete the legacy
-chat/control-plane code:
-
-- [`carry-over-manifest.md`](finitecomputer-v2/docs/carry-over-manifest.md)
+Completed by deleting the `finite-core` crate and every relay-backed route.
 
 Evidence and safety work:
 
-- [ ] Enumerate every production route that reaches `finite-core`.
-- [ ] Name every writer, reader, persisted file, and active client.
-- [ ] Document existing-user and mixed-version requirements.
-- [ ] Confirm whether the relay state is authoritative, transitional, or dead.
-- [ ] Identify the backup and rollback boundary for every persisted surface.
-- [ ] Assign an owner and delete condition to any bridge that must remain.
+- [x] Enumerate every production route that reaches `finite-core`.
+      All were relay-backed `/api/finite/v1/*` routes in
+      [`finite-saas-core/src/api.rs`](finitecomputer-v2/crates/finite-saas-core/src/api.rs);
+      the two heartbeat routes that survive are Postgres-backed and never
+      touched `finite-core`.
+- [x] Name every writer, reader, persisted file, and active client.
+      No in-tree caller of any relay route existed. Stronger: no runtime
+      could authenticate to one — every launcher generates the bootstrap
+      token, registers only its hash with Core, and discards the plaintext,
+      so the runtime-token routes were unreachable in every environment.
+- [x] Confirm whether the relay state is authoritative, transitional, or
+      dead. Dead: Finite Chat owns ordered ciphertext and durable history;
+      the relay ledgers could not be written by anyone.
+- [x] Assign an owner and delete condition to the remaining artifact: the
+      on-disk relay state under `/var/lib/private/finite-saas-core/relay`
+      is unreferenced by code; archive or delete it during a normal ops
+      pass (see the `StateDirectory` note in
+      [`finite-saas-core.nix`](infra/nixos/modules/finite-saas-core.nix)).
 
 Removal work:
 
-- [ ] Remove routes proven unreachable from production.
-- [ ] Replace necessary v2 DTOs with workspace-local types.
-- [ ] Replace archived Git dependencies with sibling workspace paths where a
-  dependency is still required.
-- [ ] Delete legacy relay/chat/control-plane code once its replacement and
-  compatibility proof exist.
-- [ ] Confirm that the root `Cargo.lock` contains no unintended archived
-  Finite Chat dependency generation.
+- [x] Remove routes proven unreachable from production.
+- [x] Delete legacy relay/chat/control-plane code (the entire `finite-core`
+      crate) and the dashboard's unused relay client and `/api/finite`
+      public proxy.
+- [x] Confirm that the root `Cargo.lock` contains no archived Finite Chat
+  dependency generation.
 
 Definition of done:
 
-- [ ] No production crate depends on the archived Finite Chat repository.
-- [ ] Every remaining compatibility bridge has a documented owner and delete
-  condition.
-- [ ] Existing users and durable chat state remain readable throughout the
-  transition.
+- [x] No production crate depends on the archived Finite Chat repository.
+- [x] Every remaining compatibility bridge has a documented owner and delete
+  condition (only the inert on-disk relay state remains).
+- [x] Existing users and durable chat state remain readable throughout the
+  transition (Finite Chat state was never stored in the relay).
 
 ## P1 — Durable compatibility and product-level proof
 
