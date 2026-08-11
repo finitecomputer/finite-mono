@@ -1196,6 +1196,147 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
 }
 
 #[tokio::test]
+async fn hosted_brain_identity_provider_approves_brain_actions_with_the_users_key() {
+    let root = TempDir::new().unwrap();
+    let hosted = test_app(&root);
+    let provider_path = "/v1/brain/identity-provider";
+    let provider_request = |operation: &str, input: Value| {
+        Request::post(provider_path)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, "user_paul")
+            .header("x-finite-brain-public-origin", "https://finite.computer")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "version": BRAIN_IDENTITY_PROVIDER_VERSION,
+                    "operation": operation,
+                    "input": input,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let now = test_now_unix_seconds();
+    let approval_input = || {
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "invite-commit",
+            "planId": "plan-123",
+            "nonce": "ab".repeat(16),
+            "expiresAt": now + 900,
+        })
+    };
+
+    // Approval signing is setup-gated like every Brain identity operation.
+    let setup_required = hosted
+        .clone()
+        .oneshot(provider_request("approveBrainAction", approval_input()))
+        .await
+        .unwrap();
+    assert_eq!(setup_required.status(), StatusCode::PRECONDITION_REQUIRED);
+
+    state_for(hosted.clone(), "user_paul").await;
+    let identify = hosted
+        .clone()
+        .oneshot(provider_request("identifyMember", Value::Null))
+        .await
+        .unwrap();
+    let identify: Value =
+        serde_json::from_slice(&identify.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let member_npub = identify["npub"].as_str().unwrap().to_owned();
+    let public_key_hex = identify["publicKeyHex"].as_str().unwrap().to_owned();
+
+    // The device signs the approval artifact with the user's key and binds
+    // the user's npub as the approving human.
+    let approved = hosted
+        .clone()
+        .oneshot(provider_request("approveBrainAction", approval_input()))
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    let event: Event =
+        serde_json::from_slice(&approved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    verify_event_integrity(&event).unwrap();
+    assert_eq!(event.pubkey.to_hex(), public_key_hex);
+    let validated = finite_brain_core::validate_brain_approval_event(&event, &member_npub).unwrap();
+    assert_eq!(validated.version, "finite-brain-approval-v1");
+    assert_eq!(validated.human_npub, member_npub);
+    assert_eq!(validated.action, "invite-commit");
+    assert_eq!(validated.brain_id, "acme");
+    assert_eq!(validated.plan_id.as_deref(), Some("plan-123"));
+    assert_eq!(validated.nonce, "ab".repeat(16));
+    assert_eq!(validated.expires_at, now + 900);
+
+    // A delegation-grant approval binds its target principals.
+    let delegation = hosted
+        .clone()
+        .oneshot(provider_request(
+            "approveBrainAction",
+            serde_json::json!({
+                "brainId": "acme",
+                "action": "delegation-grant",
+                "targetNpubs": [member_npub],
+                "nonce": "cd".repeat(16),
+                "expiresAt": now + 900,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delegation.status(), StatusCode::OK);
+    let event: Event =
+        serde_json::from_slice(&delegation.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let validated = finite_brain_core::validate_brain_approval_event(&event, &member_npub).unwrap();
+    assert_eq!(validated.target_npubs, vec![member_npub.clone()]);
+
+    // The caller can never name a different signing human, and malformed or
+    // out-of-scope actions fail closed before signing.
+    for input in [
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "invite-commit",
+            "planId": "plan-123",
+            "humanNpub": member_npub,
+            "nonce": "ab".repeat(16),
+            "expiresAt": now + 900,
+        }),
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "open-brain",
+            "nonce": "ab".repeat(16),
+            "expiresAt": now + 900,
+        }),
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "invite-commit",
+            "nonce": "ab".repeat(16),
+            "expiresAt": now + 900,
+        }),
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "invite-commit",
+            "planId": "plan-123",
+            "nonce": "ab".repeat(16),
+            "expiresAt": 0,
+        }),
+        serde_json::json!({
+            "brainId": "acme",
+            "action": "delegation-grant",
+            "targetNpubs": [],
+            "nonce": "ab".repeat(16),
+            "expiresAt": now + 900,
+        }),
+    ] {
+        let rejected = hosted
+            .clone()
+            .oneshot(provider_request("approveBrainAction", input))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn hosted_sites_identity_provider_is_setup_gated_and_origin_bounded() {
     let root = TempDir::new().unwrap();
     let hosted = test_app(&root);

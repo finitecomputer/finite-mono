@@ -39,10 +39,7 @@ pub(crate) fn approval_request_response(
         requested_by_npub: request.requested_by_npub.to_string(),
         status: request.status.as_str().to_owned(),
         approval_event_id: request.approval_event_id.clone(),
-        resolved_by_npub: request
-            .resolved_by_npub
-            .as_ref()
-            .map(ToString::to_string),
+        resolved_by_npub: request.resolved_by_npub.as_ref().map(ToString::to_string),
         created_at: request.created_at.clone(),
         updated_at: request.updated_at.clone(),
     })
@@ -93,7 +90,10 @@ fn ensure_approval_requester(stored: &StoredBrain, actor_npub: &str) -> Result<(
 /// The Approval signer must hold Brain admin standing: the Personal Brain
 /// owner or an Organization Brain admin. Personal Agents and ordinary members
 /// cannot produce Tier-3/4 signatures.
-fn ensure_approval_signer_standing(stored: &StoredBrain, signer_npub: &str) -> Result<(), ApiError> {
+fn ensure_approval_signer_standing(
+    stored: &StoredBrain,
+    signer_npub: &str,
+) -> Result<(), ApiError> {
     let is_owner = stored.brain.kind == BrainKind::Personal
         && stored
             .brain
@@ -204,7 +204,12 @@ fn validate_approval_request_action(
                         "delegation-grant approval requests cannot repeat a target Principal",
                     ));
                 }
-                if stored.brain.admins.iter().any(|admin| admin.as_str() == npub) {
+                if stored
+                    .brain
+                    .admins
+                    .iter()
+                    .any(|admin| admin.as_str() == npub)
+                {
                     return Err(ApiError::new(
                         StatusCode::CONFLICT,
                         "delegation target is already a brain admin",
@@ -314,9 +319,9 @@ pub(crate) async fn create_approval_request_handler(
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error
-        .map(ApiError::from)
-        .unwrap_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")))
+    Err(last_error.map(ApiError::from).unwrap_or_else(|| {
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+    }))
 }
 
 pub(crate) async fn list_approval_requests_handler(
@@ -498,11 +503,9 @@ pub(crate) async fn submit_approval_handler(
             })?;
             let plan = {
                 let store = state.store.lock().map_err(lock_error)?;
-                store
-                    .load_brain_invitation_plan(plan_id)?
-                    .ok_or_else(|| {
-                        ApiError::new(StatusCode::NOT_FOUND, "invitation plan not found")
-                    })?
+                store.load_brain_invitation_plan(plan_id)?.ok_or_else(|| {
+                    ApiError::new(StatusCode::NOT_FOUND, "invitation plan not found")
+                })?
             };
             if plan.brain_id != brain_id {
                 return Err(ApiError::new(

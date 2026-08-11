@@ -36,11 +36,11 @@ impl BrainStore {
             self.conn.pragma_update(None, "foreign_keys", "ON")?;
             self.conn.pragma_update(None, "legacy_alter_table", "OFF")?;
             result?;
-            let violations: i64 =
-                self.conn
-                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                        row.get(0)
-                    })?;
+            let violations: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
             if violations > 0 {
                 return Err(StoreError::BrokenInvariant {
                     reason: "schema V23 table rebuild left foreign key violations".to_owned(),

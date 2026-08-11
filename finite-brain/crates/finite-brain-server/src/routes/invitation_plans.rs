@@ -1,5 +1,7 @@
 use crate::*;
-use finite_brain_store::{ProvenanceOriginKind, StoredInvitationPlan, StoredPlanAgent, StoredPlanExclusion};
+use finite_brain_store::{
+    ProvenanceOriginKind, StoredInvitationPlan, StoredPlanAgent, StoredPlanExclusion,
+};
 
 const PLAN_COMMIT_WINDOW_SECONDS: u64 = 15 * 60;
 const COMMIT_INVITATION_EXPIRY_SECONDS: u64 = 14 * 24 * 60 * 60;
@@ -720,8 +722,8 @@ pub(crate) async fn check_invitation_acceptance_narrowing(
                 let Some(event_id) = invitation.origin_ref.as_deref() else {
                     return Ok(None);
                 };
-                let request =
-                    store.load_brain_approval_request_by_event_id(&invitation.brain_id, event_id)?;
+                let request = store
+                    .load_brain_approval_request_by_event_id(&invitation.brain_id, event_id)?;
                 let Some(request) = request else {
                     return Ok(None);
                 };

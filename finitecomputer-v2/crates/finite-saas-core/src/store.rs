@@ -6439,8 +6439,13 @@ where
     .await?;
     // Runtime Retirement is the destroy flow: every destroy completion carries
     // a verified retirement snapshot, so the departure is a retirement.
-    postgres_record_agent_departure(client, &request.project_id, now, BrainDepartureReason::Retired)
-        .await?;
+    postgres_record_agent_departure(
+        client,
+        &request.project_id,
+        now,
+        BrainDepartureReason::Retired,
+    )
+    .await?;
     Ok(())
 }
 

@@ -4894,7 +4894,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resolved.status, ApprovalRequestStatus::Approved);
-        assert_eq!(resolved.approval_event_id.as_deref(), Some("event-approval-1"));
+        assert_eq!(
+            resolved.approval_event_id.as_deref(),
+            Some("event-approval-1")
+        );
         assert_eq!(resolved.resolved_by_npub, Some(admin.clone()));
 
         // Terminal state is exactly-once.
@@ -4949,11 +4952,25 @@ mod tests {
 
         assert!(!store.approval_nonce_seen(&brain_id, &nonce).unwrap());
         store
-            .record_brain_approval_nonce(&brain_id, &nonce, "event-1", &signer, "invite-commit", now)
+            .record_brain_approval_nonce(
+                &brain_id,
+                &nonce,
+                "event-1",
+                &signer,
+                "invite-commit",
+                now,
+            )
             .unwrap();
         assert!(store.approval_nonce_seen(&brain_id, &nonce).unwrap());
         assert!(matches!(
-            store.record_brain_approval_nonce(&brain_id, &nonce, "event-1", &signer, "invite-commit", now),
+            store.record_brain_approval_nonce(
+                &brain_id,
+                &nonce,
+                "event-1",
+                &signer,
+                "invite-commit",
+                now
+            ),
             Err(StoreError::Conflict { .. })
         ));
         // The same nonce on another Brain is independent.
@@ -4976,7 +4993,10 @@ mod tests {
         assert!(brain.admins.contains(&target));
         assert!(brain.members.iter().any(|member| member.user_id == target));
         assert_eq!(
-            store.member_provenance(&brain_id, &target).unwrap().unwrap(),
+            store
+                .member_provenance(&brain_id, &target)
+                .unwrap()
+                .unwrap(),
             provenance
         );
 
@@ -5026,7 +5046,10 @@ mod tests {
             .accept_brain_invitation_by_code("invite-appr0123456789abcdef0123456", &target, now)
             .unwrap();
         assert_eq!(
-            store.member_provenance(&brain_id, &target).unwrap().unwrap(),
+            store
+                .member_provenance(&brain_id, &target)
+                .unwrap()
+                .unwrap(),
             MemberProvenance::approval(signer, "event-approval-1".to_owned())
         );
     }

@@ -12248,10 +12248,7 @@ mod tests {
         {
             let mut store = state.store.lock().unwrap();
             store
-                .add_member(
-                    &acme_brain_id(),
-                    &UserId::new(npub(&member_keys)).unwrap(),
-                )
+                .add_member(&acme_brain_id(), &UserId::new(npub(&member_keys)).unwrap())
                 .unwrap();
         }
         let router = router_with_state(state.clone());
@@ -12344,7 +12341,10 @@ mod tests {
             router.clone(),
             &member_keys,
             "POST",
-            &format!("/v1/brains/acme/approval-requests/{}/deny", member_request.id),
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                member_request.id
+            ),
             None,
             TEST_NOW + 7,
         )
@@ -12352,12 +12352,18 @@ mod tests {
         assert_eq!(denied.status(), StatusCode::OK);
         let denied: ApprovalRequestResponse = read_json(denied).await;
         assert_eq!(denied.status, "denied");
-        assert_eq!(denied.resolved_by_npub.as_deref(), Some(npub(&member_keys).as_str()));
+        assert_eq!(
+            denied.resolved_by_npub.as_deref(),
+            Some(npub(&member_keys).as_str())
+        );
         let deny_again = authed_request(
             router.clone(),
             &member_keys,
             "POST",
-            &format!("/v1/brains/acme/approval-requests/{}/deny", member_request.id),
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                member_request.id
+            ),
             None,
             TEST_NOW + 8,
         )
@@ -12369,7 +12375,10 @@ mod tests {
             router.clone(),
             &member_keys,
             "POST",
-            &format!("/v1/brains/acme/approval-requests/{}/deny", admin_request.id),
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                admin_request.id
+            ),
             None,
             TEST_NOW + 9,
         )
@@ -12379,7 +12388,10 @@ mod tests {
             router.clone(),
             &admin_keys,
             "POST",
-            &format!("/v1/brains/acme/approval-requests/{}/deny", admin_request.id),
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                admin_request.id
+            ),
             None,
             TEST_NOW + 10,
         )
@@ -12498,15 +12510,14 @@ mod tests {
         {
             let store = state.store.lock().unwrap();
             let stored = store.load_brain(&acme_brain_id()).unwrap();
-            assert!(stored
-                .brain
-                .admins
-                .contains(&UserId::new(target_npub.clone()).unwrap()));
+            assert!(
+                stored
+                    .brain
+                    .admins
+                    .contains(&UserId::new(target_npub.clone()).unwrap())
+            );
             let provenance = store
-                .member_provenance(
-                    &acme_brain_id(),
-                    &UserId::new(target_npub.clone()).unwrap(),
-                )
+                .member_provenance(&acme_brain_id(), &UserId::new(target_npub.clone()).unwrap())
                 .unwrap()
                 .expect("approval grant provenance is recorded");
             assert_eq!(
@@ -12525,7 +12536,11 @@ mod tests {
                 resolved.approval_event_id.as_deref(),
                 Some(applied.approval_event_id.as_str())
             );
-            assert!(store.approval_nonce_seen(&acme_brain_id(), &request.nonce).unwrap());
+            assert!(
+                store
+                    .approval_nonce_seen(&acme_brain_id(), &request.nonce)
+                    .unwrap()
+            );
         }
 
         // The resolved card leaves the pending list.
@@ -12595,8 +12610,12 @@ mod tests {
         // Bad signature: any content tampering breaks event integrity.
         let mut tampered: serde_json::Value =
             serde_json::from_str(&signed_approval_event_json(&admin_keys, &payload)).unwrap();
-        tampered["content"] =
-            serde_json::json!(tampered["content"].as_str().unwrap().replace("acme", "ecma"));
+        tampered["content"] = serde_json::json!(
+            tampered["content"]
+                .as_str()
+                .unwrap()
+                .replace("acme", "ecma")
+        );
         let bad_signature = authed_request(
             router.clone(),
             &admin_keys,
@@ -12612,7 +12631,12 @@ mod tests {
             TEST_NOW + 2,
         )
         .await;
-        assert_error(bad_signature, StatusCode::BAD_REQUEST, "signature is invalid").await;
+        assert_error(
+            bad_signature,
+            StatusCode::BAD_REQUEST,
+            "signature is invalid",
+        )
+        .await;
 
         // Wrong scope: a valid artifact for another brain is rejected here.
         let wrong_scope = finite_brain_core::BrainApprovalPayload {
@@ -12677,8 +12701,12 @@ mod tests {
             TEST_NOW + 5,
         )
         .await;
-        assert_error(mismatched, StatusCode::BAD_REQUEST, "does not match the pending request")
-            .await;
+        assert_error(
+            mismatched,
+            StatusCode::BAD_REQUEST,
+            "does not match the pending request",
+        )
+        .await;
 
         // A correctly shaped artifact signed by a non-admin human is rejected.
         let outsider_payload = finite_brain_core::BrainApprovalPayload {
@@ -12704,9 +12732,16 @@ mod tests {
 
         // None of the rejections consumed the nonce or touched the card.
         let store = state.store.lock().unwrap();
-        assert!(!store.approval_nonce_seen(&acme_brain_id(), &request.nonce).unwrap());
+        assert!(
+            !store
+                .approval_nonce_seen(&acme_brain_id(), &request.nonce)
+                .unwrap()
+        );
         assert_eq!(
-            store.load_brain_approval_request(&request.id).unwrap().status,
+            store
+                .load_brain_approval_request(&request.id)
+                .unwrap()
+                .status,
             finite_brain_store::ApprovalRequestStatus::Pending
         );
     }
@@ -12841,7 +12876,10 @@ mod tests {
                 .unwrap();
             assert!(plan_row.committed);
             assert_eq!(
-                store.load_brain_approval_request(&request.id).unwrap().status,
+                store
+                    .load_brain_approval_request(&request.id)
+                    .unwrap()
+                    .status,
                 finite_brain_store::ApprovalRequestStatus::Approved
             );
         }

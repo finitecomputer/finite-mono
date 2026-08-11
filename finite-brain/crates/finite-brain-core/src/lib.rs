@@ -3856,7 +3856,9 @@ mod tests {
         // the signature itself verifies.
         let template = brain_approval_event_template(&payload, 1_780_000_000).unwrap();
         let mut drifted_template = template.clone();
-        drifted_template.tags.push(vec!["extra".to_owned(), "tag".to_owned()]);
+        drifted_template
+            .tags
+            .push(vec!["extra".to_owned(), "tag".to_owned()]);
         let drifted = sign_brain_event_template(&human_keys, &drifted_template).unwrap();
         verify_event_integrity(&drifted).unwrap();
         assert!(validate_brain_approval_event(&drifted, &human_npub).is_err());

@@ -7,7 +7,9 @@ const APPROVAL_REQUEST_SELECT: &str = r#"
     FROM brain_approval_requests
 "#;
 
-fn approval_request_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredBrainApprovalRequest> {
+fn approval_request_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredBrainApprovalRequest> {
     let status = row.get::<_, String>(7)?;
     Ok(StoredBrainApprovalRequest {
         id: row.get(0)?,
