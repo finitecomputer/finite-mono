@@ -642,6 +642,9 @@ pub struct BrainInvitationResponse {
     pub updated_at: String,
     pub accepted_at: Option<String>,
     pub duplicate_accept: bool,
+    /// Set when a plan-linked acceptance observed roster narrowing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowed: Option<NarrowedAcceptanceResponse>,
 }
 
 /// Claim an Email Invite Bootstrap into npub-bound Brain access.
@@ -654,6 +657,105 @@ pub struct ClaimEmailBrainInvitationRequest {
     pub invite_unwrap_proof_event_json: Option<String>,
     #[serde(default)]
     pub grants: Vec<CreateBrainFolderKeyGrantRequest>,
+}
+
+/// Invitation Preflight request: resolve one email target into an immutable plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPreflightRequest {
+    pub target: String,
+}
+
+/// Resolved human Principal in an Invitation Plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanHuman {
+    pub email: String,
+    pub npub: Option<String>,
+}
+
+/// Resolved, grant-ready agent Principal in an Invitation Plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanAgent {
+    pub managed_agent_email: String,
+    pub agent_npub: Option<String>,
+    pub status: String,
+}
+
+/// Participant excluded from an Invitation Plan with an explicit reason.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanExclusion {
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    pub reason: String,
+}
+
+/// Invitation Preflight response: the immutable plan commit must match.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPreflightResponse {
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub human: InvitationPlanHuman,
+    pub agents: Vec<InvitationPlanAgent>,
+    pub roster_revision: Option<i64>,
+    pub exclusions: Vec<InvitationPlanExclusion>,
+    pub expires_at: String,
+    /// Set when this plan replaces a stale plan at commit time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_plan_id: Option<String>,
+}
+
+/// Invitation Commit request.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationCommitRequest {
+    pub plan_id: String,
+    pub plan_hash: String,
+    /// Agent emails to exclude from the committed set (narrowing only).
+    #[serde(default)]
+    pub reduced_set: Option<Vec<String>>,
+}
+
+/// One per-principal Brain Invitation written by a commit.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommittedPrincipalInvitation {
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    pub npub: String,
+    pub invitation: BrainInvitationResponse,
+}
+
+/// One plan participant skipped at commit with an explicit reason.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitSkippedPrincipal {
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    pub reason: String,
+}
+
+/// Invitation Commit response.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationCommitResponse {
+    pub status: String,
+    pub plan_id: String,
+    pub roster_revision: Option<i64>,
+    pub invitations: Vec<CommittedPrincipalInvitation>,
+    pub skipped: Vec<CommitSkippedPrincipal>,
+}
+
+/// Acceptance result note when the account roster narrowed the resolved set:
+/// permanently departed participants are excluded, never added or substituted.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NarrowedAcceptanceResponse {
+    pub roster_revision: Option<i64>,
+    pub exclusions: Vec<InvitationPlanExclusion>,
 }
 
 /// Request authenticated, post-proof Invite Instructions for an Email Invite Bootstrap.

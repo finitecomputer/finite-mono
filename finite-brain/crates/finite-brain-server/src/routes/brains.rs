@@ -974,11 +974,19 @@ pub(crate) async fn accept_brain_invitation_link_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor = UserId::new(actor)?;
     let now = server_timestamp(&state);
+    let narrowing = {
+        let invitation = {
+            let store = state.store.lock().map_err(lock_error)?;
+            store.load_brain_invitation_by_code(&invite_code)?
+        };
+        check_invitation_acceptance_narrowing(&state, &invitation, &actor).await?
+    };
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.accept_brain_invitation_by_code(&invite_code, &actor, &now)?
     };
     let mut response = brain_invitation_response(invitation);
+    response.narrowed = narrowing;
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;
@@ -1019,6 +1027,7 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
         .into());
     }
 
+    let mut narrowing = None;
     let invitation = if invitation.status == LinkStatus::Accepted {
         if invitation.claimed_by_npub.as_ref() == Some(&actor_user_id) {
             let mut invitation = invitation;
@@ -1031,6 +1040,8 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
             .into());
         }
     } else {
+        narrowing =
+            check_invitation_acceptance_narrowing(&state, &invitation, &actor_user_id).await?;
         validate_email_proof_window(&invitation, &request.email_proof_created_at, &now)?;
         verify_identity_authority_email_proof(&state, invited_email.as_str(), &actor_user_id)
             .await?;
@@ -1092,6 +1103,7 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
     };
 
     let mut response = brain_invitation_response(invitation);
+    response.narrowed = narrowing;
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;

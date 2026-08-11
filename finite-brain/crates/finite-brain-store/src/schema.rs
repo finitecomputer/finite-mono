@@ -195,10 +195,79 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 22)? {
+            tx.execute_batch(SCHEMA_V22)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![22, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 }
+
+const SCHEMA_V22: &str = r#"
+-- ADR-0046 Grant Provenance: every access record carries who delegated it,
+-- which invitation or approval it came from, and the account roster state at
+-- write time. Defaults keep pre-existing rows valid as 'direct' origins.
+ALTER TABLE folder_key_grants
+ADD COLUMN delegated_by_npub TEXT;
+
+ALTER TABLE folder_key_grants
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'direct'
+CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap'));
+
+ALTER TABLE folder_key_grants
+ADD COLUMN origin_ref TEXT;
+
+ALTER TABLE folder_key_grants
+ADD COLUMN roster_revision INTEGER
+CHECK (roster_revision IS NULL OR roster_revision >= 0);
+
+ALTER TABLE brain_members
+ADD COLUMN delegated_by_npub TEXT;
+
+ALTER TABLE brain_members
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'direct'
+CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap'));
+
+ALTER TABLE brain_members
+ADD COLUMN origin_ref TEXT;
+
+-- Plan-linked invitations remember which Invitation Plan resolved them and at
+-- what account roster revision, so acceptance can re-check and narrow only.
+ALTER TABLE brain_invitations
+ADD COLUMN origin_ref TEXT;
+
+ALTER TABLE brain_invitations
+ADD COLUMN roster_revision INTEGER
+CHECK (roster_revision IS NULL OR roster_revision >= 0);
+
+-- Immutable Invitation Plans: the resolved invite set previewed at preflight
+-- and committed as per-principal Brain Invitations. A plan is not a stored
+-- cohort entity; it grants nothing by itself and only records the resolution
+-- the inviter committed to.
+CREATE TABLE brain_invitation_plans (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    inviter_npub TEXT NOT NULL,
+    workos_user_id TEXT,
+    human_email TEXT NOT NULL,
+    human_npub TEXT,
+    agents_json TEXT NOT NULL,
+    exclusions_json TEXT NOT NULL,
+    roster_revision INTEGER
+        CHECK (roster_revision IS NULL OR roster_revision >= 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'committed')),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
 
 const SCHEMA_V21: &str = r#"
 -- V6 created this index before V10 renamed vault_invitations to
@@ -1429,6 +1498,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migration_adds_provenance_columns_with_direct_defaults() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        for (table, expected) in [
+            (
+                "folder_key_grants",
+                vec![
+                    "delegated_by_npub",
+                    "origin_kind",
+                    "origin_ref",
+                    "roster_revision",
+                ],
+            ),
+            (
+                "brain_members",
+                vec!["delegated_by_npub", "origin_kind", "origin_ref"],
+            ),
+            ("brain_invitations", vec!["origin_ref", "roster_revision"]),
+        ] {
+            let mut statement = store
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            for column in expected {
+                assert!(
+                    columns.iter().any(|existing| existing == column),
+                    "{table} is missing provenance column {column}"
+                );
+            }
+        }
+
+        let plans_table_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'brain_invitation_plans'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(plans_table_count, 1);
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -1571,7 +1688,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 21);
+        assert_eq!(latest_version, 22);
 
         let old_table_count: i64 = store
             .conn

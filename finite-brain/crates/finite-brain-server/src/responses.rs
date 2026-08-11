@@ -290,6 +290,7 @@ pub(crate) fn brain_invitation_response(
         updated_at: invitation.updated_at,
         accepted_at: invitation.accepted_at,
         duplicate_accept: invitation.duplicate_accept,
+        narrowed: None,
     }
 }
 

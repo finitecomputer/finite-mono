@@ -14,6 +14,7 @@ use finite_brain_core::{
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -148,6 +149,117 @@ fn parse_capacity_error(message: &str) -> Option<(String, usize)> {
     let limit = parts.next()?.to_owned();
     let max = parts.next()?.split_whitespace().next()?.parse().ok()?;
     Some((limit, max))
+}
+
+/// ADR-0046 Grant Provenance origin: how an access record came to exist.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ProvenanceOriginKind {
+    /// Written directly by an admin action with no invitation or approval.
+    Direct,
+    /// Produced by accepting or claiming a Brain Invitation.
+    Invitation,
+    /// Produced by a signed Approval Card.
+    Approval,
+    /// Produced by an account bootstrap flow.
+    Bootstrap,
+}
+
+impl ProvenanceOriginKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Invitation => "invitation",
+            Self::Approval => "approval",
+            Self::Bootstrap => "bootstrap",
+        }
+    }
+}
+
+impl TryFrom<&str> for ProvenanceOriginKind {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "invitation" => Ok(Self::Invitation),
+            "approval" => Ok(Self::Approval),
+            "bootstrap" => Ok(Self::Bootstrap),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown provenance origin kind {value}"),
+            }),
+        }
+    }
+}
+
+/// Provenance stamped on one stored Folder Key Grant. Metadata only; it never
+/// carries key material.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GrantProvenance {
+    /// Principal who delegated the access, when known.
+    pub delegated_by_npub: Option<UserId>,
+    /// Origin classification.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Invitation id, Invitation Plan id, or approval id the grant came from.
+    pub origin_ref: Option<String>,
+    /// Account roster revision at write time, when roster-derived.
+    pub roster_revision: Option<i64>,
+}
+
+impl GrantProvenance {
+    /// Provenance for a grant written directly by an admin action.
+    pub fn direct() -> Self {
+        Self {
+            delegated_by_npub: None,
+            origin_kind: ProvenanceOriginKind::Direct,
+            origin_ref: None,
+            roster_revision: None,
+        }
+    }
+
+    /// Provenance for a grant written through a Brain Invitation.
+    pub fn invitation(
+        delegated_by_npub: UserId,
+        origin_ref: String,
+        roster_revision: Option<i64>,
+    ) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Invitation,
+            origin_ref: Some(origin_ref),
+            roster_revision,
+        }
+    }
+}
+
+/// Provenance stamped on one Brain Membership row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemberProvenance {
+    /// Principal who delegated the membership, when known.
+    pub delegated_by_npub: Option<UserId>,
+    /// Origin classification.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Invitation id, Invitation Plan id, or approval id the membership came from.
+    pub origin_ref: Option<String>,
+}
+
+impl MemberProvenance {
+    /// Provenance for a membership written directly.
+    pub fn direct() -> Self {
+        Self {
+            delegated_by_npub: None,
+            origin_kind: ProvenanceOriginKind::Direct,
+            origin_ref: None,
+        }
+    }
+
+    /// Provenance for a membership written through a Brain Invitation.
+    pub fn invitation(delegated_by_npub: UserId, origin_ref: String) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Invitation,
+            origin_ref: Some(origin_ref),
+        }
+    }
 }
 
 /// Stored Folder Key Grant metadata. The encrypted key remains opaque to the server.
@@ -671,8 +783,69 @@ pub struct StoredBrainInvitation {
     pub updated_at: String,
     /// Acceptance timestamp when consumed.
     pub accepted_at: Option<String>,
+    /// Invitation Plan id this invitation was committed from, when plan-linked.
+    pub origin_ref: Option<String>,
+    /// Account roster revision at commit time, when roster-derived.
+    pub roster_revision: Option<i64>,
     /// True when accept returned an already-consumed result for the same target.
     pub duplicate_accept: bool,
+}
+
+/// One agent resolved into an Invitation Plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredPlanAgent {
+    /// Managed Agent email from the account roster.
+    pub managed_agent_email: String,
+    /// Resolved Agent Principal npub, when grant-ready.
+    pub agent_npub: Option<String>,
+    /// Roster status for the agent.
+    pub status: String,
+}
+
+/// One participant excluded from an Invitation Plan with an explicit reason.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredPlanExclusion {
+    /// Email or npub of the excluded participant.
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    /// Why the participant is not grant-ready.
+    pub reason: String,
+}
+
+/// Stored immutable Invitation Plan: the resolved invite set previewed at
+/// preflight and committed as per-principal Brain Invitations.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredInvitationPlan {
+    /// Stable plan id.
+    pub id: String,
+    /// Brain id.
+    pub brain_id: BrainId,
+    /// Hash over the full resolved set and roster revision.
+    pub plan_hash: String,
+    /// Admin who created the plan.
+    pub inviter_npub: UserId,
+    /// Finite account id behind the invited email, when it binds to one.
+    pub workos_user_id: Option<String>,
+    /// Invited human email.
+    pub human_email: String,
+    /// Resolved human npub, when resolvable.
+    pub human_npub: Option<UserId>,
+    /// Resolved roster agents.
+    pub agents: Vec<StoredPlanAgent>,
+    /// Participants excluded with reasons.
+    pub exclusions: Vec<StoredPlanExclusion>,
+    /// Account roster revision at resolution time.
+    pub roster_revision: Option<i64>,
+    /// True once committed into per-principal invitations.
+    pub committed: bool,
+    /// Commit-by timestamp.
+    pub expires_at: String,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
 }
 
 /// Stored npub-bound singleton Folder Share Link.
@@ -1270,7 +1443,8 @@ impl BrainStore {
         Ok(())
     }
 
-    fn member_exists(&self, brain_id: &BrainId, user_id: &UserId) -> Result<bool, StoreError> {
+    /// True when the npub already holds Brain Membership.
+    pub fn member_exists(&self, brain_id: &BrainId, user_id: &UserId) -> Result<bool, StoreError> {
         let exists = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM brain_members WHERE brain_id = ?1 AND user_id = ?2)",
             params![brain_id.as_str(), user_id.as_str()],
@@ -1835,6 +2009,8 @@ fn brain_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
         accepted_at: row.get(11)?,
+        origin_ref: row.get(21)?,
+        roster_revision: row.get(22)?,
         duplicate_accept: false,
     })
 }
@@ -2108,9 +2284,26 @@ fn insert_member_if_missing(
     brain_id: &BrainId,
     user_id: &UserId,
 ) -> Result<(), StoreError> {
+    insert_member_with_provenance_if_missing(tx, brain_id, user_id, &MemberProvenance::direct())
+}
+
+fn insert_member_with_provenance_if_missing(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    user_id: &UserId,
+    provenance: &MemberProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT OR IGNORE INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
-        params![brain_id.as_str(), user_id.as_str()],
+        "INSERT OR IGNORE INTO brain_members (
+            brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            brain_id.as_str(),
+            user_id.as_str(),
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref
+        ],
     )?;
     Ok(())
 }
@@ -2235,13 +2428,23 @@ fn insert_grant_or_ignore(
     brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
+    insert_grant_or_ignore_with_provenance(tx, brain_id, grant, &GrantProvenance::direct())
+}
+
+fn insert_grant_or_ignore_with_provenance(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    grant: &FolderKeyGrantMetadata,
+    provenance: &GrantProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT OR IGNORE INTO folder_key_grants (
             id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
-            wrapped_event_json, access_change_event_json, created_at
+            wrapped_event_json, access_change_event_json, created_at,
+            delegated_by_npub, origin_kind, origin_ref, roster_revision
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         "#,
         params![
             grant.id,
@@ -2253,7 +2456,11 @@ fn insert_grant_or_ignore(
             grant.format,
             grant.wrapped_event_json,
             grant.access_change_event_json,
-            grant.created_at
+            grant.created_at,
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref,
+            provenance.roster_revision
         ],
     )?;
     Ok(())
@@ -3034,13 +3241,23 @@ fn insert_grant(
     brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
+    insert_grant_with_provenance(tx, brain_id, grant, &GrantProvenance::direct())
+}
+
+fn insert_grant_with_provenance(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    grant: &FolderKeyGrantMetadata,
+    provenance: &GrantProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT INTO folder_key_grants (
             id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
-            wrapped_event_json, access_change_event_json, created_at
+            wrapped_event_json, access_change_event_json, created_at,
+            delegated_by_npub, origin_kind, origin_ref, roster_revision
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         "#,
         params![
             grant.id,
@@ -3052,7 +3269,11 @@ fn insert_grant(
             grant.format,
             grant.wrapped_event_json,
             grant.access_change_event_json,
-            grant.created_at
+            grant.created_at,
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref,
+            provenance.roster_revision
         ],
     )
     .map_err(map_insert_error("folder_key_grant_id", &grant.id))?;
@@ -4308,6 +4529,239 @@ mod tests {
                 .unwrap_err(),
             StoreError::UnavailableLink {
                 kind: "brain invitation"
+            }
+        );
+    }
+
+    #[test]
+    fn invitation_acceptance_stamps_member_provenance() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let invitation = store
+            .create_brain_invitation_with_provenance(
+                &brain_id,
+                "invitation-plan-linked",
+                &target,
+                "invite-plan0123456789abcdef0123456",
+                "/v1/brain-invitation-links/invite-plan0123456789abcdef0123456/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+                Some("plan-roster-1"),
+                Some(7),
+            )
+            .unwrap();
+        assert_eq!(invitation.origin_ref.as_deref(), Some("plan-roster-1"));
+        assert_eq!(invitation.roster_revision, Some(7));
+
+        store
+            .accept_brain_invitation_by_code("invite-plan0123456789abcdef0123456", &target, now)
+            .unwrap();
+
+        let provenance = store
+            .member_provenance(&brain_id, &target)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            provenance,
+            MemberProvenance::invitation(admin.clone(), "plan-roster-1".to_owned())
+        );
+
+        // A plain invitation still records invitation provenance keyed by its
+        // own invitation id.
+        let plain_target = UserId::new("npub-plain-target").unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-plain",
+                &plain_target,
+                "invite-plain0123456789abcdef012345",
+                "/v1/brain-invitation-links/invite-plain0123456789abcdef012345/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        store
+            .accept_brain_invitation_by_code(
+                "invite-plain0123456789abcdef012345",
+                &plain_target,
+                now,
+            )
+            .unwrap();
+        let provenance = store
+            .member_provenance(&brain_id, &plain_target)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            provenance,
+            MemberProvenance::invitation(admin, "invitation-plain".to_owned())
+        );
+    }
+
+    #[test]
+    fn email_claim_stamps_grant_and_member_provenance() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let unwrap_npub = UserId::new("npub-unwrap").unwrap();
+        let claimant = UserId::new("npub-claimant").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-email-provenance",
+                "friend@example.com",
+                &unwrap_npub,
+                "sha256-bootstrap-payload",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-emailprov0123456789abcdef01",
+                "/v1/brain-invitation-links/invite-emailprov0123456789abcdef01/claim",
+                std::slice::from_ref(&restricted),
+                false,
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+
+        let claim_grants = vec![
+            grant(
+                "claim-grant-team-notes",
+                "team-notes",
+                1,
+                "npub-claimant",
+                "npub-claimant",
+            ),
+            grant(
+                "claim-grant-private-project",
+                "private-project",
+                1,
+                "npub-claimant",
+                "npub-claimant",
+            ),
+        ];
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-emailprov0123456789abcdef01",
+                "friend@example.com",
+                &claimant,
+                &claim_grants,
+                now,
+            )
+            .unwrap();
+
+        let member_provenance = store
+            .member_provenance(&brain_id, &claimant)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            member_provenance,
+            MemberProvenance::invitation(admin.clone(), "invitation-email-provenance".to_owned())
+        );
+
+        for claim_grant in &claim_grants {
+            let provenance = store
+                .grant_provenance(&brain_id, &claim_grant.id)
+                .unwrap()
+                .expect("grant provenance is recorded");
+            assert_eq!(
+                provenance,
+                GrantProvenance::invitation(
+                    admin.clone(),
+                    "invitation-email-provenance".to_owned(),
+                    None,
+                )
+            );
+        }
+
+        // Grants written outside the invitation spine keep 'direct' provenance.
+        let stored = store.load_brain(&brain_id).unwrap();
+        let direct_grant = stored
+            .grants
+            .iter()
+            .find(|grant| !claim_grants.contains(grant))
+            .expect("fixture has a bootstrap grant")
+            .clone();
+        let provenance = store
+            .grant_provenance(&brain_id, &direct_grant.id)
+            .unwrap()
+            .expect("grant provenance is recorded");
+        assert_eq!(provenance, GrantProvenance::direct());
+    }
+
+    #[test]
+    fn invitation_plan_roundtrips_and_commits_exactly_once() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let plan = StoredInvitationPlan {
+            id: "plan-roster-1".to_owned(),
+            brain_id: brain_id.clone(),
+            plan_hash: "sha256-plan".to_owned(),
+            inviter_npub: UserId::new("npub-admin").unwrap(),
+            workos_user_id: Some("user_workos_1".to_owned()),
+            human_email: "friend@example.com".to_owned(),
+            human_npub: Some(UserId::new("npub-human").unwrap()),
+            agents: vec![
+                StoredPlanAgent {
+                    managed_agent_email: "agent-one@finite.vip".to_owned(),
+                    agent_npub: Some("npub-agent-one".to_owned()),
+                    status: "active".to_owned(),
+                },
+                StoredPlanAgent {
+                    managed_agent_email: "agent-two@finite.vip".to_owned(),
+                    agent_npub: None,
+                    status: "active".to_owned(),
+                },
+            ],
+            exclusions: vec![StoredPlanExclusion {
+                ref_: "agent-two@finite.vip".to_owned(),
+                reason: "agent npub is not resolvable".to_owned(),
+            }],
+            roster_revision: Some(7),
+            committed: false,
+            expires_at: "2026-06-23T00:15:00.000Z".to_owned(),
+            created_at: now.to_owned(),
+            updated_at: now.to_owned(),
+        };
+
+        let created = store.create_brain_invitation_plan(&plan).unwrap();
+        assert_eq!(created, plan);
+        assert_eq!(
+            store
+                .load_brain_invitation_plan("plan-roster-1")
+                .unwrap()
+                .as_ref(),
+            Some(&plan)
+        );
+        assert!(
+            store
+                .load_brain_invitation_plan("plan-missing")
+                .unwrap()
+                .is_none()
+        );
+
+        let committed = store
+            .mark_brain_invitation_plan_committed("plan-roster-1", now)
+            .unwrap();
+        assert!(committed.committed);
+        assert_eq!(
+            store
+                .mark_brain_invitation_plan_committed("plan-roster-1", now)
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "invitation plan is not pending".to_owned(),
+                current_revision: None,
             }
         );
     }

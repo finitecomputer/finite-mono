@@ -636,6 +636,14 @@ fn normal_signed_api_router() -> Router<ServerState> {
             get(list_brain_invitations_handler).post(create_brain_invitation_handler),
         )
         .route(
+            "/brains/{brain_id}/invitations/preflight",
+            post(preflight_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/commit",
+            post(commit_brain_invitation_handler),
+        )
+        .route(
             "/brain-invitation-links/{invite_code}",
             get(get_brain_invitation_link_handler),
         )
@@ -3025,6 +3033,8 @@ mod tests {
             created_at: "2026-07-07T12:00:00Z".to_owned(),
             updated_at: "2026-07-07T12:00:00Z".to_owned(),
             accepted_at: None,
+            origin_ref: None,
+            roster_revision: None,
             duplicate_accept: false,
         };
 
@@ -9930,6 +9940,736 @@ mod tests {
     fn test_state() -> ServerState {
         let store = BrainStore::open_in_memory().unwrap();
         ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    #[tokio::test]
+    async fn invitation_preflight_resolves_human_and_agents_with_explicit_exclusions() {
+        let admin_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let agent_one_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let agent_one_npub = npub(&agent_one_keys);
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_friend",
+            "humanMailbox": "friend@example.com",
+            "rosterRevision": 3,
+            "agents": [
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": agent_one_npub,
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-two@finite.vip",
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-three@finite.vip",
+                    "agentNpub": npub(&Keys::generate()),
+                    "status": "paused",
+                    "placementRunnerClass": "kata",
+                },
+            ],
+        });
+        let (core_url, _core_server) =
+            spawn_json_authority(vec![("/api/core/v1/brain/account-agent-roster", roster)]);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": human_npub,
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_one_npub,
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+        ]);
+        let state = test_state()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let plan: InvitationPreflightResponse = read_json(preflight).await;
+        assert!(!plan.plan_id.is_empty());
+        assert!(plan.plan_hash.starts_with("sha256:"));
+        assert_eq!(plan.human.email, "friend@example.com");
+        assert_eq!(plan.human.npub.as_deref(), Some(human_npub.as_str()));
+        assert_eq!(plan.roster_revision, Some(3));
+        assert_eq!(plan.agents.len(), 1);
+        assert_eq!(plan.agents[0].managed_agent_email, "agent-one@finite.vip");
+        assert_eq!(
+            plan.agents[0].agent_npub.as_deref(),
+            Some(agent_one_npub.as_str())
+        );
+        assert_eq!(plan.exclusions.len(), 2);
+        assert_eq!(plan.exclusions[0].ref_, "agent-two@finite.vip");
+        assert_eq!(plan.exclusions[0].reason, "agent npub is not resolvable");
+        assert_eq!(plan.exclusions[1].ref_, "agent-three@finite.vip");
+        assert_eq!(
+            plan.exclusions[1].reason,
+            "agent is not active in the account roster"
+        );
+        assert!(plan.supersedes_plan_id.is_none());
+
+        // A second preflight for a non-admin is rejected.
+        let stranger = Keys::generate();
+        let forbidden = authed_request(
+            router,
+            &stranger,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invitation_preflight_fails_closed_without_authorities() {
+        let admin_keys = Keys::generate();
+        let router = router_with_state(test_state());
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    struct PlanFixture {
+        admin_keys: Keys,
+        human_keys: Keys,
+        agent_one_keys: Keys,
+        agent_two_keys: Keys,
+        state: ServerState,
+    }
+
+    impl PlanFixture {
+        fn new() -> Self {
+            Self {
+                admin_keys: Keys::generate(),
+                human_keys: Keys::generate(),
+                agent_one_keys: Keys::generate(),
+                agent_two_keys: Keys::generate(),
+                state: test_state(),
+            }
+        }
+
+        fn human_npub(&self) -> String {
+            npub(&self.human_keys)
+        }
+
+        fn agent_one_npub(&self) -> String {
+            npub(&self.agent_one_keys)
+        }
+
+        fn agent_two_npub(&self) -> String {
+            npub(&self.agent_two_keys)
+        }
+
+        fn roster(&self, revision: i64, agents: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "workosUserId": "user_workos_friend",
+                "humanMailbox": "friend@example.com",
+                "rosterRevision": revision,
+                "agents": agents,
+            })
+        }
+
+        fn full_roster_agents(&self) -> serde_json::Value {
+            serde_json::json!([
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": self.agent_one_npub(),
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-two@finite.vip",
+                    "agentNpub": self.agent_two_npub(),
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+            ])
+        }
+    }
+
+    async fn plan_fixture_router(
+        mut fixture: PlanFixture,
+        core_responses: Vec<(u16, &'static str, serde_json::Value)>,
+        identity_responses: Vec<(u16, &'static str, serde_json::Value)>,
+    ) -> (PlanFixture, Router) {
+        let (core_url, _core_server) = spawn_json_authority_with_status(core_responses);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(identity_responses);
+        let state = fixture
+            .state
+            .clone()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        fixture.state = state.clone();
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &fixture.admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        (fixture, router)
+    }
+
+    async fn run_preflight(router: &Router, fixture: &PlanFixture) -> InvitationPreflightResponse {
+        let preflight = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        read_json(preflight).await
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_creates_per_principal_invitations_and_honors_reduced_set() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.agents.len(), 2);
+        assert!(plan.exclusions.is_empty());
+
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                    "reducedSet": ["agent-two@finite.vip"],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.plan_id, plan.plan_id);
+        assert_eq!(committed.roster_revision, Some(3));
+        assert_eq!(committed.invitations.len(), 2);
+        assert!(committed.skipped.is_empty());
+        assert_eq!(committed.invitations[0].ref_, "friend@example.com");
+        assert_eq!(committed.invitations[0].npub, fixture.human_npub());
+        assert_eq!(committed.invitations[1].ref_, "agent-one@finite.vip");
+        assert_eq!(committed.invitations[1].npub, fixture.agent_one_npub());
+        for entry in &committed.invitations {
+            assert_eq!(entry.invitation.target_kind, "npub");
+            assert_eq!(entry.invitation.status, "pending");
+        }
+
+        // Commit provenance is recorded on the invitations.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            for entry in &committed.invitations {
+                let invitation = store.load_brain_invitation(&entry.invitation.id).unwrap();
+                assert_eq!(
+                    invitation.origin_ref.as_deref(),
+                    Some(plan.plan_id.as_str())
+                );
+                assert_eq!(invitation.roster_revision, Some(3));
+            }
+        }
+
+        // A second commit of the same plan is refused.
+        let recommit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(recommit.status(), StatusCode::CONFLICT);
+
+        // Acceptance of a still-active agent invitation is not narrowed, and
+        // stamps member provenance from the plan.
+        let accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[1].invitation.invite_code
+        );
+        let accept = authed_request(
+            router.clone(),
+            &fixture.agent_one_keys,
+            "POST",
+            &accept_path,
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+        assert!(accepted.narrowed.is_none());
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let provenance = store
+                .member_provenance(
+                    &BrainId::new("acme").unwrap(),
+                    &UserId::new(fixture.agent_one_npub()).unwrap(),
+                )
+                .unwrap()
+                .expect("member provenance is recorded");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::invitation(
+                    UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    plan.plan_id.clone(),
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_rejects_plan_hash_mismatch() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![(
+            200,
+            "/api/core/v1/brain/account-agent-roster",
+            fixture.roster(3, fixture.full_roster_agents()),
+        )];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": "sha256:tampered",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_returns_fresh_preflight_on_roster_drift() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(4, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(4, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.roster_revision, Some(3));
+
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::CONFLICT);
+        let fresh: InvitationPreflightResponse = read_json(commit).await;
+        assert_eq!(fresh.roster_revision, Some(4));
+        assert_eq!(
+            fresh.supersedes_plan_id.as_deref(),
+            Some(plan.plan_id.as_str())
+        );
+        assert_ne!(fresh.plan_id, plan.plan_id);
+        assert_eq!(fresh.agents.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn plan_linked_acceptance_narrows_permanently_departed_participants() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            // Acceptance re-checks: agent-one has permanently departed.
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(
+                    4,
+                    serde_json::json!([
+                        {
+                            "managedAgentEmail": "agent-two@finite.vip",
+                            "agentNpub": fixture.agent_two_npub(),
+                            "status": "active",
+                            "placementRunnerClass": "kata",
+                        },
+                    ]),
+                ),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(
+                    4,
+                    serde_json::json!([
+                        {
+                            "managedAgentEmail": "agent-two@finite.vip",
+                            "agentNpub": fixture.agent_two_npub(),
+                            "status": "active",
+                            "placementRunnerClass": "kata",
+                        },
+                    ]),
+                ),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.invitations.len(), 3);
+
+        // The human accepts: the roster moved, agent-one is excluded with an
+        // explicit narrowed result, and nothing is added or substituted.
+        let human_accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[0].invitation.invite_code
+        );
+        let accept = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            &human_accept_path,
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+        let narrowed = accepted.narrowed.expect("acceptance reports narrowing");
+        assert_eq!(narrowed.roster_revision, Some(4));
+        assert_eq!(narrowed.exclusions.len(), 1);
+        assert_eq!(narrowed.exclusions[0].ref_, "agent-one@finite.vip");
+        assert_eq!(
+            narrowed.exclusions[0].reason,
+            "permanently departed the account roster"
+        );
+
+        // The departed agent's invitation is refused outright.
+        let agent_accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[1].invitation.invite_code
+        );
+        let accept = authed_request(
+            router,
+            &fixture.agent_one_keys,
+            "POST",
+            &agent_accept_path,
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::GONE);
     }
 
     fn personal_test_state(owner_keys: &Keys, agent_keys: &Keys) -> ServerState {
