@@ -126,7 +126,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let router = finite_brain_server::router_with_state(state);
+    let router = finite_brain_server::router_with_state(state.clone());
+    // Consume Core's Permanent Departure Facts in the background; no-op when
+    // the Core/Identity authorities are not configured. Routine authorization
+    // never depends on it.
+    finite_brain_server::spawn_departure_fact_consumer(&state);
     axum::serve(listener, router).await?;
 
     Ok(())

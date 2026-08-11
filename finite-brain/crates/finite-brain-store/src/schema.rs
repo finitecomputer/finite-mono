@@ -2,6 +2,55 @@ use crate::*;
 
 impl BrainStore {
     pub(crate) fn apply_migrations(&mut self) -> Result<(), StoreError> {
+        self.apply_migrations_through_v22()?;
+        {
+            let tx = self.conn.transaction()?;
+            if migration_applied(&tx, 23)? {
+                tx.commit()?;
+                return Ok(());
+            }
+            tx.commit()?;
+        }
+        // SCHEMA_V23 rebuilds folder_key_grants and brain_members to extend
+        // their provenance origin CHECKs. The rebuild is only safe with
+        // legacy_alter_table=ON (so the RENAMEs do not rewrite folder_access
+        // and brain_admins foreign keys toward the retired table names) and
+        // foreign_keys=OFF (so the DROPs do not cascade into those children).
+        // Neither pragma can change inside a transaction, so V23 runs as its
+        // own guarded step outside the main migration transaction.
+        self.conn.pragma_update(None, "legacy_alter_table", "ON")?;
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = (|| -> Result<(), StoreError> {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V23)?;
+            tx.execute(
+                "INSERT INTO brain_departure_fact_cursor (id, last_applied_revision, updated_at) VALUES (1, 0, ?1)",
+                params![MIGRATION_TIMESTAMP],
+            )?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![23, MIGRATION_TIMESTAMP],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })();
+        self.conn.pragma_update(None, "foreign_keys", "ON")?;
+        self.conn.pragma_update(None, "legacy_alter_table", "OFF")?;
+        result?;
+        let violations: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })?;
+        if violations > 0 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "schema V23 table rebuild left foreign key violations".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_migrations_through_v22(&mut self) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
             r#"
@@ -207,6 +256,118 @@ impl BrainStore {
         Ok(())
     }
 }
+
+const SCHEMA_V23: &str = r#"
+-- ADR-0046 Permanent Departure Facts. Brain consumes Core's durable,
+-- monotonic departure log from a last-applied-revision cursor. The cursor
+-- advances only inside the per-fact revocation transaction, so after any
+-- crash it always trails the facts whose revocations actually committed.
+CREATE TABLE brain_departure_fact_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_applied_revision INTEGER NOT NULL DEFAULT 0
+        CHECK (last_applied_revision >= 0),
+    updated_at TEXT NOT NULL
+);
+
+-- Revocation ledger: the departure fact is the authority record for every
+-- service-issued revocation, with the fact revision recorded. One row per
+-- affected Brain per fact; ids are deterministic so replay never duplicates.
+CREATE TABLE brain_principal_revocations (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    departed_npub TEXT,
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('human', 'agent')),
+    principal_ref TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    fact_revision INTEGER NOT NULL CHECK (fact_revision > 0),
+    origin_kind TEXT NOT NULL DEFAULT 'departure'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    UNIQUE (brain_id, fact_revision, principal_ref),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+-- Folders the departed Principal could read keep their current key until a
+-- remaining admin's client re-wraps; the server never sees plaintext keys.
+-- A marker tracks the key version that still needs rotation-on-replay.
+CREATE TABLE brain_departure_pending_rotations (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    marked_at_revision INTEGER NOT NULL CHECK (marked_at_revision > 0),
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, folder_id),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+-- Extend the V22 provenance origin CHECKs with 'departure' so rotation grants
+-- written during departure replay can be stamped with their true origin.
+-- SQLite cannot alter a column CHECK, so both tables are rebuilt following
+-- the V6/V9 pattern; existing rows are copied verbatim and stay valid. The
+-- migration runner applies this batch with legacy_alter_table=ON and
+-- foreign_keys=OFF (neither pragma can change inside a transaction), which
+-- stops the RENAMEs from rewriting folder_access and brain_admins foreign
+-- keys toward the retired table names and stops the DROPs from cascading.
+ALTER TABLE folder_key_grants RENAME TO folder_key_grants_v22;
+ALTER TABLE brain_members RENAME TO brain_members_v22;
+
+CREATE TABLE folder_key_grants (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    issuer_npub TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    format TEXT NOT NULL CHECK (format = 'NIP-59'),
+    wrapped_event_json TEXT NOT NULL,
+    access_change_event_json TEXT,
+    created_at TEXT NOT NULL,
+    delegated_by_npub TEXT,
+    origin_kind TEXT NOT NULL DEFAULT 'direct'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT,
+    roster_revision INTEGER
+        CHECK (roster_revision IS NULL OR roster_revision >= 0),
+    UNIQUE (brain_id, folder_id, key_version, recipient_npub),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+INSERT INTO folder_key_grants (
+    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+    wrapped_event_json, access_change_event_json, created_at,
+    delegated_by_npub, origin_kind, origin_ref, roster_revision
+)
+SELECT
+    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+    wrapped_event_json, access_change_event_json, created_at,
+    delegated_by_npub, origin_kind, origin_ref, roster_revision
+FROM folder_key_grants_v22;
+
+DROP TABLE folder_key_grants_v22;
+
+CREATE TABLE brain_members (
+    brain_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    delegated_by_npub TEXT,
+    origin_kind TEXT NOT NULL DEFAULT 'direct'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT,
+    PRIMARY KEY (brain_id, user_id),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+INSERT INTO brain_members (
+    brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+)
+SELECT
+    brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+FROM brain_members_v22;
+
+DROP TABLE brain_members_v22;
+"#;
 
 const SCHEMA_V22: &str = r#"
 -- ADR-0046 Grant Provenance: every access record carries who delegated it,
@@ -1546,6 +1707,80 @@ mod tests {
     }
 
     #[test]
+    fn migration_v23_adds_departure_tables_and_extends_origin_checks() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        for table in [
+            "brain_departure_fact_cursor",
+            "brain_principal_revocations",
+            "brain_departure_pending_rotations",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing V23 table {table}");
+        }
+        let cursor: i64 = store
+            .conn
+            .query_row(
+                "SELECT last_applied_revision FROM brain_departure_fact_cursor WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 0);
+
+        // The rebuilt V22 tables accept the new 'departure' origin kind and
+        // keep rejecting unknown kinds.
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('origin-check', 'organization', 'Origin Check', NULL, '2026-06-23T00:00:00Z');
+                INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id, parent_folder_key,
+                    path, current_key_version, shared_folder_source, setup_incomplete, created_at
+                ) VALUES (
+                    'origin-check', 'ops', 'Ops', 'vault_ops', 'admin_only', NULL, '',
+                    'ops', 1, 0, 0, '2026-06-23T00:00:00Z'
+                );
+                INSERT INTO brain_members (brain_id, user_id, origin_kind)
+                VALUES ('origin-check', 'npub-admin', 'departure');
+                INSERT INTO folder_key_grants (
+                    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub,
+                    format, wrapped_event_json, created_at, origin_kind
+                ) VALUES (
+                    'grant-departure-origin', 'origin-check', 'ops', 1, 'npub-admin', 'npub-admin',
+                    'NIP-59', '{}', '2026-06-23T00:00:00Z', 'departure'
+                );
+                "#,
+            )
+            .unwrap();
+        for statement in [
+            "INSERT INTO brain_members (brain_id, user_id, origin_kind)
+             VALUES ('origin-check', 'npub-other', 'bogus')",
+            "INSERT INTO folder_key_grants (
+                id, brain_id, folder_id, key_version, issuer_npub, recipient_npub,
+                format, wrapped_event_json, created_at, origin_kind
+             ) VALUES (
+                'grant-bogus-origin', 'origin-check', 'ops', 1, 'npub-admin', 'npub-admin',
+                'NIP-59', '{}', '2026-06-23T00:00:00Z', 'bogus'
+             )",
+        ] {
+            assert!(
+                store.conn.execute(statement, []).is_err(),
+                "origin CHECK must reject bogus kinds: {statement}"
+            );
+        }
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -1688,7 +1923,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 22);
+        assert_eq!(latest_version, 23);
 
         let old_table_count: i64 = store
             .conn

@@ -29,14 +29,14 @@ use finite_brain_core::{
     validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder,
-    EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
-    FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PersonalAgentFolderRotation,
-    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
-    StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
-    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
-    VisibleBrainRole,
+    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, DepartureFactApplication,
+    DeparturePrincipalKind, EmailInviteBootstrapScopeFolder, EncryptedBrainExport,
+    FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
+    GrantFolderAccessOutcome, IdentityAlias, LinkStatus, MountedFolderProjection,
+    MountedFolderState, PersonalAgentFolderRotation, SharedFolderConnectionStatus,
+    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredShareLink,
+    StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput,
+    SyncRecordType, VisibleBrain, VisibleBrainRole,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -49,11 +49,15 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod contracts;
+mod departure_consumer;
 mod object_records;
 mod protected_routes;
 mod responses;
 
 pub use contracts::*;
+#[cfg(test)]
+pub(crate) use departure_consumer::poll_departure_facts_once;
+pub use departure_consumer::spawn_departure_fact_consumer;
 pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
@@ -11785,5 +11789,384 @@ mod tests {
             "expected error containing {contains:?}, got {:?}",
             body.error
         );
+    }
+
+    fn departure_test_state_with_member(
+        member_keys: &Keys,
+        member_email: Option<&str>,
+    ) -> ServerState {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
+        let brain_id = output.brain.id.clone();
+        let grants = grants_for_required(&output.required_key_grants, &brain_id, "npub-admin");
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+        let member = UserId::new(npub(member_keys)).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        if let Some(email) = member_email {
+            let now = test_rfc3339();
+            store
+                .record_identity_alias(&IdentityAlias {
+                    npub: member,
+                    hex_public_key: NostrPublicKey::from_protocol(member_keys.public_key())
+                        .to_hex(),
+                    preferred_nip05: Some(email.to_owned()),
+                    nip05_verified_at: Some(now.clone()),
+                    nip05_relays: Vec::new(),
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn departure_page(facts: serde_json::Value, max_revision: i64) -> serde_json::Value {
+        serde_json::json!({ "facts": facts, "maxRevision": max_revision })
+    }
+
+    fn departure_fact_json(
+        revision: i64,
+        account_id: &str,
+        principal_kind: &str,
+        principal_ref: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "revision": revision,
+            "accountId": account_id,
+            "principalKind": principal_kind,
+            "principalRef": principal_ref,
+            "departedAt": "2026-06-24T00:00:00Z",
+            "reason": "retired",
+        })
+    }
+
+    fn acme_brain_id() -> BrainId {
+        BrainId::new("acme").unwrap()
+    }
+
+    fn assert_member_gone(state: &ServerState, member_npub: &str) {
+        let store = state.store.lock().unwrap();
+        let stored = store.load_brain(&acme_brain_id()).unwrap();
+        assert!(
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == member_npub),
+            "departed principal must lose Brain Membership"
+        );
+    }
+
+    fn assert_member_present(state: &ServerState, member_npub: &str) {
+        let store = state.store.lock().unwrap();
+        let stored = store.load_brain(&acme_brain_id()).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == member_npub),
+            "failed polls must not touch Brain Membership"
+        );
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_applies_agent_fact_through_identity_binding() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({
+                "agentNpub": agent_npub,
+                "managedAgentEmail": "agent@finite.vip",
+            }),
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    1,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                1,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &agent_npub);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 1);
+        let ledger = store.departure_revocations(&acme_brain_id()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].principal_kind, DeparturePrincipalKind::Agent);
+        assert_eq!(ledger[0].principal_ref, "agent@finite.vip");
+        assert_eq!(ledger[0].fact_revision, 1);
+        assert_eq!(ledger[0].origin_kind.as_str(), "departure");
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_applies_human_fact_through_user_resolution() {
+        let human_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/user-resolution",
+            serde_json::json!({
+                "workosUserId": "user_workos_human",
+                "userNpub": human_npub,
+            }),
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    4,
+                    "user_workos_human",
+                    "human",
+                    "human@finite.computer"
+                )]),
+                4,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&human_keys, None)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &human_npub);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 4);
+        let ledger = store.departure_revocations(&acme_brain_id()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].principal_kind, DeparturePrincipalKind::Human);
+        assert_eq!(ledger[0].account_id, "user_workos_human");
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_resolves_deleted_agent_through_local_alias() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        // The retired agent's NIP-05 name and Identity binding are both gone;
+        // no agent-resolution call is made, so the identity server sees zero
+        // requests.
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": {} }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    2,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                2,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &agent_npub);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_tolerates_core_outage_and_routine_routes_continue() {
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let (core_url, core_server) = spawn_authority_response(AuthorityTestResponse::Status);
+        let state = departure_test_state_with_member(&member_keys, Some("agent@finite.vip"))
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                "http://127.0.0.1:9",
+                "identity-token",
+            );
+
+        let error = poll_departure_facts_once(&state).await.unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(store.departure_fact_cursor().unwrap(), 0);
+        }
+        assert_member_present(&state, &member_npub);
+
+        // Routine authorization never consults Core: reads keep working while
+        // the consumer cannot reach it.
+        let response = authed_request(
+            router_with_state(state),
+            &member_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let visible: VisibleBrainsResponse = read_json(response).await;
+        assert_eq!(visible.brains.len(), 1);
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_replay_after_success_is_a_no_op() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let agent_resolution = serde_json::json!({
+            "agentNpub": agent_npub,
+            "managedAgentEmail": "agent@finite.vip",
+        });
+        // The second poll fetches an empty page and never re-resolves, so the
+        // identity server only answers the first poll's agent resolution.
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/agent-resolution",
+            agent_resolution,
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/departure-facts",
+                departure_page(
+                    serde_json::json!([departure_fact_json(
+                        1,
+                        "user_workos_owner",
+                        "agent",
+                        "agent@finite.vip"
+                    )]),
+                    1,
+                ),
+            ),
+            (
+                "/api/core/v1/brain/departure-facts",
+                departure_page(serde_json::json!([]), 1),
+            ),
+        ]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        assert_eq!(poll_departure_facts_once(&state).await.unwrap(), 1);
+        // Polling again finds no new facts and changes nothing.
+        assert_eq!(poll_departure_facts_once(&state).await.unwrap(), 0);
+
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 1);
+        assert_eq!(
+            store.departure_revocations(&acme_brain_id()).unwrap().len(),
+            1
+        );
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_leaves_cursor_when_identity_resolution_fails() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let (identity_url, identity_server) =
+            spawn_authority_response(AuthorityTestResponse::Malformed);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    1,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                1,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let error = poll_departure_facts_once(&state).await.unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                store.departure_fact_cursor().unwrap(),
+                0,
+                "cursor must not advance past an unapplied fact"
+            );
+            assert!(
+                store
+                    .departure_revocations(&acme_brain_id())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_member_present(&state, &agent_npub);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_consumer_only_spawns_with_authorities() {
+        assert!(spawn_departure_fact_consumer(&test_state()).is_none());
+        let state = test_state().with_agent_bootstrap_authorities(
+            "http://127.0.0.1:9",
+            "core-token",
+            "http://127.0.0.1:9",
+            "identity-token",
+        );
+        let handle = spawn_departure_fact_consumer(&state)
+            .expect("consumer spawns when authorities are configured");
+        handle.abort();
     }
 }
