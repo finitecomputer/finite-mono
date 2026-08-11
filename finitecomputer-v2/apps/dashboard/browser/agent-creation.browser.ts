@@ -1321,12 +1321,28 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         )
       );
       hostedDevice.emit();
+      const loadDirectImage = page.getByRole("button", {
+        name: "Load hermes-generated.png",
+      });
+      await loadDirectImage.waitFor({ state: "visible" });
+      assert.equal(
+        await page.getByRole("img", { name: "hermes-generated.png" }).count(),
+        0,
+        "a remote image must not be placed in the document before user consent"
+      );
+      assert.equal(
+        hostedDevice.state.directImageGets,
+        0,
+        "a URL-only Hermes image must not make a remote request before user consent"
+      );
+
+      await loadDirectImage.click();
       const directImage = page.getByRole("img", { name: "hermes-generated.png" });
       await directImage.waitFor({ state: "visible" });
       assert.equal(
         await directImage.getAttribute("src"),
         directImageUrl,
-        "a URL-only Hermes image must load from its remote URL"
+        "a URL-only Hermes image must load from its remote URL after user consent"
       );
       await waitFor(
         () =>

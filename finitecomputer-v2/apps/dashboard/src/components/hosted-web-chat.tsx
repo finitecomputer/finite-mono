@@ -22,6 +22,7 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   FileTextIcon,
+  ImageIcon,
   Loader2Icon,
   MicIcon,
   MonitorIcon,
@@ -1332,8 +1333,10 @@ function MessageAttachments({ attachmentUrl, compact = false, message }: { attac
 }
 
 function AttachmentCard({ attachmentUrl, attachment, compact, message }: { attachmentUrl: AttachmentUrl; attachment: HostedChatMediaAttachment; compact: boolean; message: HostedChatMessage }) {
+  const directImageHref = directHostedImageUrl(attachment);
+  const [remoteImageLoaded, setRemoteImageLoaded] = useState(false);
   const href =
-    directHostedImageUrl(attachment) ??
+    directImageHref ??
     attachmentUrl({
       room_id: message.room_id,
       message_id: message.message_id,
@@ -1363,14 +1366,27 @@ function AttachmentCard({ attachmentUrl, attachment, compact, message }: { attac
   }
   return (
     <span className={cardClassName}>
-      <a className="finite-chat__image-link" href={href} target="_blank" rel="noreferrer">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={href}
-          alt={attachment.filename}
-          referrerPolicy="no-referrer"
-        />
-      </a>
+      {directImageHref && !remoteImageLoaded ? (
+        <button
+          type="button"
+          className="finite-chat__remote-image-load"
+          aria-label={`Load ${attachment.filename}`}
+          onClick={() => setRemoteImageLoaded(true)}
+        >
+          <ImageIcon className="size-5" aria-hidden />
+          <span>Remote image</span>
+          <small>Click to load</small>
+        </button>
+      ) : (
+        <a className="finite-chat__image-link" href={href} target="_blank" rel="noreferrer">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={href}
+            alt={attachment.filename}
+            referrerPolicy={directImageHref ? "no-referrer" : undefined}
+          />
+        </a>
+      )}
       <AttachmentCaption href={href} name={attachment.filename} />
     </span>
   );
