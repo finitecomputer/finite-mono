@@ -98,7 +98,6 @@ CONTRACT: dict[str, Any] = {
     },
     "thresholds": {
         "filesystem_red_percent": 90.0,
-        "heartbeat_fresh_seconds": 300,
     },
 }
 
@@ -130,15 +129,13 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
             where prl.agent_runtime_id = ar.id
          ) then 'inactive'
          else 'unlinked'
-       end as link_state,
-       rss.last_heartbeat_at
+       end as link_state
   from agent_runtimes ar
   left join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
   left join projects p on p.id = ar.project_id
-  left join runtime_status_snapshots rss on rss.agent_runtime_id = ar.id
   order by ar.source_host_id, ar.id;"""
 
-# The runner's read-only lifecycle probe. App health (endpoints, heartbeats)
+# The runner's read-only lifecycle probe. App health (endpoints, versions)
 # and lifecycle-control health (can the platform stop/replace this guest) are
 # separate facts; this binary answers the second and is consumed per Agent.
 LIFECYCLE_PROBE_BINARY = "/run/current-system/sw/bin/finite-saas-runner"
@@ -287,7 +284,6 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "agent_name",
                 "version_label",
                 "link_state",
-                "last_heartbeat_at",
             ],
         ),
     ]
@@ -769,7 +765,6 @@ def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
                     "agent_name": f"{group['name_prefix']} {index:02d}",
                     "version_label": group["version_label"],
                     "link_state": group["link_state"],
-                    "last_heartbeat_at": group.get("last_heartbeat_at", ""),
                 }
             )
     return raw
@@ -781,24 +776,6 @@ def load_fixture(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise CollectionError(f"cannot load fixture {path}: {error}") from error
     return expand_fixture(raw)
-
-
-def heartbeat_signal(value: str | None, now: datetime) -> dict[str, Any]:
-    heartbeat = parse_time(value)
-    if heartbeat is None:
-        return {"last_heartbeat_at": value or None, "freshness": "missing", "age_seconds": None}
-    age = int((now - heartbeat).total_seconds())
-    if age < 0:
-        freshness = "future"
-    elif age <= CONTRACT["thresholds"]["heartbeat_fresh_seconds"]:
-        freshness = "fresh"
-    else:
-        freshness = "stale"
-    return {
-        "last_heartbeat_at": isoformat(heartbeat),
-        "freshness": freshness,
-        "age_seconds": age,
-    }
 
 
 def combine_status(statuses: list[str]) -> str:
@@ -846,12 +823,11 @@ def build_fleet(
             "project_id": row["project_id"],
             "agent_name": row["agent_name"],
             "version_label": row["version_label"],
-            "heartbeat": heartbeat_signal(row.get("last_heartbeat_at"), now),
         }
         lifecycle = probe_agents.get(row["agent_runtime_id"])
         if lifecycle is not None:
-            # App health (heartbeat/version above) and lifecycle-control
-            # health are separate facts; both are displayed per Agent.
+            # App health (version above) and lifecycle-control health are
+            # separate facts; both are displayed per Agent.
             entry["lifecycle"] = lifecycle
         host.setdefault(row.get("link_state", "unlinked"), host["unlinked"]).append(entry)
 
@@ -864,13 +840,6 @@ def build_fleet(
         on_target = len(active) - len(stragglers)
         status = "red" if stragglers else ("unknown" if groups["unlinked"] else "green")
         section_statuses.append(status)
-        stale = sum(
-            row["heartbeat"]["freshness"] != "fresh"
-            for row in active
-        )
-        non_fresh_heartbeats = [
-            row for row in active if row["heartbeat"]["freshness"] != "fresh"
-        ]
         lifecycle_probed = [row for row in active if "lifecycle" in row]
         lifecycle_attention = [
             row for row in lifecycle_probed if row["lifecycle"]["verdict"] != "operable"
@@ -887,8 +856,6 @@ def build_fleet(
                 "intentionally_inactive": groups["inactive"],
                 "unlinked_count": len(groups["unlinked"]),
                 "unlinked": groups["unlinked"],
-                "non_fresh_heartbeat_signals": stale,
-                "non_fresh_heartbeats": non_fresh_heartbeats,
                 "lifecycle_probed_count": len(lifecycle_probed),
                 "lifecycle_attention": lifecycle_attention,
             }
@@ -921,7 +888,6 @@ def build_fleet(
         "status": combine_status(section_statuses),
         "evidence": "Core-recorded artifact/link state; not verified live compute",
         "status_basis": "active-link artifact convergence only",
-        "heartbeat_note": "timestamps are staleness signals, not lifecycle proof",
         "target_artifact": {
             "id": target["id"],
             "version_label": target_version,
@@ -1277,8 +1243,7 @@ def render_human(report: dict[str, Any]) -> str:
             host_line = (
                 f"  {host['source_host_id']}: {host['on_target']}/{host['active_total']} active on target; "
                 f"{host['straggler_count']} stragglers; "
-                f"{host['intentionally_inactive_count']} intentionally inactive excluded; "
-                f"{host['non_fresh_heartbeat_signals']} non-fresh heartbeat signals"
+                f"{host['intentionally_inactive_count']} intentionally inactive excluded"
             )
             probed = host.get("lifecycle_probed_count", 0)
             if probed:
@@ -1286,27 +1251,14 @@ def render_human(report: dict[str, Any]) -> str:
                 host_line += f"; lifecycle {probed - attention}/{probed} operable"
             lines.append(host_line)
             for runtime in host["stragglers"]:
-                heartbeat = runtime["heartbeat"]
                 lines.append(
                     f"    STRAGGLER {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
-                    f"{runtime['version_label']}; heartbeat {heartbeat['freshness']} "
-                    f"({human_age(heartbeat['age_seconds'])} old)"
+                    f"{runtime['version_label']}"
                 )
             for runtime in host["unlinked"]:
                 lines.append(
                     f"    UNKNOWN-LINK {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
                     f"{runtime['version_label']}"
-                )
-            straggler_ids = {
-                runtime["agent_runtime_id"] for runtime in host["stragglers"]
-            }
-            for runtime in host["non_fresh_heartbeats"]:
-                if runtime["agent_runtime_id"] in straggler_ids:
-                    continue
-                heartbeat = runtime["heartbeat"]
-                lines.append(
-                    f"    HEARTBEAT {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
-                    f"{heartbeat['freshness']} ({human_age(heartbeat['age_seconds'])} old)"
                 )
             for runtime in host.get("lifecycle_attention", []):
                 lifecycle = runtime["lifecycle"]
@@ -1317,7 +1269,6 @@ def render_human(report: dict[str, Any]) -> str:
                 )
     else:
         lines.append(f"  {fleet.get('error', 'unavailable')}")
-    lines.append("  heartbeat timestamps are staleness signals, not lifecycle proof")
     lines.append("")
 
     health = sections["host_health"]

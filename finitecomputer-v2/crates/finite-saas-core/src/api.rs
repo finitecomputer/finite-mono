@@ -201,7 +201,6 @@ pub struct RegisterAgentCreationRuntimeRequest {
     pub contact_endpoint: Option<String>,
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -946,11 +945,6 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(cancel_agent_creation_request),
         )
         .route("/api/core/v1/me/projects", get(projects))
-        .route("/api/finite/v1/heartbeat", post(runtime_heartbeat))
-        .route(
-            "/api/finite/v1/machines/{machine_id}/heartbeat",
-            get(runtime_heartbeat_for_machine),
-        )
         .with_state(state)
 }
 
@@ -2133,7 +2127,6 @@ async fn register_agent_creation_runtime(
                 provider_runtime_handle: input.provider_runtime_handle,
                 contact_endpoint: input.contact_endpoint,
                 runtime_capabilities: Some(runtime_capabilities),
-                runtime_relay_token_hash: input.runtime_relay_token_hash,
                 display_name: input.display_name,
                 hostname: input.hostname,
                 runtime_host: input.runtime_host,
@@ -2209,30 +2202,6 @@ async fn cancel_agent_creation_request(
                 request_id,
                 now: input.now,
             })
-            .await?,
-    ))
-}
-
-async fn runtime_heartbeat(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    let token =
-        bearer_token(&headers).ok_or_else(|| ApiError::unauthorized("missing runtime token"))?;
-    let heartbeat = state.store.record_runtime_heartbeat(&token).await?;
-    Ok(Json(heartbeat))
-}
-
-async fn runtime_heartbeat_for_machine(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    let _credential = require_runner_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .runtime_heartbeat_for_machine(&machine_id)
             .await?,
     ))
 }
@@ -2625,8 +2594,6 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingAgentCreationLeaseToken
             | CoreError::InvalidAgentCreationLeaseDuration
             | CoreError::MissingSourceMachineId
-            | CoreError::MissingRuntimeRelayTokenHash
-            | CoreError::MissingRuntimeRelayToken
             | CoreError::MissingRuntimeArtifactId
             | CoreError::MissingRuntimeArtifactReference
             | CoreError::MissingRuntimeArtifactVersionLabel
@@ -2645,7 +2612,6 @@ impl From<CoreError> for ApiError {
                 correlation_id: None,
             },
             CoreError::AgentCreationRequestNotFound
-            | CoreError::RuntimeHeartbeatNotFound
             | CoreError::RuntimeArtifactNotFound
             | CoreError::ProjectNotFound
             | CoreError::ProjectRuntimeNotFound
@@ -2655,9 +2621,7 @@ impl From<CoreError> for ApiError {
             | CoreError::FinitePrivateLimitProfileNotFound
             | CoreError::FinitePrivateReservationNotFound
             | CoreError::LaunchCodeBatchNotFound => Self::not_found(error.to_string()),
-            CoreError::InvalidRuntimeRelayToken | CoreError::InvalidFinitePrivateApiKey => {
-                Self::unauthorized(error.to_string())
-            }
+            CoreError::InvalidFinitePrivateApiKey => Self::unauthorized(error.to_string()),
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
             CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
             CoreError::AgentCreationEntitlementExhausted
@@ -5521,7 +5485,7 @@ mod tests {
                 let (status, _) = send_json(
                     &app,
                     "GET",
-                    "/api/finite/v1/machines/missing/heartbeat",
+                    "/api/core/v1/runtime-artifacts/missing",
                     headers,
                     None,
                 )
@@ -5531,7 +5495,7 @@ mod tests {
             let (status, _) = send_json(
                 &app,
                 "GET",
-                "/api/finite/v1/machines/missing/heartbeat",
+                "/api/core/v1/runtime-artifacts/missing",
                 &runner,
                 None,
             )

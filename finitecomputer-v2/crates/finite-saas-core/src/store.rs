@@ -28,21 +28,19 @@ use crate::{
     ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
-    RelayHeartbeat, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
-    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
-    RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
-    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
-    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RetryRuntimeControlRequestInput,
+    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
+    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
     append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
     build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
@@ -61,13 +59,13 @@ use crate::{
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
-    runtime_spec_v1, runtime_upgrade_contact_endpoint,
-    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
+    runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
+    should_replace_stripe_subscription, source_import_key, trim_to_option, valid_agent_npub,
+    valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
@@ -677,30 +675,6 @@ impl CoreStore {
         let result = postgres_cancel_agent_creation_request(&*tx, input).await?;
         self.finish(tx).await?;
         Ok(result)
-    }
-
-    pub async fn record_runtime_heartbeat(&self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_record_runtime_heartbeat(&*tx, relay_token).await?;
-        self.finish(tx).await?;
-        Ok(result)
-    }
-
-    pub async fn relay_events_for_runtime(
-        &self,
-        relay_token: &str,
-    ) -> CoreResult<RelayEventsOutput> {
-        let client = self.connection().await?;
-        postgres_relay_events_for_runtime(&**client, relay_token).await
-    }
-
-    pub async fn runtime_heartbeat_for_machine(
-        &self,
-        source_machine_id: &str,
-    ) -> CoreResult<RelayHeartbeat> {
-        let client = self.connection().await?;
-        postgres_runtime_heartbeat_for_machine(&**client, source_machine_id).await
     }
 
     pub async fn claimable_candidates_for_email(
@@ -2107,8 +2081,6 @@ where
     if source_machine_id.is_empty() {
         return Err(CoreError::MissingSourceMachineId);
     }
-    let token_hash = trim_to_option(Some(&input.runtime_relay_token_hash))
-        .ok_or(CoreError::MissingRuntimeRelayTokenHash)?;
     let artifact_id = trim_to_option(input.runtime_artifact_id.as_deref())
         .ok_or(CoreError::MissingRuntimeArtifactId)?;
     let artifact = select_runtime_artifact(client, &artifact_id)
@@ -2241,16 +2213,6 @@ where
         provider_operation.clone()
     };
     upsert_agent_runtime_row(client, &runtime).await?;
-    upsert_runtime_relay_credential_row(
-        client,
-        &RuntimeRelayCredential {
-            agent_runtime_id: runtime_id.clone(),
-            token_hash,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        },
-    )
-    .await?;
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_runtime_registered(client, &input.request_id, &runtime_id, &now)
@@ -2729,90 +2691,6 @@ where
     )
     .await?;
     Ok(key)
-}
-
-async fn postgres_record_runtime_heartbeat<C>(
-    client: &C,
-    relay_token: &str,
-) -> CoreResult<RelayHeartbeat>
-where
-    C: GenericClient + Sync,
-{
-    let now = current_time_iso()?;
-    let token_hash = runtime_relay_token_hash(relay_token)?;
-    let row = client
-        .query_opt(
-            "SELECT runtime.id, runtime.project_id, runtime.source_host_id,
-                    runtime.source_machine_id, runtime.source_import_key,
-                    runtime.runtime_artifact_id, runtime.state_schema_version,
-                    runtime.placement_runner_class, runtime.runtime_resource_class,
-                    runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
-                    runtime.contact_endpoint, runtime.runtime_capabilities,
-                    runtime.host_facts, core_rfc3339(runtime.created_at) AS created_at, core_rfc3339(runtime.updated_at) AS updated_at
-             FROM runtime_relay_credentials AS credential
-             JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
-             WHERE credential.token_hash = $1
-             FOR UPDATE OF runtime",
-            &[&token_hash],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-    let mut runtime = agent_runtime_from_row(&row)?;
-    runtime.host_facts.runtime_status = RuntimeSummaryStatus::Online;
-    runtime.updated_at = now.clone();
-    upsert_agent_runtime_row(client, &runtime).await?;
-    upsert_runtime_status_snapshot_row(
-        client,
-        &RuntimeStatusSnapshot {
-            agent_runtime_id: runtime.id.clone(),
-            status: RuntimeSummaryStatus::Online,
-            last_heartbeat_at: Some(now.clone()),
-            runtime_host: runtime.host_facts.runtime_host.clone(),
-            active_inference_profile: runtime.host_facts.active_inference_profile.clone(),
-            hermes_available: runtime.host_facts.hermes_available,
-            updated_at: now.clone(),
-        },
-    )
-    .await?;
-    Ok(RelayHeartbeat {
-        ok: true,
-        machine_id: runtime.source_machine_id,
-        last_seen_at: now,
-    })
-}
-
-async fn postgres_runtime_heartbeat_for_machine<C>(
-    client: &C,
-    source_machine_id: &str,
-) -> CoreResult<RelayHeartbeat>
-where
-    C: GenericClient + Sync,
-{
-    let source_machine_id = normalize_id_part(source_machine_id);
-    if source_machine_id.is_empty() {
-        return Err(CoreError::MissingSourceMachineId);
-    }
-    let row = client
-        .query_opt(
-            "SELECT runtime.source_machine_id, core_rfc3339(snapshot.last_heartbeat_at) AS last_heartbeat_at
-             FROM agent_runtimes AS runtime
-             JOIN runtime_status_snapshots AS snapshot ON snapshot.agent_runtime_id = runtime.id
-             WHERE runtime.source_machine_id = $1
-               AND snapshot.status = 'online'
-               AND snapshot.last_heartbeat_at IS NOT NULL
-             ORDER BY snapshot.last_heartbeat_at DESC
-             LIMIT 1",
-            &[&source_machine_id],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::RuntimeHeartbeatNotFound)?;
-    Ok(RelayHeartbeat {
-        ok: true,
-        machine_id: row.get("source_machine_id"),
-        last_seen_at: row.get("last_heartbeat_at"),
-    })
 }
 
 async fn postgres_visible_projects_for_workos_user<C>(
@@ -4026,68 +3904,6 @@ where
                 &host_facts,
                 &runtime.created_at,
                 &runtime.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn upsert_runtime_relay_credential_row<C>(
-    client: &C,
-    credential: &RuntimeRelayCredential,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO runtime_relay_credentials (agent_runtime_id, token_hash, created_at, updated_at)
-             VALUES ($1, $2, $3::text::timestamptz, $4::text::timestamptz)
-             ON CONFLICT (agent_runtime_id) DO UPDATE SET
-               token_hash = EXCLUDED.token_hash,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &credential.agent_runtime_id,
-                &credential.token_hash,
-                &credential.created_at,
-                &credential.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn upsert_runtime_status_snapshot_row<C>(
-    client: &C,
-    snapshot: &RuntimeStatusSnapshot,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO runtime_status_snapshots (
-               agent_runtime_id, status, last_heartbeat_at, runtime_host,
-               active_inference_profile, hermes_available, updated_at
-             )
-             VALUES ($1, $2, $3::text::timestamptz, $4, $5, $6, $7::text::timestamptz)
-             ON CONFLICT (agent_runtime_id) DO UPDATE SET
-               status = EXCLUDED.status,
-               last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-               runtime_host = EXCLUDED.runtime_host,
-               active_inference_profile = EXCLUDED.active_inference_profile,
-               hermes_available = EXCLUDED.hermes_available,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &snapshot.agent_runtime_id,
-                &snapshot.status.as_str(),
-                &snapshot.last_heartbeat_at,
-                &snapshot.runtime_host,
-                &snapshot.active_inference_profile,
-                &snapshot.hermes_available,
-                &snapshot.updated_at,
             ],
         )
         .await
@@ -6686,31 +6502,6 @@ where
         .await
         .map_err(store_error)?;
     runtime_artifact_from_row(&row)
-}
-
-async fn postgres_relay_events_for_runtime<C>(
-    client: &C,
-    relay_token: &str,
-) -> CoreResult<RelayEventsOutput>
-where
-    C: GenericClient + Sync,
-{
-    let token_hash = runtime_relay_token_hash(relay_token)?;
-    let row = client
-        .query_opt(
-            "SELECT runtime.source_machine_id
-             FROM runtime_relay_credentials AS credential
-             JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
-             WHERE credential.token_hash = $1",
-            &[&token_hash],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-    Ok(RelayEventsOutput {
-        machine_id: row.get("source_machine_id"),
-        events: Vec::new(),
-    })
 }
 
 async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<AdminRuntimeOverview>>
@@ -9834,7 +9625,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: "relocation-relay-token-hash".to_string(),
                     display_name: Some("Relocation Canary".to_string()),
                     hostname: None,
                     runtime_host: Some(target_host.to_string()),
@@ -9912,7 +9702,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: "relocation-retry-relay-token-hash".to_string(),
                     display_name: Some("Relocation Canary".to_string()),
                     hostname: None,
                     runtime_host: Some(target_host.to_string()),
@@ -10709,7 +10498,6 @@ mod tests {
                 FinitePrivateApiKeyStatus::Active
             );
 
-            let runtime_token = "runtime-row-native-token";
             store
                 .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                     request_id: lease.request.id.clone(),
@@ -10722,7 +10510,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: None,
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("row-native-host".to_string()),
@@ -10734,14 +10521,6 @@ mod tests {
                 })
                 .await
                 .unwrap();
-
-            let heartbeat = store.record_runtime_heartbeat(runtime_token).await.unwrap();
-            assert_eq!(heartbeat.machine_id, "row-native-agent-001");
-            let observed = store
-                .runtime_heartbeat_for_machine("row-native-agent-001")
-                .await
-                .unwrap();
-            assert_eq!(observed.machine_id, "row-native-agent-001");
 
             let completed = store
                 .complete_agent_creation_request(CompleteAgentCreationRequestInput {
@@ -12791,7 +12570,6 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let runtime_token = "runtime-golden-token";
             store
                 .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                     request_id: lease.request.id.clone(),
@@ -12804,7 +12582,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: None,
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(source_host_id.clone()),

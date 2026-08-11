@@ -261,8 +261,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 RunOnceConfig {
                     runner_id,
                     lease_seconds,
-                    runtime_ready_timeout,
-                    runtime_ready_interval,
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
@@ -325,8 +323,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 RunOnceConfig {
                     runner_id,
                     lease_seconds,
-                    runtime_ready_timeout,
-                    runtime_ready_interval,
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
@@ -387,8 +383,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 RunOnceConfig {
                     runner_id,
                     lease_seconds,
-                    runtime_ready_timeout,
-                    runtime_ready_interval,
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
@@ -429,8 +423,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 RunOnceConfig {
                     runner_id,
                     lease_seconds,
-                    runtime_ready_timeout,
-                    runtime_ready_interval,
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
@@ -481,8 +473,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 RunOnceConfig {
                     runner_id,
                     lease_seconds,
-                    runtime_ready_timeout,
-                    runtime_ready_interval,
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
@@ -549,8 +539,6 @@ fn serve() -> Result<()> {
 struct RunOnceConfig {
     runner_id: String,
     lease_seconds: i64,
-    runtime_ready_timeout: Duration,
-    runtime_ready_interval: Duration,
     finite_private_base_url: String,
     finite_private_model: String,
     finite_private_api_key_override: Option<String>,
@@ -587,8 +575,7 @@ where
         ),
     })
     .with_runtime_environment(config.runtime_environment)?
-    .with_runtime_secret_environment(config.runtime_secret_environment)?
-    .with_runtime_ready_polling(config.runtime_ready_timeout, config.runtime_ready_interval);
+    .with_runtime_secret_environment(config.runtime_secret_environment)?;
     if let Some(identity_authority) = config.agent_identity_authority {
         runner = runner.with_agent_identity_authority(identity_authority)?;
     }

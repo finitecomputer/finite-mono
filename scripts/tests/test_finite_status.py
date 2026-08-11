@@ -59,7 +59,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
@@ -230,7 +230,6 @@ class FiniteStatusTests(unittest.TestCase):
             "agent_name": runtime,
             "version_label": "v2",
             "link_state": link_state,
-            "last_heartbeat_at": "2026-08-01T00:00:00Z",
         }
 
     def probe_report(self, verdict: str, reason: str | None = None) -> str:
