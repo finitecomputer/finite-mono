@@ -648,18 +648,19 @@ async function assertPersonalAgent(
   const roster = brain.locator("#personalBrainAgentRosterList");
   await assertEventually(
     async () => {
-      const renderedAgentAccess = [
-        await current.textContent(),
-        await roster.textContent(),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return renderedAgentAccess.includes(expectedAgentEmail);
+      const currentText = (await current.textContent())?.trim() || "";
+      if (await roster.isVisible()) {
+        const rosterText = (await roster.textContent())?.toLowerCase() || "";
+        return (
+          /\b\d+ current account agents?\b/i.test(currentText) &&
+          rosterText.includes(expectedAgentEmail)
+        );
+      }
+      return currentText.toLowerCase().includes(expectedAgentEmail);
     },
     30_000,
     async () =>
-      `Personal Agent did not resolve to ${expectedAgentEmail}: summary=${(await current.textContent())?.trim()} roster=${(await roster.textContent())?.trim()}`,
+      `Personal Agent did not resolve to ${expectedAgentEmail}: mode=${(await roster.isVisible()) ? "authoritative-roster" : "legacy-summary"} summary=${(await current.textContent())?.trim()} roster=${(await roster.textContent())?.trim()}`,
   );
   assert.equal(
     await brain.locator("#personalAgentEmailInput").getAttribute("placeholder"),
