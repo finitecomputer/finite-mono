@@ -115,16 +115,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
 
       - name: Install Rust
-        # Pinned to 1.93: 1.88's clippy trips uninlined_format_args on v2
+        # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
         # crates, and floating stable (1.96 today) trips new let-chain lints
-        # in devfinity. 1.93 is verified clean across the whole workspace.
+        # in devfinity. 1.93.1 is verified clean across the whole workspace.
         # Bump deliberately (run clippy locally first), don't float.
         # MSRV (rust-version 1.88) is still exercised by the release builds.
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.93.1"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -191,6 +195,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - uses: Swatinem/rust-cache@v2
 
       - name: Device parity and Electron boundary gates
@@ -290,6 +298,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - name: Skills check
         run: nix develop --command just skills check
       - name: Brain product language check
@@ -407,6 +419,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - uses: Swatinem/rust-cache@v2
       - name: Prebuild stack binaries
         # devfinity's readiness window is shorter than a cold compile of the
