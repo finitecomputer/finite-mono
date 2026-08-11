@@ -287,14 +287,44 @@ fn hash_named_persist_for_a_different_container_id_is_stale() {
 }
 
 #[test]
-fn machine_named_state_root_is_a_mismatch_not_an_expectation() {
-    // The pre-fix probe expected the durable root to be machine-named. On the
-    // real fleet that layout is wrong, so a machine-named bind must still
-    // fail closed as provider_handle_mismatch (with the observed mount as
-    // evidence), never silently pass.
+fn own_machine_named_legacy_root_is_operable_with_loud_evidence() {
+    // Pre-runtime-id-era runtimes (one live case in the fleet) keep their durable root
+    // named by the source machine id, and same-volume upgrades preserve that
+    // bind forever. The container's OWN machine-named root is therefore a
+    // legitimate durable root when the runtime-id root does not exist; the
+    // acceptance must be loud in the evidence, never silent.
     let fixture = new_fixture();
     let machine_named_root = fixture.config.work_root.join("kata").join(MACHINE);
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &machine_named_root);
+    fixture.add_task(&container_id(), "RUNNING");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, "qemu-system-x86");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Operable);
+    let canonical = fixture.check(&report, "canonical_handle");
+    assert_eq!(
+        canonical.evidence["legacy_machine_named_root"],
+        true,
+        "legacy acceptance must be recorded; full report:\n{}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+    assert_eq!(
+        canonical.evidence["state_root"].as_str(),
+        Some(machine_named_root.to_str().unwrap())
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn machine_named_root_is_a_mismatch_when_the_runtime_id_root_exists() {
+    // The legacy path stops being valid the moment the runtime-id root
+    // exists on disk: a container still bound to the machine-named root
+    // while the canonical root is present must fail closed.
+    let fixture = new_fixture();
+    let machine_named_root = fixture.config.work_root.join("kata").join(MACHINE);
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &machine_named_root);
+    fs::create_dir_all(fixture.state_root()).unwrap();
 
     let report = fixture.probe();
     assert_verdict(&report, LifecycleVerdict::Inoperable);
@@ -313,6 +343,26 @@ fn machine_named_state_root_is_a_mismatch_not_an_expectation() {
         canonical.evidence["observed_data_mounts"][0].as_str(),
         Some(machine_named_root.to_str().unwrap())
     );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn foreign_machine_named_root_is_still_a_mismatch() {
+    // A machine-named root belonging to a DIFFERENT container is never a
+    // durable bind for this one, whether or not the runtime-id root exists.
+    let fixture = new_fixture();
+    let foreign_root = fixture
+        .config
+        .work_root
+        .join("kata")
+        .join("finite-kata-somebody-else");
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &foreign_root);
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
+    assert_eq!(report.reason.as_deref(), Some("provider_handle_mismatch"));
+    let canonical = fixture.check(&report, "canonical_handle");
+    assert_eq!(canonical.evidence["durable_bind_ok"], false);
     fixture.assert_nothing_mutated();
 }
 
