@@ -195,10 +195,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - uses: Swatinem/rust-cache@v2
 
       - name: Device parity and Electron boundary gates
