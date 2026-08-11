@@ -297,6 +297,7 @@ pub(crate) async fn brain_metadata_handler(
         store.load_brain(&brain_id)?
     };
     ensure_metadata_visible(&stored, &actor_npub)?;
+    let actor_is_admin = ensure_brain_admin(&stored, &actor_npub).is_ok();
     let mounted_folders = {
         let store = state.store.lock().map_err(lock_error)?;
         store.mounted_folder_projection(&brain_id, &UserId::new(actor_npub.clone())?)?
@@ -306,6 +307,9 @@ pub(crate) async fn brain_metadata_handler(
     {
         let store = state.store.lock().map_err(lock_error)?;
         enrich_metadata_identities(&store, &mut response)?;
+        if actor_is_admin {
+            attach_pending_approvals(&store, &mut response, &brain_id)?;
+        }
     }
     Ok(Json(response))
 }

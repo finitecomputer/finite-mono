@@ -1,5 +1,5 @@
 use crate::*;
-use finite_brain_store::{StoredInvitationPlan, StoredPlanAgent, StoredPlanExclusion};
+use finite_brain_store::{ProvenanceOriginKind, StoredInvitationPlan, StoredPlanAgent, StoredPlanExclusion};
 
 const PLAN_COMMIT_WINDOW_SECONDS: u64 = 15 * 60;
 const COMMIT_INVITATION_EXPIRY_SECONDS: u64 = 14 * 24 * 60 * 60;
@@ -470,6 +470,60 @@ pub(crate) async fn commit_brain_invitation_handler(
         ));
     }
 
+    match execute_invitation_plan_commit(
+        &state,
+        &brain_id,
+        &actor_user_id,
+        &plan,
+        request.reduced_set,
+        PlanCommitOrigin::Direct,
+        None,
+    )
+    .await?
+    {
+        PlanCommitResult::Committed(response) => Ok(Json(response).into_response()),
+        PlanCommitResult::Drifted(preflight) => {
+            Ok((StatusCode::CONFLICT, Json(preflight)).into_response())
+        }
+    }
+}
+
+/// How one plan commit was authorized: directly by the inviting admin, or by
+/// a signed Approval artifact (ADR-0046).
+pub(crate) enum PlanCommitOrigin {
+    Direct,
+    Approval { approval_event_id: String },
+}
+
+/// Approval artifact bookkeeping applied inside the commit critical section.
+pub(crate) struct ApprovalExecutionContext {
+    pub nonce: String,
+    pub approval_event_id: String,
+    pub signer_npub: UserId,
+    pub request_id: Option<String>,
+}
+
+/// Plan commit outcome shared by the direct route and the Approval route.
+pub(crate) enum PlanCommitResult {
+    Committed(InvitationCommitResponse),
+    /// The roster drifted; carry the fresh preflight persisted for retry.
+    Drifted(InvitationPreflightResponse),
+}
+
+/// Shared plan commit execution: re-verify the roster, write one npub-bound
+/// invitation per included principal, and mark the plan committed. The caller
+/// performs plan existence and shape checks first. When an Approval execution
+/// context is present, the nonce replay guard, nonce record, and request
+/// resolution run inside the same store critical section as the commit.
+pub(crate) async fn execute_invitation_plan_commit(
+    state: &ServerState,
+    brain_id: &BrainId,
+    committer_npub: &UserId,
+    plan: &StoredInvitationPlan,
+    reduced_set: Option<Vec<String>>,
+    origin: PlanCommitOrigin,
+    approval: Option<ApprovalExecutionContext>,
+) -> Result<PlanCommitResult, ApiError> {
     // Re-verify the roster: on revision drift, refuse to commit the stale plan
     // and answer with a fresh preflight instead.
     if let Some(workos_user_id) = plan.workos_user_id.as_deref() {
@@ -495,18 +549,17 @@ pub(crate) async fn commit_brain_invitation_handler(
             Some(roster) => Some(roster.roster_revision) != plan.roster_revision,
         };
         if drifted {
-            let resolution = resolve_invitation_plan(&state, &plan.human_email).await?;
-            let fresh = persist_invitation_plan(&state, &brain_id, &actor_user_id, resolution)?;
-            return Ok((
-                StatusCode::CONFLICT,
-                Json(preflight_response(fresh, Some(plan.id))),
-            )
-                .into_response());
+            let resolution = resolve_invitation_plan(state, &plan.human_email).await?;
+            let fresh = persist_invitation_plan(state, brain_id, &plan.inviter_npub, resolution)?;
+            return Ok(PlanCommitResult::Drifted(preflight_response(
+                fresh,
+                Some(plan.id.clone()),
+            )));
         }
     }
 
-    let mut reduced_set = BTreeSet::new();
-    for email in request.reduced_set.unwrap_or_default() {
+    let mut reduced = BTreeSet::new();
+    for email in reduced_set.unwrap_or_default() {
         let email = canonical_email(&email)?;
         if !plan
             .agents
@@ -518,7 +571,7 @@ pub(crate) async fn commit_brain_invitation_handler(
                 "reducedSet contains a participant outside the plan",
             ));
         }
-        reduced_set.insert(email);
+        reduced.insert(email);
     }
 
     let mut included: Vec<(String, String)> = Vec::new();
@@ -526,7 +579,7 @@ pub(crate) async fn commit_brain_invitation_handler(
         included.push((plan.human_email.clone(), human_npub.as_str().to_owned()));
     }
     for agent in &plan.agents {
-        if reduced_set.contains(&agent.managed_agent_email) {
+        if reduced.contains(&agent.managed_agent_email) {
             continue;
         }
         if let Some(agent_npub) = agent.agent_npub.as_ref() {
@@ -540,17 +593,31 @@ pub(crate) async fn commit_brain_invitation_handler(
         ));
     }
 
-    let created_at = server_timestamp(&state);
-    let invitation_expires_at = timestamp_plus_seconds(&state, COMMIT_INVITATION_EXPIRY_SECONDS);
+    let (origin_kind, origin_ref) = match &origin {
+        PlanCommitOrigin::Direct => (ProvenanceOriginKind::Invitation, plan.id.clone()),
+        PlanCommitOrigin::Approval { approval_event_id } => {
+            (ProvenanceOriginKind::Approval, approval_event_id.clone())
+        }
+    };
+    let created_at = server_timestamp(state);
+    let invitation_expires_at = timestamp_plus_seconds(state, COMMIT_INVITATION_EXPIRY_SECONDS);
     let mut invitations = Vec::new();
     let mut skipped = Vec::new();
     {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_brain(&brain_id)?;
-        ensure_brain_admin(&stored, actor_user_id.as_str())?;
+        let stored = store.load_brain(brain_id)?;
+        ensure_brain_admin(&stored, committer_npub.as_str())?;
+        if let Some(approval) = approval.as_ref()
+            && store.approval_nonce_seen(brain_id, &approval.nonce)?
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "approval nonce was already applied",
+            ));
+        }
         for (index, (ref_, npub)) in included.iter().enumerate() {
             let target = UserId::new(npub.clone())?;
-            if store.member_exists(&brain_id, &target)? {
+            if store.member_exists(brain_id, &target)? {
                 skipped.push(CommitSkippedPrincipal {
                     ref_: ref_.clone(),
                     reason: "already a brain member".to_owned(),
@@ -583,20 +650,21 @@ pub(crate) async fn commit_brain_invitation_handler(
             );
             let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
             let invitation = store.create_brain_invitation_with_provenance(
-                &brain_id,
+                brain_id,
                 &id,
                 &target,
                 &invite_code,
                 &accept_path,
                 &[],
-                &actor_user_id,
+                committer_npub,
                 &invitation_expires_at,
                 &created_at,
-                Some(plan.id.as_str()),
+                Some(origin_ref.as_str()),
                 plan.roster_revision,
+                origin_kind,
             )?;
             let mut response = brain_invitation_response(invitation);
-            attach_invitation_public_url(&state, &mut response);
+            attach_invitation_public_url(state, &mut response);
             invitations.push(CommittedPrincipalInvitation {
                 ref_: ref_.clone(),
                 npub: npub.clone(),
@@ -604,16 +672,34 @@ pub(crate) async fn commit_brain_invitation_handler(
             });
         }
         store.mark_brain_invitation_plan_committed(&plan.id, &created_at)?;
+        if let Some(approval) = approval.as_ref() {
+            store.record_brain_approval_nonce(
+                brain_id,
+                &approval.nonce,
+                &approval.approval_event_id,
+                &approval.signer_npub,
+                finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT,
+                &created_at,
+            )?;
+            if let Some(request_id) = approval.request_id.as_deref() {
+                store.resolve_brain_approval_request(
+                    request_id,
+                    finite_brain_store::ApprovalRequestStatus::Approved,
+                    Some(approval.approval_event_id.as_str()),
+                    &approval.signer_npub,
+                    &created_at,
+                )?;
+            }
+        }
     }
 
-    Ok(Json(InvitationCommitResponse {
+    Ok(PlanCommitResult::Committed(InvitationCommitResponse {
         status: "committed".to_owned(),
-        plan_id: plan.id,
+        plan_id: plan.id.clone(),
         roster_revision: plan.roster_revision,
         invitations,
         skipped,
-    })
-    .into_response())
+    }))
 }
 
 /// Re-check the account roster when a plan-linked invitation is accepted or
@@ -624,12 +710,40 @@ pub(crate) async fn check_invitation_acceptance_narrowing(
     invitation: &StoredBrainInvitation,
     actor: &UserId,
 ) -> Result<Option<NarrowedAcceptanceResponse>, ApiError> {
-    let Some(plan_id) = invitation.origin_ref.as_deref() else {
-        return Ok(None);
-    };
+    // Approval-committed invitations carry the approval event id as their
+    // origin ref; the stored Approval request links that event back to the
+    // plan it authorized.
     let plan = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_brain_invitation_plan(plan_id)?
+        match invitation.origin_kind {
+            ProvenanceOriginKind::Approval => {
+                let Some(event_id) = invitation.origin_ref.as_deref() else {
+                    return Ok(None);
+                };
+                let request =
+                    store.load_brain_approval_request_by_event_id(&invitation.brain_id, event_id)?;
+                let Some(request) = request else {
+                    return Ok(None);
+                };
+                let payload: UnsignedBrainApprovalPayload =
+                    serde_json::from_str(&request.payload_json).map_err(|_| {
+                        ApiError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "stored approval request payload is corrupt",
+                        )
+                    })?;
+                let Some(plan_id) = payload.plan_id.as_deref() else {
+                    return Ok(None);
+                };
+                store.load_brain_invitation_plan(plan_id)?
+            }
+            _ => {
+                let Some(plan_id) = invitation.origin_ref.as_deref() else {
+                    return Ok(None);
+                };
+                store.load_brain_invitation_plan(plan_id)?
+            }
+        }
     };
     let Some(plan) = plan else {
         return Ok(None);

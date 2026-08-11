@@ -3,50 +3,62 @@ use crate::*;
 impl BrainStore {
     pub(crate) fn apply_migrations(&mut self) -> Result<(), StoreError> {
         self.apply_migrations_through_v22()?;
-        {
+        let v23_applied = {
             let tx = self.conn.transaction()?;
-            if migration_applied(&tx, 23)? {
-                tx.commit()?;
-                return Ok(());
-            }
+            let applied = migration_applied(&tx, 23)?;
             tx.commit()?;
+            applied
+        };
+        if !v23_applied {
+            // SCHEMA_V23 rebuilds folder_key_grants and brain_members to extend
+            // their provenance origin CHECKs. The rebuild is only safe with
+            // legacy_alter_table=ON (so the RENAMEs do not rewrite folder_access
+            // and brain_admins foreign keys toward the retired table names) and
+            // foreign_keys=OFF (so the DROPs do not cascade into those children).
+            // Neither pragma can change inside a transaction, so V23 runs as its
+            // own guarded step outside the main migration transaction.
+            self.conn.pragma_update(None, "legacy_alter_table", "ON")?;
+            self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let result = (|| -> Result<(), StoreError> {
+                let tx = self.conn.transaction()?;
+                tx.execute_batch(SCHEMA_V23)?;
+                tx.execute(
+                    "INSERT INTO brain_departure_fact_cursor (id, last_applied_revision, updated_at) VALUES (1, 0, ?1)",
+                    params![MIGRATION_TIMESTAMP],
+                )?;
+                tx.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![23, MIGRATION_TIMESTAMP],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            self.conn.pragma_update(None, "foreign_keys", "ON")?;
+            self.conn.pragma_update(None, "legacy_alter_table", "OFF")?;
+            result?;
+            let violations: i64 =
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })?;
+            if violations > 0 {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "schema V23 table rebuild left foreign key violations".to_owned(),
+                });
+            }
         }
-        // SCHEMA_V23 rebuilds folder_key_grants and brain_members to extend
-        // their provenance origin CHECKs. The rebuild is only safe with
-        // legacy_alter_table=ON (so the RENAMEs do not rewrite folder_access
-        // and brain_admins foreign keys toward the retired table names) and
-        // foreign_keys=OFF (so the DROPs do not cascade into those children).
-        // Neither pragma can change inside a transaction, so V23 runs as its
-        // own guarded step outside the main migration transaction.
-        self.conn.pragma_update(None, "legacy_alter_table", "ON")?;
-        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
-        let result = (|| -> Result<(), StoreError> {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(SCHEMA_V23)?;
-            tx.execute(
-                "INSERT INTO brain_departure_fact_cursor (id, last_applied_revision, updated_at) VALUES (1, 0, ?1)",
-                params![MIGRATION_TIMESTAMP],
-            )?;
+
+        // V24 is additive only (one new column with a default plus new
+        // tables), so it runs inside an ordinary migration transaction.
+        let tx = self.conn.transaction()?;
+        if !migration_applied(&tx, 24)? {
+            tx.execute_batch(SCHEMA_V24)?;
             tx.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                params![23, MIGRATION_TIMESTAMP],
+                params![24, MIGRATION_TIMESTAMP],
             )?;
-            tx.commit()?;
-            Ok(())
-        })();
-        self.conn.pragma_update(None, "foreign_keys", "ON")?;
-        self.conn.pragma_update(None, "legacy_alter_table", "OFF")?;
-        result?;
-        let violations: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get(0)
-                })?;
-        if violations > 0 {
-            return Err(StoreError::BrokenInvariant {
-                reason: "schema V23 table rebuild left foreign key violations".to_owned(),
-            });
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -256,6 +268,54 @@ impl BrainStore {
         Ok(())
     }
 }
+
+const SCHEMA_V24: &str = r#"
+-- ADR-0046 Approval artifacts: npub-bound invitations remember whether they
+-- were committed directly by an admin ('invitation') or through a signed
+-- finite-brain-approval-v1 Approval Card ('approval'). Existing rows stay
+-- 'invitation', matching the provenance their accepts already stamp.
+ALTER TABLE brain_invitations
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'invitation'
+CHECK (origin_kind IN ('invitation', 'approval'));
+
+-- Pending human Approval requests: an agent or the UI submits the action
+-- payload, the server mints the nonce and expiry, and a human key holder
+-- signs exactly this payload. The request row is the durable link from the
+-- signed approval event id back to the plan it committed.
+CREATE TABLE brain_approval_requests (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('invite-commit', 'delegation-grant')),
+    payload_json TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    requested_by_npub TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied')),
+    approval_event_id TEXT,
+    resolved_by_npub TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (brain_id, nonce),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX brain_approval_requests_by_event
+    ON brain_approval_requests(brain_id, approval_event_id);
+
+-- Replay protection for applied Approvals: one row per consumed
+-- (brain_id, nonce), recorded in the same critical section as the mutation
+-- the approval authorized.
+CREATE TABLE brain_approval_nonces (
+    brain_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    approval_event_id TEXT NOT NULL,
+    signer_npub TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('invite-commit', 'delegation-grant')),
+    applied_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, nonce),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
 
 const SCHEMA_V23: &str = r#"
 -- ADR-0046 Permanent Departure Facts. Brain consumes Core's durable,
@@ -1923,7 +1983,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 23);
+        assert_eq!(latest_version, 24);
 
         let old_table_count: i64 = store
             .conn

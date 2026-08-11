@@ -648,6 +648,18 @@ fn normal_signed_api_router() -> Router<ServerState> {
             post(commit_brain_invitation_handler),
         )
         .route(
+            "/brains/{brain_id}/approval-requests",
+            get(list_approval_requests_handler).post(create_approval_request_handler),
+        )
+        .route(
+            "/brains/{brain_id}/approval-requests/{request_id}/deny",
+            post(deny_approval_request_handler),
+        )
+        .route(
+            "/brains/{brain_id}/approvals",
+            post(submit_approval_handler),
+        )
+        .route(
             "/brain-invitation-links/{invite_code}",
             get(get_brain_invitation_link_handler),
         )
@@ -2091,6 +2103,7 @@ where
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
         enrich_metadata_identities(&store, &mut response)?;
+        attach_pending_approvals(&store, &mut response, &brain_id)?;
         response
     };
     Ok(response)
@@ -3038,6 +3051,7 @@ mod tests {
             updated_at: "2026-07-07T12:00:00Z".to_owned(),
             accepted_at: None,
             origin_ref: None,
+            origin_kind: finite_brain_store::ProvenanceOriginKind::Invitation,
             roster_revision: None,
             duplicate_accept: false,
         };
@@ -12168,5 +12182,753 @@ mod tests {
         let handle = spawn_departure_fact_consumer(&state)
             .expect("consumer spawns when authorities are configured");
         handle.abort();
+    }
+
+    fn approval_test_state(admin_keys: &Keys) -> ServerState {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let admin_npub = npub(admin_keys);
+        let output = bootstrap_organization_brain("acme", "Acme", &admin_npub).unwrap();
+        let brain_id = output.brain.id.clone();
+        let grants = grants_for_required(&output.required_key_grants, &brain_id, &admin_npub);
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn signed_approval_event_json(
+        keys: &Keys,
+        payload: &finite_brain_core::BrainApprovalPayload,
+    ) -> String {
+        let template = finite_brain_core::brain_approval_event_template(payload, TEST_NOW).unwrap();
+        let event = finite_brain_core::sign_brain_event_template(keys, &template).unwrap();
+        serde_json::to_string(&event).unwrap()
+    }
+
+    fn delegation_approval_payload(
+        human_npub: &str,
+        target_npubs: Vec<String>,
+        nonce: &str,
+        expires_at: u64,
+    ) -> finite_brain_core::BrainApprovalPayload {
+        finite_brain_core::BrainApprovalPayload {
+            version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: human_npub.to_owned(),
+            action: finite_brain_core::BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+            brain_id: "acme".to_owned(),
+            plan_id: None,
+            target_npubs,
+            nonce: nonce.to_owned(),
+            expires_at,
+        }
+    }
+
+    async fn create_approval_request(
+        router: &Router,
+        keys: &Keys,
+        body: serde_json::Value,
+        created_at: u64,
+    ) -> axum::response::Response {
+        authed_request(
+            router.clone(),
+            keys,
+            "POST",
+            "/v1/brains/acme/approval-requests",
+            Some(body.to_string()),
+            created_at,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn approval_request_lifecycle_is_pending_then_denied_with_requester_scoping() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let state = approval_test_state(&admin_keys);
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .add_member(
+                    &acme_brain_id(),
+                    &UserId::new(npub(&member_keys)).unwrap(),
+                )
+                .unwrap();
+        }
+        let router = router_with_state(state.clone());
+
+        // A member files a delegation-grant request.
+        let created = create_approval_request(
+            &router,
+            &member_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let member_request: ApprovalRequestResponse = read_json(created).await;
+        assert_eq!(member_request.status, "pending");
+        assert_eq!(member_request.action, "delegation-grant");
+        assert_eq!(member_request.requested_by_npub, npub(&member_keys));
+        assert_eq!(member_request.expires_at, TEST_NOW + 900);
+        assert_eq!(member_request.nonce.len(), 32);
+        assert_eq!(member_request.payload["action"], "delegation-grant");
+        assert_eq!(member_request.payload["brainId"], "acme");
+        assert_eq!(member_request.payload["nonce"], member_request.nonce);
+
+        // An admin files a second request; list visibility is scoped.
+        let admin_created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [npub(&Keys::generate())],
+            }),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(admin_created.status(), StatusCode::OK);
+        let admin_request: ApprovalRequestResponse = read_json(admin_created).await;
+
+        let member_list = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        let member_list: ApprovalRequestListResponse = read_json(member_list).await;
+        assert_eq!(member_list.requests.len(), 1);
+        assert_eq!(member_list.requests[0].id, member_request.id);
+        let admin_list = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        let admin_list: ApprovalRequestListResponse = read_json(admin_list).await;
+        assert_eq!(admin_list.requests.len(), 2);
+
+        // Outsiders can neither file, list, nor deny.
+        let outsider_create = create_approval_request(
+            &router,
+            &outsider_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [npub(&Keys::generate())],
+            }),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(outsider_create.status(), StatusCode::FORBIDDEN);
+        let outsider_list = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(outsider_list.status(), StatusCode::FORBIDDEN);
+
+        // The requester denies their own card; terminal state is exactly-once.
+        let denied = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!("/v1/brains/acme/approval-requests/{}/deny", member_request.id),
+            None,
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::OK);
+        let denied: ApprovalRequestResponse = read_json(denied).await;
+        assert_eq!(denied.status, "denied");
+        assert_eq!(denied.resolved_by_npub.as_deref(), Some(npub(&member_keys).as_str()));
+        let deny_again = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!("/v1/brains/acme/approval-requests/{}/deny", member_request.id),
+            None,
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(deny_again.status(), StatusCode::CONFLICT);
+
+        // A member cannot deny another principal's card; an admin can.
+        let member_deny_admin = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!("/v1/brains/acme/approval-requests/{}/deny", admin_request.id),
+            None,
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(member_deny_admin.status(), StatusCode::FORBIDDEN);
+        let admin_deny = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            &format!("/v1/brains/acme/approval-requests/{}/deny", admin_request.id),
+            None,
+            TEST_NOW + 10,
+        )
+        .await;
+        assert_eq!(admin_deny.status(), StatusCode::OK);
+
+        // A denied card can never be approved: its artifact is rejected.
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub],
+            &member_request.nonce,
+            member_request.expires_at,
+        );
+        let artifact = signed_approval_event_json(&admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": member_request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 11,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::CONFLICT);
+
+        // Malformed actions fail closed at request time.
+        for body in [
+            serde_json::json!({ "action": "open-brain" }),
+            serde_json::json!({ "action": "invite-commit" }),
+            serde_json::json!({ "action": "invite-commit", "planId": "plan-missing" }),
+            serde_json::json!({ "action": "delegation-grant" }),
+            serde_json::json!({ "action": "delegation-grant", "targetNpubs": ["not-an-npub"] }),
+        ] {
+            let rejected =
+                create_approval_request(&router, &admin_keys, body.clone(), TEST_NOW + 12).await;
+            assert!(
+                matches!(
+                    rejected.status(),
+                    StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+                ),
+                "{body} must be rejected, got {}",
+                rejected.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_grant_approval_applies_with_provenance_and_replay_guards() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let state = approval_test_state(&admin_keys);
+        let router = router_with_state(state.clone());
+
+        let created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+
+        // The pending card is visible in admin metadata; members do not see it.
+        let metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 2).await;
+        let metadata: serde_json::Value = read_json(metadata).await;
+        assert_eq!(
+            metadata["pendingApprovals"][0]["id"],
+            serde_json::json!(request.id)
+        );
+
+        // The human signs exactly the pending payload and relays it.
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub.clone()],
+            &request.nonce,
+            request.expires_at,
+        );
+        let artifact = signed_approval_event_json(&admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::OK);
+        let applied: ApprovalSubmissionResponse = read_json(submit).await;
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.action, "delegation-grant");
+        assert_eq!(applied.request_id.as_deref(), Some(request.id.as_str()));
+        assert_eq!(
+            applied.result,
+            serde_json::json!({ "grantedNpubs": [target_npub] })
+        );
+
+        // The grant carries approval provenance; the card resolved approved.
+        {
+            let store = state.store.lock().unwrap();
+            let stored = store.load_brain(&acme_brain_id()).unwrap();
+            assert!(stored
+                .brain
+                .admins
+                .contains(&UserId::new(target_npub.clone()).unwrap()));
+            let provenance = store
+                .member_provenance(
+                    &acme_brain_id(),
+                    &UserId::new(target_npub.clone()).unwrap(),
+                )
+                .unwrap()
+                .expect("approval grant provenance is recorded");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::approval(
+                    UserId::new(npub(&admin_keys)).unwrap(),
+                    applied.approval_event_id.clone(),
+                )
+            );
+            let resolved = store.load_brain_approval_request(&request.id).unwrap();
+            assert_eq!(
+                resolved.status,
+                finite_brain_store::ApprovalRequestStatus::Approved
+            );
+            assert_eq!(
+                resolved.approval_event_id.as_deref(),
+                Some(applied.approval_event_id.as_str())
+            );
+            assert!(store.approval_nonce_seen(&acme_brain_id(), &request.nonce).unwrap());
+        }
+
+        // The resolved card leaves the pending list.
+        let metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 4).await;
+        let metadata: serde_json::Value = read_json(metadata).await;
+        assert!(metadata.get("pendingApprovals").is_none());
+
+        // Replay of the same artifact fails closed.
+        let replay = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+
+        // A new request for an existing admin is a conflict, not a no-op.
+        let duplicate = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn approval_submission_rejects_bad_signature_scope_expiry_and_standing() {
+        let admin_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let state = approval_test_state(&admin_keys);
+        let router = router_with_state(state.clone());
+
+        let created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub.clone()],
+            &request.nonce,
+            request.expires_at,
+        );
+
+        // Bad signature: any content tampering breaks event integrity.
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&signed_approval_event_json(&admin_keys, &payload)).unwrap();
+        tampered["content"] =
+            serde_json::json!(tampered["content"].as_str().unwrap().replace("acme", "ecma"));
+        let bad_signature = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": tampered.to_string(),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(bad_signature, StatusCode::BAD_REQUEST, "signature is invalid").await;
+
+        // Wrong scope: a valid artifact for another brain is rejected here.
+        let wrong_scope = finite_brain_core::BrainApprovalPayload {
+            brain_id: "other".to_owned(),
+            ..payload.clone()
+        };
+        let wrong_scope = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &wrong_scope),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_error(wrong_scope, StatusCode::BAD_REQUEST, "different brain").await;
+
+        // Expired artifact: the signed expiry has passed.
+        let expired = finite_brain_core::BrainApprovalPayload {
+            expires_at: TEST_NOW - 1,
+            ..payload.clone()
+        };
+        let expired = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &expired),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_error(expired, StatusCode::GONE, "expired").await;
+
+        // Artifact that does not match the pending request is rejected.
+        let mismatched = finite_brain_core::BrainApprovalPayload {
+            nonce: "ff".repeat(16),
+            ..payload.clone()
+        };
+        let mismatched = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &mismatched),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(mismatched, StatusCode::BAD_REQUEST, "does not match the pending request")
+            .await;
+
+        // A correctly shaped artifact signed by a non-admin human is rejected.
+        let outsider_payload = finite_brain_core::BrainApprovalPayload {
+            human_npub: npub(&outsider_keys),
+            ..payload.clone()
+        };
+        let wrong_signer = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&outsider_keys, &outsider_payload),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_error(wrong_signer, StatusCode::FORBIDDEN, "admin standing").await;
+
+        // None of the rejections consumed the nonce or touched the card.
+        let store = state.store.lock().unwrap();
+        assert!(!store.approval_nonce_seen(&acme_brain_id(), &request.nonce).unwrap());
+        assert_eq!(
+            store.load_brain_approval_request(&request.id).unwrap().status,
+            finite_brain_store::ApprovalRequestStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_commit_approval_executes_commit_with_approval_provenance() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.agents.len(), 2);
+
+        // The agent asks a human to approve committing the plan.
+        let created = create_approval_request(
+            &router,
+            &fixture.admin_keys,
+            serde_json::json!({
+                "action": "invite-commit",
+                "planId": plan.plan_id,
+            }),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+        assert_eq!(request.payload["planId"], serde_json::json!(plan.plan_id));
+
+        // The human signs the invite-commit approval; the relay submits it.
+        let payload = finite_brain_core::BrainApprovalPayload {
+            version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: npub(&fixture.admin_keys),
+            action: finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+            brain_id: "acme".to_owned(),
+            plan_id: Some(plan.plan_id.clone()),
+            target_npubs: Vec::new(),
+            nonce: request.nonce.clone(),
+            expires_at: request.expires_at,
+        };
+        let artifact = signed_approval_event_json(&fixture.admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &fixture.agent_one_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::OK);
+        let applied: ApprovalSubmissionResponse = read_json(submit).await;
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.action, "invite-commit");
+        let commit: InvitationCommitResponse =
+            serde_json::from_value(applied.result.clone()).unwrap();
+        assert_eq!(commit.status, "committed");
+        assert_eq!(commit.plan_id, plan.plan_id);
+        assert_eq!(commit.invitations.len(), 3);
+
+        // The committed invitations carry approval provenance keyed by the
+        // signed artifact's event id.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            for entry in &commit.invitations {
+                let invitation = store.load_brain_invitation(&entry.invitation.id).unwrap();
+                assert_eq!(
+                    invitation.origin_kind,
+                    finite_brain_store::ProvenanceOriginKind::Approval
+                );
+                assert_eq!(
+                    invitation.origin_ref.as_deref(),
+                    Some(applied.approval_event_id.as_str())
+                );
+            }
+            let plan_row = store
+                .load_brain_invitation_plan(&plan.plan_id)
+                .unwrap()
+                .unwrap();
+            assert!(plan_row.committed);
+            assert_eq!(
+                store.load_brain_approval_request(&request.id).unwrap().status,
+                finite_brain_store::ApprovalRequestStatus::Approved
+            );
+        }
+
+        // Acceptance stamps approval member provenance through the request's
+        // durable plan link, with roster narrowing intact.
+        let human_invitation = &commit.invitations[0].invitation;
+        let accept = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                human_invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let provenance = store
+                .member_provenance(
+                    &acme_brain_id(),
+                    &UserId::new(fixture.human_npub()).unwrap(),
+                )
+                .unwrap()
+                .expect("approval-committed acceptance stamps provenance");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::approval(
+                    UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    applied.approval_event_id.clone(),
+                )
+            );
+        }
+
+        // Resubmission and re-request both fail closed.
+        let resubmit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(resubmit.status(), StatusCode::CONFLICT);
+        let re_request = create_approval_request(
+            &router,
+            &fixture.admin_keys,
+            serde_json::json!({
+                "action": "invite-commit",
+                "planId": plan.plan_id,
+            }),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(re_request.status(), StatusCode::CONFLICT);
+
+        // An artifact signed by a non-admin human cannot commit the plan.
+        let outsider_payload = finite_brain_core::BrainApprovalPayload {
+            human_npub: npub(&fixture.human_keys),
+            nonce: "ee".repeat(16),
+            ..payload.clone()
+        };
+        let wrong_signer = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&fixture.human_keys, &outsider_payload),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_error(wrong_signer, StatusCode::FORBIDDEN, "admin standing").await;
     }
 }

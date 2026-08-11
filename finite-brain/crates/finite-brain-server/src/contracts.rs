@@ -59,6 +59,10 @@ pub struct BrainMetadataResponse {
     /// Populated only when the metadata requester is an Organization admin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collaborator_readiness: Vec<CollaboratorReadinessResponse>,
+    /// Pending human Approval cards (ADR-0046). Populated only when the
+    /// metadata requester holds Brain admin standing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<ApprovalRequestResponse>,
 }
 
 /// Brain role and authoritative current Folder Key Grant coverage for one
@@ -756,6 +760,68 @@ pub struct InvitationCommitResponse {
 pub struct NarrowedAcceptanceResponse {
     pub roster_revision: Option<i64>,
     pub exclusions: Vec<InvitationPlanExclusion>,
+}
+
+/// Approval Request creation (ADR-0046): an agent or the UI asks a human key
+/// holder to sign one scoped Brain action.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestCreateRequest {
+    pub action: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub target_npubs: Vec<String>,
+}
+
+/// One stored human Approval request. `payload` is the exact unsigned action
+/// payload the human's hosted key signs; the device fills in `humanNpub`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestResponse {
+    pub id: String,
+    pub brain_id: String,
+    pub action: String,
+    pub payload: serde_json::Value,
+    pub nonce: String,
+    pub expires_at: u64,
+    pub requested_by_npub: String,
+    pub status: String,
+    pub approval_event_id: Option<String>,
+    pub resolved_by_npub: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Approval Request list response.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestListResponse {
+    pub requests: Vec<ApprovalRequestResponse>,
+}
+
+/// Signed `finite-brain-approval-v1` artifact submitted for validation and
+/// execution. `requestId` binds the artifact to one pending Approval Request.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalSubmissionRequest {
+    pub approval_event_json: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// Approval submission outcome.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalSubmissionResponse {
+    pub status: String,
+    pub action: String,
+    pub approval_event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Action-specific result: an Invitation Commit response for
+    /// 'invite-commit', or `{"grantedNpubs": [...]}` for 'delegation-grant'.
+    pub result: serde_json::Value,
 }
 
 /// Request authenticated, post-proof Invite Instructions for an Email Invite Bootstrap.

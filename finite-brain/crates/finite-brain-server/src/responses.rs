@@ -137,6 +137,7 @@ pub(crate) fn metadata_response_with_mounts(
         mounted_folders: mounted_folder_responses(mounted_folders),
         grant_count: stored.grants.len(),
         collaborator_readiness: Vec::new(),
+        pending_approvals: Vec::new(),
     }
 }
 

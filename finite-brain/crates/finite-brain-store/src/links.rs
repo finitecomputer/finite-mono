@@ -6,7 +6,7 @@ const BRAIN_INVITATION_SELECT: &str = r#"
            created_at, updated_at, accepted_at, target_kind, invited_email,
            invite_unwrap_npub, bootstrap_payload_hash, bootstrap_wrapped_event_json,
            bootstrap_authorization_event_json, claimed_by_npub, bootstrap_scope_json
-           , folder_only, origin_ref, roster_revision
+           , folder_only, origin_ref, roster_revision, origin_kind
     FROM brain_invitations
 "#;
 
@@ -37,12 +37,16 @@ impl BrainStore {
             created_at,
             None,
             None,
+            ProvenanceOriginKind::Invitation,
         )
     }
 
     /// Create one npub-bound singleton Brain Invitation committed from an
     /// Invitation Plan, recording the plan id and roster revision so
-    /// acceptance can re-check the roster and narrow only.
+    /// acceptance can re-check the roster and narrow only. `origin_kind`
+    /// distinguishes a direct admin commit from a signed Approval commit;
+    /// approval-committed invitations carry the approval event id as their
+    /// origin ref.
     #[allow(clippy::too_many_arguments)]
     pub fn create_brain_invitation_with_provenance(
         &mut self,
@@ -57,6 +61,7 @@ impl BrainStore {
         created_at: &str,
         origin_ref: Option<&str>,
         roster_revision: Option<i64>,
+        origin_kind: ProvenanceOriginKind,
     ) -> Result<StoredBrainInvitation, StoreError> {
         let stored = self.load_brain(brain_id)?;
         if !has_brain_operational_authority(&stored, created_by_npub) {
@@ -83,9 +88,10 @@ impl BrainStore {
                 INSERT INTO brain_invitations (
                     id, brain_id, user_id, target_kind, status, invite_code, accept_path,
                     initial_folder_access_json, created_by_npub, expires_at,
-                    created_at, updated_at, bootstrap_scope_json, origin_ref, roster_revision
+                    created_at, updated_at, bootstrap_scope_json, origin_ref, roster_revision,
+                    origin_kind
                 )
-                VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]', ?10, ?11)
+                VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]', ?10, ?11, ?12)
                 "#,
                 params![
                     id,
@@ -98,7 +104,8 @@ impl BrainStore {
                     expires_at,
                     created_at,
                     origin_ref,
-                    roster_revision
+                    roster_revision,
+                    origin_kind.as_str(),
                 ],
             )
             .map_err(map_insert_error("brain_invitation_id", id))?;
@@ -853,24 +860,29 @@ impl BrainStore {
 }
 
 fn invitation_member_provenance(invitation: &StoredBrainInvitation) -> MemberProvenance {
-    MemberProvenance::invitation(
-        invitation.created_by_npub.clone(),
-        invitation
-            .origin_ref
-            .clone()
-            .unwrap_or_else(|| invitation.id.clone()),
-    )
+    let delegated_by = invitation.created_by_npub.clone();
+    let origin_ref = invitation
+        .origin_ref
+        .clone()
+        .unwrap_or_else(|| invitation.id.clone());
+    match invitation.origin_kind {
+        ProvenanceOriginKind::Approval => MemberProvenance::approval(delegated_by, origin_ref),
+        _ => MemberProvenance::invitation(delegated_by, origin_ref),
+    }
 }
 
 fn invitation_grant_provenance(invitation: &StoredBrainInvitation) -> GrantProvenance {
-    GrantProvenance::invitation(
-        invitation.created_by_npub.clone(),
-        invitation
-            .origin_ref
-            .clone()
-            .unwrap_or_else(|| invitation.id.clone()),
-        invitation.roster_revision,
-    )
+    let delegated_by = invitation.created_by_npub.clone();
+    let origin_ref = invitation
+        .origin_ref
+        .clone()
+        .unwrap_or_else(|| invitation.id.clone());
+    match invitation.origin_kind {
+        ProvenanceOriginKind::Approval => {
+            GrantProvenance::approval(delegated_by, origin_ref, invitation.roster_revision)
+        }
+        _ => GrantProvenance::invitation(delegated_by, origin_ref, invitation.roster_revision),
+    }
 }
 
 impl BrainStore {

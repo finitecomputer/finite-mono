@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod approvals;
 mod brains;
 mod departure;
 mod folder_access;
@@ -234,6 +235,20 @@ impl GrantProvenance {
             roster_revision,
         }
     }
+
+    /// Provenance for a grant written through a signed Approval Card.
+    pub fn approval(
+        delegated_by_npub: UserId,
+        origin_ref: String,
+        roster_revision: Option<i64>,
+    ) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Approval,
+            origin_ref: Some(origin_ref),
+            roster_revision,
+        }
+    }
 }
 
 /// Provenance stamped on one Brain Membership row.
@@ -262,6 +277,15 @@ impl MemberProvenance {
         Self {
             delegated_by_npub: Some(delegated_by_npub),
             origin_kind: ProvenanceOriginKind::Invitation,
+            origin_ref: Some(origin_ref),
+        }
+    }
+
+    /// Provenance for a membership written through a signed Approval Card.
+    pub fn approval(delegated_by_npub: UserId, origin_ref: String) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Approval,
             origin_ref: Some(origin_ref),
         }
     }
@@ -897,6 +921,8 @@ pub struct StoredBrainInvitation {
     pub accepted_at: Option<String>,
     /// Invitation Plan id this invitation was committed from, when plan-linked.
     pub origin_ref: Option<String>,
+    /// Whether this invitation was committed directly or through an Approval.
+    pub origin_kind: ProvenanceOriginKind,
     /// Account roster revision at commit time, when roster-derived.
     pub roster_revision: Option<i64>,
     /// True when accept returned an already-consumed result for the same target.
@@ -954,6 +980,74 @@ pub struct StoredInvitationPlan {
     pub committed: bool,
     /// Commit-by timestamp.
     pub expires_at: String,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Lifecycle state of one stored human Approval request.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ApprovalRequestStatus {
+    /// Waiting for a human decision.
+    Pending,
+    /// A signed Approval artifact was applied for this request.
+    Approved,
+    /// A human dismissed the request; nothing was signed.
+    Denied,
+}
+
+impl ApprovalRequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+impl TryFrom<&str> for ApprovalRequestStatus {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "denied" => Ok(Self::Denied),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown approval request status {value}"),
+            }),
+        }
+    }
+}
+
+/// Stored human Approval request (ADR-0046): the exact unsigned action payload
+/// a human key holder can sign, plus the server-minted nonce and expiry. The
+/// row is also the durable link from the applied approval event id back to
+/// the action it authorized.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredBrainApprovalRequest {
+    /// Stable request id.
+    pub id: String,
+    /// Brain id.
+    pub brain_id: BrainId,
+    /// Approval action kind ('invite-commit' or 'delegation-grant').
+    pub action: String,
+    /// Canonical unsigned Approval payload JSON (no humanNpub).
+    pub payload_json: String,
+    /// Server-minted replay nonce the signed artifact must carry.
+    pub nonce: String,
+    /// Expiry as unix seconds; the signed artifact carries the same value.
+    pub expires_at_unix: u64,
+    /// Principal who submitted the request.
+    pub requested_by_npub: UserId,
+    /// Lifecycle state.
+    pub status: ApprovalRequestStatus,
+    /// Applied approval event id, once approved.
+    pub approval_event_id: Option<String>,
+    /// Principal who approved or denied the request.
+    pub resolved_by_npub: Option<UserId>,
     /// Creation timestamp.
     pub created_at: String,
     /// Last update timestamp.
@@ -2123,6 +2217,8 @@ fn brain_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
         accepted_at: row.get(11)?,
         origin_ref: row.get(21)?,
         roster_revision: row.get(22)?,
+        origin_kind: ProvenanceOriginKind::try_from(row.get::<_, String>(23)?.as_str())
+            .map_err(to_store_from_sql_error(23, rusqlite::types::Type::Text))?,
         duplicate_accept: false,
     })
 }
@@ -4671,9 +4767,11 @@ mod tests {
                 now,
                 Some("plan-roster-1"),
                 Some(7),
+                ProvenanceOriginKind::Invitation,
             )
             .unwrap();
         assert_eq!(invitation.origin_ref.as_deref(), Some("plan-roster-1"));
+        assert_eq!(invitation.origin_kind, ProvenanceOriginKind::Invitation);
         assert_eq!(invitation.roster_revision, Some(7));
 
         store
@@ -4719,6 +4817,217 @@ mod tests {
         assert_eq!(
             provenance,
             MemberProvenance::invitation(admin, "invitation-plain".to_owned())
+        );
+    }
+
+    fn stored_approval_request(
+        brain_id: &BrainId,
+        id: &str,
+        action: &str,
+        nonce: &str,
+        requested_by: &UserId,
+    ) -> StoredBrainApprovalRequest {
+        StoredBrainApprovalRequest {
+            id: id.to_owned(),
+            brain_id: brain_id.clone(),
+            action: action.to_owned(),
+            payload_json: format!(
+                "{{\"version\":\"finite-brain-approval-v1\",\"action\":\"{action}\",\"brainId\":\"{}\",\"planId\":\"plan-1\",\"targetNpubs\":[],\"nonce\":\"{nonce}\",\"expiresAt\":1780000900}}",
+                brain_id.as_str()
+            ),
+            nonce: nonce.to_owned(),
+            expires_at_unix: 1_780_000_900,
+            requested_by_npub: requested_by.clone(),
+            status: ApprovalRequestStatus::Pending,
+            approval_event_id: None,
+            resolved_by_npub: None,
+            created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            updated_at: "2026-06-23T00:00:00.000Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn approval_request_lifecycle_is_pending_then_terminal_exactly_once() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let requester = UserId::new("npub-requester").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let request = store
+            .create_brain_approval_request(&stored_approval_request(
+                &brain_id,
+                "approval-req-1",
+                "invite-commit",
+                &"aa".repeat(16),
+                &requester,
+            ))
+            .unwrap();
+        assert_eq!(request.status, ApprovalRequestStatus::Pending);
+        assert_eq!(
+            store.list_brain_approval_requests(&brain_id).unwrap(),
+            vec![request.clone()]
+        );
+
+        // The same nonce cannot seed a second request on this Brain.
+        let mut duplicate = stored_approval_request(
+            &brain_id,
+            "approval-req-2",
+            "invite-commit",
+            &"aa".repeat(16),
+            &requester,
+        );
+        assert!(matches!(
+            store.create_brain_approval_request(&duplicate),
+            Err(StoreError::Conflict { .. })
+        ));
+        duplicate.nonce = "bb".repeat(16);
+        store.create_brain_approval_request(&duplicate).unwrap();
+
+        let resolved = store
+            .resolve_brain_approval_request(
+                "approval-req-1",
+                ApprovalRequestStatus::Approved,
+                Some("event-approval-1"),
+                &admin,
+                now,
+            )
+            .unwrap();
+        assert_eq!(resolved.status, ApprovalRequestStatus::Approved);
+        assert_eq!(resolved.approval_event_id.as_deref(), Some("event-approval-1"));
+        assert_eq!(resolved.resolved_by_npub, Some(admin.clone()));
+
+        // Terminal state is exactly-once.
+        assert!(matches!(
+            store.resolve_brain_approval_request(
+                "approval-req-1",
+                ApprovalRequestStatus::Denied,
+                None,
+                &admin,
+                now,
+            ),
+            Err(StoreError::Conflict { .. })
+        ));
+
+        // The event id links back to the request for plan narrowing.
+        let by_event = store
+            .load_brain_approval_request_by_event_id(&brain_id, "event-approval-1")
+            .unwrap()
+            .expect("approval request is linked by event id");
+        assert_eq!(by_event.id, "approval-req-1");
+        assert!(
+            store
+                .load_brain_approval_request_by_event_id(&brain_id, "event-unknown")
+                .unwrap()
+                .is_none()
+        );
+
+        let denied = store
+            .resolve_brain_approval_request(
+                "approval-req-2",
+                ApprovalRequestStatus::Denied,
+                None,
+                &admin,
+                now,
+            )
+            .unwrap();
+        assert_eq!(denied.status, ApprovalRequestStatus::Denied);
+        assert!(denied.approval_event_id.is_none());
+        assert!(matches!(
+            store.load_brain_approval_request("approval-req-missing"),
+            Err(StoreError::UnavailableLink { .. })
+        ));
+    }
+
+    #[test]
+    fn approval_nonce_replay_is_a_conflict() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let nonce = "cc".repeat(16);
+
+        assert!(!store.approval_nonce_seen(&brain_id, &nonce).unwrap());
+        store
+            .record_brain_approval_nonce(&brain_id, &nonce, "event-1", &signer, "invite-commit", now)
+            .unwrap();
+        assert!(store.approval_nonce_seen(&brain_id, &nonce).unwrap());
+        assert!(matches!(
+            store.record_brain_approval_nonce(&brain_id, &nonce, "event-1", &signer, "invite-commit", now),
+            Err(StoreError::Conflict { .. })
+        ));
+        // The same nonce on another Brain is independent.
+        let other = BrainId::new("other").unwrap();
+        assert!(!store.approval_nonce_seen(&other, &nonce).unwrap());
+    }
+
+    #[test]
+    fn grant_admin_with_provenance_stamps_approval_origin() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let provenance = MemberProvenance::approval(signer.clone(), "event-approval-1".to_owned());
+
+        store
+            .grant_admin_with_provenance(&brain_id, &target, &provenance)
+            .unwrap();
+        let brain = store.load_core_brain(&brain_id).unwrap();
+        assert!(brain.admins.contains(&target));
+        assert!(brain.members.iter().any(|member| member.user_id == target));
+        assert_eq!(
+            store.member_provenance(&brain_id, &target).unwrap().unwrap(),
+            provenance
+        );
+
+        // Granting an existing admin is a conflict, never a silent no-op.
+        assert!(matches!(
+            store.grant_admin_with_provenance(&brain_id, &target, &provenance),
+            Err(StoreError::Conflict { .. })
+        ));
+
+        // Personal Brains have an owner, not a delegatable admin role.
+        let personal_id = BrainId::new("personal").unwrap();
+        assert!(
+            store
+                .grant_admin_with_provenance(&personal_id, &target, &provenance)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn approval_committed_invitation_stamps_approval_provenance_on_accept() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let invitation = store
+            .create_brain_invitation_with_provenance(
+                &brain_id,
+                "invitation-approval-linked",
+                &target,
+                "invite-appr0123456789abcdef0123456",
+                "/v1/brain-invitation-links/invite-appr0123456789abcdef0123456/accept",
+                &[],
+                &signer,
+                "2026-06-30T00:00:00.000Z",
+                now,
+                Some("event-approval-1"),
+                Some(3),
+                ProvenanceOriginKind::Approval,
+            )
+            .unwrap();
+        assert_eq!(invitation.origin_kind, ProvenanceOriginKind::Approval);
+        assert_eq!(invitation.origin_ref.as_deref(), Some("event-approval-1"));
+
+        store
+            .accept_brain_invitation_by_code("invite-appr0123456789abcdef0123456", &target, now)
+            .unwrap();
+        assert_eq!(
+            store.member_provenance(&brain_id, &target).unwrap().unwrap(),
+            MemberProvenance::approval(signer, "event-approval-1".to_owned())
         );
     }
 
