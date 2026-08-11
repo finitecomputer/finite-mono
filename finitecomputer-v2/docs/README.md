@@ -28,5 +28,3 @@
   Identity keys.
 - [Billing v0](billing-v0.md): Stripe Checkout, promo codes, Core
   entitlements, Finite Private limits, Runtime Retirement, and purge isolation.
-- [Existing user import bridge](existing-user-import-bridge.md): parked notes
-  on the carried-over claim/import path for existing smoke/box1/TRF machines.

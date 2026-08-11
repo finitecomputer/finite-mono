@@ -10,24 +10,21 @@ use crate::{
     AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput,
-    ArchiveImportedProjectInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
-    BrainAgentAccount, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
-    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
+    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
-    HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
-    ProjectImportCandidate, ProjectMembershipRole, ProviderOperationEnvelope,
+    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
+    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
+    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
+    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectMembershipRole, ProviderOperationEnvelope,
     ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
     RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
     RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
@@ -39,23 +36,21 @@ use crate::{
     RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
     RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
     RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
-    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
-    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
-    finite_private_api_key_id_for, finite_private_grant_id_for_user,
-    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
-    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
-    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
+    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    agent_creation_entitlement_id_for, append_provider_operation_transition,
+    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
+    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
+    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
+    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
+    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
-    parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
-    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
-    parse_runtime_control_request_status, parse_runtime_resource_class,
-    parse_runtime_summary_status, parse_time, parse_user_link_status,
+    parse_finite_private_reservation_status, parse_hosting_tier, parse_runner_class,
+    parse_runtime_artifact_kind, parse_runtime_control_kind, parse_runtime_control_request_status,
+    parse_runtime_resource_class, parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
@@ -201,29 +196,6 @@ impl CoreStore {
             .batch_execute(CORE_SCHEMA_SQL)
             .await
             .map_err(store_error)
-    }
-
-    pub async fn reconcile_existing_host_imports(
-        &self,
-        records: Vec<ExistingHostProjectImport>,
-        options: ReconcileExistingHostImportsOptions,
-    ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let report = postgres_reconcile_existing_host_imports(&*tx, &records, options).await?;
-        self.finish(tx).await?;
-        Ok(report)
-    }
-
-    pub async fn claim_project_imports(
-        &self,
-        input: ClaimProjectImportsInput,
-    ) -> CoreResult<ClaimProjectImportsResult> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_claim_project_imports(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
     }
 
     pub async fn issue_launch_code_batch(
@@ -438,45 +410,6 @@ impl CoreStore {
         Ok(result)
     }
 
-    pub async fn archive_imported_project(
-        &self,
-        input: ArchiveImportedProjectInput,
-    ) -> CoreResult<()> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let user = ensure_linked_user_row(
-            &*tx,
-            &verified_email,
-            &input.workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )
-        .await?;
-        let updated = tx
-            .execute(
-                "UPDATE project_room_memberships AS membership
-             SET archived_at = $1::text::timestamptz
-             FROM chat_identities AS identity, projects AS project
-             WHERE membership.project_id = $2
-               AND identity.id = membership.chat_identity_id
-               AND identity.user_id = $3
-               AND project.id = membership.project_id
-               AND project.owner_user_id = $3
-               AND project.import_candidate_id IS NOT NULL",
-                &[&now, &input.project_id, &user.id],
-            )
-            .await
-            .map_err(store_error)?;
-        if updated == 0 {
-            return Err(CoreError::ProjectNotFound);
-        }
-        self.finish(tx).await?;
-        Ok(())
-    }
-
     pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
@@ -677,14 +610,6 @@ impl CoreStore {
         Ok(result)
     }
 
-    pub async fn claimable_candidates_for_email(
-        &self,
-        email: Option<&str>,
-    ) -> CoreResult<Vec<ProjectImportCandidate>> {
-        let client = self.connection().await?;
-        postgres_claimable_candidates_for_email(&**client, email).await
-    }
-
     pub async fn visible_projects_for_workos_user(
         &self,
         workos_user_id: &str,
@@ -726,26 +651,6 @@ impl CoreStore {
     ) -> CoreResult<Vec<AgentCreationRequest>> {
         let client = self.connection().await?;
         postgres_agent_creation_requests_for_workos_user(&**client, workos_user_id).await
-    }
-
-    pub async fn source_host_relay_endpoint(
-        &self,
-        source_host_id: &str,
-    ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
-        let source_host_id = normalize_source_host_id(source_host_id)?;
-        let client = self.connection().await?;
-        select_source_host_relay(&**client, &source_host_id).await
-    }
-
-    pub async fn upsert_source_host_relay_endpoint(
-        &self,
-        input: UpsertSourceHostRelayEndpointInput,
-    ) -> CoreResult<SourceHostRelayEndpoint> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let endpoint = postgres_upsert_source_host_relay_endpoint(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(endpoint)
     }
 
     pub async fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
@@ -6317,66 +6222,6 @@ where
     .await
 }
 
-async fn select_source_host_relay<C>(
-    client: &C,
-    source_host_id: &str,
-) -> CoreResult<Option<SourceHostRelayEndpoint>>
-where
-    C: GenericClient + Sync,
-{
-    Ok(client
-        .query_opt(
-            "SELECT source_host_id, url, admin_token, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
-             FROM source_host_relays WHERE source_host_id = $1",
-            &[&source_host_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| SourceHostRelayEndpoint {
-            source_host_id: row.get("source_host_id"),
-            url: row.get("url"),
-            admin_token: row.get("admin_token"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }))
-}
-
-async fn postgres_upsert_source_host_relay_endpoint<C>(
-    client: &C,
-    input: UpsertSourceHostRelayEndpointInput,
-) -> CoreResult<SourceHostRelayEndpoint>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let source_host_id = normalize_source_host_id(&input.source_host_id)?;
-    let url = crate::normalize_source_host_relay_url(&input.url)?;
-    let admin_token = input.admin_token.trim();
-    if admin_token.is_empty() {
-        return Err(CoreError::MissingSourceHostRelayAdminToken);
-    }
-    let row = client
-        .query_one(
-            "INSERT INTO source_host_relays (source_host_id, url, admin_token, created_at, updated_at)
-             VALUES ($1, $2, $3, $4::text::timestamptz, $4::text::timestamptz)
-             ON CONFLICT (source_host_id) DO UPDATE SET
-               url = EXCLUDED.url,
-               admin_token = EXCLUDED.admin_token,
-               updated_at = EXCLUDED.updated_at
-             RETURNING source_host_id, url, admin_token, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
-            &[&source_host_id, &url, &admin_token, &now],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(SourceHostRelayEndpoint {
-        source_host_id: row.get("source_host_id"),
-        url: row.get("url"),
-        admin_token: row.get("admin_token"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
-}
-
 async fn postgres_upsert_runtime_artifact<C>(
     client: &C,
     input: UpsertRuntimeArtifactInput,
@@ -6584,75 +6429,6 @@ where
         .collect()
 }
 
-fn import_candidate_from_row(row: &Row) -> CoreResult<ProjectImportCandidate> {
-    let status: String = row.get("status");
-    Ok(ProjectImportCandidate {
-        id: row.get("id"),
-        source_host_id: row.get("source_host_id"),
-        source_machine_id: row.get("source_machine_id"),
-        source_import_key: row.get("source_import_key"),
-        owner_email: row.get("owner_email"),
-        latest_host_owner_email: row.get("latest_host_owner_email"),
-        pending_user_id: row.get("pending_user_id"),
-        customer_org_id: row.get("customer_org_id"),
-        status: parse_import_candidate_status(&status)
-            .ok_or_else(|| CoreError::Store(format!("invalid import candidate status {status}")))?,
-        project_id: row.get("project_id"),
-        agent_runtime_id: row.get("agent_runtime_id"),
-        claimed_by_user_id: row.get("claimed_by_user_id"),
-        host_facts: json_column(row, "host_facts")?,
-        known_external_channel_participants: json_column(
-            row,
-            "known_external_channel_participants",
-        )?,
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
-}
-
-const IMPORT_CANDIDATE_COLUMNS: &str = "id, source_host_id, source_machine_id, source_import_key,
-    owner_email, latest_host_owner_email, pending_user_id, customer_org_id, status, project_id,
-    agent_runtime_id, claimed_by_user_id, host_facts, known_external_channel_participants,
-    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at";
-
-async fn select_import_candidate_by_source_import_key<C>(
-    client: &C,
-    source_import_key: &str,
-) -> CoreResult<Option<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE source_import_key = $1 FOR UPDATE"
-    );
-    client
-        .query_opt(&sql, &[&source_import_key])
-        .await
-        .map_err(store_error)?
-        .map(|row| import_candidate_from_row(&row))
-        .transpose()
-}
-
-async fn select_import_candidate<C>(
-    client: &C,
-    candidate_id: &str,
-) -> CoreResult<Option<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE id = $1 FOR UPDATE"
-    );
-    client
-        .query_opt(&sql, &[&candidate_id])
-        .await
-        .map_err(store_error)?
-        .map(|row| import_candidate_from_row(&row))
-        .transpose()
-}
-
 /// Find-or-create a PENDING user by natural key (email). Mirrors
 /// `ensure_pending_user`: an existing row (pending or linked) keeps its
 /// surrogate id; a brand-new email gets a fresh one. Never derives id from PII.
@@ -6676,285 +6452,6 @@ where
         .await
         .map_err(store_error)?;
     core_user_from_row(&row)
-}
-
-async fn upsert_import_candidate_row<C>(
-    client: &C,
-    candidate: &ProjectImportCandidate,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let host_facts = serde_json::to_value(&candidate.host_facts).map_err(json_error)?;
-    let participants =
-        serde_json::to_value(&candidate.known_external_channel_participants).map_err(json_error)?;
-    client
-        .execute(
-            "INSERT INTO project_import_candidates (
-               id, source_host_id, source_machine_id, source_import_key, owner_email,
-               latest_host_owner_email, pending_user_id, customer_org_id, status,
-               project_id, agent_runtime_id, claimed_by_user_id, host_facts,
-               known_external_channel_participants, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb,
-                     $15::text::timestamptz, $16::text::timestamptz)
-             ON CONFLICT (id) DO UPDATE SET
-               latest_host_owner_email = EXCLUDED.latest_host_owner_email,
-               status = EXCLUDED.status,
-               project_id = EXCLUDED.project_id,
-               agent_runtime_id = EXCLUDED.agent_runtime_id,
-               claimed_by_user_id = EXCLUDED.claimed_by_user_id,
-               host_facts = EXCLUDED.host_facts,
-               known_external_channel_participants = EXCLUDED.known_external_channel_participants,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &candidate.id,
-                &candidate.source_host_id,
-                &candidate.source_machine_id,
-                &candidate.source_import_key,
-                &candidate.owner_email,
-                &candidate.latest_host_owner_email,
-                &candidate.pending_user_id,
-                &candidate.customer_org_id,
-                &candidate.status.as_str(),
-                &candidate.project_id,
-                &candidate.agent_runtime_id,
-                &candidate.claimed_by_user_id,
-                &host_facts,
-                &participants,
-                &candidate.created_at,
-                &candidate.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn postgres_reconcile_existing_host_imports<C>(
-    client: &C,
-    records: &[ExistingHostProjectImport],
-    options: ReconcileExistingHostImportsOptions,
-) -> CoreResult<ReconcileExistingHostImportsReport>
-where
-    C: GenericClient + Sync,
-{
-    let now = options.now.unwrap_or(current_time_iso()?);
-    let allowlist = options
-        .allowlisted_owner_emails
-        .into_iter()
-        .filter_map(|email| normalize_owner_email(Some(&email)))
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut report = ReconcileExistingHostImportsReport {
-        created_candidates: Vec::new(),
-        updated_candidates: Vec::new(),
-        skipped_records: Vec::new(),
-    };
-
-    for record in records {
-        let source_key = source_import_key(&record.source_host_id, &record.source_machine_id);
-        let owner_email = match normalize_owner_email(record.owner_email.as_deref()) {
-            Some(email) => email,
-            None => {
-                report.skipped_records.push(crate::SkippedImportRecord {
-                    source_import_key: source_key,
-                    reason: crate::SkippedImportReason::MissingOwnerEmail,
-                });
-                continue;
-            }
-        };
-
-        // Resolve the candidate by its natural key (source_import_key UNIQUE),
-        // FOR UPDATE, instead of a deterministic-id lookup.
-        if let Some(existing) =
-            select_import_candidate_by_source_import_key(client, &source_key).await?
-        {
-            let host_facts =
-                serde_json::to_value(crate::host_facts_from_record(record)).map_err(json_error)?;
-            let participants = serde_json::to_value(&record.known_external_channel_participants)
-                .map_err(json_error)?;
-            client
-                .execute(
-                    "UPDATE project_import_candidates
-                     SET latest_host_owner_email = $2,
-                         host_facts = $3::jsonb,
-                         known_external_channel_participants = $4::jsonb,
-                         updated_at = $5::text::timestamptz
-                     WHERE id = $1",
-                    &[&existing.id, &owner_email, &host_facts, &participants, &now],
-                )
-                .await
-                .map_err(store_error)?;
-            // Keep a claimed candidate's runtime host facts in sync.
-            if let Some(runtime_id) = existing.agent_runtime_id.as_deref() {
-                client
-                    .execute(
-                        "UPDATE agent_runtimes
-                         SET host_facts = $2::jsonb, updated_at = $3::text::timestamptz
-                         WHERE id = $1",
-                        &[&runtime_id, &host_facts, &now],
-                    )
-                    .await
-                    .map_err(store_error)?;
-            }
-            report.updated_candidates.push(existing.id);
-            continue;
-        }
-
-        if !allowlist.contains(&owner_email) {
-            report.skipped_records.push(crate::SkippedImportRecord {
-                source_import_key: source_key,
-                reason: crate::SkippedImportReason::OwnerNotAllowlisted,
-            });
-            continue;
-        }
-
-        let user = ensure_pending_user_row(client, &owner_email, &now).await?;
-        let org = ensure_personal_org_row(client, &user, BillingClass::Grandfathered, &now).await?;
-        let candidate = ProjectImportCandidate {
-            id: crate::new_import_candidate_id()?,
-            source_host_id: normalize_id_part(&record.source_host_id),
-            source_machine_id: normalize_id_part(&record.source_machine_id),
-            source_import_key: source_key,
-            owner_email,
-            latest_host_owner_email: record
-                .owner_email
-                .as_deref()
-                .and_then(|email| normalize_owner_email(Some(email))),
-            pending_user_id: user.id,
-            customer_org_id: org.id,
-            status: crate::ImportCandidateStatus::Pending,
-            project_id: None,
-            agent_runtime_id: None,
-            claimed_by_user_id: None,
-            host_facts: crate::host_facts_from_record(record),
-            known_external_channel_participants: record.known_external_channel_participants.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_import_candidate_row(client, &candidate).await?;
-        report.created_candidates.push(candidate.id);
-    }
-
-    Ok(report)
-}
-
-async fn postgres_claim_project_imports<C>(
-    client: &C,
-    input: ClaimProjectImportsInput,
-) -> CoreResult<ClaimProjectImportsResult>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let verified_email = normalize_owner_email(Some(&input.verified_email))
-        .ok_or(CoreError::MissingVerifiedEmail)?;
-    let workos_user_id = input.workos_user_id.trim().to_string();
-    if workos_user_id.is_empty() {
-        return Err(CoreError::MissingWorkosUserId);
-    }
-    let user =
-        ensure_grandfathered_linked_user(client, &verified_email, &workos_user_id, &now).await?;
-    let mut result = ClaimProjectImportsResult::default();
-    let selected_candidate_ids = input
-        .selected_candidate_ids
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for candidate_id in selected_candidate_ids {
-        let Some(candidate) = select_import_candidate(client, &candidate_id).await? else {
-            result.missing_candidate_ids.push(candidate_id);
-            continue;
-        };
-        if candidate.owner_email != verified_email || candidate.pending_user_id != user.id {
-            result.denied_candidate_ids.push(candidate.id);
-            continue;
-        }
-        if candidate.status == crate::ImportCandidateStatus::Claimed {
-            if let Some(project_id) = candidate.project_id {
-                ensure_hosted_web_membership_row(client, &user, &project_id, &now).await?;
-                result.already_claimed_project_ids.push(project_id);
-            }
-            continue;
-        }
-
-        // Fresh surrogate ids for the claimed project and its runtime; the
-        // candidate is resolved by its natural key, never rederived.
-        let project_id = new_self_service_project_id()?;
-        let runtime_id = new_agent_runtime_id()?;
-        let project = Project {
-            id: project_id.clone(),
-            customer_org_id: candidate.customer_org_id.clone(),
-            owner_user_id: user.id.clone(),
-            display_name: candidate.host_facts.display_name.clone(),
-            agent_email: None,
-            import_candidate_id: Some(candidate.id.clone()),
-            hosting_tier: Some(HostingTier::Standard),
-            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_project_row(client, &project).await?;
-        let runtime = AgentRuntime {
-            id: runtime_id.clone(),
-            project_id: project_id.clone(),
-            source_host_id: candidate.source_host_id.clone(),
-            source_machine_id: candidate.source_machine_id.clone(),
-            source_import_key: candidate.source_import_key.clone(),
-            runtime_artifact_id: None,
-            state_schema_version: None,
-            placement: project.placement,
-            provider_runtime_handle: None,
-            provider_runtime_handle_history: Vec::new(),
-            contact_endpoint: None,
-            runtime_capabilities: None,
-            host_facts: candidate.host_facts.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_agent_runtime_row(client, &runtime).await?;
-        activate_project_runtime_link(client, &project_id, &runtime_id, &now).await?;
-        client
-            .execute(
-                "UPDATE project_import_candidates
-                 SET status = 'claimed',
-                     project_id = $2,
-                     agent_runtime_id = $3,
-                     claimed_by_user_id = $4,
-                     updated_at = $5::text::timestamptz
-                 WHERE id = $1",
-                &[&candidate.id, &project_id, &runtime_id, &user.id, &now],
-            )
-            .await
-            .map_err(store_error)?;
-        ensure_hosted_web_membership_row(client, &user, &project_id, &now).await?;
-        result.claimed_project_ids.push(project_id);
-    }
-
-    Ok(result)
-}
-
-async fn postgres_claimable_candidates_for_email<C>(
-    client: &C,
-    email: Option<&str>,
-) -> CoreResult<Vec<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let Some(normalized) = normalize_owner_email(email) else {
-        return Ok(Vec::new());
-    };
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE status = 'pending' AND owner_email = $1"
-    );
-    client
-        .query(&sql, &[&normalized])
-        .await
-        .map_err(store_error)?
-        .iter()
-        .map(import_candidate_from_row)
-        .collect()
 }
 
 /// RFC3339 rendering for a TIMESTAMPTZ column so stored strings round-trip
@@ -8386,19 +7883,6 @@ impl CoreStore {
         let mut out = Vec::new();
         for id in self.ids("users").await {
             out.push(self.user(&id).await.unwrap());
-        }
-        out
-    }
-
-    pub(crate) async fn import_candidate(&self, id: &str) -> Option<ProjectImportCandidate> {
-        let client = self.connection().await.unwrap();
-        select_import_candidate(&**client, id).await.unwrap()
-    }
-
-    pub(crate) async fn all_import_candidates(&self) -> Vec<ProjectImportCandidate> {
-        let mut out = Vec::new();
-        for id in self.ids("project_import_candidates").await {
-            out.push(self.import_candidate(&id).await.unwrap());
         }
         out
     }
@@ -11834,307 +11318,6 @@ mod tests {
     /// id, a re-reconcile updates the same row, and claim materializes a project +
     /// runtime (fresh surrogate ids) that the owner can then see. Re-claim is
     /// idempotent and a missing candidate id is reported, not fabricated.
-    #[tokio::test]
-    async fn postgres_reconcile_and_claim_import_row_scoped() {
-        with_isolated_postgres(|store| async move {
-            let run = "import-flow";
-            let email = format!("{run}@finite.vip");
-            let workos = format!("workos_{run}");
-
-            let record = ExistingHostProjectImport {
-                source_host_id: "imphost".to_string(),
-                source_machine_id: "imp-agent-001".to_string(),
-                owner_email: Some(email.clone()),
-                display_name: "Imported Agent".to_string(),
-                hostname: None,
-                runtime_host: Some("imphost".to_string()),
-                runtime_status: RuntimeSummaryStatus::Unknown,
-                active_inference_profile: None,
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: Vec::new(),
-            };
-            let report = store
-                .reconcile_existing_host_imports(
-                    vec![record.clone()],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(report.created_candidates.len(), 1);
-            let candidate_id = report.created_candidates[0].clone();
-            assert!(
-                candidate_id.starts_with("import_"),
-                "candidate id must be a surrogate, got {candidate_id}"
-            );
-
-            let claimable = store
-                .claimable_candidates_for_email(Some(&email))
-                .await
-                .unwrap();
-            assert_eq!(claimable.len(), 1);
-            assert_eq!(claimable[0].id, candidate_id);
-
-            // Re-reconcile updates the same row (natural-key resolution).
-            let report2 = store
-                .reconcile_existing_host_imports(
-                    vec![record],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert!(report2.created_candidates.is_empty());
-            assert_eq!(report2.updated_candidates, vec![candidate_id.clone()]);
-
-            let claim = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
-                    selected_candidate_ids: vec![
-                        candidate_id.clone(),
-                        "does-not-exist".to_string(),
-                    ],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert_eq!(claim.claimed_project_ids.len(), 1);
-            assert_eq!(
-                claim.missing_candidate_ids,
-                vec!["does-not-exist".to_string()]
-            );
-            let project_id = claim.claimed_project_ids[0].clone();
-            assert!(project_id.starts_with("project_"), "surrogate project id");
-
-            let visible = store
-                .visible_projects_for_workos_user(&workos)
-                .await
-                .unwrap();
-            assert_eq!(visible.len(), 1);
-            assert_eq!(visible[0].project.id, project_id);
-            assert_eq!(
-                visible[0].runtime.as_ref().unwrap().source_machine_id,
-                "imp-agent-001"
-            );
-
-            // Re-claim is idempotent: already-claimed, nothing newly claimed.
-            let reclaim = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
-                    selected_candidate_ids: vec![candidate_id],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert!(reclaim.claimed_project_ids.is_empty());
-            assert_eq!(reclaim.already_claimed_project_ids, vec![project_id]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn postgres_imported_runtime_does_not_consume_self_serve_launch_entitlement() {
-        with_isolated_postgres(|store| async move {
-            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
-            let email = "postgres-import-with-launch@finite.vip".to_string();
-            let workos_user_id = "workos_postgres_import_with_launch".to_string();
-            let record = ExistingHostProjectImport {
-                source_host_id: "legacy-host".to_string(),
-                source_machine_id: "legacy-agent-001".to_string(),
-                owner_email: Some(email.clone()),
-                display_name: "Imported Agent".to_string(),
-                hostname: None,
-                runtime_host: Some("legacy-host".to_string()),
-                runtime_status: RuntimeSummaryStatus::Online,
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: Vec::new(),
-            };
-            let reconciled = store
-                .reconcile_existing_host_imports(
-                    vec![record],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            let candidate_id = reconciled.created_candidates[0].clone();
-            let claimed = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            let imported_project_id = claimed.claimed_project_ids[0].clone();
-            let imported_before = store
-                .visible_projects_for_workos_user(&workos_user_id)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|visible| visible.project.id == imported_project_id)
-                .expect("claimed import must remain visible");
-            let imported_runtime_id = imported_before
-                .runtime
-                .as_ref()
-                .expect("claimed import must expose its runtime")
-                .id
-                .clone();
-
-            let created = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    display_name: "New Hosted Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "first-self-serve-submit".to_string(),
-                    now: None,
-                })
-                .await
-                .expect("an imported runtime must not consume the hosted launch");
-            assert!(created.project.import_candidate_id.is_none());
-
-            let exhausted = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    display_name: "Another Hosted Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "second-self-serve-submit".to_string(),
-                    now: None,
-                })
-                .await
-                .unwrap_err();
-            assert!(matches!(exhausted, CoreError::InvalidLaunchCode));
-
-            let requests = store
-                .agent_creation_requests_for_workos_user(&workos_user_id)
-                .await
-                .unwrap();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].id, created.request.id);
-
-            let imported_after = store
-                .visible_projects_for_workos_user(&workos_user_id)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|visible| visible.project.id == imported_project_id)
-                .expect("launch attempts must preserve the imported project");
-            assert_eq!(imported_after, imported_before);
-
-            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
-            let connection = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let candidate = raw
-                .query_one(
-                    "SELECT status, project_id, agent_runtime_id
-                     FROM project_import_candidates WHERE id = $1",
-                    &[&candidate_id],
-                )
-                .await
-                .unwrap();
-            assert_eq!(candidate.get::<_, String>("status"), "claimed");
-            assert_eq!(
-                candidate.get::<_, Option<String>>("project_id").as_deref(),
-                Some(imported_project_id.as_str())
-            );
-            assert_eq!(
-                candidate
-                    .get::<_, Option<String>>("agent_runtime_id")
-                    .as_deref(),
-                Some(imported_runtime_id.as_str())
-            );
-            let active_link_count: i64 = raw
-                .query_one(
-                    "SELECT COUNT(*) FROM project_runtime_links
-                     WHERE project_id = $1 AND agent_runtime_id = $2 AND active = TRUE",
-                    &[&imported_project_id, &imported_runtime_id],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            assert_eq!(active_link_count, 1);
-            drop(raw);
-            connection.abort();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn postgres_owner_can_archive_imported_project() {
-        with_isolated_postgres(|store| async move {
-            let email = "postgres-archive-import@finite.vip".to_string();
-            let workos_user_id = "workos_postgres_archive_import".to_string();
-            let reconciled = store
-                .reconcile_existing_host_imports(
-                    vec![ExistingHostProjectImport {
-                        source_host_id: "legacy-host".to_string(),
-                        source_machine_id: "legacy-agent-archive".to_string(),
-                        owner_email: Some(email.clone()),
-                        display_name: "Imported Agent".to_string(),
-                        hostname: None,
-                        runtime_host: Some("legacy-host".to_string()),
-                        runtime_status: RuntimeSummaryStatus::Online,
-                        active_inference_profile: Some("finite-private".to_string()),
-                        hermes_available: Some(true),
-                        published_app_urls: Vec::new(),
-                        known_external_channel_participants: Vec::new(),
-                        admin_visible_to_emails: Vec::new(),
-                    }],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: Some("2026-05-25T12:00:00Z".to_string()),
-                    },
-                )
-                .await
-                .unwrap();
-            let claimed = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    selected_candidate_ids: reconciled.created_candidates,
-                    now: Some("2026-05-25T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-
-            store
-                .archive_imported_project(ArchiveImportedProjectInput {
-                    verified_email: email,
-                    workos_user_id: workos_user_id.clone(),
-                    project_id: claimed.claimed_project_ids[0].clone(),
-                    now: Some("2026-05-25T12:02:00Z".to_string()),
-                })
-                .await
-                .expect("timestamp text must serialize for Postgres archive");
-
-            assert!(
-                store
-                    .visible_projects_for_workos_user(&workos_user_id)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        })
-        .await;
-    }
-
     /// The agent-creation lease queue is partitioned by source host: two requests
     /// routed to different hosts, and a runner declaring host A leases only A's
     /// request — never B's. Proves the global claim across all rows is gone.
