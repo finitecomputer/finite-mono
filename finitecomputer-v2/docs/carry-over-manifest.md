@@ -60,5 +60,8 @@ Only Finite Private limiter state is a mandatory carry-forward from the old Core
 world: grants, API-key hashes/tokens, reservations, usage counters, and audit
 events. Other legacy Core runtime/deploy state should be deleted, re-created, or
 bridged only by an explicit migration doc with a delete condition. The parked
-existing-user import bridge is documented in
-[`existing-user-import-bridge.md`](existing-user-import-bridge.md).
+existing-user import bridge was deleted in 2026-08 (routes, claim flow, CLI,
+and design doc — see git history for `existing-user-import-bridge.md`); its
+schema and any rows from the abandoned test run remain in Postgres, hidden and
+inert. A future importer starts from a fresh design against the current
+architecture rather than resurrecting that code.

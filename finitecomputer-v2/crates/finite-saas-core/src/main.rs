@@ -6,21 +6,16 @@ use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
     AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
-    CoreResult, ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
-    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeSummaryStatus, SourceHostRelayEndpoint, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput,
+    CoreResult, FinitePrivateApiKey, FinitePrivateGrant, IssueFinitePrivateApiKeyInput,
+    IssueFinitePrivateFriendKeyInput, ResetFinitePrivateUsageWindowInput,
+    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimePlacement, RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::{self, Read};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep};
@@ -37,41 +32,6 @@ struct Args {
 enum Command {
     /// Run the Core HTTP API.
     Serve,
-    /// Reconcile existing-host Project import candidates from a typed manifest.
-    #[command(name = "reconcile-imports")]
-    ReconcileImports {
-        /// Path to a manifest emitted by `finited core-import-manifest`, or `-` for stdin.
-        #[arg(long)]
-        manifest: PathBuf,
-        /// Owner email allowed to be materialized by this import run. Repeatable.
-        #[arg(long = "allow-owner")]
-        allowlisted_owner_emails: Vec<String>,
-        /// Optional RFC3339 timestamp for deterministic tests/operator dry runs.
-        #[arg(long)]
-        now: Option<String>,
-        /// Validate and reconcile into an in-memory store without touching Postgres.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Add or update the relay endpoint for an existing source host.
-    #[command(name = "source-host-relay-upsert")]
-    SourceHostRelayUpsert {
-        /// Source host id used in Core import keys, such as smoke, box1, or trf.
-        #[arg(long)]
-        source_host_id: String,
-        /// Public relay base URL for that source host.
-        #[arg(long)]
-        url: String,
-        /// Environment variable containing the host relay admin token.
-        #[arg(long, default_value = "FC_RELAY_ADMIN_TOKEN")]
-        admin_token_env: String,
-        /// Optional RFC3339 timestamp for deterministic tests/operator dry runs.
-        #[arg(long)]
-        now: Option<String>,
-        /// Validate and upsert into an in-memory store without touching Postgres.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Add or update a promoted runtime artifact record.
     #[command(name = "runtime-artifact-upsert")]
     RuntimeArtifactUpsert {
@@ -391,12 +351,6 @@ struct RuntimeColdRelocateExactCliArgs {
     now: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CoreImportManifestInput {
-    source_host_id: String,
-    records: Vec<ExistingHostProjectImport>,
-}
-
 /// Install a compact tracing subscriber writing to stderr, filtered by
 /// `RUST_LOG` (default `info`). Kept minimal and standard: this is the crate's
 /// first server-side logging, added so DB/store failures stop being invisible.
@@ -417,38 +371,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     match args.command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
-        Command::ReconcileImports {
-            manifest,
-            allowlisted_owner_emails,
-            now,
-            dry_run,
-        } => {
-            let report = reconcile_imports_from_manifest(
-                manifest,
-                allowlisted_owner_emails,
-                now,
-                ImportMode::from_dry_run(dry_run),
-            )
-            .await?;
-            print_json(&report)
-        }
-        Command::SourceHostRelayUpsert {
-            source_host_id,
-            url,
-            admin_token_env,
-            now,
-            dry_run,
-        } => {
-            let endpoint = source_host_relay_upsert(
-                source_host_id,
-                url,
-                required_env(&admin_token_env)?,
-                now,
-                ImportMode::from_dry_run(dry_run),
-            )
-            .await?;
-            print_json(&redacted_source_host_relay_endpoint(endpoint))
-        }
         Command::RuntimeArtifactUpsert {
             artifact_id,
             kind,
@@ -615,58 +537,6 @@ async fn serve() -> Result<()> {
     tracing::info!(%addr, "finite-saas-core listening");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn reconcile_imports_from_manifest(
-    manifest_path: PathBuf,
-    allowlisted_owner_emails: Vec<String>,
-    now: Option<String>,
-    mode: ImportMode,
-) -> Result<ReconcileExistingHostImportsReport> {
-    let records = read_import_manifest(&manifest_path)?;
-    reconcile_imports(records, allowlisted_owner_emails, now, mode).await
-}
-
-async fn reconcile_imports(
-    records: Vec<ExistingHostProjectImport>,
-    allowlisted_owner_emails: Vec<String>,
-    now: Option<String>,
-    mode: ImportMode,
-) -> Result<ReconcileExistingHostImportsReport> {
-    if allowlisted_owner_emails.is_empty() {
-        bail!("at least one --allow-owner email is required");
-    }
-
-    let store = core_store_for_mode(mode).await?;
-    store
-        .reconcile_existing_host_imports(
-            records,
-            ReconcileExistingHostImportsOptions {
-                allowlisted_owner_emails,
-                now,
-            },
-        )
-        .await
-        .map_err(Into::into)
-}
-
-async fn source_host_relay_upsert(
-    source_host_id: String,
-    url: String,
-    admin_token: String,
-    now: Option<String>,
-    mode: ImportMode,
-) -> Result<SourceHostRelayEndpoint> {
-    let store = core_store_for_mode(mode).await?;
-    store
-        .upsert_source_host_relay_endpoint(UpsertSourceHostRelayEndpointInput {
-            source_host_id,
-            url,
-            admin_token,
-            now,
-        })
-        .await
-        .map_err(Into::into)
 }
 
 async fn runtime_artifact_upsert(
@@ -1573,27 +1443,9 @@ fn generate_finite_private_api_key() -> Result<String> {
     Ok(key)
 }
 
-#[derive(Debug, serde::Serialize)]
-struct RedactedSourceHostRelayEndpoint {
-    source_host_id: String,
-    url: String,
-    admin_token_configured: bool,
-    created_at: String,
-    updated_at: String,
-}
-
-fn redacted_source_host_relay_endpoint(
-    endpoint: SourceHostRelayEndpoint,
-) -> RedactedSourceHostRelayEndpoint {
-    RedactedSourceHostRelayEndpoint {
-        source_host_id: endpoint.source_host_id,
-        url: endpoint.url,
-        admin_token_configured: !endpoint.admin_token.is_empty(),
-        created_at: endpoint.created_at,
-        updated_at: endpoint.updated_at,
-    }
-}
-
+/// Commit-vs-dry-run switch for every admin CLI write. The name is a leftover
+/// from the deleted existing-host import bridge (its reconcile command was the
+/// first dry-runnable write); the mechanism is live and unrelated to imports.
 #[derive(Debug, Clone, Copy)]
 enum ImportMode {
     Commit,
@@ -1657,42 +1509,6 @@ async fn connect_and_migrate_postgres(database_url: &str, mode: ImportMode) -> R
         // which commits outside the rolled-back transaction.
         ImportMode::DryRun => Ok(CoreStore::connect_dry_run(database_url).await?),
     }
-}
-
-fn read_import_manifest(path: &PathBuf) -> Result<Vec<ExistingHostProjectImport>> {
-    let raw = if path == std::path::Path::new("-") {
-        let mut raw = String::new();
-        io::stdin()
-            .read_to_string(&mut raw)
-            .context("failed to read import manifest from stdin")?;
-        raw
-    } else {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read import manifest {}", path.display()))?
-    };
-
-    parse_import_manifest(&raw)
-}
-
-fn parse_import_manifest(raw: &str) -> Result<Vec<ExistingHostProjectImport>> {
-    let manifest: CoreImportManifestInput =
-        serde_json::from_str(raw).context("failed to parse import manifest JSON")?;
-    let manifest_source_host_id = manifest.source_host_id.trim().to_lowercase();
-    if manifest_source_host_id.is_empty() {
-        bail!("manifest source_host_id is required");
-    }
-
-    for record in &manifest.records {
-        let record_source_host_id = record.source_host_id.trim().to_lowercase();
-        if record_source_host_id != manifest_source_host_id {
-            bail!(
-                "manifest source_host_id {manifest_source_host_id} does not match record source_host_id {record_source_host_id} for {}",
-                record.source_machine_id
-            );
-        }
-    }
-
-    Ok(manifest.records)
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
@@ -1808,144 +1624,12 @@ mod tests {
         unsafe { env::remove_var("FC_CORE_DATABASE_URL") };
     }
 
-    #[test]
-    fn parses_control_plane_import_manifest_shape() {
-        let records = parse_import_manifest(
-            r#"{
-              "source_host_id": "box1",
-              "records": [
-                {
-                  "source_host_id": "box1",
-                  "source_machine_id": "paul-finite-2",
-                  "owner_email": "paul@finite.vip",
-                  "display_name": "Paul 2",
-                  "hostname": "paul2-opencode.finite.vip",
-                  "runtime_host": "box1",
-                  "runtime_status": "unknown",
-                  "active_inference_profile": "main",
-                  "hermes_available": null,
-                  "published_app_urls": ["https://demo.finite.vip"],
-                  "known_external_channel_participants": [],
-                  "admin_visible_to_emails": ["paul@finite.vip"]
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].source_host_id, "box1");
-        assert_eq!(records[0].source_machine_id, "paul-finite-2");
-        assert_eq!(records[0].runtime_status, RuntimeSummaryStatus::Unknown);
-    }
-
-    #[test]
-    fn rejects_manifest_records_from_another_host() {
-        let error = parse_import_manifest(
-            r#"{
-              "source_host_id": "box1",
-              "records": [
-                {
-                  "source_host_id": "trf",
-                  "source_machine_id": "grant",
-                  "owner_email": "rene@example.com",
-                  "display_name": "Grant",
-                  "hostname": null,
-                  "runtime_host": "trf",
-                  "runtime_status": "unknown",
-                  "active_inference_profile": null,
-                  "hermes_available": null,
-                  "published_app_urls": [],
-                  "known_external_channel_participants": [],
-                  "admin_visible_to_emails": []
-                }
-              ]
-            }"#,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("does not match record source_host_id"));
-    }
-
     /// A dry-run reconcile reports what it would do against real state and
     /// persists nothing.
     ///
     /// Running the same record twice is the assertion that matters: if the
     /// first dry run had committed, the second would report an *update* of the
     /// row it just wrote instead of a creation.
-    #[tokio::test]
-    async fn dry_run_reconcile_reports_creation_and_persists_nothing() {
-        with_dry_run_database(|| async {
-            let record = ExistingHostProjectImport {
-                source_host_id: "smoke".to_string(),
-                source_machine_id: "paul-smoke".to_string(),
-                owner_email: Some("paul@finite.vip".to_string()),
-                display_name: "Paul Smoke".to_string(),
-                hostname: Some("paul-smoke-opencode.smoke.finite.computer".to_string()),
-                runtime_host: Some("smoke".to_string()),
-                runtime_status: RuntimeSummaryStatus::Unknown,
-                active_inference_profile: Some("main".to_string()),
-                hermes_available: None,
-                published_app_urls: vec!["https://demo.smoke.finite.computer".to_string()],
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: vec!["admin@finite.vip".to_string()],
-            };
-
-            for _ in 0..2 {
-                let report = reconcile_imports(
-                    vec![record.clone()],
-                    vec!["paul@finite.vip".to_string()],
-                    Some("2026-05-25T12:00:00Z".to_string()),
-                    ImportMode::DryRun,
-                )
-                .await
-                .unwrap();
-
-                assert_eq!(report.created_candidates.len(), 1);
-                assert!(report.updated_candidates.is_empty());
-                assert!(report.skipped_records.is_empty());
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn import_reconcile_requires_explicit_allowlist_before_store_access() {
-        let error = reconcile_imports(
-            Vec::new(),
-            Vec::new(),
-            Some("2026-05-25T12:00:00Z".to_string()),
-            ImportMode::DryRun,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("at least one --allow-owner email is required"));
-    }
-
-    #[tokio::test]
-    async fn dry_run_source_host_relay_upsert_validates_and_redacts() {
-        with_dry_run_database(|| async {
-            let endpoint = source_host_relay_upsert(
-                "Smoke".to_string(),
-                "https://relay.smoke.finite.computer/".to_string(),
-                "smoke-token".to_string(),
-                Some("2026-05-25T12:00:00Z".to_string()),
-                ImportMode::DryRun,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(endpoint.source_host_id, "smoke");
-            assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
-            assert_eq!(endpoint.admin_token, "smoke-token");
-            assert!(redacted_source_host_relay_endpoint(endpoint).admin_token_configured);
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn dry_run_finite_private_friend_key_issue_generates_one_time_key() {
         with_dry_run_database(|| async {
