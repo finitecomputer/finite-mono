@@ -107,7 +107,9 @@
           overlays = [ (import rust-overlay) ];
         };
         gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
-        rustToolchain = pkgs.rust-bin.stable."1.91.1".default.override {
+        # Keep this in sync with the CI Rust workspace pin so cached Cargo
+        # artifacts are reusable between clippy and Nix-shell test commands.
+        rustToolchain = pkgs.rust-bin.stable."1.93.1".default.override {
           extensions = [
             "clippy"
             "rust-analyzer"
