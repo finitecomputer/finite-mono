@@ -648,19 +648,27 @@ async function assertPersonalAgent(
   const roster = brain.locator("#personalBrainAgentRosterList");
   await assertEventually(
     async () => {
+      if (!(await roster.isVisible())) return false;
       const currentText = (await current.textContent())?.trim() || "";
-      if (await roster.isVisible()) {
-        const rosterText = (await roster.textContent())?.toLowerCase() || "";
-        return (
-          /\b\d+ current account agents?\b/i.test(currentText) &&
-          rosterText.includes(expectedAgentEmail)
-        );
-      }
-      return currentText.toLowerCase().includes(expectedAgentEmail);
+      const rosterRows = await roster
+        .locator(".brain-invitation-participant")
+        .allTextContents();
+      const readyRows = rosterRows.filter((row) =>
+        row.toLowerCase().includes("current · ready"),
+      );
+      const expectedReadyRows = readyRows.filter((row) =>
+        row.toLowerCase().includes(expectedAgentEmail),
+      );
+      const expectedSummary = `${readyRows.length} current account ${readyRows.length === 1 ? "agent" : "agents"}.`;
+      return (
+        readyRows.length > 0 &&
+        expectedReadyRows.length === 1 &&
+        currentText.startsWith(expectedSummary)
+      );
     },
     30_000,
     async () =>
-      `Personal Agent did not resolve to ${expectedAgentEmail}: mode=${(await roster.isVisible()) ? "authoritative-roster" : "legacy-summary"} summary=${(await current.textContent())?.trim()} roster=${(await roster.textContent())?.trim()}`,
+      `Authoritative Personal Agent roster did not resolve ${expectedAgentEmail} as Current · Ready: visible=${await roster.isVisible()} summary=${(await current.textContent())?.trim()} roster=${(await roster.textContent())?.trim()}`,
   );
   assert.equal(
     await brain.locator("#personalAgentEmailInput").getAttribute("placeholder"),
