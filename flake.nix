@@ -136,6 +136,15 @@
           python3
         ];
         rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
+        # CI's devfinity smoke starts the dashboard dev server, but it does not
+        # run browser tests or need local editor/tooling extras from the default shell.
+        devfinityCiPackages =
+          rustBasePackages
+          ++ (with pkgs; [
+            nodejs_24
+            pnpm
+            rustCiToolchain
+          ]);
       in
       {
         devShells.default = pkgs.mkShell {
@@ -157,6 +166,10 @@
 
         devShells.rust-ci = pkgs.mkShell {
           packages = rustCiPackages;
+        };
+
+        devShells.devfinity-ci = pkgs.mkShell {
+          packages = devfinityCiPackages;
         };
 
         formatter = pkgs.nixfmt-rfc-style;
