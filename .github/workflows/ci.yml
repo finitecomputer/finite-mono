@@ -140,7 +140,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test workspace
-        run: nix develop --command just test
+        run: nix develop .#rust-ci --command just test
 
   dashboard:
     name: Dashboard

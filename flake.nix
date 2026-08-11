@@ -107,9 +107,10 @@
           overlays = [ (import rust-overlay) ];
         };
         gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
+        rustVersion = "1.93.1";
         # Keep this in sync with the CI Rust workspace pin so cached Cargo
         # artifacts are reusable between clippy and Nix-shell test commands.
-        rustToolchain = pkgs.rust-bin.stable."1.93.1".default.override {
+        rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
           extensions = [
             "clippy"
             "rust-analyzer"
@@ -121,33 +122,41 @@
             "aarch64-apple-ios-sim"
           ];
         };
+        rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
+        rustBasePackages = with pkgs; [
+          curl
+          git
+          jq
+          just
+          openssl
+          pkg-config
+          postgresql_16
+          process-compose
+          protobuf
+          python3
+        ];
+        rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
       in
       {
         devShells.default = pkgs.mkShell {
           packages =
-            with pkgs;
-            [
-              curl
-              gcxCli
-              git
-              jq
-              just
+            rustBasePackages
+            ++ [ gcxCli ]
+            ++ (with pkgs; [
               nodejs_24
-              openssl
               pnpm
-              postgresql_16
-              pkg-config
-              process-compose
-              protobuf
-              python3
               rsync
               xxd
               rustToolchain
-            ]
+            ])
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+        };
+
+        devShells.rust-ci = pkgs.mkShell {
+          packages = rustCiPackages;
         };
 
         formatter = pkgs.nixfmt-rfc-style;
