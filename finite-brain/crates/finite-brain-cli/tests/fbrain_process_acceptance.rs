@@ -973,6 +973,90 @@ fn supervisor_runs_with_builtin_working_tree_root_default_and_flag_override() {
 }
 
 #[test]
+fn supervisor_quiesces_after_catch_up_when_nothing_changes() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    // Pre-create the supervised root: when the supervisor creates it itself,
+    // FSEvents can deliver that creation to the freshly started watcher,
+    // which is a legitimate lifecycle event unrelated to this check.
+    let working_tree_root = scratch.path().join("supervised-trees");
+    fs::create_dir_all(&working_tree_root).unwrap();
+    let secret = scratch.path().join("secret");
+    fs::write(
+        &secret,
+        "0000000000000000000000000000000000000000000000000000000000000007\n",
+    )
+    .unwrap();
+    let imported = run(
+        &home,
+        &home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+
+    // The server accepts the notification stream connection and then never
+    // answers, so the stream thread blocks inside the HTTP request: the
+    // filesystem watcher is the only remaining event source.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server_url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => held.push(stream),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let supervisor_log_path = scratch.path().join("supervisor.log");
+    let supervisor_log = fs::File::create(&supervisor_log_path).unwrap();
+    let supervisor = command(&home, &home)
+        .env("FINITE_BRAIN_SERVER_URL", &server_url)
+        .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+        .args([
+            "daemon",
+            "supervise",
+            "--working-tree-root",
+            working_tree_root.to_str().unwrap(),
+            // startup_catch_up is the only legitimate pending event; the
+            // stream thread is blocked inside its unanswered request. A second
+            // handled event means the supervisor manufactured work by itself:
+            // before observation traffic was filtered, every handled event
+            // re-scanned the Working Tree root and the scan's directory reads
+            // re-armed the watcher, so the process exited almost immediately.
+            "--max-events",
+            "2",
+        ])
+        .stdout(Stdio::from(supervisor_log.try_clone().unwrap()))
+        .stderr(Stdio::from(supervisor_log))
+        .spawn()
+        .unwrap();
+    let mut supervisor = ChildGuard(supervisor);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        assert!(
+            supervisor.0.try_wait().unwrap().is_none(),
+            "supervisor handled more events than exist without any local change; \
+             its own observation traffic is feeding the filesystem watcher: {}",
+            fs::read_to_string(&supervisor_log_path).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     let mut smoke = CollaborationSmokeReport::from_environment();
     let scratch = TempDir::new().unwrap();
