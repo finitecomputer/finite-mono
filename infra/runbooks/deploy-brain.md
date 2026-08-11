@@ -214,10 +214,12 @@ at least two eligible Agent Principals:
 2. Commit once, observe one mailbox delivery, and accept through one included
    agent. Prove the human and both agents can independently sync and decrypt the
    intended Brain and restricted Folder with their distinct keys.
-3. Apply one scoped agent exclusion or one synthetic permanent-departure fact
-   through the documented preflight/commit path. Prove the affected Folder key
-   version advances once, the targeted agent loses current access, and the
-   human plus sibling agent retain readable content.
+3. Apply one scoped agent exclusion through the documented preflight/commit
+   path. Prove the affected Folder key version advances once, the targeted
+   agent loses current access, and the human plus sibling agent retain readable
+   content. Permanent-departure coverage stays in disposable local/CI state;
+   production accepts only a real authoritative Core lifecycle fact through a
+   separately authorized procedure.
 4. Revoke the disposable invitation/access and retain only redacted receipts.
    Do not use customer state or treat an operator-selected row as authority to
    choose durable user data.
