@@ -35,7 +35,7 @@ const PUBLIC_WORKOS_PATHS = new Set([
   "/signup",
 ]);
 
-const PUBLIC_WORKOS_PATH_PREFIXES = ["/api/finite", "/client/fonts"] as const;
+const PUBLIC_WORKOS_PATH_PREFIXES = ["/client/fonts"] as const;
 
 const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",
@@ -60,7 +60,7 @@ const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
 // specified). Let those APIs reach Brain without replacing their authority
 // with an AuthKit session. Runtime callbacks likewise enforce their own
 // protocol boundary.
-const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1", "/_admin", "/api/finite"] as const;
+const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1", "/_admin"] as const;
 
 type EnvSource = Record<string, string | undefined>;
 
