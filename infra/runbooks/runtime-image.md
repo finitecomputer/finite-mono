@@ -16,8 +16,8 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 - Depot-managed GitHub Actions runner access is available for the
   `depot-ubuntu-24.04` label. Set `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or the
   shared `DEPOT_PROJECT_ID` repository variable or secret for Depot remote
-  container builds. If OIDC is not configured in Depot, also set `DEPOT_TOKEN`
-  as a secret. Image builds run in CI on ephemeral Depot runners/builders; lat1
+  container builds. The workflow authenticates through `depot/setup-action`
+  OIDC. Image builds run in CI on ephemeral Depot runners/builders; lat1
   launches only the resulting digest-pinned artifact.
 - The tree state you are building is on the ref you dispatch (the single
   checkout SHA pins finitechat + finite-sites + finite-brain + finite-skills

@@ -44,6 +44,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - uses: depot/setup-action@v1
+        with:
+          oidc: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,7 +66,6 @@ jobs:
       - name: Build canonical runtime image
         env:
           DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           DEPOT_DISABLE_OTEL: "1"
           FC_RUNTIME_IMAGE_ENGINE: depot
         run: |

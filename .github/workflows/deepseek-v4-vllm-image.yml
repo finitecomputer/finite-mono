@@ -25,6 +25,8 @@ jobs:
         with:
           path: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: depot/setup-action@v1
+        with:
+          oidc: true
 
       - name: Log in to GHCR
         env:
@@ -38,7 +40,6 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/deepseek-v4-vllm
           VERSION: ${{ inputs.version }}
           DEPOT_PROJECT_ID: ${{ vars.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || secrets.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           DEPOT_DISABLE_OTEL: "1"
         run: |
           version_ref="$IMAGE:$VERSION"

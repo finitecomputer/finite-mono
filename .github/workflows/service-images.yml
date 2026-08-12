@@ -36,6 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
+        with:
+          oidc: true
 
       - name: Resolve image parameters
         id: params
@@ -78,7 +80,6 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ steps.params.outputs.name }}
           VERSION: ${{ inputs.version }}
           DEPOT_PROJECT_ID: ${{ vars.DEPOT_SERVICE_IMAGES_PROJECT_ID || secrets.DEPOT_SERVICE_IMAGES_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           DEPOT_DISABLE_OTEL: "1"
         run: |
           if [ -z "$DEPOT_PROJECT_ID" ]; then
