@@ -174,11 +174,14 @@ while the SOPS contract entry is absent, and will read
 `config.finite.secrets.files."metrics-remote-write".path` after the pilot entry
 is added. Encryption and the actual switch are blocked until real
 human/recovery and host recipients are recorded in `.sops.yaml` and the live
-pilot value is staged without printing it.
+pilot value is staged without printing it. A stdin-only `just nixos-sops-ingest`
+helper is available for the staging step.
 
 - [x] Choose exactly one pilot secret.
 - [x] Leave all other secrets absent from `finite.secrets.files` and on their
       existing host-file paths.
+- [x] Add a stdin-only SOPS ingestion helper so operators do not hand-roll the
+      encryption command.
 - [ ] Encrypt the pilot value into its planned SOPS file without printing it.
 - [ ] Add only the pilot contract entry to `finite.secrets.files`.
 - [x] Update only the pilot consumer to use

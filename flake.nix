@@ -169,8 +169,10 @@
               packages =
                 rustBasePackages
                 ++ [
+                  pkgs.age
                   gcxCli
                   litestreamCli
+                  pkgs.sops
                 ]
                 ++ (with pkgs; [
                   nodejs_24

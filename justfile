@@ -153,6 +153,17 @@ lat1-secret-bootstrap-contract:
 nixos-secrets-contract:
     python3 scripts/check_nixos_secrets_contract.py
     python3 -m unittest scripts.tests.test_nixos_secrets_contract
+    python3 -m unittest scripts.tests.test_nixos_sops_ingest
+
+# Encrypt one NixOS SOPS secret from stdin into infra/nixos/secrets.
+# Example:
+#   ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
+#     | just nixos-sops-ingest shared metrics-remote-write.env --logical-name metrics-remote-write --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME --required-env-name FINITE_METRICS_REMOTE_WRITE_PASSWORD --consumer alloy.service --restart-unit alloy.service
+[positional-arguments]
+nixos-sops-ingest *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_ingest.py "$@"
 
 # Synthetic deletion, watermark, active-job, and stale-lease safety contract
 # for finite-lat-2's operator-installed runner guardrails.
