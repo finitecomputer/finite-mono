@@ -13,14 +13,6 @@ export type CoreBridgeStatus = {
 
 export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
 
-export type CoreProjectImportCandidate = {
-  id: string;
-  display_name: string;
-  status: "pending" | "claimed" | "admin_review";
-  created_at: string;
-  updated_at: string;
-};
-
 export type CoreProject = {
   id: string;
   display_name: string;
@@ -125,14 +117,6 @@ export type CoreRuntimeControlRequest = {
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
-};
-
-export type CoreSourceHostRelayEndpoint = {
-  source_host_id: string;
-  url: string;
-  admin_token: string;
-  created_at: string;
-  updated_at: string;
 };
 
 export type CoreFinitePrivateGrant = {
@@ -362,7 +346,6 @@ export type CoreBillingOverviewResult = CoreBridgeStatus & {
 export type CoreMe = {
   email: string;
   workos_user_id: string;
-  claimable_candidates: CoreProjectImportCandidate[];
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
 };
@@ -408,14 +391,6 @@ export type CoreReadOptions = {
 
 export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
   const missing = REQUIRED_CORE_ENV.filter((name) => !env[name]?.trim());
-  return {
-    configured: missing.length === 0,
-    missing,
-  };
-}
-
-function coreServiceBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
-  const missing = REQUIRED_CORE_SERVICE_ENV.filter((name) => !env[name]?.trim());
   return {
     configured: missing.length === 0,
     missing,
@@ -807,37 +782,6 @@ export async function resolveCoreRuntimeRoute(identifier: string) {
       `/api/core/v1/me/runtime-routes/${encodeURIComponent(routeIdentifier)}`,
       account
     );
-  } catch (error) {
-    if (error instanceof CoreFetchError && error.status === 404) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-export async function loadCoreSourceHostRelayEndpoint(
-  sourceHostId: string,
-  options: CoreReadOptions = {}
-) {
-  const hostId = sourceHostId.trim().toLowerCase();
-  if (!hostId) {
-    return null;
-  }
-  const status = coreServiceBridgeStatus();
-  if (!status.configured) {
-    return null;
-  }
-
-  try {
-    const pathname = `/api/core/v1/source-host-relays/${encodeURIComponent(hostId)}`;
-    const load = () => coreServiceFetch<CoreSourceHostRelayEndpoint>(pathname);
-    return options.cacheMode === "swr"
-      ? await readThroughServerSwr(
-          `${CORE_CACHE_PREFIX}source-host-relay:${coreCacheFingerprint(coreServiceCacheParts(hostId))}`,
-          { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
-          load
-        )
-      : await load();
   } catch (error) {
     if (error instanceof CoreFetchError && error.status === 404) {
       return null;
@@ -1634,14 +1578,6 @@ function accountCacheParts(account: AccountAuthContext) {
     account.workosUserId ?? "",
     account.email ?? "",
     account.emailVerified ? "verified" : "unverified",
-  ];
-}
-
-function coreServiceCacheParts(...parts: string[]) {
-  return [
-    process.env.FC_CORE_BASE_URL?.trim() ?? "",
-    process.env.FC_CORE_API_TOKEN?.trim() ?? "",
-    ...parts,
   ];
 }
 

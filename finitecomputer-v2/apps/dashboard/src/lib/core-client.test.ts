@@ -38,7 +38,6 @@ import {
   type CoreVisibleProject,
   loadCoreDashboardSummary,
   loadCoreFinitePrivateUsageStatus,
-  loadCoreSourceHostRelayEndpoint,
   runtimeRetirementProductEnabled,
 } from "./core-client";
 
@@ -403,54 +402,6 @@ test("relocation requests stay out of initial agent creation presentation", () =
   );
 });
 
-test("loadCoreSourceHostRelayEndpoint reads relay routing through service auth", async () => {
-  const previousBaseUrl = process.env.FC_CORE_BASE_URL;
-  const previousToken = process.env.FC_CORE_API_TOKEN;
-  const previousFetch = globalThis.fetch;
-  let requestedUrl: string | null = null;
-  let requestedAuth: string | null = null;
-
-  process.env.FC_CORE_BASE_URL = "https://core.example.com";
-  process.env.FC_CORE_API_TOKEN = "core-token";
-  globalThis.fetch = (async (input, init) => {
-    requestedUrl = String(input);
-    requestedAuth = new Headers(init?.headers).get("authorization");
-    return new Response(
-      JSON.stringify({
-        source_host_id: "smoke",
-        url: "https://relay.smoke.finite.computer",
-        admin_token: "smoke-token",
-        created_at: "2026-05-25T12:00:00Z",
-        updated_at: "2026-05-25T12:00:00Z",
-      }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  }) as typeof fetch;
-
-  try {
-    const endpoint = await loadCoreSourceHostRelayEndpoint(" Smoke ");
-    assert.equal(
-      requestedUrl,
-      "https://core.example.com/api/core/v1/source-host-relays/smoke"
-    );
-    assert.equal(requestedAuth, "Bearer core-token");
-    assert.equal(endpoint?.url, "https://relay.smoke.finite.computer");
-    assert.equal(endpoint?.admin_token, "smoke-token");
-  } finally {
-    if (previousBaseUrl === undefined) {
-      delete process.env.FC_CORE_BASE_URL;
-    } else {
-      process.env.FC_CORE_BASE_URL = previousBaseUrl;
-    }
-    if (previousToken === undefined) {
-      delete process.env.FC_CORE_API_TOKEN;
-    } else {
-      process.env.FC_CORE_API_TOKEN = previousToken;
-    }
-    globalThis.fetch = previousFetch;
-  }
-});
-
 test("Finite Private usage is N-1 fail-soft on 404 but surfaces real Core failures", async () => {
   const names = [
     "FC_CORE_BASE_URL",
@@ -525,7 +476,6 @@ test("dashboard summary uses one Core request and falls back safely to independe
   const me = {
     email: "summary-test@finite.vip",
     workos_user_id: "user_summary_test",
-    claimable_candidates: [],
     projects: [],
     agent_creation_requests: [],
   };

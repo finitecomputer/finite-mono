@@ -63,6 +63,10 @@ rust-smoke:
 status:
     cd .. && cargo run -p devfinity -- status
 
+# Restarts one running devfinity process through the default process-compose socket
+restart process:
+    cd .. && scripts/devfinity-restart-process {{ quote(process) }}
+
 # Kills running devfinity processes
 cleanup:
     cd .. && cargo run -p devfinity -- cleanup

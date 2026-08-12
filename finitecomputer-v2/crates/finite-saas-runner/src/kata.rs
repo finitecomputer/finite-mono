@@ -1752,10 +1752,6 @@ impl RuntimeLauncher for KataLauncher {
         Ok(())
     }
 
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
-    }
-
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
             runner_classes: vec![self.runner_class()],
@@ -2719,9 +2715,6 @@ impl RuntimeLauncher for KataLauncher {
                 "cold relocation target exposed a different Agent Principal".to_string(),
             ));
         }
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         let public_base_url = plan.public_base_url(host_port);
 
         Ok(RuntimeLaunchFacts {
@@ -2731,7 +2724,6 @@ impl RuntimeLauncher for KataLauncher {
             state_schema_version: launcher.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
             contact_endpoint: Some(plan.contact_url(host_port)),
-            runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
             runtime_host: Some(public_base_url),

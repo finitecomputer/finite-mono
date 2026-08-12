@@ -10,17 +10,15 @@ use crate::{
     AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, AgentRuntime,
     BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
-    ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
+    CustomerBillingAccount, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
     FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
     FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier, ImportCandidateStatus,
+    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
     IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
     RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
     RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
@@ -29,9 +27,8 @@ use crate::{
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
-    normalize_source_host_id,
+    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, normalize_owner_email,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
 };
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -70,14 +67,6 @@ struct ApiError {
     /// Set only for internal errors we logged server-side; echoed back so a
     /// user can quote it in a support request and we can grep it out of the logs.
     correlation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconcileImportsRequest {
-    pub records: Vec<ExistingHostProjectImport>,
-    pub allowlisted_owner_emails: Vec<String>,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,7 +191,6 @@ pub struct RegisterAgentCreationRuntimeRequest {
     pub contact_endpoint: Option<String>,
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -313,14 +301,6 @@ pub struct CancelAgentCreationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BrainAgentAccountRequest {
     pub managed_agent_email: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpsertSourceHostRelayRequest {
-    pub url: String,
-    pub admin_token: String,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,7 +431,6 @@ pub struct SettleFinitePrivateReservationRequest {
 pub struct MeResponse {
     pub email: String,
     pub workos_user_id: String,
-    pub claimable_candidates: Vec<ClaimableProjectSummary>,
     pub projects: Vec<PublicVisibleProject>,
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
 }
@@ -461,30 +440,6 @@ pub struct DashboardSummaryResponse {
     pub me: MeResponse,
     pub billing: BillingOverview,
     pub finite_private_usage: Option<FinitePrivateUsageStatus>,
-}
-
-/// A user-facing import choice. Source-host and machine identifiers stay on
-/// the internal compatibility path and never become browser authorization or
-/// navigation keys.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaimableProjectSummary {
-    pub id: String,
-    pub display_name: String,
-    pub status: ImportCandidateStatus,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl From<ProjectImportCandidate> for ClaimableProjectSummary {
-    fn from(candidate: ProjectImportCandidate) -> Self {
-        Self {
-            id: candidate.id,
-            display_name: candidate.host_facts.display_name,
-            status: candidate.status,
-            created_at: candidate.created_at,
-            updated_at: candidate.updated_at,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -621,6 +576,11 @@ fn public_runtime_contact_endpoint(runtime: &AgentRuntime) -> Option<String> {
         })
 }
 
+/// LEGACY-ROW GUARD. Projects with `import_candidate_id` set were created by
+/// the abandoned 2026-07 existing-host import bridge (machinery deleted; rows
+/// may survive in production from its near-ship test run). They never became
+/// part of the hosted product surface, so they stay hidden from every
+/// user-facing list. Do not remove this filter while such rows exist.
 fn public_visible_projects(projects: Vec<VisibleProject>) -> Vec<PublicVisibleProject> {
     projects
         .into_iter()
@@ -753,14 +713,6 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(brain_agent_account),
         )
         .route(
-            "/api/core/v1/import-candidates/reconcile",
-            post(reconcile_import_candidates),
-        )
-        .route(
-            "/api/core/v1/source-host-relays/{source_host_id}",
-            get(source_host_relay_endpoint).put(upsert_source_host_relay_endpoint),
-        )
-        .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",
             get(runtime_artifact).put(upsert_runtime_artifact),
         )
@@ -880,18 +832,9 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             "/api/core/v1/billing/stripe/subscription",
             post(sync_stripe_subscription),
         )
-        .route("/api/core/v1/me/import-candidates", get(import_candidates))
-        .route(
-            "/api/core/v1/me/import-candidates/claim",
-            post(claim_import_candidates),
-        )
         .route(
             "/api/core/v1/me/agent-creation-requests",
             post(create_agent_request),
-        )
-        .route(
-            "/api/core/v1/me/projects/{project_id}/archive",
-            post(archive_imported_project),
         )
         .route(
             "/api/core/v1/me/projects/{project_id}/runtime/restart",
@@ -958,11 +901,6 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(cancel_agent_creation_request),
         )
         .route("/api/core/v1/me/projects", get(projects))
-        .route("/api/finite/v1/heartbeat", post(runtime_heartbeat))
-        .route(
-            "/api/finite/v1/machines/{machine_id}/heartbeat",
-            get(runtime_heartbeat_for_machine),
-        )
         .with_state(state)
 }
 
@@ -995,63 +933,6 @@ async fn brain_agent_account(
         .await?
         .ok_or_else(|| ApiError::not_found("active account-agent association not found"))?;
     Ok(Json(binding))
-}
-
-async fn reconcile_import_candidates(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<ReconcileImportsRequest>,
-) -> Result<Json<ReconcileExistingHostImportsReport>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let report = state
-        .store
-        .reconcile_existing_host_imports(
-            input.records,
-            ReconcileExistingHostImportsOptions {
-                allowlisted_owner_emails: input.allowlisted_owner_emails,
-                now: input.now,
-            },
-        )
-        .await?;
-    Ok(Json(report))
-}
-
-async fn source_host_relay_endpoint(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(source_host_id): Path<String>,
-) -> Result<Json<SourceHostRelayEndpoint>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let Some(endpoint) = state
-        .store
-        .source_host_relay_endpoint(&source_host_id)
-        .await?
-    else {
-        return Err(ApiError::not_found(
-            "source host relay endpoint is not configured",
-        ));
-    };
-    Ok(Json(endpoint))
-}
-
-async fn upsert_source_host_relay_endpoint(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(source_host_id): Path<String>,
-    Json(input): Json<UpsertSourceHostRelayRequest>,
-) -> Result<Json<SourceHostRelayEndpoint>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .upsert_source_host_relay_endpoint(UpsertSourceHostRelayEndpointInput {
-                source_host_id,
-                url: input.url,
-                admin_token: input.admin_token,
-                now: input.now,
-            })
-            .await?,
-    ))
 }
 
 async fn runtime_artifact(
@@ -1641,10 +1522,6 @@ async fn me_response_for_identity(
     state: &CoreApiState,
     identity: &VerifiedIdentity,
 ) -> Result<MeResponse, ApiError> {
-    let claimable_candidates = state
-        .store
-        .claimable_candidates_for_email(Some(&identity.email))
-        .await?;
     let projects = state
         .store
         .visible_projects_for_workos_user(&identity.workos_user_id)
@@ -1656,10 +1533,6 @@ async fn me_response_for_identity(
     Ok(MeResponse {
         email: identity.email.clone(),
         workos_user_id: identity.workos_user_id.clone(),
-        claimable_candidates: claimable_candidates
-            .into_iter()
-            .map(ClaimableProjectSummary::from)
-            .collect(),
         projects: public_visible_projects(projects),
         agent_creation_requests: agent_creation_requests
             .into_iter()
@@ -1689,6 +1562,8 @@ async fn resolve_runtime_route(
         .await?
         .into_iter()
         .find_map(|project| {
+            // Legacy-row guard: imported-bridge projects (see
+            // `public_visible_projects`) are not routable product surfaces.
             if project.project.import_candidate_id.is_some() {
                 return None;
             }
@@ -1765,37 +1640,6 @@ async fn sync_stripe_subscription(
             })
             .await?,
     ))
-}
-
-async fn import_candidates(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ProjectImportCandidate>>, ApiError> {
-    let identity = require_verified_identity(&state, &headers).await?;
-    Ok(Json(
-        state
-            .store
-            .claimable_candidates_for_email(Some(&identity.email))
-            .await?,
-    ))
-}
-
-async fn claim_import_candidates(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(input): Json<ClaimImportsRequest>,
-) -> Result<Json<ClaimProjectImportsResult>, ApiError> {
-    let identity = require_verified_identity(&state, &headers).await?;
-    let result = state
-        .store
-        .claim_project_imports(ClaimProjectImportsInput {
-            verified_email: identity.email,
-            workos_user_id: identity.workos_user_id,
-            selected_candidate_ids: input.selected_candidate_ids,
-            now: input.now,
-        })
-        .await?;
-    Ok(Json(result))
 }
 
 async fn create_agent_request(
@@ -1905,25 +1749,6 @@ async fn request_runtime_destroy(
         })
         .await?;
     Ok(Json(RuntimeControlRequestView::from(request)))
-}
-
-async fn archive_imported_project(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(input): Json<TimestampRequest>,
-) -> Result<StatusCode, ApiError> {
-    let identity = require_verified_identity(&state, &headers).await?;
-    state
-        .store
-        .archive_imported_project(crate::ArchiveImportedProjectInput {
-            verified_email: identity.email,
-            workos_user_id: identity.workos_user_id,
-            project_id,
-            now: input.now,
-        })
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn lease_agent_creation_request(
@@ -2165,7 +1990,6 @@ async fn register_agent_creation_runtime(
                 provider_runtime_handle: input.provider_runtime_handle,
                 contact_endpoint: input.contact_endpoint,
                 runtime_capabilities: Some(runtime_capabilities),
-                runtime_relay_token_hash: input.runtime_relay_token_hash,
                 display_name: input.display_name,
                 hostname: input.hostname,
                 runtime_host: input.runtime_host,
@@ -2241,30 +2065,6 @@ async fn cancel_agent_creation_request(
                 request_id,
                 now: input.now,
             })
-            .await?,
-    ))
-}
-
-async fn runtime_heartbeat(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    let token =
-        bearer_token(&headers).ok_or_else(|| ApiError::unauthorized("missing runtime token"))?;
-    let heartbeat = state.store.record_runtime_heartbeat(&token).await?;
-    Ok(Json(heartbeat))
-}
-
-async fn runtime_heartbeat_for_machine(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Path(machine_id): Path<String>,
-) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    let _credential = require_runner_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .runtime_heartbeat_for_machine(&machine_id)
             .await?,
     ))
 }
@@ -2640,8 +2440,6 @@ impl From<CoreError> for ApiError {
         match error {
             CoreError::MissingSourceHostId
             | CoreError::InvalidSourceHostId
-            | CoreError::InvalidSourceHostRelayUrl
-            | CoreError::MissingSourceHostRelayAdminToken
             | CoreError::MissingAgentDisplayName
             | CoreError::MissingAgentCreationIdempotencyKey
             | CoreError::MissingLaunchCode
@@ -2657,8 +2455,6 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingAgentCreationLeaseToken
             | CoreError::InvalidAgentCreationLeaseDuration
             | CoreError::MissingSourceMachineId
-            | CoreError::MissingRuntimeRelayTokenHash
-            | CoreError::MissingRuntimeRelayToken
             | CoreError::MissingRuntimeArtifactId
             | CoreError::MissingRuntimeArtifactReference
             | CoreError::MissingRuntimeArtifactVersionLabel
@@ -2677,7 +2473,6 @@ impl From<CoreError> for ApiError {
                 correlation_id: None,
             },
             CoreError::AgentCreationRequestNotFound
-            | CoreError::RuntimeHeartbeatNotFound
             | CoreError::RuntimeArtifactNotFound
             | CoreError::ProjectNotFound
             | CoreError::ProjectRuntimeNotFound
@@ -2687,9 +2482,7 @@ impl From<CoreError> for ApiError {
             | CoreError::FinitePrivateLimitProfileNotFound
             | CoreError::FinitePrivateReservationNotFound
             | CoreError::LaunchCodeBatchNotFound => Self::not_found(error.to_string()),
-            CoreError::InvalidRuntimeRelayToken | CoreError::InvalidFinitePrivateApiKey => {
-                Self::unauthorized(error.to_string())
-            }
+            CoreError::InvalidFinitePrivateApiKey => Self::unauthorized(error.to_string()),
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
             CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
             CoreError::AgentCreationEntitlementExhausted
@@ -3164,345 +2957,6 @@ mod tests {
         assert!(json.get("lease_token").is_none());
         assert!(json.get("lease_expires_at").is_none());
         assert_eq!(json["source_machine_id"], "oslo-agent-001");
-    }
-
-    #[tokio::test]
-    async fn core_api_reconciles_claims_and_lists_visible_projects() {
-        with_isolated_postgres(|db| async move {
-            let app = router(db.store.clone(), test_auth());
-            let reconcile = serde_json::to_vec(&ReconcileImportsRequest {
-                records: vec![ExistingHostProjectImport {
-                    source_host_id: "smoke".to_string(),
-                    source_machine_id: "test-smoke".to_string(),
-                    owner_email: Some("test@finite.vip".to_string()),
-                    display_name: "Smoke".to_string(),
-                    hostname: Some("smoke.example.com".to_string()),
-                    runtime_host: Some("smoke".to_string()),
-                    runtime_status: crate::RuntimeSummaryStatus::Online,
-                    active_inference_profile: Some("finite-private".to_string()),
-                    hermes_available: Some(true),
-                    published_app_urls: vec![
-                        "not-a-contact-url".to_string(),
-                        "https://smoke.example.com/contact/".to_string(),
-                    ],
-                    known_external_channel_participants: Vec::new(),
-                    admin_visible_to_emails: Vec::new(),
-                }],
-                allowlisted_owner_emails: vec!["test@finite.vip".to_string()],
-                now: Some("2026-05-25T12:00:00Z".to_string()),
-            })
-            .unwrap();
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/import-candidates/reconcile")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(reconcile))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let me_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert!(me_json.get("workos_user_id").is_some());
-            assert!(me_json.get("claimable_candidates").is_some());
-            assert!(me_json.get("agent_creation_requests").is_some());
-            assert!(me_json.get("workosUserId").is_none());
-            assert!(me_json.get("claimableCandidates").is_none());
-            assert!(me_json.get("agentCreationRequests").is_none());
-            assert_json_omits_keys(
-                &me_json,
-                &[
-                    "runner_class",
-                    "placement",
-                    "source_host_id",
-                    "source_machine_id",
-                    "source_import_key",
-                    "provider_runtime_handle",
-                    "provider_runtime_handle_history",
-                    "published_app_urls",
-                    "host_facts",
-                ],
-            );
-            let me: MeResponse = serde_json::from_slice(&body).unwrap();
-            assert_eq!(me.claimable_candidates.len(), 1);
-            assert_eq!(me.claimable_candidates[0].display_name, "Smoke");
-            assert!(me.projects.is_empty());
-            assert!(me.agent_creation_requests.is_empty());
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me/billing")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let billing_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me/dashboard-summary")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(summary["me"], me_json);
-            assert_eq!(summary["billing"], billing_json);
-            assert!(summary["finite_private_usage"].is_null());
-
-            let claim = serde_json::to_vec(&ClaimImportsRequest {
-                selected_candidate_ids: vec![me.claimable_candidates[0].id.clone()],
-                now: Some("2026-05-25T13:00:00Z".to_string()),
-            })
-            .unwrap();
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/me/import-candidates/claim")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .header("content-type", "application/json")
-                        .body(Body::from(claim))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let claim_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert!(claim_json.get("claimed_project_ids").is_some());
-            assert!(claim_json.get("claimedProjectIds").is_none());
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me/projects")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
-            assert!(
-                projects.is_empty(),
-                "legacy imports stay out of the product DTO"
-            );
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me/runtime-routes/test-smoke")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_test",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/me")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_prod_google",
-                                    "test@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let relinked_me: MeResponse = serde_json::from_slice(&body).unwrap();
-            assert!(relinked_me.projects.is_empty());
-            assert_eq!(relinked_me.workos_user_id, "user_workos_prod_google");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn core_api_stores_source_host_relay_endpoints_behind_service_auth() {
-        with_isolated_postgres(|db| async move {
-            let app = router(db.store.clone(), test_auth());
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/core/v1/source-host-relays/Smoke")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "url": "https://relay.smoke.finite.computer/",
-                                "adminToken": "smoke-token",
-                                "now": "2026-05-25T12:00:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let endpoint: SourceHostRelayEndpoint = serde_json::from_slice(&body).unwrap();
-            assert_eq!(endpoint.source_host_id, "smoke");
-            assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
-            assert_eq!(endpoint.admin_token, "smoke-token");
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/source-host-relays/smoke")
-                        .header("authorization", "Bearer core-token")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/core/v1/source-host-relays/smoke")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        })
-        .await;
     }
 
     #[tokio::test]
@@ -5470,23 +4924,27 @@ mod tests {
                 }
             }
 
+            // A service-token-only route: auth is checked before the empty
+            // email is rejected, so the wrong credential sees 401 and the
+            // right one sees the post-auth validation error instead.
+            let brain_probe = serde_json::json!({ "managedAgentEmail": "" });
             for headers in [&runner, &usage] {
                 let (status, _) = send_json(
                     &app,
-                    "GET",
-                    "/api/core/v1/source-host-relays/missing",
+                    "POST",
+                    "/api/core/v1/brain/agent-account",
                     headers,
-                    None,
+                    Some(brain_probe.clone()),
                 )
                 .await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED);
             }
             let (status, _) = send_json(
                 &app,
-                "GET",
-                "/api/core/v1/source-host-relays/missing",
+                "POST",
+                "/api/core/v1/brain/agent-account",
                 &service,
-                None,
+                Some(brain_probe),
             )
             .await;
             assert_ne!(status, StatusCode::UNAUTHORIZED);
@@ -5553,7 +5011,7 @@ mod tests {
                 let (status, _) = send_json(
                     &app,
                     "GET",
-                    "/api/finite/v1/machines/missing/heartbeat",
+                    "/api/core/v1/runtime-artifacts/missing",
                     headers,
                     None,
                 )
@@ -5563,7 +5021,7 @@ mod tests {
             let (status, _) = send_json(
                 &app,
                 "GET",
-                "/api/finite/v1/machines/missing/heartbeat",
+                "/api/core/v1/runtime-artifacts/missing",
                 &runner,
                 None,
             )

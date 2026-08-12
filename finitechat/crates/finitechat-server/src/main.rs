@@ -17,12 +17,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             push::run_push_drain(command)?;
             Ok(())
         }
+        Some("snapshot") => {
+            let options = ServeOptions::parse(&args[1..])?;
+            let Some(path) = options.sqlite_path else {
+                return Err("snapshot requires --sqlite PATH".into());
+            };
+            // Boot (snapshot + op-log tail replay) and write a fresh durable
+            // snapshot, so an operator can compact a stopped server's store
+            // without waiting for the op-interval trigger.
+            let state = finitechat_server::HttpServerState::from_sqlite_path(&path)?;
+            state
+                .snapshot_now()
+                .map_err(|error| format!("state snapshot failed: {error:?}"))?;
+            println!("finitechat-server: state snapshot written to {path}");
+            Ok(())
+        }
         Some("smoke") | None => {
             smoke();
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'push-drain [options]', or 'smoke'"
         )
         .into()),
     }

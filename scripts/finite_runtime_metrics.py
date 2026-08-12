@@ -39,14 +39,32 @@ def render(core: dict[str, Any]) -> str:
         for runtime in core.get("runtimes", [])
         if runtime.get("link_state") == "active"
     }
-    if any(not host or artifact_id not in by_id for host, artifact_id in active):
-        raise finite_status.CollectionError(
-            "an active Runtime has incomplete artifact identity"
-        )
+    # Pre-artifact-era rows (NULL artifact id) and unknown-artifact references
+    # must not take the whole exporter down: surface them as their own gauge
+    # and keep publishing the healthy fleet. Never silently drop them.
+    incomplete_by_host: dict[str, int] = {}
+    for host, artifact_id in sorted(active):
+        if not host or artifact_id not in by_id:
+            incomplete_by_host[host or "unknown"] = (
+                incomplete_by_host.get(host or "unknown", 0) + 1
+            )
+    active = {
+        (host, artifact_id)
+        for host, artifact_id in active
+        if host and artifact_id in by_id
+    }
     if not any(artifact_id == target["id"] for _, artifact_id in active):
         active.add(("unassigned", target["id"]))
 
     lines: list[str] = []
+    for host, count in sorted(incomplete_by_host.items()):
+        lines.append(
+            sample(
+                "finite_runtime_incomplete_artifact_identity",
+                {"source_host_id": host},
+                count,
+            )
+        )
     by_host: dict[str, set[str]] = {}
     for host, artifact_id in sorted(active):
         artifact = by_id[artifact_id]
