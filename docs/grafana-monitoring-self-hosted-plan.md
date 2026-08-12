@@ -1,4 +1,4 @@
-# Self-Hosted Grafana Monitoring Migration Plan
+# Self-Hosted Grafana Monitoring Plan
 
 Status: in progress
 
@@ -6,10 +6,10 @@ Depends on: `docs/grafana-monitoring-mvp-requirements.md`
 
 ## Goal
 
-Replace the Grafana Cloud UI, metrics backend, and public probes with one small
-self-hosted monitoring VPS. Keep the existing dashboard, PromQL, version
-metrics, health metrics, and five public checks. Historical Grafana Cloud data
-does not need to move.
+Run the monitoring MVP on one small self-hosted monitoring VPS. Keep the
+dashboard, PromQL, version metrics, health metrics, and five public checks in
+the repository-owned self-hosted stack. No managed monitoring backend is part
+of the production path.
 
 This plan does not add logs, traces, alerts, paging, ticketing, high
 availability, monitoring backups, or host-performance dashboards.
@@ -76,7 +76,7 @@ and TLS cutover.
 Done when Grafana loads over HTTPS from an empty VPS and the repository-owned
 dashboard is present without manual UI configuration.
 
-### 2. Replace Public Synthetic Monitoring
+### 2. Run Public Blackbox Probes
 
 - [x] Configure the five existing public targets in Prometheus.
 - [x] Preserve each target's current `job` and `instance` labels.
@@ -87,14 +87,14 @@ dashboard is present without manual UI configuration.
 - [ ] Confirm the public dashboard panels populate.
 - [ ] Accumulate 24 hours of self-hosted uptime data.
 
-Done when the VPS records the five checks independently of Grafana Cloud and
-the existing uptime panels work without query changes.
+Done when the VPS records the five checks and the existing uptime panels work
+without query changes.
 
-### 3. Redirect LAT Remote Write
+### 3. Enable LAT Remote Write
 
-- [ ] Rename the Cloud-specific Alloy environment file and variables to
+- [x] Rename the Alloy environment file and variables to
   provider-neutral names.
-- [ ] Point Alloy at
+- [x] Point Alloy at
   `https://metrics-ingest.finite.computer/api/v1/write`.
 - [ ] Install the VPS-generated metrics-write password on `finite-lat-1` and
   `finite-lat-3` without committing it.
@@ -107,28 +107,23 @@ the existing uptime panels work without query changes.
 Done when both LAT hosts send only the existing metric allowlist to the VPS and
 all seven dashboard panels have their expected data.
 
-### 4. Retire Grafana Cloud
+### 4. Production Verification
 
 - [ ] Verify the complete self-hosted dashboard for at least 24 hours.
 - [ ] Verify the stack survives a VPS reboot with its state.
-- [ ] Disable the five Grafana Cloud Synthetic Monitoring checks.
-- [ ] Revoke the Grafana Cloud metrics-write token and access policy.
-- [ ] Delete or cancel the Grafana Cloud stack after the rollback window.
 - [ ] Mark this plan complete.
 
-Done when Grafana Cloud can disappear without stopping new uptime or internal
-metrics.
+Done when the self-hosted VPS is the complete monitoring surface for uptime,
+internal health, versions, Runtime artifacts, and drift.
 
 ## Cutover And Rollback
 
-Bring up the VPS and public checks before changing either LAT host. Keep
-Grafana Cloud active during validation. Historical continuity is not required,
-so there is no need to migrate old samples.
+Bring up the VPS and public checks before changing either LAT host. Historical
+continuity is not required, so there is no need to migrate old samples.
 
 Cut over one LAT host at a time. If ingestion or dashboard checks fail, restore
-that host's previous Grafana Cloud environment file and NixOS generation. Do
-not revoke the Cloud token until both LAT hosts and the public checks have been
-healthy on the VPS for 24 hours.
+that host's previous NixOS generation and remove or correct
+`/etc/finite/metrics-remote-write.env` before retrying.
 
 Stopping the VPS stack with `docker compose down` preserves its named volumes.
 Do not use `--volumes` during rollback unless deleting monitoring history is
@@ -155,5 +150,3 @@ intentional.
   `finite-lat-1` and `finite-lat-3`.
 - [ ] Authorize deploying the provider-neutral Alloy changes to
   `finite-lat-1` and `finite-lat-3`.
-- [ ] Authorize disabling checks, revoking credentials, and deleting the
-  Grafana Cloud stack after the rollback window.

@@ -20,8 +20,8 @@ This MVP should work quickly. It is not a full observability platform.
   minute and curls the internal health endpoints.
 - New internal service probes must be added to `finite-healthcheck` and the
   `finite-status` contract instead of becoming one-off monitoring logic.
-- Public uptime checks run externally through Grafana Cloud Synthetic
-  Monitoring for the MVP.
+- Public uptime checks run externally from the self-hosted monitoring VPS using
+  Prometheus blackbox exporter.
 
 ## MVP Scope
 
@@ -49,27 +49,24 @@ The MVP does not include:
 
 ## Recommended Shape
 
-Use Grafana Cloud as the UI and Grafana Cloud Metrics, its hosted Mimir service,
-as the Prometheus-compatible time-series backend.
+Use the self-hosted monitoring VPS as the UI, metrics backend, and public probe
+runner. Grafana OSS serves the dashboard, Prometheus stores metrics and accepts
+authenticated remote write, blackbox exporter performs public checks, and Caddy
+exposes only Grafana plus the exact remote-write route.
 
 Send internally collected metrics through the standard Prometheus
 `remote_write` protocol. Keep metric names and dashboard queries in Prometheus
-formats so the setup can later move to self-hosted Prometheus, Mimir, or another
-compatible backend without redesigning the metrics or dashboard. Historical
-data does not need to be migrated.
+formats. Historical data does not need to be migrated.
 
-Use Grafana Cloud Synthetic Monitoring for public uptime checks. Configure only
-basic HTTP checks for the MVP:
+Use Prometheus blackbox exporter for public uptime checks. Configure only basic
+HTTP checks for the MVP:
 
-- one public probe location;
 - one check every five minutes per target;
 - expected HTTP status validation;
 - standard `probe_*` metrics for dashboard queries.
 
-Do not use browser checks, scripted checks, private probes, or Synthetic
-Monitoring logs for the MVP. Store the target list and expected status behavior
-in the repository so the managed checks can later be replaced by Prometheus
-blackbox exporter with minimal changes.
+Do not use browser checks, scripted checks, private probes, or logs for the MVP.
+Store the target list and expected status behavior in the repository.
 
 Avoid making `finite-lat-1` the only monitoring host. The external uptime checks
 must continue recording failures if `finite-lat-1` disappears.
@@ -136,13 +133,12 @@ Rules:
 
 ## Uptime Metrics
 
-Public endpoint checks should emit standard blackbox or synthetic monitoring
-metrics:
+Public endpoint checks should emit standard blackbox metrics:
 
 ```text
-probe_success{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 1
-probe_duration_seconds{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 0.123
-probe_http_status_code{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 200
+probe_success{job="finite.computer",instance="https://finite.computer",probe="self-hosted-monitoring"} 1
+probe_duration_seconds{job="finite.computer",instance="https://finite.computer",probe="self-hosted-monitoring"} 0.123
+probe_http_status_code{job="finite.computer",instance="https://finite.computer",probe="self-hosted-monitoring"} 200
 ```
 
 Minimum public targets:
@@ -210,18 +206,19 @@ The MVP is done when:
 - The dashboard shows current versions for every required component.
 - The dashboard shows whether the internal `finite-healthcheck` is currently
   green.
-- All monitoring configuration lives in the repo or in a documented managed
-  service configuration.
+- All monitoring configuration lives in the repo, with host-only secret files
+  documented by name and location only.
 - Dashboard queries use standard PromQL and standard `probe_*` metrics so they
-  remain portable to a self-hosted Prometheus-compatible setup.
+  remain portable within Prometheus-compatible tooling.
 - No secret values are present in metrics, labels, dashboard JSON, or docs.
 
 ## Implementation Order
 
-1. Add external uptime checks for the minimum public targets.
+1. Add the self-hosted monitoring VPS stack and public uptime checks for the
+   minimum public targets.
 2. Export `finite-healthcheck` health through node exporter and standard
    Prometheus `remote_write`.
 3. Export component version and runtime artifact metrics.
 4. Create the Grafana dashboard.
-5. Record the exact managed-service settings or checked-in config needed to
+5. Record the exact checked-in config and host-only secret names needed to
    recreate the setup.

@@ -81,8 +81,29 @@ Prometheus data source and `Finite Production MVP` dashboard are provisioned;
 there is no UI setup step.
 
 The existing Docker volumes and credentials survive the switch from raw-IP to
-DNS mode. Internal health, version, and Runtime artifact panels remain empty
-until the separately authorized LAT remote-write rollout is complete.
+DNS mode.
+
+## LAT Remote Write
+
+LAT hosts write internal health, version, and Runtime artifact metrics only to
+`https://metrics-ingest.finite.computer/api/v1/write`. Install this root-only
+file independently on `finite-lat-1` and `finite-lat-3` before activating a
+closure that enables Alloy:
+
+```dotenv
+FINITE_METRICS_REMOTE_WRITE_USERNAME=<METRICS_USERNAME from /etc/finite/monitoring/stack.env on the monitoring VPS>
+FINITE_METRICS_REMOTE_WRITE_PASSWORD=<contents of /etc/finite/monitoring/metrics-write-password on the monitoring VPS>
+```
+
+Apply the host permissions exactly:
+
+```bash
+sudo install -d -m 0700 -o root -g root /etc/finite
+sudo install -m 0600 -o root -g root /tmp/metrics-remote-write.env /etc/finite/metrics-remote-write.env
+```
+
+The password is a shared write credential for the monitoring ingest endpoint.
+It must not enter Git, shell history, logs, screenshots, or metric labels.
 
 ## Operations
 

@@ -57,7 +57,7 @@ in
 
         services.alloy = {
           enable = true;
-          environmentFile = "/etc/finite/grafana-cloud-metrics.env";
+          environmentFile = "/etc/finite/metrics-remote-write.env";
           extraFlags = [ "--disable-reporting" ];
         };
         environment.etc."alloy/config.alloy".text = ''
@@ -74,7 +74,7 @@ in
           }
 
           prometheus.relabel "finite_mvp" {
-            forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+            forward_to = [prometheus.remote_write.finite_monitoring.receiver]
 
             rule {
               action        = "keep"
@@ -83,13 +83,13 @@ in
             }
           }
 
-          prometheus.remote_write "grafana_cloud" {
+          prometheus.remote_write "finite_monitoring" {
             endpoint {
-              url = sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")
+              url = "https://metrics-ingest.finite.computer/api/v1/write"
 
               basic_auth {
-                username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USERNAME")
-                password = sys.env("GRAFANA_CLOUD_PROMETHEUS_PASSWORD")
+                username = sys.env("FINITE_METRICS_REMOTE_WRITE_USERNAME")
+                password = sys.env("FINITE_METRICS_REMOTE_WRITE_PASSWORD")
               }
             }
           }

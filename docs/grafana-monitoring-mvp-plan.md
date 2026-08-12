@@ -19,24 +19,22 @@ status pages, alert notifications, paging, ticketing, or automated repair.
 
 ### 1. Choose the MVP Hosting Shape
 
-- [x] Use Grafana Cloud as the managed monitoring host.
-- [x] Use Grafana Cloud Metrics, backed by hosted Mimir, as the
-  Prometheus-compatible metrics backend.
+- [x] Use the self-hosted monitoring VPS as the monitoring host.
+- [x] Use Prometheus on the monitoring VPS as the Prometheus-compatible metrics
+  backend.
 - [x] Send internally collected metrics using standard Prometheus
   `remote_write`.
-- [x] Use Grafana Cloud Synthetic Monitoring basic HTTP checks for public
-  uptime.
-- [x] Use one public probe location and a five-minute check interval.
+- [x] Use Prometheus blackbox exporter basic HTTP checks for public uptime.
+- [x] Use a five-minute check interval.
 - [x] Record the selected services and portability requirements without
   secrets.
 
 Done when:
 
-- Grafana Cloud, Grafana Cloud Metrics, and Synthetic Monitoring are recorded as
-  the MVP services.
+- Grafana OSS, Prometheus, blackbox exporter, and Caddy are recorded as the MVP
+  services.
 - The setup does not depend only on `finite-lat-1`.
-- Metric collection uses standard Prometheus formats and can be redirected to a
-  self-hosted Prometheus-compatible backend.
+- Metric collection uses standard Prometheus formats.
 
 ### 2. Add Public Uptime Checks
 
@@ -51,7 +49,7 @@ Done when:
 - [x] Store the resolved uptime target list and expected statuses in the
   repository.
 - [x] Record all implemented check settings in
-  `infra/monitoring/grafana-cloud/public-uptime-checks.json`.
+  `infra/monitoring/self-hosted/prometheus.yml`.
 - [x] Verify the `finite.computer` check emits `probe_success`, response
   duration, and HTTP status code.
 - [x] Verify each remaining check emits `probe_success`, response duration, and
@@ -85,13 +83,14 @@ Done when:
   names.
 - [x] Limit Alloy remote write to the MVP health, scrape, and freshness metric
   families.
-- [x] Record the host-only Grafana Cloud remote-write credential names and
+- [x] Record the host-only self-hosted remote-write credential names and
   bootstrap file without secret values.
 - [x] Verify no metric labels contain secrets, tokens, customer ids, or private
   user data.
-- [ ] Install the Grafana Cloud `metrics:write` credential file on
+- [ ] Install the self-hosted metrics-write credential file on
   `finite-lat-1` and deploy the evaluated NixOS closure.
-- [ ] Verify the current aggregate and per-service metrics in Grafana Cloud.
+- [ ] Verify the current aggregate and per-service metrics in self-hosted
+  Grafana.
 
 Done when:
 
@@ -119,10 +118,10 @@ Done when:
 - [x] Verify versions come from deployed state, not hand-maintained dashboard
   values.
 - [x] Verify no version metric exposes secrets or private user data.
-- [ ] Install the Grafana Cloud metrics credential on `finite-lat-3` and deploy
+- [ ] Install the self-hosted metrics credential on `finite-lat-3` and deploy
   the reviewed version-metric closures to `finite-lat-1` and `finite-lat-3`.
 - [ ] Verify all configured version and Runtime artifact metrics in Grafana
-  Cloud.
+  OSS.
 
 Done when:
 
@@ -142,7 +141,7 @@ Done when:
 - [x] Add Runtime artifact panel.
 - [x] Add version drift panel.
 - [x] Keep panel count limited to the MVP sections.
-- [x] Export dashboard JSON or document managed-service dashboard recreation.
+- [x] Export dashboard JSON and self-hosted provisioning config.
 
 Done when:
 
@@ -155,7 +154,7 @@ Done when:
 - [ ] Confirm public uptime is visible for at least 24 hours.
 - [ ] Confirm all required version metrics are present.
 - [ ] Confirm internal `finite-healthcheck` state is visible and current.
-- [x] Confirm dashboard JSON or managed-service recreation notes are stored.
+- [x] Confirm dashboard JSON and self-hosted provisioning config are stored.
 - [x] Confirm no secrets appear in metrics, labels, dashboard JSON, or docs.
 - [ ] Run `scripts/finite-status --json` as retained evidence, if appropriate
   for the rollout.
@@ -183,17 +182,13 @@ Do not start these until the MVP above is complete:
 
 ## Final Authorization Todos
 
-These actions change production systems or managed-service state and require
+These actions change production systems or monitoring service state and require
 explicit authorization before execution:
 
-- [x] Authorize creating a stack-scoped Grafana Cloud access-policy token with
-  only `metrics:write` permission.
 - [ ] Authorize installing the root-owned, mode `0600`
-  `/etc/finite/grafana-cloud-metrics.env` credential file on `finite-lat-1` and
+  `/etc/finite/metrics-remote-write.env` credential file on `finite-lat-1` and
   `finite-lat-3`.
 - [ ] Authorize deploying the reviewed monitoring and version-metric NixOS
   changes to `finite-lat-1` and `finite-lat-3`.
-- [x] Authorize creating or updating the `Finite Production MVP` dashboard and
-  saving its managed Grafana Cloud configuration.
 - [ ] Authorize rolling either host back to its previous NixOS generation if
   post-deploy health checks fail.
