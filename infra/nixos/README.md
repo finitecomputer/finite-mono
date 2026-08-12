@@ -7,7 +7,7 @@ The root flake's `nixosConfigurations.finite-lat-1` composes the modules here;
 **LIVE since 2026-07-09.** The cutover is done — lat1 was reinstalled as
 NixOS and now runs the whole coupled cluster (Core, dashboard, native
 Postgres, chat, sites, search, one Caddy edge). This tree IS lat1's current
-config; copying and directly switching to the exact closure prebuilt on lat2
+config; copying and directly switching to the exact CI-built closure artifact
 is the deploy.
 The historical cutover and its hard-won gotchas (single-disk/no-mdadm, disks
 by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`; its
@@ -56,8 +56,9 @@ It was installed and storage-qualified on 2026-07-20. The current generation
 adds Kata/containerd and a timer-disabled Runner configured for a drained
 private-path proof. It is not customer capacity or a Recovery Authority until
 the synthetic handoff passes. The authoritative sequence and dated evidence are in
-`docs/runs/finite-lat-capacity-and-redundancy.md`. Builds happen on the existing
-finite-lat-2 x86_64 Nix builder; lat2's services and storage are unchanged.
+`docs/runs/finite-lat-capacity-and-redundancy.md`. Production lat1 closure
+builds are moving to the `Lat1 NixOS Closure` workflow; lat2's services and
+storage are unchanged.
 
 ## Deploy story
 
@@ -117,136 +118,31 @@ Then the secrets checklist below + the data restore in the runbook.
 
 Do not run Nix evaluation, `nix build`, `nixos-rebuild`, or `nixos-anywhere`
 for the production closure on macOS. Nix would inherit `/etc/nix/machines` or
-the operator's personal builder settings. The root recipe runs only SSH on the
-Mac, is fixed to `ubuntu@finite-lat-2`, checks the remote hostname and system,
-and evaluates/builds the exact pushed GitHub commit on lat2 with `builders =`
-explicitly empty. There is no builder override: neither clawland nor lat1 is a
-permitted production build host.
+the operator's personal builder settings. The historical transcript below used
+lat2 as the x86_64 Linux builder/driver; the current routine deploy path is the
+CI-built closure artifact documented in `infra/runbooks/deploy-core.md`.
 
 ### Every deploy after that
 
-`finite-lat-2` is the required x86_64 build host for finite-mono production
-closures. **Do not use clawland and do not build on finite-lat-1.** A deploy
-has two immutable handoff values: a full lowercase 40-hex Git commit `REV` and
-the exact `/nix/store/...-nixos-system-finite-lat-1-...` path `SYSTEM` printed
-by the prebuild. A tag, branch, 12-character abbreviation, or dirty working
-tree is not an acceptable handoff.
+The routine deploy path is:
 
-From the reviewed checkout on the Mac, confirm the commit is pushed to
-`origin/main`, then prebuild it:
+1. Dispatch `.github/workflows/lat1-nixos-closure.yml` for the exact reviewed
+   `origin/main` revision. The workflow runs on `depot-ubuntu-24.04` by default,
+   builds `nixosConfigurations.finite-lat-1.config.system.build.toplevel` and
+   the matching disko script with remote builders disabled, and uploads a file
+   binary cache artifact named `lat1-nixos-closure-REV`.
+2. Download that artifact and run `just deploy-lat1-closure ARTIFACT_DIR`.
+   `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
+   prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
+   the exact `SYSTEM` path in a transient systemd unit, and verifies
+   `/run/current-system` equals that path.
 
-```sh
-set -euo pipefail
-git fetch origin --prune
-REV="$(git rev-parse HEAD)"
-[[ "$REV" =~ ^[0-9a-f]{40}$ ]]
-git merge-base --is-ancestor "$REV" origin/main
-SYSTEM="$(just nixos-build-lat1 "$REV")"
-case "$SYSTEM" in /nix/store/*) ;; *) exit 1 ;; esac
-printf 'REV=%s\nSYSTEM=%s\n' "$REV" "$SYSTEM"
-```
-
-The helper's stdout is only `SYSTEM`. Evaluation and building occurred over
-SSH on lat2 with remote builders disabled, and the result is GC-rooted at
-`~ubuntu/.local/state/finite-mono/lat1-closures/$REV` on lat2. The matching
-bare-metal disko script is rooted at
-`~ubuntu/.local/state/finite-mono/lat1-disko-scripts/$REV`; it is used only by
-the reinstall flow. Record both printed values in the deploy log. Then SSH to
-lat2 with temporary agent forwarding and paste those exact two values; do not
-recompute either value
-there. Lat2 intentionally stores no lat1 deploy key, and it cannot resolve the
-`finite-lat-1` alias:
-
-```sh
-ssh -A ubuntu@finite-lat-2
-```
-
-On lat2, run:
-
-```sh
-set -euo pipefail
-REV='<exact-40-hex-rev-from-prebuild>'
-SYSTEM='<exact-/nix/store-path-from-prebuild>'
-[[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
-[[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-ROOT="$HOME/.local/state/finite-mono/lat1-closures/$REV"
-test -L "$ROOT"
-test "$(readlink -f "$ROOT")" = "$SYSTEM"
-nix path-info --option builders '' "$SYSTEM" >/dev/null
-ssh -o BatchMode=yes root@64.34.82.77 true
-# The exact lat2-built closure is unsigned. The authenticated root SSH
-# transport is the trust boundary for this reviewed handoff.
-nix copy --no-check-sigs --option builders '' \
-  --to ssh-ng://root@64.34.82.77 "$SYSTEM"
-
-UNIT="finite-nixos-activate-${REV}.service"
-ssh -o BatchMode=yes root@64.34.82.77 \
-  bash -s -- "$REV" "$SYSTEM" "$UNIT" <<'LAT1'
-set -euo pipefail
-rev="$1"
-system="$2"
-unit="$3"
-[[ "$rev" =~ ^[0-9a-f]{40}$ ]] || exit 64
-[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-[[ "$unit" == "finite-nixos-activate-${rev}.service" ]] || exit 64
-test "$(readlink -f "$system")" = "$system"
-test -x "$system/bin/switch-to-configuration"
-nix-store --check-validity "$system" >/dev/null
-load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
-[[ "$load_state" == not-found ]] || {
-  echo "refusing to replace existing transient unit $unit ($load_state)" >&2
-  exit 73
-}
-nix-env --option builders '' --profile /nix/var/nix/profiles/system \
-  --set "$system"
-test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
-systemd-run --quiet --unit="$unit" --property=Type=oneshot \
-  --property=RemainAfterExit=yes --no-block \
-  "$system/bin/switch-to-configuration" switch
-LAT1
-
-deadline=$((SECONDS + 600))
-while true; do
-  if ! state="$(ssh -o BatchMode=yes -o ConnectTimeout=5 root@64.34.82.77 \
-    systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null)"; then
-    state=unreachable
-  fi
-  case "$state" in
-    active) break ;;
-    activating|inactive|unreachable) ;;
-    failed)
-      ssh -o BatchMode=yes root@64.34.82.77 \
-        journalctl --no-pager -n 100 -u "$UNIT" >&2 || true
-      exit 1
-      ;;
-    *) echo "unexpected activation state: $state" >&2; exit 1 ;;
-  esac
-  (( SECONDS < deadline )) || { echo "activation timed out" >&2; exit 1; }
-  sleep 2
-done
-PROFILE="$(ssh -o BatchMode=yes root@64.34.82.77 \
-  readlink -f /nix/var/nix/profiles/system)"
-ACTUAL="$(ssh -o BatchMode=yes root@64.34.82.77 \
-  readlink -f /run/current-system)"
-printf 'expected=%s\nprofile=%s\nactual=%s\n' "$SYSTEM" "$PROFILE" "$ACTUAL"
-test "$PROFILE" = "$SYSTEM"
-test "$ACTUAL" = "$SYSTEM"
-ssh -o BatchMode=yes root@64.34.82.77 systemctl stop "$UNIT"
-```
-
-This first advances `/nix/var/nix/profiles/system` to the exact copied closure,
-so boot and generation rollback agree with the activation. The direct
-`switch-to-configuration` call runs in a transient systemd unit and survives a
-lost SSH connection; it does not evaluate or build on lat1. The final
-exact-path assertion is the deployment identity check and must pass before
-service-specific verification.
-If the client SSH connection drops after `systemd-run`, reconnect through
-lat2 and inspect `systemctl status` plus `journalctl -u` for
-`finite-nixos-activate-$REV.service`; activation continues independently. Do
-not start a second activation until that unit and both exact profile paths are
-accounted for.
-Rollback remains `ssh root@64.34.82.77 nixos-rebuild switch --rollback`,
-followed by recording and verifying the newly active `/run/current-system`.
+Do not build production closures on the Mac, clawland, lat1, or lat2. The old
+`just deploy-lat1 REV` helper still exists as a lat2 fallback until the artifact
+flow has live deployment evidence; do not treat it as the normal path. Rollback
+remains `ssh root@64.34.82.77 nixos-rebuild switch --rollback`, or the same
+artifact workflow for a previous known-good revision followed by
+`just deploy-lat1-closure`.
 
 ## Secrets bootstrap checklist (values NEVER in this repo)
 

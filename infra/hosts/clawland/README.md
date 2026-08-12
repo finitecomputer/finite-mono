@@ -4,9 +4,9 @@
 > here.** `chat.finite.computer` now resolves to lat1 (native
 > `finitechat-server` on :8788). clawland is now **purely the legacy finite.vip
 > fleet box** and is out of mono's scope. **Do not use clawland as a
-> finite-mono build host.** `finite-lat-2` is the current x86_64 Nix builder
-> for finite-mono and lat1 deploys. The finitechat section below is
-> **historical** (its migration story is in
+> finite-mono build host.** Routine lat1 NixOS closures are built by the
+> `Lat1 NixOS Closure` workflow; the finitechat section below is **historical**
+> (its migration story is in
 > [`finitechat-server.md`](finitechat-server.md)).
 
 The current finite-mono deployment exceptions are the first-party AEON

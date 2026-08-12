@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Legacy fallback for production Nix closure builds. The preferred path is
+# .github/workflows/lat1-nixos-closure.yml plus
+# scripts/deploy-lat1-closure-cache.
 builder="ubuntu@finite-lat-2"
 system_target="nixosConfigurations.finite-lat-1.config.system.build.toplevel"
 disko_target="nixosConfigurations.finite-lat-1.config.system.build.diskoScript"

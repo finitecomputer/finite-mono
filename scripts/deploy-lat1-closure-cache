@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Deploy a lat1 NixOS closure that was already built on x86_64 Linux and
+# packaged as a file binary cache by scripts/build-lat1-nixos-closure-artifact.
+set -euo pipefail
+
+LAT1="${FINITE_LAT1_TARGET:-root@64.34.82.77}"
+
+usage() {
+  echo "usage: $0 <lat1-closure-artifact-dir> [runtime rollout options]" >&2
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 64
+fi
+
+artifact_dir="$1"
+shift
+ROLLOUT_ARGS=("$@")
+
+if [[ ! -d "$artifact_dir" ]]; then
+  echo "artifact directory does not exist: $artifact_dir" >&2
+  exit 66
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+manifest="$artifact_dir/manifest.json"
+if [[ ! -f "$manifest" ]]; then
+  echo "artifact manifest is missing: $manifest" >&2
+  exit 66
+fi
+
+manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat1-closure-manifest.XXXXXX")"
+trap 'rm -f "$manifest_values_file"' EXIT
+python3 - "$manifest" > "$manifest_values_file" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+
+expected_schema = "finite.lat1.nixos-closure.v1"
+if data.get("schema") != expected_schema:
+    raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
+if data.get("repository") != "finitecomputer/finite-mono":
+    raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
+
+rev = data.get("rev")
+system = data.get("system")
+disko = data.get("disko")
+cache = data.get("cache")
+if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
+    raise SystemExit(f"invalid rev: {rev!r}")
+if not isinstance(system, str) or not re.fullmatch(
+    r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/\s]+", system
+):
+    raise SystemExit(f"invalid system path: {system!r}")
+if not isinstance(disko, str) or not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", disko):
+    raise SystemExit(f"invalid disko path: {disko!r}")
+if cache != "nix-cache":
+    raise SystemExit(f"invalid cache directory: {cache!r}")
+
+print(rev)
+print(system)
+print(disko)
+print(cache)
+PY
+
+REV="$(sed -n '1p' "$manifest_values_file")"
+SYSTEM="$(sed -n '2p' "$manifest_values_file")"
+DISKO="$(sed -n '3p' "$manifest_values_file")"
+CACHE_REL="$(sed -n '4p' "$manifest_values_file")"
+CACHE_DIR="$artifact_dir/$CACHE_REL"
+
+if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
+  echo "artifact cache is missing or incomplete: $CACHE_DIR" >&2
+  exit 66
+fi
+
+if [[ ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
+  scripts/rollout-lat1-runtime-artifact --validate-only "${ROLLOUT_ARGS[@]}"
+fi
+
+git fetch origin --prune
+git merge-base --is-ancestor "$REV" origin/main || {
+  echo "refusing: $REV is not on origin/main" >&2
+  exit 65
+}
+
+echo "==> using prebuilt lat1 closure artifact"
+echo "    rev=$REV"
+echo "    system=$SYSTEM"
+echo "    disko=$DISKO"
+
+# Deploys are when the Hosted Web Chat + Identity recovery snapshot happens
+# (no calendar timer since 2026-07-14): capture pre-upgrade state while a
+# service blip is expected.
+echo "==> taking pre-deploy recovery snapshot on lat1"
+ssh -n -o BatchMode=yes "$LAT1" \
+  'systemctl start finite-hosted-web-chat-snapshot.service && readlink /data/recovery-snapshots/hosted-web-chat/latest'
+
+echo "==> copying prebuilt closure to lat1"
+nix copy --no-check-sigs --option builders '' \
+  --from "file://$CACHE_DIR" \
+  --to "ssh-ng://$LAT1" \
+  "$SYSTEM" "$DISKO"
+
+UNIT="finite-nixos-activate-${REV}.service"
+echo "==> activating $SYSTEM on lat1"
+ssh -o BatchMode=yes "$LAT1" \
+  bash -s -- "$REV" "$SYSTEM" "$UNIT" <<'LAT1'
+set -euo pipefail
+rev="$1"
+system="$2"
+unit="$3"
+[[ "$rev" =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
+[[ "$unit" == "finite-nixos-activate-${rev}.service" ]] || exit 64
+test "$(readlink -f "$system")" = "$system"
+test -x "$system/bin/switch-to-configuration"
+nix-store --check-validity "$system" >/dev/null
+load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
+[[ "$load_state" == not-found ]] || {
+  echo "refusing to replace existing transient unit $unit ($load_state)" >&2
+  exit 73
+}
+nix-env --option builders '' --profile /nix/var/nix/profiles/system \
+  --set "$system"
+test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
+systemd-run --quiet --unit="$unit" --property=Type=oneshot \
+  --property=RemainAfterExit=yes --no-block \
+  "$system/bin/switch-to-configuration" switch
+LAT1
+
+echo "==> activation dispatched, polling"
+deadline=$((SECONDS + 600))
+while true; do
+  if ! state="$(ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$LAT1" \
+    systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null)"; then
+    state=unreachable
+  fi
+  case "$state" in
+    active) break ;;
+    activating|inactive|unreachable) ;;
+    failed)
+      ssh -n -o BatchMode=yes "$LAT1" \
+        journalctl --no-pager -n 100 -u "$UNIT" >&2 || true
+      exit 1
+      ;;
+    *) echo "unexpected activation state: $state" >&2; exit 1 ;;
+  esac
+  (( SECONDS < deadline )) || { echo "activation timed out" >&2; exit 1; }
+  sleep 2
+done
+
+PROFILE="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /nix/var/nix/profiles/system)"
+ACTUAL="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /run/current-system)"
+test "$PROFILE" = "$SYSTEM"
+test "$ACTUAL" = "$SYSTEM"
+ssh -n -o BatchMode=yes "$LAT1" systemctl stop "$UNIT"
+ssh -n -o BatchMode=yes "$LAT1" \
+  'systemctl is-active finite-saas-core podman-finite-saas-dashboard >/dev/null'
+DIGEST="$(ssh -n -o BatchMode=yes "$LAT1" \
+  "podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'")"
+curl -fsS -o /dev/null https://finite.computer/
+
+echo "==> DEPLOYED rev=$REV"
+echo "    system=$SYSTEM"
+echo "    dashboard image digest=$DIGEST"
+
+if [[ ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
+  scripts/rollout-lat1-runtime-artifact "${ROLLOUT_ARGS[@]}"
+fi

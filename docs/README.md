@@ -40,9 +40,9 @@ commands against the owning source folder before relying on them.
   product-specific identity intents over shared key primitives without a
   generic signer authority.
 - [finite-lat host roles and safe initial placement](adr/0005-finite-lat-host-roles-and-placement.md):
-  lat1 control/existing Agents, lat2 as the remaining x86_64 production Nix
-  build host, lat3 initial new-Agent capacity, and fail-closed
-  provider-neutral placement. Docker/image CI has since moved to Depot.
+  lat1 control/existing Agents, lat2 excluded from Agent capacity, lat3 initial
+  new-Agent capacity, and fail-closed provider-neutral placement. Docker/image
+  CI and the staged lat1 NixOS closure build path use Depot-backed CI.
 - [Current deployed infrastructure](../infra/README.md): exact observed fleet
   roles and the boundary between executable configuration and dated captures.
 - [finite-lat capacity, redundancy, and admission](runs/finite-lat-capacity-and-redundancy.md):

@@ -61,15 +61,31 @@ identity-conformance:
 brain-api-route-check:
     python3 scripts/check-brain-api-routes.py
 
-# Evaluate and build immutable system + disko outputs on finite-lat-2. The
-# helper prints the exact, GC-rooted system path used for the deploy handoff.
+# Build immutable system + disko outputs on the current x86_64 Linux host and
+# package them as a file binary cache deploy artifact.
+nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec scripts/build-lat1-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
+
+# Legacy fallback: evaluate and build immutable system + disko outputs on
+# finite-lat-2. Kept until the CI closure artifact deploy path is live-proven.
 nixos-build-lat1 rev:
     #!/usr/bin/env bash
     set -euo pipefail
     exec scripts/nix-build-lat2 {{ quote(rev) }}
 
-# Full lat1 deploy for a committed main rev: prebuild on lat2, copy/switch
-# lat1, then verify the running closure and dashboard digest by state.
+# Full lat1 deploy from a CI-built closure artifact: copy/switch lat1, then
+# verify the running closure and dashboard digest by state.
+[positional-arguments]
+deploy-lat1-closure artifact_dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec scripts/deploy-lat1-closure-cache "$@"
+
+# Legacy fallback deploy for a committed main rev: prebuild on lat2,
+# copy/switch lat1, then verify the running closure and dashboard digest by
+# state. Prefer deploy-lat1-closure after CI closure artifact validation.
 [positional-arguments]
 deploy-lat1 rev *args:
     #!/usr/bin/env bash
@@ -79,8 +95,9 @@ deploy-lat1 rev *args:
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
-    bash -n scripts/deploy-lat1 scripts/rollout-lat1-runtime-artifact
+    bash -n scripts/deploy-lat1 scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
     python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
+    python3 -m unittest scripts.tests.test_lat1_closure_artifact
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint
 # behavior for the aggregate production healthcheck.

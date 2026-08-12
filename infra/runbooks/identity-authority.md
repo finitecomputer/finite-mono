@@ -78,7 +78,8 @@ starting either. The Sites notification credential must exist before switching
 to a closure whose Identity and Sites units require it.
 
 After the DNS record and credential exist, deploy only an exact reviewed commit
-on `origin/main` through `scripts/deploy-lat1 REV`.
+on `origin/main` through the closure-artifact path in
+[`deploy-core.md`](deploy-core.md#steps).
 
 After lat1 health is green, apply the apex route from the same exact checkout:
 

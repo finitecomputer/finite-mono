@@ -211,8 +211,9 @@
       }
     )
     // {
-      # Server binaries + CLIs built by nix from this workspace (built by Linux
-      # CI and by lat2 only for production Nix closures; eval-only on darwin).
+      # Server binaries + CLIs built by nix from this workspace (Linux CI for
+      # routine production closure artifacts; lat2 only as fallback; eval-only
+      # on darwin).
       # See infra/nixos/packages.nix.
       packages.x86_64-linux = finitePackagesLinux // {
         hermes-agent-minimal = hermes-agent.packages.x86_64-linux.minimal;

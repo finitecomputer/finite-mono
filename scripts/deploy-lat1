@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# One-command lat1 deploy: prebuild on lat2, copy/switch lat1, verify by state.
+# Legacy fallback lat1 deploy: prebuild on lat2, copy/switch lat1, verify by
+# state. Prefer scripts/deploy-lat1-closure-cache with a CI-built
+# lat1-nixos-closure artifact.
 #
 # Usage: scripts/deploy-lat1 <exact-40-hex-mono-rev> [runtime rollout options]
 #

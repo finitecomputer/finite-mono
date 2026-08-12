@@ -28,7 +28,7 @@ is historical, not current authority.
   Chat/Core, Sites, Brain, and the secrets bootstrap.
 - [ ] Add swap and pin the next lat1 NixOS generation without changing storage.
 - [ ] Close the exact lat1 disk inventory and RAID/disko configuration; build
-  the reviewed closure on finite-lat-2.
+  the reviewed closure through the CI closure-artifact path.
 - [ ] Fix the Runner/Core startup ordering found during the lat1 bridge rollout.
 - [ ] In an evening window: stop writers, take and verify backups, reinstall
   pinned NixOS with RAID, restore, verify, and keep creation drained until all
@@ -45,8 +45,8 @@ is historical, not current authority.
 
 ## Parked / later
 
-- [ ] Keep finite-lat-2 out of Agent capacity; it remains the production
-  x86_64 Nix build host until that deploy path is replaced.
+- [ ] Keep finite-lat-2 out of Agent capacity; the routine production Nix build
+  path is the CI closure-artifact flow once live-proven.
 - [ ] Revisit Latitude Kubernetes only at the trigger recorded in
   [`parking-lot.md`](parking-lot.md).
 - [ ] Preserve provider-neutral Runner boundaries for future Phala/TEE work;
