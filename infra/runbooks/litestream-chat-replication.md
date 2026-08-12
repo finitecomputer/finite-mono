@@ -37,10 +37,17 @@ rendered to `/etc/litestream.yml` on the host. Credentials:
 
 ## ACTIVATION (one-time; record evidence here when exercised)
 
-1. TODO: Before the enabling closure is deployed, smoke-test the credential
-   and endpoint from any machine with litestream 0.5: replicate a scratch
-   SQLite into the bucket and `litestream restore` it back. This proves
-   Latitude↔litestream-0.5 compatibility independent of production.
+1. Smoke-test the credential and endpoint with litestream 0.5 before the
+   enabling closure is deployed: replicate a scratch SQLite into the bucket
+   and `litestream restore` it back. This proves Latitude↔litestream-0.5
+   compatibility independent of production.
+   **EXERCISED 2026-08-12** from lat1 itself: scratch WAL db replicated to
+   `s3://finite-lat-1-litestream/smoke-test` via
+   `https://objects.chi.storage.sh` (path-style) with litestream 0.5.11 from
+   the platform pin, restored, `PRAGMA integrity_check` = ok, content
+   intact. Secret file verified root:root 0600 with both names present. The
+   tiny `smoke-test/` prefix left in the bucket may be deleted from the
+   dashboard at any time.
 2. Deploy the enabling closure via the normal chain
    (`just nixos-build-lat1 REV` → `scripts/deploy-lat1 REV`).
 3. Watch the initial snapshot upload of the ~4 GB database:
