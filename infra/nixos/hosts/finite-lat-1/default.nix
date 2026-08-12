@@ -48,11 +48,15 @@ in
   # Continuous chat-database replication to Latitude object storage
   # (modules/finite-litestream.nix). Endpoint and bucket are non-secret;
   # credentials live only in the operator-placed env file declared in
-  # secret-bootstrap-contract.json.
+  # secret-bootstrap-contract.json. Region choice (measured from this host,
+  # 2026-08-12): chi is 29ms away vs nyc's 48ms, and object storage exists
+  # only in those two regions today. Off-host is the point — same-DC would
+  # defeat DR — but the nearer region wins for the future blob phase, whose
+  # downloads proxy through this server per-request.
   finite.litestream = {
     enable = true;
     replica = {
-      endpoint = "https://objects.nyc.storage.sh";
+      endpoint = "https://objects.chi.storage.sh";
       bucket = "finite-lat-1-litestream";
     };
     dbs = [

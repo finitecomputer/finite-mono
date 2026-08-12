@@ -107,7 +107,7 @@ in
     replica = {
       endpoint = lib.mkOption {
         type = lib.types.str;
-        description = "S3-compatible endpoint URL (non-secret), e.g. https://objects.nyc.storage.sh";
+        description = "S3-compatible endpoint URL (non-secret), e.g. https://objects.chi.storage.sh";
       };
       bucket = lib.mkOption {
         type = lib.types.str;

@@ -5,7 +5,8 @@
 `finite-litestream.service` on finite-lat-1 continuously replicates the chat
 server's SQLite (`/var/lib/private/finite-chat/data/server.sqlite3`) to the
 Latitude.sh S3-compatible bucket `finite-lat-1-litestream`
-(`https://objects.nyc.storage.sh`, path-style). This is a **DR-only restore
+(`https://objects.chi.storage.sh`, path-style; chi measured nearest to lat1
+at 29 ms vs nyc's 48 ms, 2026-08-12). This is a **DR-only restore
 lane** with seconds-of-writes RPO — NOT a warm standby. It is additive to the
 deploy-triggered Recovery Snapshot and the nightly Borg offsite job; neither
 is replaced.
