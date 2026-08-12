@@ -13,20 +13,18 @@ CHECKER = REPO_ROOT / "scripts/check_nixos_secrets_contract.py"
 
 def contract_entry(**overrides: object) -> dict[str, object]:
     entry: dict[str, object] = {
-        "backend": "legacy",
         "consumers": ["synthetic.service"],
         "destinationPath": "/run/secrets/finite/synthetic-env",
         "group": "root",
         "kind": "env",
-        "legacyPath": "/etc/finite/synthetic.env",
         "mode": "0600",
         "owner": "root",
-        "path": "/etc/finite/synthetic.env",
+        "path": "/run/secrets/finite/synthetic-env",
         "reloadUnits": [],
         "requiredEnvNames": ["SYNTHETIC_TOKEN"],
         "restartUnits": [],
         "scope": ["finite-lat-1"],
-        "sopsFile": None,
+        "sopsFile": "/nix/store/synthetic-source/synthetic.env",
         "sopsFormat": "binary",
         "sopsKey": None,
     }
@@ -46,24 +44,35 @@ class NixosSecretsContractTest(unittest.TestCase):
                 text=True,
             )
 
-    def test_legacy_entry_passes_without_secret_values(self) -> None:
+    def test_sops_managed_entry_passes_without_secret_values(self) -> None:
         result = self.run_checker({"synthetic-env": contract_entry()})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("values-free", result.stdout)
 
-    def test_sops_entry_requires_resolved_destination_and_source_file(self) -> None:
+    def test_entry_requires_resolved_destination_and_source_file(self) -> None:
         result = self.run_checker(
             {
                 "synthetic-env": contract_entry(
-                    backend="sops",
                     path="/etc/finite/synthetic.env",
                     sopsFile=None,
                 )
             }
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("resolved path does not match sops backend", result.stderr)
-        self.assertIn("sops backend requires sopsFile", result.stderr)
+        self.assertIn("path must resolve to destinationPath", result.stderr)
+        self.assertIn("sopsFile must be a non-empty string", result.stderr)
+
+    def test_legacy_fields_are_not_part_of_the_sops_contract(self) -> None:
+        result = self.run_checker(
+            {
+                "synthetic-env": contract_entry(
+                    backend="legacy",
+                    legacyPath="/etc/finite/synthetic.env",
+                )
+            }
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unknown field(s): backend, legacyPath", result.stderr)
 
     def test_checker_never_prints_unknown_field_values(self) -> None:
         secret_value = "synthetic-secret-value"

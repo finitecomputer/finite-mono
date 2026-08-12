@@ -7,7 +7,7 @@ Opened: 2026-08-12
 
 Acceptance: `finite-lat-1` and `finite-lat-3` have one Nix-owned secret
 contract, every live production secret is declared in that contract, all
-production secret backends have migrated from legacy host files to `sops-nix`,
+production secret sources have migrated from legacy host files to `sops-nix`,
 no production service consumes mutable operator-placed plaintext under
 `/etc/finite` or `/etc/finite-saas` as its source of truth, and
 `scripts/finite-status` is green after the final migration.
@@ -47,38 +47,36 @@ Mixed legacy/SOPS mode is a temporary migration state, not the final design.
       generated store files, unit text, or logs.
 - [ ] Do not delete old plaintext live files until both hosts have booted the
       SOPS-backed generation and the old paths are proven unused.
-- [ ] Keep the mixed-backend period bounded; every legacy backend entry must
-      have an owner and migration phase.
+- [ ] Keep the mixed migration period bounded; every still-legacy host-file
+      input must remain documented in the inventory until it is migrated.
 
 ## Target Design
 
-- [ ] `finite.secrets` is the single Nix contract for production secret
-      consumers.
-- [ ] Each secret declaration records logical name, host scope, backend,
-      legacy path, SOPS source, destination path, owner, group, mode, kind,
-      required env names, consumer services, and restart/reload behavior.
-- [ ] Service modules consume only the centralized path, not hardcoded
-      `/etc/finite/*.env` or `/etc/finite-saas/*.env` paths.
-- [ ] `backend = "legacy"` means the service still reads the current
-      operator-placed host file.
-- [ ] `backend = "sops"` means `sops-nix` owns activation-time decryption and
-      the service reads the decrypted runtime path.
-- [ ] A checker proves every live consumer has a contract entry and every
-      contract entry has a live consumer or documented recovery purpose.
+- [ ] `finite.secrets` is the Nix contract for SOPS-managed production secret
+      consumers. During migration, absence from `finite.secrets` means the
+      service still uses its existing host-file path.
+- [ ] Each SOPS declaration records logical name, host scope, SOPS source,
+      destination path, owner, group, mode, kind, required env names, consumer
+      services, and restart/reload behavior.
+- [ ] Migrated service modules consume only the centralized path, not
+      hardcoded `/etc/finite/*.env` or `/etc/finite-saas/*.env` paths.
+- [ ] A checker proves every SOPS-managed entry is metadata-complete without
+      printing values.
+- [ ] Final-state verification proves every live consumer is SOPS-managed or
+      has a documented recovery-only exception.
 
 Example shape:
 
 ```nix
 finite.secrets.files.metrics-remote-write = {
-  backend = "sops";
   scope = [ "finite-lat-1" "finite-lat-3" ];
-  legacyPath = "/etc/finite/metrics-remote-write.env";
   sopsFile = ../secrets/shared/metrics-remote-write.env;
+  destinationPath = "/run/secrets/finite/metrics-remote-write.env";
   owner = "root";
   group = "root";
   mode = "0600";
   kind = "env";
-  requiredNames = [
+  requiredEnvNames = [
     "FINITE_METRICS_REMOTE_WRITE_USERNAME"
     "FINITE_METRICS_REMOTE_WRITE_PASSWORD"
   ];
@@ -132,15 +130,17 @@ rg -n \
       initial SOPS source-layout hypothesis.
 - [ ] Produce a reviewed values-free inventory recording each live item by
       path, owner, group, mode, kind, service consumer, required variable
-      names, planned backend, and planned SOPS source.
+      names, current source path, and planned SOPS source.
 
 ## Phase 1: Nix Contract and SOPS Plumbing
 
-Progress 2026-08-12: foundation plumbing added with all entries still on the
-implicit empty contract. No service consumer is pointed at SOPS yet. The
-host-level contract evaluates values-free on this Darwin workstation; production
-closure build/eval proof on finite-lat-2 is still required before switching any
-consumer.
+Progress 2026-08-12: foundation plumbing added with an SOPS-only contract and
+no entries yet. Absence from `finite.secrets.files` means the existing host-file
+path remains untouched. No service consumer is pointed at SOPS yet. The legacy
+backend bridge was removed after review so `finite.secrets.files` only means
+SOPS-owned. The host-level contract evaluates values-free on this Darwin
+workstation; production closure build/eval proof on finite-lat-2 is still
+required before switching any consumer.
 
 - [x] Add `sops-nix` to `flake.nix` and import its module for
       `finite-lat-1` and `finite-lat-3`.
@@ -151,11 +151,10 @@ consumer.
       host recipients.
 - [x] Add `infra/nixos/modules/secrets.nix` with the `finite.secrets.files`
       option schema.
-- [x] Implement backend resolution so `config.finite.secrets.files.<name>.path`
-      returns the legacy path for `backend = "legacy"` and the decrypted SOPS
-      path for `backend = "sops"`.
+- [x] Implement path resolution so `config.finite.secrets.files.<name>.path`
+      returns the decrypted SOPS runtime path.
 - [x] Preserve owner, group, mode, required env names, and consumer metadata
-      in the contract even while entries still use `backend = "legacy"`.
+      in the SOPS-managed contract.
 - [x] Add a host-generic checker that reads the Nix contract and validates
       metadata/name completeness without emitting values.
 - [x] Add tests proving the checker never prints secret values.
@@ -170,9 +169,10 @@ Fallback pilot: `searxng.env`, only if Search is explicitly accepted as lower
 blast radius for this rollout.
 
 - [ ] Choose exactly one pilot secret.
-- [ ] Keep all other secrets declared as `backend = "legacy"`.
+- [ ] Leave all other secrets absent from `finite.secrets.files` and on their
+      existing host-file paths.
 - [ ] Encrypt the pilot value into its planned SOPS file without printing it.
-- [ ] Switch only the pilot contract entry to `backend = "sops"`.
+- [ ] Add only the pilot contract entry to `finite.secrets.files`.
 - [ ] Update only the pilot consumer to use
       `config.finite.secrets.files.<name>.path`.
 - [ ] Build the affected host closure on the approved Linux builder.
@@ -186,25 +186,25 @@ blast radius for this rollout.
 - [ ] Record what broke, what was noisy, and what must change before broad
       migration.
 
-## Phase 3: Declare Every Live Secret
+## Phase 3: Migrate Every Live Secret
 
-- [ ] Add every live lat1 secret to `finite.secrets.files` with
-      `backend = "legacy"` unless it is already migrated.
-- [ ] Add every live lat3 secret to `finite.secrets.files` with
-      `backend = "legacy"` unless it is already migrated.
-- [ ] Classify each entry as `lat1-only`, `lat3-only`, `shared`,
+- [ ] Add each live lat1 secret to `finite.secrets.files` only as it migrates
+      to SOPS.
+- [ ] Add each live lat3 secret to `finite.secrets.files` only as it migrates
+      to SOPS.
+- [ ] Classify each inventory item as `lat1-only`, `lat3-only`, `shared`,
       `non-secret`, `retired`, or `recovery-only`.
 - [ ] Confirm that shared entries are intentionally shared. Prefer per-host or
       per-service credentials where the product boundary allows it.
-- [ ] Replace remaining hardcoded secret paths in Nix modules with centralized
-      contract paths while preserving legacy backends.
+- [ ] Replace hardcoded secret paths in Nix modules only when that secret is
+      moved to SOPS.
 - [ ] Add a static guard that fails on new direct live references to
-      `/etc/finite/*.env` or `/etc/finite-saas/*.env` outside the secret
-      contract.
-- [ ] Add a Nix eval gate proving every rendered live consumer resolves
-      through `finite.secrets`.
-- [ ] Confirm no service behavior changes while entries remain on legacy
-      backends.
+      `/etc/finite/*.env` or `/etc/finite-saas/*.env` for already-migrated
+      secrets.
+- [ ] Add a Nix eval gate proving every migrated rendered live consumer
+      resolves through `finite.secrets`.
+- [ ] Confirm no service behavior changes for secrets that remain absent from
+      `finite.secrets.files`.
 
 Initial classification hypothesis, to be checked against the generated
 inventory:
@@ -239,7 +239,7 @@ restarts, rollback boundary, and verification commands before deployment.
       backup-health checks are updated.
 - [ ] For each batch, encrypt staged host values into SOPS without printing
       values.
-- [ ] For each batch, switch contract entries from `legacy` to `sops`.
+- [ ] For each batch, add or update the SOPS-managed contract entries.
 - [ ] For each batch, build the host closure on the approved Linux builder.
 - [ ] For each batch, run `scripts/finite-status` before rollout.
 - [ ] For each batch, deploy only the affected host(s).
@@ -249,12 +249,11 @@ restarts, rollback boundary, and verification commands before deployment.
 - [ ] Stop the migration if any batch creates unexpected service churn,
       ambiguous health, or a new chat/onboarding risk.
 
-## Phase 5: Remove Legacy Mode
+## Phase 5: Remove Host-File Sources
 
-- [ ] Confirm every live production entry has `backend = "sops"`.
+- [ ] Confirm every live production secret is present in `finite.secrets.files`
+      or has a documented recovery-only exception.
 - [ ] Confirm no active unit references old plaintext source paths.
-- [ ] Remove or archive the legacy-path code path from `finite.secrets` unless
-      a documented local-dev use remains.
 - [ ] Remove old plaintext live files only after the SOPS-backed generation is
       active and verified on both hosts.
 - [ ] Update Borg backup inputs so obsolete plaintext secret roots are not the

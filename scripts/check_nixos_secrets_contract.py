@@ -19,19 +19,16 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOSTS = ("finite-lat-1", "finite-lat-3")
-BACKENDS = {"legacy", "sops"}
 KINDS = {"env", "opaque"}
 SOPS_FORMATS = {"binary", "dotenv", "ini", "json", "yaml"}
 MODE = re.compile(r"^[0-7]{4}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ABSOLUTE_PATH = re.compile(r"^/")
 ALLOWED_FIELDS = {
-    "backend",
     "consumers",
     "destinationPath",
     "group",
     "kind",
-    "legacyPath",
     "mode",
     "owner",
     "path",
@@ -106,7 +103,9 @@ def require_string_list(
     failures: list[str], host: str, name: str, item: dict[str, Any], field: str
 ) -> list[str]:
     value = item.get(field)
-    if not isinstance(value, list) or not all(isinstance(entry, str) for entry in value):
+    if not isinstance(value, list) or not all(
+        isinstance(entry, str) for entry in value
+    ):
         failures.append(f"{host}:{name}: {field} must be a list of strings")
         return []
     return value
@@ -127,10 +126,6 @@ def check_contract(host: str, contract: dict[str, Any]) -> list[str]:
         if unknown:
             failures.append(f"{host}:{name}: unknown field(s): {', '.join(unknown)}")
 
-        backend = require_string(failures, host, name, item, "backend")
-        if backend is not None and backend not in BACKENDS:
-            failures.append(f"{host}:{name}: backend must be one of {sorted(BACKENDS)}")
-
         kind = require_string(failures, host, name, item, "kind")
         if kind is not None and kind not in KINDS:
             failures.append(f"{host}:{name}: kind must be one of {sorted(KINDS)}")
@@ -139,10 +134,10 @@ def check_contract(host: str, contract: dict[str, Any]) -> list[str]:
         if mode is not None and MODE.fullmatch(mode) is None:
             failures.append(f"{host}:{name}: mode must be four octal digits")
 
-        for field in ("owner", "group", "path", "legacyPath", "destinationPath"):
+        for field in ("owner", "group", "path", "destinationPath", "sopsFile"):
             require_string(failures, host, name, item, field)
 
-        for field in ("path", "legacyPath", "destinationPath"):
+        for field in ("path", "destinationPath", "sopsFile"):
             value = item.get(field)
             if isinstance(value, str) and ABSOLUTE_PATH.match(value) is None:
                 failures.append(f"{host}:{name}: {field} must be absolute")
@@ -163,17 +158,8 @@ def check_contract(host: str, contract: dict[str, Any]) -> list[str]:
                         f"{host}:{name}: invalid required env name {env_name!r}"
                     )
 
-        expected_path = item.get("legacyPath") if backend == "legacy" else item.get("destinationPath")
-        if isinstance(expected_path, str) and item.get("path") != expected_path:
-            failures.append(
-                f"{host}:{name}: resolved path does not match {backend} backend"
-            )
-
-        sops_file = item.get("sopsFile")
-        if backend == "sops" and not isinstance(sops_file, str):
-            failures.append(f"{host}:{name}: sops backend requires sopsFile")
-        if backend == "legacy" and sops_file is not None and not isinstance(sops_file, str):
-            failures.append(f"{host}:{name}: sopsFile must be null or a string")
+        if item.get("path") != item.get("destinationPath"):
+            failures.append(f"{host}:{name}: path must resolve to destinationPath")
 
         sops_format = require_string(failures, host, name, item, "sopsFormat")
         if sops_format is not None and sops_format not in SOPS_FORMATS:
@@ -181,8 +167,9 @@ def check_contract(host: str, contract: dict[str, Any]) -> list[str]:
                 f"{host}:{name}: sopsFormat must be one of {sorted(SOPS_FORMATS)}"
             )
 
-        sops_key = item.get("sopsKey")
-        if sops_key is not None and not isinstance(sops_key, str):
+        if item.get("sopsKey") is not None and not isinstance(
+            item.get("sopsKey"), str
+        ):
             failures.append(f"{host}:{name}: sopsKey must be null or a string")
 
     return failures
@@ -192,7 +179,12 @@ def main() -> int:
     args = parse_args()
     try:
         contracts = load_contract(args)
-    except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+    except (
+        OSError,
+        ValueError,
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+    ) as error:
         print(f"failed to load secret contract: {error}", file=sys.stderr)
         return 2
 

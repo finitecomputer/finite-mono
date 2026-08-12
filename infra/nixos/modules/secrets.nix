@@ -9,18 +9,12 @@ let
 
   activeOnHost = secret: secret.scope == [ ] || builtins.elem hostName secret.scope;
 
-  sopsBackedFiles = lib.filterAttrs (
-    _name: secret: activeOnHost secret && secret.backend == "sops"
-  ) cfg.files;
+  sopsManagedFiles = lib.filterAttrs (_name: secret: activeOnHost secret) cfg.files;
 
   toSopsSecret =
     name: secret:
     {
-      sopsFile =
-        if secret.sopsFile == null then
-          throw "finite.secrets.files.${name}: backend = \"sops\" requires sopsFile"
-        else
-          secret.sopsFile;
+      sopsFile = secret.sopsFile;
       format = secret.sopsFormat;
       owner = secret.owner;
       group = secret.group;
@@ -37,32 +31,16 @@ let
     { name, config, ... }:
     {
       options = {
-        backend = lib.mkOption {
-          type = lib.types.enum [
-            "legacy"
-            "sops"
-          ];
-          default = "legacy";
-          description = "Secret source backend for this migration entry.";
-        };
-
         scope = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ hostName ];
           description = "Production hosts this secret entry is active on. Empty means every host.";
         };
 
-        legacyPath = lib.mkOption {
-          type = lib.types.str;
-          example = "/etc/finite/metrics-remote-write.env";
-          description = "Current operator-placed plaintext path used while backend is legacy.";
-        };
-
         sopsFile = lib.mkOption {
-          type = lib.types.nullOr lib.types.path;
-          default = null;
+          type = lib.types.path;
           example = "../secrets/shared/metrics-remote-write.env";
-          description = "Tracked encrypted SOPS source file. Required when backend is sops.";
+          description = "Tracked encrypted SOPS source file.";
         };
 
         destinationPath = lib.mkOption {
@@ -74,8 +52,8 @@ let
         path = lib.mkOption {
           type = lib.types.str;
           readOnly = true;
-          default = if config.backend == "legacy" then config.legacyPath else config.destinationPath;
-          description = "Resolved runtime path for service modules to consume.";
+          default = config.destinationPath;
+          description = "Resolved SOPS-managed runtime path for service modules to consume.";
         };
 
         owner = lib.mkOption {
@@ -157,16 +135,11 @@ in
 
   config = {
     sops.age.keyFile = lib.mkDefault "/var/lib/sops-nix/${hostName}.agekey";
-    sops.secrets = lib.mapAttrs toSopsSecret sopsBackedFiles;
+    sops.secrets = lib.mapAttrs toSopsSecret sopsManagedFiles;
 
-    assertions =
-      lib.mapAttrsToList (name: secret: {
-        assertion = secret.backend != "sops" || secret.sopsFile != null;
-        message = "finite.secrets.files.${name}: backend = \"sops\" requires sopsFile";
-      }) cfg.files
-      ++ lib.mapAttrsToList (name: secret: {
-        assertion = builtins.match "[0-7][0-7][0-7][0-7]" secret.mode != null;
-        message = "finite.secrets.files.${name}: mode must be four octal digits";
-      }) cfg.files;
+    assertions = lib.mapAttrsToList (name: secret: {
+      assertion = builtins.match "[0-7][0-7][0-7][0-7]" secret.mode != null;
+      message = "finite.secrets.files.${name}: mode must be four octal digits";
+    }) cfg.files;
   };
 }
