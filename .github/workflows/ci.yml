@@ -520,33 +520,81 @@ jobs:
         with:
           use-gha-cache: true
           use-flakehub: false
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Fetch cached devfinity service package outputs
+        run: |
+          set -euo pipefail
+
+          fetch_cached_output() {
+            local attr="$1"
+            local env_name="$2"
+            local binary="$3"
+            local out_path
+            local log_file
+
+            out_path="$(nix eval --raw "$attr.outPath")"
+            log_file="$(mktemp)"
+            if nix build --no-link --print-out-paths --option max-jobs 0 --option builders '' "$out_path" >"$log_file" 2>&1; then
+              cat "$log_file"
+              if [[ ! -x "$out_path/$binary" ]]; then
+                echo "::error::$attr substituted, but $out_path/$binary is not executable"
+                exit 1
+              fi
+              echo "$env_name=$out_path/$binary" >> "$GITHUB_ENV"
+            else
+              echo "::notice::$attr was not available from configured binary caches; devfinity will use its Cargo fallback"
+              cat "$log_file"
+            fi
+            rm -f "$log_file"
+          }
+
+          fetch_cached_output .#packages.x86_64-linux.finite-saas-core DEVFINITY_FINITE_SAAS_CORE_BIN bin/finite-saas-core
+          fetch_cached_output .#packages.x86_64-linux.finitechat-server DEVFINITY_FINITECHAT_SERVER_BIN bin/finitechat-server
+          fetch_cached_output .#packages.x86_64-linux.finitechat-hosted-device DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN bin/finitechat-hosted-device
+          fetch_cached_output .#packages.x86_64-linux.finitesitesd DEVFINITY_FINITESITESD_BIN bin/finitesitesd
+          fetch_cached_output .#packages.x86_64-linux.finite-identity DEVFINITY_FINITE_IDENTITYD_BIN bin/finite-identityd
+          fetch_cached_output .#packages.x86_64-linux.finite-brain DEVFINITY_FINITE_BRAIN_BIN bin/finite-brain
+          fetch_cached_output .#packages.x86_64-linux.fsite DEVFINITY_FSITE_BIN bin/fsite
       - uses: Swatinem/rust-cache@v2
       - name: Prebuild stack and smoke artifacts
-        # devfinity's readiness window is shorter than a cold compile of the
-        # whole stack on a hosted runner; build first so the preflight is a
-        # no-op and the wait measures actual service startup. One build per
-        # package: combined -p builds unify features (resolver 2) and produce
-        # artifacts the per-package `cargo run` invocations don't reuse.
-        # The smoke script also shells out to fsite and two focused cargo test
-        # commands after services are live, so precompile those artifacts here
-        # instead of spending that time inside the smoke window.
+        # Use cached Nix package outputs when available. For cache misses,
+        # keep the old Cargo prebuild path so the smoke job remains useful
+        # before a trusted package job has populated Cachix for a new commit.
         run: |
           nix develop .#devfinity-ci --command bash -euxo pipefail -c '
             cargo build --locked -p devfinity
-            cargo build --locked -p finite-saas-core
-            cargo build --locked -p finitechat-server
-            cargo build --locked -p finitechat-hosted-device
-            cargo build --locked -p finitesitesd
-            cargo build --locked -p finite-identity --bin finite-identityd
-            cargo build --locked -p finite-brain-app
-            cargo build --locked -p fsite-cli
+            if [[ -z "${DEVFINITY_FINITE_SAAS_CORE_BIN:-}" ]]; then
+              cargo build --locked -p finite-saas-core
+            fi
+            if [[ -z "${DEVFINITY_FINITECHAT_SERVER_BIN:-}" ]]; then
+              cargo build --locked -p finitechat-server
+            fi
+            if [[ -z "${DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN:-}" ]]; then
+              cargo build --locked -p finitechat-hosted-device
+            fi
+            if [[ -z "${DEVFINITY_FINITESITESD_BIN:-}" ]]; then
+              cargo build --locked -p finitesitesd
+            fi
+            if [[ -z "${DEVFINITY_FINITE_IDENTITYD_BIN:-}" ]]; then
+              cargo build --locked -p finite-identity --bin finite-identityd
+            fi
+            if [[ -z "${DEVFINITY_FINITE_BRAIN_BIN:-}" ]]; then
+              cargo build --locked -p finite-brain-app
+            fi
+            if [[ -z "${DEVFINITY_FSITE_BIN:-}" ]]; then
+              cargo build --locked -p fsite-cli
+            fi
             cargo test -p finitechat-client --locked --lib --no-run
             cargo test -p devfinity --locked --test stack_smoke --no-run
           '
       - name: devfinity smoke
         env:
-          # Cold-cache runs (e.g. when the Actions cache service hiccups)
-          # compile the stack inside the readiness window; give CI headroom.
+          # Keep CI headroom for package substitution, dashboard startup, and
+          # any local Cargo fallback if an expected package output is absent.
           DEVFINITY_READY_TIMEOUT_SECS: "600"
         run: nix develop .#devfinity-ci --command just dev smoke
       - name: Dump devfinity logs on failure

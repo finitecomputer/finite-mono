@@ -156,6 +156,7 @@ JS
 
 check_identity_reconciliation_operator_boundary() {
   local smoke_root
+  local finitesitesd_bin
   local source_db
   local synthetic_db
   local preview_json
@@ -167,6 +168,7 @@ check_identity_reconciliation_operator_boundary() {
   local smoke_pubkey="2222222222222222222222222222222222222222222222222222222222222222"
 
   smoke_root="${DEVFINITY_STATE_DIR:?}/sites-reconciliation-smoke"
+  finitesitesd_bin="${DEVFINITY_FINITESITESD_BIN:-$(pwd)/target/debug/finitesitesd}"
   source_db="${DEVFINITY_STATE_DIR:?}/finitesites/registry.db"
   synthetic_db="$smoke_root/registry.db"
   preview_json="$smoke_root/preview.json"
@@ -180,7 +182,7 @@ check_identity_reconciliation_operator_boundary() {
   authorized_before="$(sqlite3 "$synthetic_db" \
     "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
 
-  target/debug/finitesitesd reconcile-identity --data "$smoke_root" >"$preview_json"
+  "$finitesitesd_bin" reconcile-identity --data "$smoke_root" >"$preview_json"
   node - "$preview_json" <<'JS'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -195,7 +197,7 @@ JS
     return 1
   fi
 
-  target/debug/finitesitesd reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
+  "$finitesitesd_bin" reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
   node - "$apply_json" <<'JS'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -255,7 +257,7 @@ check_native_requesting_user_site() {
   smoke_root="${DEVFINITY_STATE_DIR:?}/sites-native-requester-${run_id}"
   agent_home="$smoke_root/home"
   agent_finite_home="$smoke_root/finite-home"
-  fsite_bin="$(pwd)/target/debug/fsite"
+  fsite_bin="${DEVFINITY_FSITE_BIN:-$(pwd)/target/debug/fsite}"
   project_dir="$smoke_root/project"
   hosted_config="$smoke_root/hosted-device.curl"
   sites_config="$smoke_root/sites-service.curl"
@@ -313,7 +315,9 @@ JS
     'spa = false' >"$project_dir/finite.toml"
   printf '<h1>%s</h1>\n' "$marker" >"$project_dir/site/index.html"
 
-  cargo build -q -p fsite-cli
+  if [[ -z "${DEVFINITY_FSITE_BIN:-}" ]]; then
+    cargo build -q -p fsite-cli
+  fi
   env \
     HOME="$agent_home" \
     FINITE_HOME="$agent_finite_home" \
