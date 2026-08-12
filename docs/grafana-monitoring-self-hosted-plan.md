@@ -2,8 +2,6 @@
 
 Status: in progress
 
-Depends on: `docs/grafana-monitoring-mvp-requirements.md`
-
 ## Goal
 
 Run the monitoring MVP on one small self-hosted monitoring VPS. Keep the
