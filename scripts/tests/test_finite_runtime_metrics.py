@@ -57,6 +57,55 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
             metrics,
         )
 
+    def test_incomplete_artifact_identity_is_a_gauge_not_a_crash(self) -> None:
+        # Pre-artifact-era rows (NULL artifact id, e.g. old smoke runtimes)
+        # must not take the exporter down; they surface as their own gauge
+        # while the healthy fleet keeps publishing.
+        core = {
+            "artifacts": [
+                {
+                    "id": "artifact-v2",
+                    "reference": "ghcr.io/finite/runtime@sha256:2222",
+                    "version_label": "v2",
+                    "source_git_sha": "git-v2",
+                    "promoted_at": "2026-08-01T00:00:00Z",
+                    "retired_at": "",
+                },
+            ],
+            "runtimes": [
+                {
+                    "source_host_id": "finite-lat-1",
+                    "runtime_artifact_id": "artifact-v2",
+                    "link_state": "active",
+                },
+                {
+                    "source_host_id": "finite-lat-2",
+                    "runtime_artifact_id": "",
+                    "link_state": "active",
+                },
+                {
+                    "source_host_id": "",
+                    "runtime_artifact_id": "artifact-unknown",
+                    "link_state": "active",
+                },
+            ],
+        }
+
+        metrics = finite_runtime_metrics.render(core)
+
+        self.assertIn(
+            'finite_runtime_incomplete_artifact_identity{source_host_id="finite-lat-2"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_runtime_incomplete_artifact_identity{source_host_id="unknown"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_runtime_artifact_info{source_host_id="finite-lat-1",artifact_id="artifact-v2",version_label="v2",promoted="true"} 1',
+            metrics,
+        )
+
     def test_atomic_write_replaces_the_complete_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "runtime.prom"

@@ -106,6 +106,7 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
+        gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
         rustToolchain = pkgs.rust-bin.stable."1.91.1".default.override {
           extensions = [
             "clippy"
@@ -125,6 +126,7 @@
             with pkgs;
             [
               curl
+              gcxCli
               git
               jq
               just

@@ -123,15 +123,6 @@ wire_enum! {
 }
 
 wire_enum! {
-    ImportCandidateStatus {
-    Pending => "pending",
-    Claimed => "claimed",
-    AdminReview => "admin_review",
-    }
-    parse: parse_import_candidate_status
-}
-
-wire_enum! {
     UserLinkStatus {
     Pending => "pending",
     Linked => "linked",
@@ -494,10 +485,6 @@ pub enum CoreError {
     MissingSourceHostId,
     #[error("source host id must contain only lowercase letters, digits, and hyphens")]
     InvalidSourceHostId,
-    #[error("source host relay url must be http or https")]
-    InvalidSourceHostRelayUrl,
-    #[error("source host relay admin token is required")]
-    MissingSourceHostRelayAdminToken,
     #[error("agent display name is required")]
     MissingAgentDisplayName,
     #[error("agent creation idempotency key is required")]
@@ -568,14 +555,6 @@ pub enum CoreError {
     AgentCreationRequestNotCancellable,
     #[error("source machine id is required")]
     MissingSourceMachineId,
-    #[error("runtime relay token hash is required")]
-    MissingRuntimeRelayTokenHash,
-    #[error("runtime relay token is required")]
-    MissingRuntimeRelayToken,
-    #[error("runtime relay token is invalid")]
-    InvalidRuntimeRelayToken,
-    #[error("runtime heartbeat was not found")]
-    RuntimeHeartbeatNotFound,
     #[error("runtime artifact id is required")]
     MissingRuntimeArtifactId,
     #[error("runtime artifact reference is required")]
@@ -683,30 +662,6 @@ pub enum CoreError {
 pub type CoreResult<T> = Result<T, CoreError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExistingHostProjectImport {
-    pub source_host_id: String,
-    pub source_machine_id: String,
-    pub owner_email: Option<String>,
-    pub display_name: String,
-    pub hostname: Option<String>,
-    pub runtime_host: Option<String>,
-    pub runtime_status: RuntimeSummaryStatus,
-    pub active_inference_profile: Option<String>,
-    pub hermes_available: Option<bool>,
-    pub published_app_urls: Vec<String>,
-    pub known_external_channel_participants: Vec<KnownExternalChannelParticipant>,
-    pub admin_visible_to_emails: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KnownExternalChannelParticipant {
-    pub channel: String,
-    pub external_user_id: Option<String>,
-    pub username: Option<String>,
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreUser {
     pub id: String,
     pub email: String,
@@ -756,26 +711,6 @@ pub struct BillingOverview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectImportCandidate {
-    pub id: String,
-    pub source_host_id: String,
-    pub source_machine_id: String,
-    pub source_import_key: String,
-    pub owner_email: String,
-    pub latest_host_owner_email: Option<String>,
-    pub pending_user_id: String,
-    pub customer_org_id: String,
-    pub status: ImportCandidateStatus,
-    pub project_id: Option<String>,
-    pub agent_runtime_id: Option<String>,
-    pub claimed_by_user_id: Option<String>,
-    pub host_facts: HostOwnedRuntimeFacts,
-    pub known_external_channel_participants: Vec<KnownExternalChannelParticipant>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostOwnedRuntimeFacts {
     pub display_name: String,
     pub hostname: Option<String>,
@@ -796,6 +731,13 @@ pub struct Project {
     /// Authorization continues to use the principal key resolved from it.
     #[serde(default)]
     pub agent_email: Option<String>,
+    /// LEGACY ROWS ONLY. Set on projects created by the abandoned 2026-07
+    /// existing-host import bridge (deleted; see git history for the
+    /// reconcile/claim machinery). Production may still hold such rows from
+    /// its near-ship test run. Nothing writes this anymore; a `Some` value
+    /// means "hide from user-facing project lists" (`public_visible_projects`
+    /// in api.rs). A future importer should define its own linkage rather
+    /// than resurrecting this field's semantics.
     pub import_candidate_id: Option<String>,
     #[serde(default)]
     pub hosting_tier: Option<HostingTier>,
@@ -839,6 +781,10 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// Fail-closed capability gate for restart/stop/upgrade/etc. Note this is
+    /// also what keeps legacy rows inert: runtimes imported by the abandoned
+    /// 2026-07 import bridge (and any other row without a capabilities
+    /// envelope) have `runtime_capabilities: NULL` and refuse every control.
     pub fn supports_runtime_control(&self, kind: RuntimeControlKind) -> bool {
         self.runtime_capabilities
             .as_ref()
@@ -863,41 +809,6 @@ pub struct RuntimeArtifact {
     pub created_at: String,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeRelayCredential {
-    pub agent_runtime_id: String,
-    pub token_hash: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeStatusSnapshot {
-    pub agent_runtime_id: String,
-    pub status: RuntimeSummaryStatus,
-    pub last_heartbeat_at: Option<String>,
-    pub runtime_host: String,
-    pub active_inference_profile: Option<String>,
-    pub hermes_available: Option<bool>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayHeartbeat {
-    pub ok: bool,
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    #[serde(rename = "lastSeenAt")]
-    pub last_seen_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayEventsOutput {
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -926,15 +837,6 @@ pub struct ProjectRoomMembership {
     pub role: ProjectMembershipRole,
     pub created_at: String,
     pub archived_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchiveImportedProjectInput {
-    pub verified_email: String,
-    pub workos_user_id: String,
-    pub project_id: String,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1113,24 +1015,6 @@ pub struct RuntimeRetirementSnapshotReceipt {
 pub struct RuntimeRetirementSnapshot {
     pub receipt: RuntimeRetirementSnapshotReceipt,
     pub stored_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceHostRelayEndpoint {
-    pub source_host_id: String,
-    pub url: String,
-    pub admin_token: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct UpsertSourceHostRelayEndpointInput {
-    pub source_host_id: String,
-    pub url: String,
-    pub admin_token: String,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1466,52 +1350,6 @@ pub struct SettleFinitePrivateReservationInput {
 pub struct SettleFinitePrivateReservationResult {
     pub settled: bool,
     pub reservation_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconcileExistingHostImportsOptions {
-    pub allowlisted_owner_emails: Vec<String>,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconcileExistingHostImportsReport {
-    pub created_candidates: Vec<String>,
-    pub updated_candidates: Vec<String>,
-    pub skipped_records: Vec<SkippedImportRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SkippedImportRecord {
-    pub source_import_key: String,
-    pub reason: SkippedImportReason,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SkippedImportReason {
-    MissingOwnerEmail,
-    OwnerNotAllowlisted,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimProjectImportsInput {
-    pub verified_email: String,
-    pub workos_user_id: String,
-    pub selected_candidate_ids: Vec<String>,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaimProjectImportsResult {
-    pub claimed_project_ids: Vec<String>,
-    pub already_claimed_project_ids: Vec<String>,
-    pub denied_candidate_ids: Vec<String>,
-    pub missing_candidate_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2068,7 +1906,6 @@ pub struct RegisterAgentCreationRuntimeInput {
     pub contact_endpoint: Option<String>,
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -2151,6 +1988,12 @@ pub fn normalize_owner_email(value: Option<&str>) -> Option<String> {
     if email.is_empty() { None } else { Some(email) }
 }
 
+/// The natural key for a runtime: `source_host_id:source_machine_id`
+/// (UNIQUE on `agent_runtimes.source_import_key`). The name is an artifact of
+/// the deleted existing-host import bridge, but the key itself is live
+/// identity machinery — every registration resolves runtimes through it.
+/// Renaming the column would be schema surgery for zero behavior change, so
+/// the legacy name stays.
 pub fn source_import_key(source_host_id: &str, source_machine_id: &str) -> String {
     format!(
         "{}:{}",
@@ -2217,33 +2060,6 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Err(CoreError::RuntimeSpecMismatch);
     }
     Ok(())
-}
-
-fn normalize_source_host_relay_url(value: &str) -> CoreResult<String> {
-    let url = value.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(CoreError::InvalidSourceHostRelayUrl);
-    }
-    if url.contains(char::is_whitespace) || url.contains('\n') || url.contains('\r') {
-        return Err(CoreError::InvalidSourceHostRelayUrl);
-    }
-    Ok(url.trim_end_matches('/').to_string())
-}
-
-fn host_facts_from_record(record: &ExistingHostProjectImport) -> HostOwnedRuntimeFacts {
-    HostOwnedRuntimeFacts {
-        display_name: trim_or_fallback(&record.display_name, &record.source_machine_id),
-        hostname: trim_to_option(record.hostname.as_deref()),
-        runtime_host: record
-            .runtime_host
-            .as_deref()
-            .and_then(|value| trim_to_option(Some(value)))
-            .unwrap_or_else(|| normalize_id_part(&record.source_host_id)),
-        runtime_status: record.runtime_status,
-        active_inference_profile: trim_to_option(record.active_inference_profile.as_deref()),
-        hermes_available: record.hermes_available,
-        published_app_urls: record.published_app_urls.clone(),
-    }
 }
 
 fn trim_or_fallback(value: &str, fallback: &str) -> String {
@@ -2992,19 +2808,6 @@ fn parse_time(value: &str) -> CoreResult<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|_| CoreError::InvalidTimestamp)
 }
 
-pub fn runtime_relay_token_hash(value: &str) -> CoreResult<String> {
-    hash_runtime_relay_token(value)
-}
-
-fn hash_runtime_relay_token(value: &str) -> CoreResult<String> {
-    let token = trim_to_option(Some(value)).ok_or(CoreError::MissingRuntimeRelayToken)?;
-    let digest = Sha256::digest(token.as_bytes());
-    Ok(digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>())
-}
-
 fn hash_finite_private_api_key(value: &str) -> CoreResult<String> {
     let token = trim_to_option(Some(value)).ok_or(CoreError::MissingFinitePrivateApiKey)?;
     let digest = Sha256::digest(token.as_bytes());
@@ -3085,14 +2888,6 @@ pub(crate) fn new_user_id() -> CoreResult<String> {
 
 pub(crate) fn new_customer_org_id() -> CoreResult<String> {
     generate_surrogate_id("org")
-}
-
-/// Opaque surrogate id for a project-import candidate, minted at insert time.
-/// The candidate's natural key is `source_import_key` (UNIQUE), so reconcile and
-/// claim resolve the row by that key rather than rederiving its id from the
-/// source identifiers (PERSISTENCE.md anti-pattern #5).
-pub(crate) fn new_import_candidate_id() -> CoreResult<String> {
-    generate_surrogate_id("import")
 }
 
 pub(crate) fn new_agent_runtime_id() -> CoreResult<String> {
@@ -3436,13 +3231,6 @@ mod tests {
         );
 
         assert_wire_encodings_agree!(
-            parse_import_candidate_status,
-            ImportCandidateStatus::Pending,
-            ImportCandidateStatus::Claimed,
-            ImportCandidateStatus::AdminReview,
-        );
-
-        assert_wire_encodings_agree!(
             parse_user_link_status,
             UserLinkStatus::Pending,
             UserLinkStatus::Linked,
@@ -3632,306 +3420,113 @@ mod tests {
             .to_string()
     }
 
+    /// LEGACY-ROW CONTRACT. The existing-host import bridge is deleted, but
+    /// production may still hold rows from its 2026-07 near-ship test run.
+    /// This test plants those rows the way the bridge left them (raw SQL —
+    /// the writing machinery is gone; see git history for the original
+    /// reconcile/claim code) and pins the two behaviors that keep them inert:
+    ///
+    /// 1. A project linked to an import candidate stays out of user-facing
+    ///    project lists (`public_visible_projects` filters on
+    ///    `import_candidate_id`).
+    /// 2. Its capability-less runtime refuses every runtime control
+    ///    (`supports_runtime_control` fails closed on NULL capabilities).
+    ///
+    /// A future importer must define its own linkage and lifecycle rather
+    /// than resurrecting these rows' semantics.
     #[tokio::test]
-    async fn existing_host_import_creates_multiple_claimable_candidates_without_visible_projects() {
+    async fn legacy_import_rows_stay_hidden_and_refuse_runtime_controls() {
         with_isolated_postgres(|db| async move {
-            let report = db
-                .reconcile_existing_host_imports(
-                    vec![
-                        import("smoke", "paul-smoke", "Paul Smoke", Some("PAUL@FINITE.VIP")),
-                        import("box1", "paul-box", "Paul Box", Some("paul@finite.vip")),
-                        import("trf", "paul-trf", "Paul TRF", Some("paul@finite.vip")),
-                    ],
-                    options(["paul@finite.vip"], NOW),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(report.created_candidates.len(), 3);
-            assert_eq!(
-                db.claimable_candidates_for_email(Some("paul@finite.vip"))
-                    .await
-                    .unwrap()
-                    .len(),
-                3
-            );
-            assert!(db.all_projects().await.is_empty());
-            assert!(db.all_agent_runtimes().await.is_empty());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn allowlist_and_owner_email_decide_imports_not_admin_visibility() {
-        with_isolated_postgres(|db| async move {
-            let mut rene_bot = import("trf", "grant", "Grant", Some("rene@example.com"));
-            rene_bot
-                .admin_visible_to_emails
-                .push("paul@finite.vip".to_string());
-
-            let report = db
-                .reconcile_existing_host_imports(vec![rene_bot], options(["paul@finite.vip"], NOW))
-                .await
-                .unwrap();
-
-            assert!(report.created_candidates.is_empty());
-            assert_eq!(report.skipped_records.len(), 1);
-            assert_eq!(
-                report.skipped_records[0].reason,
-                SkippedImportReason::OwnerNotAllowlisted
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn verified_workos_login_claims_selected_projects_and_keeps_test_user_grandfathered() {
-        with_isolated_postgres(|db| async move {
-            db.reconcile_existing_host_imports(
-                vec![import(
-                    "smoke",
-                    "test-smoke",
-                    "Smoke",
-                    Some("test@finite.vip"),
-                )],
-                options(["test@finite.vip"], NOW),
-            )
-            .await
-            .unwrap();
-            let candidate_id = db
-                .claimable_candidates_for_email(Some("test@finite.vip"))
-                .await
-                .unwrap()[0]
-                .id
-                .clone();
-
-            let result = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "test@finite.vip".to_string(),
-                    workos_user_id: "user_workos_test".to_string(),
-                    selected_candidate_ids: vec![candidate_id],
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-
-            assert_eq!(result.claimed_project_ids.len(), 1);
-            let user = db.all_users().await.into_iter().next().unwrap();
-            assert_eq!(user.status, UserLinkStatus::Linked);
-            assert_eq!(user.workos_user_id.as_deref(), Some("user_workos_test"));
-            let org = db.all_customer_orgs().await.into_iter().next().unwrap();
-            assert_eq!(org.billing_class, BillingClass::Grandfathered);
-            assert_eq!(db.visible_projects_for_user(&user.id).await.len(), 1);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn verified_email_can_relink_to_new_workos_user_and_keep_imported_projects() {
-        with_isolated_postgres(|db| async move {
-            db.reconcile_existing_host_imports(
-                vec![import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
-            )
-            .await
-            .unwrap();
-            let candidate_id = db
-                .claimable_candidates_for_email(Some("paul@finite.vip"))
-                .await
-                .unwrap()[0]
-                .id
-                .clone();
-            let claimed = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "paul@finite.vip".to_string(),
-                    workos_user_id: "user_workos_staging".to_string(),
-                    selected_candidate_ids: vec![candidate_id],
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-
-            let user = db
+            let owner = db
                 .link_verified_user(LinkVerifiedUserInput {
                     verified_email: "paul@finite.vip".to_string(),
-                    workos_user_id: "user_workos_prod_google".to_string(),
-                    now: Some("2026-05-25T15:00:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-
-            assert_eq!(
-                user.workos_user_id.as_deref(),
-                Some("user_workos_prod_google")
-            );
-            assert_eq!(
-                db.visible_projects_for_user(&user.id).await[0].project.id,
-                claimed.claimed_project_ids[0]
-            );
-            let org = db.personal_org_by_owner(&user.id).await.unwrap();
-            assert_eq!(org.billing_class, BillingClass::Grandfathered);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn claiming_is_idempotent_and_reimport_updates_only_host_owned_facts() {
-        with_isolated_postgres(|db| async move {
-            db.reconcile_existing_host_imports(
-                vec![import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
-            )
-            .await
-            .unwrap();
-            let candidate_id = db
-                .claimable_candidates_for_email(Some("paul@finite.vip"))
-                .await
-                .unwrap()[0]
-                .id
-                .clone();
-
-            let first = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "paul@finite.vip".to_string(),
                     workos_user_id: "user_workos_paul".to_string(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: Some(LATER.to_string()),
+                    now: Some(NOW.to_string()),
                 })
                 .await
                 .unwrap();
-            let second = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "paul@finite.vip".to_string(),
-                    workos_user_id: "user_workos_paul".to_string(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: Some("2026-05-25T14:00:00Z".to_string()),
-                })
+            let owner_id = owner.id.clone();
+            // link_verified_user already provisioned the personal org; the
+            // bridge reused it the same way.
+            let org_id = db
+                .query_json(
+                    "SELECT to_jsonb(t.id) FROM customer_orgs t WHERE t.owner_user_id = $1",
+                    &[&owner_id],
+                )
+                .await[0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            for statement in [
+                format!(
+                    "INSERT INTO project_import_candidates \
+                     (id, source_host_id, source_machine_id, source_import_key, owner_email, \
+                      pending_user_id, customer_org_id, status, project_id, agent_runtime_id, \
+                      claimed_by_user_id, host_facts, created_at, updated_at) \
+                     VALUES ('candidate-legacy', 'box1', 'paul-smoke', 'box1:paul-smoke', \
+                      'paul@finite.vip', '{owner_id}', '{org_id}', 'claimed', 'project-legacy', \
+                      'runtime-legacy', '{owner_id}', \
+                      '{{\"display_name\": \"Paul Smoke\", \"hostname\": null, \"runtime_host\": \"box1\", \
+                        \"runtime_status\": \"online\", \"active_inference_profile\": null, \
+                        \"hermes_available\": null, \"published_app_urls\": []}}', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, \
+                      import_candidate_id, created_at, updated_at) \
+                     VALUES ('project-legacy', '{org_id}', '{owner_id}', 'Paul Smoke', \
+                      'candidate-legacy', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO agent_runtimes (id, project_id, source_host_id, source_machine_id, \
+                      source_import_key, host_facts, created_at, updated_at) \
+                     VALUES ('runtime-legacy', 'project-legacy', 'box1', 'paul-smoke', \
+                      'box1:paul-smoke', \
+                      '{{\"display_name\": \"Paul Smoke\", \"hostname\": null, \"runtime_host\": \"box1\", \
+                        \"runtime_status\": \"online\", \"active_inference_profile\": null, \
+                        \"hermes_available\": null, \"published_app_urls\": []}}', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO project_runtime_links (id, project_id, agent_runtime_id, active, created_at) \
+                     VALUES ('link-legacy', 'project-legacy', 'runtime-legacy', TRUE, '{NOW}')"
+                ),
+                // The bridge granted the claiming user a hosted-web owner
+                // membership; visibility reads flow through these rows.
+                format!(
+                    "INSERT INTO chat_identities (id, user_id, kind, device_id, created_at) \
+                     VALUES ('identity-legacy', '{owner_id}', 'hosted_web', 'dashboard-bridge-v1', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO project_room_memberships (id, project_id, chat_identity_id, role, created_at) \
+                     VALUES ('membership-legacy', 'project-legacy', 'identity-legacy', 'owner', '{NOW}')"
+                ),
+            ] {
+                db.exec(&statement).await;
+            }
+
+            let visible = db
+                .visible_projects_for_workos_user("user_workos_paul")
                 .await
                 .unwrap();
-
-            assert_eq!(first.claimed_project_ids.len(), 1);
-            assert!(second.claimed_project_ids.is_empty());
-            assert_eq!(
-                second.already_claimed_project_ids,
-                first.claimed_project_ids
-            );
-
-            let mut changed = import(
-                "smoke",
-                "paul-smoke",
-                "Renamed Smoke",
-                Some("other@finite.vip"),
-            );
-            changed.hostname = Some("new-smoke.finite.vip".to_string());
-            changed.runtime_status = RuntimeSummaryStatus::Online;
-            db.reconcile_existing_host_imports(vec![changed], options(["other@finite.vip"], LATER))
-                .await
-                .unwrap();
-
-            let candidate = db.import_candidate(&candidate_id).await.unwrap();
-            assert_eq!(candidate.owner_email, "paul@finite.vip");
-            assert_eq!(
-                candidate.latest_host_owner_email.as_deref(),
-                Some("other@finite.vip")
-            );
-            assert_eq!(candidate.host_facts.display_name, "Renamed Smoke");
-            let project = db.project(&first.claimed_project_ids[0]).await.unwrap();
-            assert_eq!(project.owner_user_id, candidate.pending_user_id);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn same_historical_machine_id_on_different_hosts_does_not_collide() {
-        with_isolated_postgres(|db| async move {
-            db.reconcile_existing_host_imports(
-                vec![
-                    import("smoke", "grant", "Smoke Grant", Some("rene@example.com")),
-                    import("trf", "grant", "TRF Grant", Some("rene@example.com")),
-                ],
-                options(["rene@example.com"], NOW),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(db.table_len("project_import_candidates").await, 2);
-            let candidates = db.all_import_candidates().await;
-            let keys = candidates
+            let legacy = visible
                 .iter()
-                .map(|candidate| candidate.source_import_key.as_str())
-                .collect::<BTreeSet<_>>();
-            assert!(keys.contains("smoke:grant"));
-            assert!(keys.contains("trf:grant"));
-        })
-        .await;
-    }
+                .find(|candidate| candidate.project.id == "project-legacy")
+                .expect("the legacy project row is still readable internally");
+            assert_eq!(
+                legacy.project.import_candidate_id.as_deref(),
+                Some("candidate-legacy"),
+                "the import linkage that keeps this row hidden must survive reads"
+            );
 
-    #[tokio::test]
-    async fn multi_user_telegram_bot_is_claimable_only_by_owner_without_participant_memberships() {
-        with_isolated_postgres(|db| async move {
-            let mut grant = import("trf", "grant", "Grant", Some("rene@example.com"));
-            grant
-                .known_external_channel_participants
-                .push(KnownExternalChannelParticipant {
-                    channel: "telegram".to_string(),
-                    external_user_id: Some("telegram:paul".to_string()),
-                    username: Some("paul".to_string()),
-                    display_name: Some("Paul".to_string()),
-                });
-            db.reconcile_existing_host_imports(
-                vec![grant],
-                options(["paul@finite.vip", "rene@example.com"], NOW),
-            )
-            .await
-            .unwrap();
-            let candidate_id = db
-                .claimable_candidates_for_email(Some("rene@example.com"))
-                .await
-                .unwrap()[0]
-                .id
-                .clone();
-
-            let denied = db
-                .claim_project_imports(ClaimProjectImportsInput {
+            let error = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
                     verified_email: "paul@finite.vip".to_string(),
                     workos_user_id: "user_workos_paul".to_string(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
+                    project_id: "project-legacy".to_string(),
                     now: Some(LATER.to_string()),
                 })
                 .await
-                .unwrap();
-            assert_eq!(denied.denied_candidate_ids, vec![candidate_id.clone()]);
-            assert!(db.all_projects().await.is_empty());
-
-            let claimed = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "rene@example.com".to_string(),
-                    workos_user_id: "user_workos_rene".to_string(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: Some("2026-05-25T14:00:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            assert_eq!(claimed.claimed_project_ids.len(), 1);
-            assert_eq!(db.table_len("project_room_memberships").await, 1);
-            assert_eq!(
-                db.import_candidate(&candidate_id)
-                    .await
-                    .unwrap()
-                    .known_external_channel_participants
-                    .len(),
-                1
-            );
+                .unwrap_err();
+            assert!(matches!(error, CoreError::RuntimeControlUnsupported));
         })
         .await;
     }
@@ -4063,8 +3658,6 @@ mod tests {
                             ..RuntimeCapabilitiesV1::default()
                         },
                     )),
-                    runtime_relay_token_hash: runtime_relay_token_hash("phala-runtime-token")
-                        .unwrap(),
                     display_name: None,
                     hostname: None,
                     runtime_host: None,
@@ -4876,7 +4469,6 @@ mod tests {
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
-                    runtime_relay_token_hash: runtime_relay_token_hash("ledger-relay").unwrap(),
                     display_name: None,
                     hostname: None,
                     runtime_host: None,
@@ -5396,7 +4988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_serve_runtime_must_publish_relay_heartbeat_before_running() {
+    async fn self_serve_registration_launches_then_completion_marks_running() {
         with_isolated_postgres(|db| async move {
             let launch_code = issue_test_launch_code(&db).await;
             promote_runtime_artifact(&db).await;
@@ -5423,9 +5015,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let runtime_token = "runtime-token-1";
-            let token_hash = runtime_relay_token_hash(runtime_token).unwrap();
-
             let register_input = RegisterAgentCreationRuntimeInput {
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
@@ -5442,7 +5031,6 @@ mod tests {
                 )),
                 contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: token_hash,
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -5471,24 +5059,6 @@ mod tests {
                 Some("https://oslo-agent.example.com/contact")
             );
             assert_eq!(runtime.provider_runtime_handle_history.len(), 1);
-            assert!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .is_err()
-            );
-
-            let heartbeat = db.record_runtime_heartbeat(runtime_token).await.unwrap();
-            assert_eq!(heartbeat.machine_id, "oslo-agent-001");
-            let events = db.relay_events_for_runtime(runtime_token).await.unwrap();
-            assert_eq!(events.machine_id, "oslo-agent-001");
-            assert!(events.events.is_empty());
-            assert_eq!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .unwrap()
-                    .last_seen_at,
-                heartbeat.last_seen_at
-            );
 
             let completion_input = CompleteAgentCreationRequestInput {
                 request_id: lease.request.id,
@@ -5783,7 +5353,9 @@ mod tests {
                 .id
                 .clone();
             assert_eq!(db.visible_projects_for_user(&user_id).await.len(), 2);
-            let relay_hash = runtime_relay_token_hash("destroy-test-relay-token").unwrap();
+            // A legacy relay credential row: nothing writes these anymore, but
+            // destroy still clears any left behind by earlier Core generations.
+            let relay_hash = "ab".repeat(32);
             db.exec(&format!(
                 "INSERT INTO runtime_relay_credentials \
                  (agent_runtime_id, token_hash, created_at, updated_at) \
@@ -6240,51 +5812,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imported_legacy_runtime_restart_is_rejected() {
-        with_isolated_postgres(|db| async move {
-            db.reconcile_existing_host_imports(
-                vec![import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
-            )
-            .await
-            .unwrap();
-            let candidate_id = db
-                .claimable_candidates_for_email(Some("paul@finite.vip"))
-                .await
-                .unwrap()[0]
-                .id
-                .clone();
-            let claimed = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: "paul@finite.vip".to_string(),
-                    workos_user_id: "user_workos_paul".to_string(),
-                    selected_candidate_ids: vec![candidate_id],
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-
-            let error = db
-                .request_runtime_restart(RequestRuntimeRestartInput {
-                    verified_email: "paul@finite.vip".to_string(),
-                    workos_user_id: "user_workos_paul".to_string(),
-                    project_id: claimed.claimed_project_ids[0].clone(),
-                    now: Some("2026-05-25T13:03:00Z".to_string()),
-                })
-                .await
-                .unwrap_err();
-
-            assert!(matches!(error, CoreError::RuntimeControlUnsupported));
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn runner_lease_can_expire_and_reassign_but_completion_requires_current_token() {
         with_isolated_postgres(|db| async move {
             let launch_code = issue_test_launch_code(&db).await;
@@ -6520,7 +6047,6 @@ mod tests {
                 provider_runtime_handle: None,
                 contact_endpoint: None,
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: runtime_relay_token_hash("runtime-token-1").unwrap(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6534,7 +6060,6 @@ mod tests {
             .unwrap();
 
             assert_eq!(db.table_len("agent_runtimes").await, 1);
-            assert_eq!(db.table_len("runtime_relay_credentials").await, 1);
             assert_eq!(db.table_len("project_runtime_links").await, 1);
 
             let failed = db
@@ -6552,13 +6077,7 @@ mod tests {
             assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
             assert!(failed.agent_runtime_id.is_none());
             assert!(db.all_agent_runtimes().await.is_empty());
-            assert!(db.all("runtime_relay_credentials").await.is_empty());
             assert!(db.all("project_runtime_links").await.is_empty());
-            assert!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .is_err()
-            );
         })
         .await;
     }
@@ -6647,206 +6166,6 @@ mod tests {
                 2,
                 "an identical retry must not apply the top-up twice"
             );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn imported_runtime_does_not_consume_self_serve_launch_entitlement() {
-        with_isolated_postgres(|db| async move {
-            let launch_code = issue_test_launch_code(&db).await;
-            let email = "import-with-launch@finite.vip";
-            let workos_user_id = "user_workos_import_with_launch";
-
-            let reconciled = db
-                .reconcile_existing_host_imports(
-                    vec![import(
-                        "legacy-host",
-                        "legacy-agent-001",
-                        "Imported Agent",
-                        Some(email),
-                    )],
-                    options([email], NOW),
-                )
-                .await
-                .unwrap();
-            let candidate_id = reconciled.created_candidates[0].clone();
-            let claimed = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.to_string(),
-                    workos_user_id: workos_user_id.to_string(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-            let imported_project_id = claimed.claimed_project_ids[0].clone();
-            let imported_candidate = db.import_candidate(&candidate_id).await.unwrap().clone();
-            let imported_runtime_id = imported_candidate
-                .agent_runtime_id
-                .clone()
-                .expect("claimed import has a runtime");
-            let imported_project = db.project(&imported_project_id).await.unwrap().clone();
-            let imported_runtime = db
-                .agent_runtime(&imported_runtime_id)
-                .await
-                .unwrap()
-                .clone();
-            let imported_link = db
-                .all("project_runtime_links")
-                .await
-                .iter()
-                .find(|link| {
-                    link["project_id"] == imported_project_id.as_str() && link["active"] == true
-                })
-                .cloned()
-                .expect("claimed import has an active runtime link");
-
-            let created = db
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.to_string(),
-                    workos_user_id: workos_user_id.to_string(),
-                    display_name: "New Hosted Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "first-self-serve-submit".to_string(),
-                    now: Some("2026-05-25T14:00:00Z".to_string()),
-                })
-                .await
-                .expect("an imported runtime must not consume the hosted launch");
-            assert!(created.project.import_candidate_id.is_none());
-
-            let unused_launch_code = issue_test_launch_code(&db).await;
-            let unused_launch_code_id = issued_launch_code_id(&db, &unused_launch_code).await;
-            let second = db
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.to_string(),
-                    workos_user_id: workos_user_id.to_string(),
-                    display_name: "Another Hosted Agent".to_string(),
-                    launch_code: unused_launch_code,
-                    idempotency_key: "second-self-serve-submit".to_string(),
-                    now: Some("2026-05-25T15:00:00Z".to_string()),
-                })
-                .await
-                .expect("a second fresh code grants one more hosted agent");
-            assert!(!second.reused);
-            assert!(
-                !db.row("launch_codes", &unused_launch_code_id)
-                    .await
-                    .unwrap()["redeemed_at"]
-                    .is_null()
-            );
-
-            assert_eq!(db.table_len("agent_creation_requests").await, 2);
-            assert_eq!(
-                db.import_candidate(&candidate_id).await.unwrap(),
-                imported_candidate
-            );
-            assert_eq!(
-                db.project(&imported_project_id).await.unwrap(),
-                imported_project
-            );
-            assert_eq!(
-                db.agent_runtime(&imported_runtime_id).await.unwrap(),
-                imported_runtime
-            );
-            assert_eq!(
-                db.row(
-                    "project_runtime_links",
-                    imported_link["id"].as_str().unwrap()
-                )
-                .await
-                .unwrap(),
-                imported_link
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn owner_can_archive_imported_project_without_deleting_runtime_history() {
-        with_isolated_postgres(|db| async move {
-            let email = "archive-import@finite.vip";
-            let workos_user_id = "user_workos_archive_import";
-            let reconciled = db
-                .reconcile_existing_host_imports(
-                    vec![import(
-                        "legacy-host",
-                        "legacy-agent-archive",
-                        "Old Agent",
-                        Some(email),
-                    )],
-                    options([email], NOW),
-                )
-                .await
-                .unwrap();
-            let claimed = db
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.to_string(),
-                    workos_user_id: workos_user_id.to_string(),
-                    selected_candidate_ids: reconciled.created_candidates,
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-            let project_id = claimed.claimed_project_ids[0].clone();
-            let runtime_count = db.table_len("agent_runtimes").await;
-            let link_count = db.table_len("project_runtime_links").await;
-
-            db.archive_imported_project(ArchiveImportedProjectInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T16:00:00Z".to_string()),
-            })
-            .await
-            .unwrap();
-
-            assert!(
-                db.visible_projects_for_user(&db.user_by_email(email).await.unwrap().id)
-                    .await
-                    .is_empty()
-            );
-            assert!(db.project(&project_id).await.is_some());
-            assert_eq!(db.table_len("agent_runtimes").await, runtime_count);
-            assert_eq!(db.table_len("project_runtime_links").await, link_count);
-            assert!(
-                db.all("project_room_memberships")
-                    .await
-                    .iter()
-                    .any(|membership| {
-                        membership["project_id"] == project_id.as_str()
-                            && !membership["archived_at"].is_null()
-                    })
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn hosted_project_cannot_use_import_archive_path() {
-        with_isolated_postgres(|db| async move {
-            let launch_code = issue_test_launch_code(&db).await;
-            let created = db
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: "hosted-archive@finite.vip".to_string(),
-                    workos_user_id: "user_workos_hosted_archive".to_string(),
-                    display_name: "Hosted Agent".to_string(),
-                    launch_code,
-                    idempotency_key: "hosted-archive".to_string(),
-                    now: Some(NOW.to_string()),
-                })
-                .await
-                .unwrap();
-            let error = db
-                .archive_imported_project(ArchiveImportedProjectInput {
-                    verified_email: "hosted-archive@finite.vip".to_string(),
-                    workos_user_id: "user_workos_hosted_archive".to_string(),
-                    project_id: created.project.id,
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap_err();
-            assert!(matches!(error, CoreError::ProjectNotFound));
         })
         .await;
     }
@@ -8221,6 +7540,9 @@ mod tests {
         for table in [
             "users",
             "customer_orgs",
+            // Written only by the deleted existing-host import bridge; the
+            // table stays because production may hold rows from its 2026-07
+            // test run and dropping schema is a rollback boundary.
             "project_import_candidates",
             "projects",
             "runtime_artifacts",
@@ -8390,41 +7712,6 @@ mod tests {
             normalize_runtime_contact_endpoint(Some("file:///tmp/contact")),
             Err(CoreError::InvalidRuntimeContactEndpoint)
         ));
-    }
-
-    fn options<const N: usize>(
-        allowlisted_owner_emails: [&str; N],
-        now: &str,
-    ) -> ReconcileExistingHostImportsOptions {
-        ReconcileExistingHostImportsOptions {
-            allowlisted_owner_emails: allowlisted_owner_emails
-                .iter()
-                .map(|email| email.to_string())
-                .collect(),
-            now: Some(now.to_string()),
-        }
-    }
-
-    fn import(
-        source_host_id: &str,
-        source_machine_id: &str,
-        display_name: &str,
-        owner_email: Option<&str>,
-    ) -> ExistingHostProjectImport {
-        ExistingHostProjectImport {
-            source_host_id: source_host_id.to_string(),
-            source_machine_id: source_machine_id.to_string(),
-            owner_email: owner_email.map(str::to_string),
-            display_name: display_name.to_string(),
-            hostname: None,
-            runtime_host: None,
-            runtime_status: RuntimeSummaryStatus::Unknown,
-            active_inference_profile: None,
-            hermes_available: None,
-            published_app_urls: Vec::new(),
-            known_external_channel_participants: Vec::new(),
-            admin_visible_to_emails: Vec::new(),
-        }
     }
 
     #[tokio::test]
@@ -8792,7 +8079,6 @@ mod tests {
                 provider_runtime_handle: None,
                 contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: "relay-token-hash".to_string(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("http://oslo-host-3:4201".to_string()),

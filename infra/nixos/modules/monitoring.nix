@@ -139,6 +139,9 @@ in
       Type = "oneshot";
       DynamicUser = true;
       SupplementaryGroups = [ "finite-monitoring" ];
+      # DynamicUser implies ProtectSystem=strict, which mounts /run read-only
+      # for the unit; the group grant alone cannot open the textfile directory.
+      ReadWritePaths = [ healthMetricsDirectory ];
       # Keep slow or wedged local endpoints from extending an activation
       # indefinitely even though each probe has its own curl timeout.
       TimeoutStartSec = "2min";

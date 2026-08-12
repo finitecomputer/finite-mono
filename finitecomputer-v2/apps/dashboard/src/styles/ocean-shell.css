@@ -3373,6 +3373,42 @@ button.ocean-pill-button {
   aspect-ratio: 3 / 2;
 }
 
+.finite-chat__remote-image-load {
+  display: flex;
+  aspect-ratio: 4 / 3;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  border: 0;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.finite-chat__image-card.is-compact .finite-chat__remote-image-load {
+  aspect-ratio: 3 / 2;
+}
+
+.finite-chat__remote-image-load span {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.finite-chat__remote-image-load small {
+  font-size: 11px;
+}
+
+.finite-chat__remote-image-load:hover {
+  background: var(--bg-hover);
+}
+
+.finite-chat__remote-image-load:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 .finite-chat__image-card img {
   display: block;
   width: 100%;
