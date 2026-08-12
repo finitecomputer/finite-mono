@@ -471,8 +471,6 @@ jobs:
         run: nix develop --command just litestream-recovery-contract
       - name: lat1 secret bootstrap contract
         run: nix develop --command just lat1-secret-bootstrap-contract
-      - name: lat2 runner guardrails contract
-        run: nix develop --command just lat2-runner-guardrails-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 

@@ -50,23 +50,22 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   `infra/nixos/` and re-deploy; land any emergency change back within a day
   (rule above). To roll config back fast: `nixos-rebuild switch --rollback`.
 
-## lat2 — finite-lat-2 (64.34.80.19) — legacy runners and historical captures (Ubuntu+nix)
+## lat2 — finite-lat-2 (64.34.80.19) — decommission target (Ubuntu+nix)
 
 Post-cutover lat2 is no longer an app host. Its finite-saas-sites,
 finite-search, and finite-core-tunnel units are **DISABLED** (those services
 moved to lat1). Docker/image CI and production Nix closure builds now run
-through Depot-backed CI. Lat2 still has installed legacy GitHub Actions runners
-until they are explicitly removed.
+through Depot-backed CI. Lat2 should be used only to execute the authorized
+archive/offload and wipe procedure in
+[`decommission-lat2.md`](decommission-lat2.md).
 
 - **Get on:** `ssh finite-lat-2` (user `ubuntu`).
 - **Logs:**
   - `journalctl -u 'actions.runner.*'` — installed legacy Actions runners
-    (`finite-lat-2-mono` should not drive mono Docker/image lanes after the
-    Depot migration)
+    before removal only; do not repair or restart them
   - `journalctl -u caddy` — legacy edge, if still present
-- **Restart:**
-  - runner: `sudo ./svc.sh stop|start` in the runner dir under
-    `/srv/github-runner/`, or systemctl on the `actions.runner.*` unit
+- **Removal:** unregister runners and delete local directories only through
+  `infra/hosts/lat2/runners.md` and `decommission-lat2.md`.
 - **Note:** do NOT re-enable the migrated units here (sites/search/tunnel) —
   they are authoritative on lat1 now; a second sites writer especially is a
   split-brain risk.

@@ -45,8 +45,9 @@ is historical, not current authority.
 
 ## Parked / later
 
-- [ ] Keep finite-lat-2 out of Agent capacity; the routine production Nix build
-  path is the CI closure-artifact flow once live-proven.
+- [ ] Decommission finite-lat-2 after moving any required private
+  historical/archive data off-box; keep it out of Agent capacity and keep the
+  routine production Nix build path on the CI closure-artifact flow.
 - [ ] Revisit Latitude Kubernetes only at the trigger recorded in
   [`parking-lot.md`](parking-lot.md).
 - [ ] Preserve provider-neutral Runner boundaries for future Phala/TEE work;

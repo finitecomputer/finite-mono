@@ -37,9 +37,12 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   by `scripts/deploy-lat1-closure-cache`. On-host `podman build` is gone;
   first-party images are CI-built and digest-pinned (`infra/images/`).
 
-Still elsewhere: lat2 retains historical captures and legacy runner inventory
-only. It is no longer a Docker/image CI host, Nix build host, or deploy driver.
-Docker/image CI and production closure builds run through Depot-backed CI.
+Still elsewhere: lat2 is a decommission target. Historical captures that need
+to live in git are under `hosts/lat2/`; any remaining private host archive must
+be moved off the machine through `runbooks/decommission-lat2.md`, then the
+legacy runners and credentials are removed. It is no longer a Docker/image CI
+host, Nix build host, deploy driver, or archive authority. Docker/image CI and
+production closure builds run through Depot-backed CI.
 **clawland** remains the legacy finite.vip fleet box; **Tinfoil** is unchanged.
 The old FiniteBrain smoke service remains a rollback source, not the
 production origin.
@@ -70,7 +73,7 @@ infra/
   nixos/       # finite-lat-1 AS CODE — the live definition of the app server
   hosts/
     lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)
-    lat2/      # finite-lat-2 (64.34.80.19) — historical captures + legacy runner inventory
+    lat2/      # finite-lat-2 (64.34.80.19) — historical captures; host pending decommission
     smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
@@ -84,8 +87,9 @@ infra/
 its own banner explicitly says otherwise; it is not permission to deploy its
 old units. `hosts/lat1/` describes the wiped pre-cutover k3s control plane, and
 the Sites/Search material under `hosts/lat2/` is historical. The runner
-inventory in `hosts/lat2/runners.md` documents installed legacy runners; mono
-Docker/image CI is no longer scheduled there.
+inventory in `hosts/lat2/runners.md` is removal inventory for
+`runbooks/decommission-lat2.md`; mono Docker/image CI is no longer scheduled
+there.
 
 ## Hosts and services (observed topology, 2026-07-20)
 
@@ -97,7 +101,7 @@ capacity. The one accepted next candidate and its hard gates live in
 | Host | Role | Services |
 |---|---|---|
 | **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: CI-built `lat1-nixos-closure-REV` artifact copied and switched by `scripts/deploy-lat1-closure-cache`. |
-| **finite-lat-2** (64.34.80.19) | **Historical captures plus legacy runner inventory** (Ubuntu 26.04+nix). Healthy root and `/data` MD RAID1, one populated ESP, no swap at the 2026-07-18 inventory. | The installed GitHub runners are retained only as legacy/operator inventory after the Docker/image CI migration to Depot (`hosts/lat2/runners.md`). Do not use it for Docker CI, production Nix builds, deploy driving, Agent capacity, recovery authority, or this storage experiment. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
+| **finite-lat-2** (64.34.80.19) | **Decommission target** (Ubuntu 26.04+nix at last inventory). Historical service captures are in `hosts/lat2/`; private legacy/archive data must be moved off-box through `runbooks/decommission-lat2.md` before repurpose or release. | No production service, CI, build, deploy, Agent capacity, recovery authority, or archive authority may run here. The installed GitHub runners are removal inventory only (`hosts/lat2/runners.md`). finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** and migrated to lat1. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 32.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | Merged PR #134 closure is active and the system profile. The private lat1 connection and unique credential are proven. The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=32`; repeated cycles return idle and containerd has zero containers. No Recovery Authority exists here. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |

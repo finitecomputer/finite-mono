@@ -1,16 +1,18 @@
 # finite-lat-2 — 64.34.80.19 (Latitude.sh)
 
-> **ROLE CHANGE 2026-08-12 — lat2 is no longer the mono Docker CI box.** The
+> **ROLE CHANGE 2026-08-12 — lat2 is a decommission target.** The
 > consolidation cutover **migrated finitesitesd (sites), finite-search, and the
 > finite-core-tunnel to lat1**; those services are **DISABLED** here. Docker
 > and image CI moved to Depot. Lat1 NixOS closure builds moved to the
-> `Lat1 NixOS Closure` CI artifact workflow. Lat2 keeps only historical service
-> captures and legacy runner inventory until they are explicitly removed
-> (`runners.md`). The Services / Ports / Secrets tables below are the
-> **pre-cutover** capture; the sites/search/tunnel rows are historical.
+> `Lat1 NixOS Closure` CI artifact workflow. Remaining private historical or
+> legacy archive data must be moved off-box through
+> [`decommission-lat2.md`](../../runbooks/decommission-lat2.md), then runner
+> registrations, credentials, and local data are removed. The Services / Ports
+> / Secrets tables below are the **pre-cutover** capture; the
+> sites/search/tunnel rows are historical.
 
-Formerly the dedicated sites + search + CI-runner box; now legacy runner
-inventory plus historical service captures. Captured read-only 2026-07-08
+Formerly the dedicated sites + search + CI-runner box; now a host to archive,
+credential-clean, and repurpose or release. Captured read-only 2026-07-08
 (before the sites/search/tunnel migration and the later Docker/Nix build
 migrations to Depot-backed CI).
 
@@ -32,8 +34,7 @@ migrations to Depot-backed CI).
 | finite-search **(DISABLED — migrated to lat1)** | Two Docker Compose projects under `/home/ubuntu/finite-search/`: SearXNG on 127.0.0.1:8080, Firecrawl (upstream checkout + Finite override) on 127.0.0.1:3002. Loopback-only. | `search.md` (compose sources live in `finite-search/compose/`) |
 | `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
-| GitHub Actions runners **(legacy/operator inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current mono Docker/image workflows use Depot and should not target these runners. | `runners.md` |
-| `finite-lat2-runner-maintenance.service` + `.timer` **(PROPOSED — operator install required)** | Hourly idle-only cleanup of explicitly named aged CI checkouts, stopped Docker objects, unused image/build cache, plus 80%/90% root-disk watermarks. | `runner-maintenance`, `systemd/finite-lat2-runner-maintenance.service`, `.timer`, `runners.md` |
+| GitHub Actions runners **(removal inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current workflows use Depot and should not target these runners; they are to be unregistered during decommission. | `runners.md` |
 
 ## Ports
 
@@ -71,8 +72,7 @@ migrations to Depot-backed CI).
   `finite-sites/deploy/finite-lat-2/`). Files headed "Captured from host"
   or "PROPOSED" are new to any repo.
 - `caddy/Caddyfile` — deployed at `/etc/caddy/Caddyfile`.
-- `runners.md` — runner topology, login isolation, disk guardrails, stale-lease
-  restart, and the finite-mono cutover checklist.
+- `runners.md` — runner removal inventory for the lat2 decommission.
 - `backups.md` — backup reality and the proposed timer.
 - `search.md` — how finite-search runs; points at `finite-search/compose/`.
 - `deploy.md` — current (deprecated) manual sites deploy and the target flow.

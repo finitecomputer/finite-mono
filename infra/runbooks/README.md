@@ -15,9 +15,9 @@ not been exercised yet are marked `TODO:` with what must be learned.
 > ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): Core, dashboard,
 > native Postgres, chat, sites, and Brain all run on finite-lat-1 (now NixOS,
 > one Caddy edge, no k3s); production Nix closures are built by the
-> Depot-backed `Lat1 NixOS Closure` artifact workflow, while lat2 keeps only
-> historical captures and legacy runner inventory. Docker/image CI also uses
-> Depot; smoke is the Brain rollback source during migration; clawland is legacy.
+> Depot-backed `Lat1 NixOS Closure` artifact workflow. Lat2 is pending
+> archive/offload and decommission, not ongoing fleet capacity. Docker/image CI
+> also uses Depot; smoke is the Brain rollback source during migration; clawland is legacy.
 > **The topology runbooks below
 > (deploy-core / deploy-sites / deploy-finitechat-server /
 > postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
@@ -39,6 +39,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
+| [decommission-lat2.md](decommission-lat2.md) | Hard-cut offload, runner removal, credential revocation, and wipe/release procedure for finite-lat-2 |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
 | [finite-private-deepseek-production-update.md](finite-private-deepseek-production-update.md) | Guarded promotion of the measured DeepSeek 128/2048 scheduler and canonical model label, with exact current DeepSeek rollback |
@@ -46,7 +47,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [runtime-cold-relocation.md](runtime-cold-relocation.md) | Operator-only stopped Kata Runtime move between exact hosts, with state-manifest and Agent Principal fencing |
 | [finite-private-limiter-mono-switch.md](finite-private-limiter-mono-switch.md) | Planned-downtime switch from the legacy limiter image to a mono-built limiter plus upstream GLM 5.2 v0.0.17 |
 | [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
-| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke rollback source, clawland legacy) |
+| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 decommission target, smoke rollback source, clawland legacy) |
 
 ## Release checklist discipline
 
