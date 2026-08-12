@@ -122,6 +122,11 @@ smoke/clawland. Each host README documents which secrets each service needs —
 variable **names** and where the value lives, never the value. If you find a
 secret value committed here, rotate it first, then delete it.
 
+CI-only operational secrets live as GitHub Actions repository or organization
+secrets. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
+cache used by the CI Nix service package job. The cache must remain readable
+without that token for forked pull requests to substitute from it.
+
 ## Images
 
 First-party images are **built by CI**, tagged with the git SHA, pushed to

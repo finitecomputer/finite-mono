@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
@@ -13,6 +15,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  CACHIX_CACHE_NAME: finite
 
 jobs:
   changes:
@@ -43,23 +48,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          case "$GITHUB_EVENT_NAME" in
-            pull_request)
-              diff_range="$PR_BASE_SHA...$PR_HEAD_SHA"
-              ;;
-            push)
-              diff_range="$PUSH_BEFORE_SHA..$PUSH_HEAD_SHA"
-              ;;
-            *)
-              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
-
-          changed_files="$RUNNER_TEMP/ci-changed-files"
-          # Surface both sides of a rename so the old path still selects its harness.
-          git diff --name-only --no-renames "$diff_range" -- > "$changed_files"
-
           run_rust=false
           run_dashboard=false
           run_electron_alpha=false
@@ -72,7 +60,10 @@ jobs:
           select_all() {
             run_rust=true
             run_dashboard=true
-            run_electron_alpha=true
+            # Electron CI remains disabled until we actually build and ship an
+            # Electron surface again; the current alpha artifact is unused.
+            # Re-enable this when Electron becomes an active product target.
+            run_electron_alpha=false
             run_hermes_bridge=true
             run_nix_checks=true
             run_nix_service_packages=true
@@ -80,21 +71,46 @@ jobs:
             run_brain_product_matrix=true
           }
 
-          while IFS= read -r path; do
-            case "$path" in
-              docs/*|README.md|CONTRIBUTING.md|AGENTS.md|CONTEXT-MAP.md)
-                ;;
-              finitecomputer-v2/apps/dashboard/*|finitechat/packages/finitechat-chat-ui/*)
-                run_dashboard=true
-                run_nix_checks=true
-                run_devfinity_smoke=true
-                ;;
-              *)
-                select_all
-                break
-                ;;
-            esac
-          done < "$changed_files"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              diff_range="$PR_BASE_SHA...$PR_HEAD_SHA"
+              ;;
+            push)
+              diff_range="$PUSH_BEFORE_SHA..$PUSH_HEAD_SHA"
+              ;;
+            merge_group)
+              # Merge queue validation must report every required check on the
+              # synthetic merge group SHA.
+              select_all
+              diff_range=
+              ;;
+            *)
+              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ -n "$diff_range" ]]; then
+            changed_files="$RUNNER_TEMP/ci-changed-files"
+            # Surface both sides of a rename so the old path still selects its harness.
+            git diff --name-only --no-renames "$diff_range" -- > "$changed_files"
+
+            while IFS= read -r path; do
+              case "$path" in
+                docs/*|README.md|CONTRIBUTING.md|AGENTS.md|CONTEXT-MAP.md)
+                  ;;
+                finitecomputer-v2/apps/dashboard/*|finitechat/packages/finitechat-chat-ui/*)
+                  run_dashboard=true
+                  run_nix_checks=true
+                  run_devfinity_smoke=true
+                  ;;
+                *)
+                  select_all
+                  break
+                  ;;
+              esac
+            done < "$changed_files"
+          fi
 
           {
             echo "run_rust=$run_rust"
@@ -347,22 +363,103 @@ jobs:
           # this clean package-build checkout.
           path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Build every scoped Rust package
-        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Select Cachix push mode
+        id: cachix
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          nix build --no-link --print-build-logs --option builders '' \
-            .#packages.x86_64-linux.finite-saas-core \
-            .#packages.x86_64-linux.finite-saas-runner \
-            .#packages.x86_64-linux.finitechat-server \
-            .#packages.x86_64-linux.finitechat-hosted-device \
-            .#packages.x86_64-linux.finite-agentd \
-            .#packages.x86_64-linux.finite-specialization-worker \
-            .#packages.x86_64-linux.finitesitesd \
-            .#packages.x86_64-linux.finite-brain \
-            .#packages.x86_64-linux.finite-identity \
-            .#packages.x86_64-linux.fsite \
-            .#packages.x86_64-linux.fbrain \
-            .#packages.x86_64-linux.finitechat
+          set -euo pipefail
+
+          push_enabled=false
+          case "$GITHUB_EVENT_NAME" in
+            push|merge_group)
+              push_enabled=true
+              ;;
+            pull_request)
+              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+                push_enabled=true
+              fi
+              ;;
+          esac
+
+          echo "push_enabled=$push_enabled" >> "$GITHUB_OUTPUT"
+      - name: Configure Cachix read-only cache
+        if: steps.cachix.outputs.push_enabled != 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Require Cachix token for trusted cache push
+        if: steps.cachix.outputs.push_enabled == 'true'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+      - name: Configure Cachix trusted cache
+        if: steps.cachix.outputs.push_enabled == 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build every scoped Rust package
+        id: build_packages
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          BUILD_PLAN: ${{ runner.temp }}/nix-service-package-build-plan
+          PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+        run: |
+          set -euo pipefail
+
+          packages=(
+            ".#packages.x86_64-linux.finite-saas-core"
+            ".#packages.x86_64-linux.finite-saas-runner"
+            ".#packages.x86_64-linux.finitechat-server"
+            ".#packages.x86_64-linux.finitechat-hosted-device"
+            ".#packages.x86_64-linux.finite-agentd"
+            ".#packages.x86_64-linux.finite-specialization-worker"
+            ".#packages.x86_64-linux.finitesitesd"
+            ".#packages.x86_64-linux.finite-brain"
+            ".#packages.x86_64-linux.finite-identity"
+            ".#packages.x86_64-linux.fsite"
+            ".#packages.x86_64-linux.fbrain"
+            ".#packages.x86_64-linux.finitechat"
+          )
+
+          nix build --dry-run --option builders '' "${packages[@]}" 2>&1 | tee "$BUILD_PLAN"
+          if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
+            echo "built_paths=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "built_paths=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' "${packages[@]}" \
+            | tee "$PACKAGE_OUTPUTS"
+      - name: Push Nix service package runtime closures
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths == 'true'
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s "$PACKAGE_OUTPUTS" ]]; then
+            echo "::error::Nix service package build did not record any output paths"
+            exit 1
+          fi
+
+          closure_paths="$RUNNER_TEMP/nix-service-package-runtime-closure"
+          mapfile -t outputs < "$PACKAGE_OUTPUTS"
+          nix path-info --recursive "${outputs[@]}" > "$closure_paths"
+          closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
+          echo "Pushing $closure_count Nix runtime closure paths to $CACHIX_CACHE_NAME"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
+      - name: Skip Cachix push for fully substituted service packages
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths != 'true'
+        run: echo "Nix dry-run found no service package derivations to build; skipping Cachix push."
       - name: Verify Chat reports its scoped source fingerprint
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
