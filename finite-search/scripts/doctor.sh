@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-host="${1:-lat2}"
+host="${1:-lat1}"
 
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" '
 set -e

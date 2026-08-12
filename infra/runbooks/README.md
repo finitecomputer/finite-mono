@@ -14,8 +14,9 @@ not been exercised yet are marked `TODO:` with what must be learned.
 > **Topology as of the 2026-07-09 lat1 consolidation cutover**
 > ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): Core, dashboard,
 > native Postgres, chat, sites, and Brain all run on finite-lat-1 (now NixOS,
-> one Caddy edge, no k3s); lat2 is the CI runner box; smoke is the Brain
-> rollback source during migration; clawland is legacy. **The topology runbooks
+> one Caddy edge, no k3s); lat2 is the remaining production x86_64 Nix build
+> driver and legacy runner inventory, while Docker/image CI uses Depot; smoke
+> is the Brain rollback source during migration; clawland is legacy. **The topology runbooks
 > below (deploy-core / deploy-sites / deploy-finitechat-server /
 > postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
 > The NixOS config (`infra/nixos/`) declares lat1; live inventory proves its

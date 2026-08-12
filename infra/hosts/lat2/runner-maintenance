@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Conservative host maintenance for finite-lat-2's self-hosted CI runners.
+# Conservative host maintenance for finite-lat-2's installed legacy runners.
 # The systemd unit fixes these defaults; environment overrides exist so the
 # destructive policy can be exercised against synthetic directories in tests.
 runner_root="${FINITE_LAT2_RUNNER_ROOT:-/srv/github-runner}"

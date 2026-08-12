@@ -2,16 +2,22 @@
 
 Status: accepted, 2026-07-20.
 
+Status note 2026-08-12: Docker/image CI moved from `finite-lat-2` to Depot.
+The placement decision remains unchanged for Agent capacity: `finite-lat-2`
+is still not a production Agent host and remains the approved x86_64
+production Nix build host until that deploy path is replaced.
+
 ## Context
 
 `finite-lat-1` currently combines the Finite control/app plane with existing
 Kata Agent compute. A workload spike can therefore threaten Core, Postgres,
 Chat, Sites, Brain, and Search. It also has single-disk root and `/data`.
 
-`finite-lat-2` has healthy root and data RAID1, but it runs Finite's GitHub
-Actions runners and is the only approved x86_64 production Nix builder.
-Reinstalling it or adding Agent workloads would combine two scarce failure
-domains and remove the known-good builder during the riskiest storage work.
+`finite-lat-2` has healthy root and data RAID1, but it is the only approved
+x86_64 production Nix builder and still has installed legacy GitHub Actions
+runners. Reinstalling it or adding Agent workloads would combine two scarce
+failure domains and remove the known-good builder during the riskiest storage
+work.
 
 Runtime placement is already expressed in provider-neutral hosting and
 resource classes, and Core queues can be partitioned by source host. Current
@@ -25,9 +31,9 @@ contact also require a private non-loopback path.
 - `finite-lat-1` remains the control/app plane and lifecycle controller for
   existing Agents. After a proven handoff, it is drained for new creation but
   continues lifecycle operations for Runtimes already bound to it.
-- `finite-lat-2` remains dedicated to CI and x86_64 production builds. It is
-  not reinstalled, used for production Agents, or made the sole recovery
-  target in this capacity/redundancy work.
+- `finite-lat-2` remains dedicated to x86_64 production Nix builds and legacy
+  runner inventory. It is not reinstalled, used for production Agents, or made
+  the sole recovery target in this capacity/redundancy work.
 - `finite-lat-3` is the blank-slate NixOS/RAID canary and then the sole creator
   for bounded new Standard Agents during the initial rollout.
 - During the lat3 rollout, exactly one Standard Runner may accept new creation.

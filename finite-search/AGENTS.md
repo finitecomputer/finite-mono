@@ -9,7 +9,9 @@ and extraction.
 - Prefer explicit runbooks and smoke scripts over hidden operator knowledge.
 - Do not commit secrets, host-private env files, API keys, or object-storage
   credentials.
-- Treat `lat2` as the first Latitude Docker target until an ADR changes that.
+- Treat the lat1 NixOS finite-search deployment as the current production
+  target. The old lat2 Docker deploy docs are historical evidence unless a new
+  ADR explicitly revives that path.
 - Treat `smoke` / `ovh-vps-smoke` as an OVH canary host, not a Latitude host.
 - Do not move services into Tinfoil until the plain Docker deployment is proven.
 - Keep Firecrawl and SearXNG smokes independent so failures are easy to isolate.
@@ -30,4 +32,3 @@ Use the default five-role triage label vocabulary. See
 
 This is a single-context repo: read root `CONTEXT.md` and relevant ADRs in
 `docs/adr/`. See `docs/agents/domain.md`.
-

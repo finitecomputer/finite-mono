@@ -50,7 +50,8 @@ and the concise
 - [x] Deploy Runtime Retirement and pass a disposable retirement/independent-restore canary.
 - [ ] Add fail-closed Agent-creation capacity admission and the contact-Paul UI.
 - [ ] Extend recovery proof to the complete finite-lat-1 Recovery Set, then schedule its NixOS/RAID reprovision for an evening window.
-- [ ] Consider finite-lat-2 Agent capacity later; keep its CI Runner untouched for now.
+- [ ] Consider finite-lat-2 Agent capacity later; keep it as the production
+  x86_64 Nix build host until that deploy path is replaced.
 
 ## Production acceptance evidence — 2026-07-21
 

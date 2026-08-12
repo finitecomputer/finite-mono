@@ -5,6 +5,7 @@ This is the Layer 2 gate from docs/hermes-phone-canary-loop.md. It builds the
 real runtime image on a remote Docker daemon, starts it against the hosted
 Finite Chat server, proves invite admission plus real Hermes model replies,
 then proves entrypoint backup/restore before handing the invite to a human.
+This is a manual canary; CI image builds use the mono Depot workflows.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
-DEFAULT_DOCKER_HOST = "ssh://finite-lat-2"
 DEFAULT_HERMES_VERSION = "0.18.2"
 RECOVERY_SCOPE = {
     "snapshot_root": "/data",
@@ -68,8 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--docker-host",
-        default=os.environ.get("FINITECHAT_REMOTE_DOCKER_HOST", DEFAULT_DOCKER_HOST),
-        help="Docker host URI. Defaults to ssh://finite-lat-2.",
+        default=os.environ.get("FINITECHAT_REMOTE_DOCKER_HOST", ""),
+        help=(
+            "Docker host URI for the manual remote canary. Required unless "
+            "FINITECHAT_REMOTE_DOCKER_HOST is set."
+        ),
     )
     parser.add_argument(
         "--server-url",
@@ -142,7 +145,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not auto-load local repo/finitecomputer env files.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.docker_host:
+        parser.error(
+            "--docker-host or FINITECHAT_REMOTE_DOCKER_HOST is required; "
+            "lat2 is no longer the default Docker build host"
+        )
+    return args
 
 
 def run(

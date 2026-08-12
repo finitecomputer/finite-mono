@@ -1,17 +1,18 @@
 # finite-lat-2 — 64.34.80.19 (Latitude.sh)
 
-> **ROLE CHANGE 2026-07-09 — lat2 is now the CI RUNNER BOX.** The
+> **ROLE CHANGE 2026-08-12 — lat2 is no longer the mono Docker CI box.** The
 > consolidation cutover **migrated finitesitesd (sites), finite-search, and the
-> finite-core-tunnel to lat1**; those services are **DISABLED** here. lat2's
-> live role is the **finite-mono CI runner and x86_64 Nix build host**.
-> Production lat1 closures must be built here, never on clawland or the
-> production host. It also runs the 3 legacy-repo runners until those repos
-> are archived (`runners.md`). The Services / Ports / Secrets tables below are the
-> **pre-cutover** capture; the sites/search/tunnel rows are historical.
+> finite-core-tunnel to lat1**; those services are **DISABLED** here. Docker
+> and image CI moved to Depot. lat2's remaining approved role is the
+> **x86_64 production Nix build host** for lat1 closures, never clawland or the
+> production host. Its GitHub runners are installed legacy/operator inventory
+> until they are explicitly removed (`runners.md`). The Services / Ports /
+> Secrets tables below are the **pre-cutover** capture; the sites/search/tunnel
+> rows are historical.
 
-Formerly the dedicated sites + search + CI-runner box; now the finite-mono CI
-runner and x86_64 Nix builder. Captured read-only 2026-07-08 (before the
-sites/search/tunnel migration).
+Formerly the dedicated sites + search + CI-runner box; now the x86_64 Nix
+builder plus legacy runner inventory. Captured read-only 2026-07-08 (before the
+sites/search/tunnel migration and the later Docker CI migration to Depot).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
   7.0.0-15-generic, x86-64.
@@ -31,7 +32,7 @@ sites/search/tunnel migration).
 | finite-search **(DISABLED — migrated to lat1)** | Two Docker Compose projects under `/home/ubuntu/finite-search/`: SearXNG on 127.0.0.1:8080, Firecrawl (upstream checkout + Finite override) on 127.0.0.1:3002. Loopback-only. | `search.md` (compose sources live in `finite-search/compose/`) |
 | `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
-| GitHub Actions runners **(lat2's LIVE role)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2) — kept until those repos are archived, then removed. | `runners.md` |
+| GitHub Actions runners **(legacy/operator inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current mono Docker/image workflows use Depot and should not target these runners. | `runners.md` |
 | `finite-lat2-runner-maintenance.service` + `.timer` **(PROPOSED — operator install required)** | Hourly idle-only cleanup of explicitly named aged CI checkouts, stopped Docker objects, unused image/build cache, plus 80%/90% root-disk watermarks. | `runner-maintenance`, `systemd/finite-lat2-runner-maintenance.service`, `.timer`, `runners.md` |
 
 ## Ports

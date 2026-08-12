@@ -54,8 +54,8 @@ jobs:
           tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" fsite
           shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
 
-      # The lat2 server deploy (infra/hosts/lat2/deploy.md) installs the
-      # finitesitesd daemon from this release instead of building on the box.
+      # The lat1 NixOS deploy can consume the finitesitesd daemon from this
+      # release instead of reviving the old lat2 build-on-box flow.
       - name: Build and package finitesitesd (linux only)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash

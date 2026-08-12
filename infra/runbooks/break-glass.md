@@ -50,16 +50,19 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   `infra/nixos/` and re-deploy; land any emergency change back within a day
   (rule above). To roll config back fast: `nixos-rebuild switch --rollback`.
 
-## lat2 — finite-lat-2 (64.34.80.19) — the CI runner box (Ubuntu+nix)
+## lat2 — finite-lat-2 (64.34.80.19) — Nix build host and legacy runners (Ubuntu+nix)
 
-Post-cutover lat2 is just the CI runner. Its finite-saas-sites, finite-search,
-and finite-core-tunnel units are **DISABLED** (those services moved to lat1).
-It hosts the `finite-lat-2-mono` GitHub Actions runner.
+Post-cutover lat2 is no longer an app host. Its finite-saas-sites,
+finite-search, and finite-core-tunnel units are **DISABLED** (those services
+moved to lat1). Docker/image CI now runs through Depot. Lat2 remains the
+approved x86_64 production Nix build driver and still has installed legacy
+GitHub Actions runners until they are explicitly removed.
 
 - **Get on:** `ssh finite-lat-2` (user `ubuntu`).
 - **Logs:**
-  - `journalctl -u 'actions.runner.*'` — the `finite-lat-2-mono` Actions
-    runner (drives the runtime-image / service-images build lanes)
+  - `journalctl -u 'actions.runner.*'` — installed legacy Actions runners
+    (`finite-lat-2-mono` should not drive mono Docker/image lanes after the
+    Depot migration)
   - `journalctl -u caddy` — legacy edge, if still present
 - **Restart:**
   - runner: `sudo ./svc.sh stop|start` in the runner dir under

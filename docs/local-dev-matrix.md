@@ -27,7 +27,7 @@ verification note says otherwise.
 | iOS app build or local Hermes simulator work | repository root | `just dev ios-local-agent` | The pinned dev shell includes Rust's Apple targets and launches the encrypted local chat stack, automatic Device Link, Hermes, and Simulator. Requires Xcode; physical phone work also needs a paired phone and signing team. |
 | Hermes chat bridge canary | `finitechat` | `cp .env.example .env`, set provider key, run `scripts/hermes-phone-canary.py ...` | Real-Hermes proof is stricter than echo/adapter smokes. |
 | FiniteBrain brain, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Brain/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
-| Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat2`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
+| Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat1`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
 | Managed skill edits | `finite-skills` | `just skills check`, then follow `finite-skills/docs/runtime-delivery-contract.md` for promotion proof | A basic static checker exists. It does not yet prove artifact integrity, compatibility, activation, rollback, or real Hermes behavior; those climb the v2 runtime matrix. |
 | Reusable Nostr primitives | `finite-nostr` | `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` | Small Rust crate. No repo-local toolchain pin. |
 | Reporting snapshots/site data | `reporting` plus legacy `finitecomputer` | `python3 ../finitecomputer/scripts/bootstrap_ai_training_stats.py`, then `python3 ai-training-stats/build_site_data.py` | Generator ownership is currently split; live probes depend on local env/SSH availability. |
@@ -360,7 +360,7 @@ Documented tools:
 
 - Shell smoke scripts.
 - `just` recipes for check, doctor, and smoke wrappers.
-- Docker Compose on the `lat2` host.
+- Loopback-only finite-search services on the `lat1` NixOS host.
 - SSH tunnels from an operator machine to host-local service ports.
 - A local Docker smoke for the SearXNG Tinfoil bundle.
 
@@ -369,15 +369,15 @@ Quick checks:
 ```bash
 cd finite-search
 scripts/check-static.sh
-just doctor lat2
-ssh -L 18080:127.0.0.1:8080 -L 13002:127.0.0.1:3002 lat2 -N
+just doctor lat1
+ssh -L 18080:127.0.0.1:8080 -L 13002:127.0.0.1:3002 lat1 -N
 SEARXNG_URL=http://127.0.0.1:18080 scripts/smoke-searxng.sh
 FIRECRAWL_URL=http://127.0.0.1:13002 scripts/smoke-firecrawl.sh
 ```
 
 Friction:
 
-- The happy path assumes SSH access to `lat2`.
+- The happy path assumes SSH access to `lat1`.
 - Static checks are easy to run, but full service proof is not currently a
   no-access local onboarding path.
 - SearXNG has a small local Compose profile; Firecrawl uses an upstream
@@ -489,8 +489,8 @@ The current fragmentation falls into a few concrete buckets:
 6. Validation is uneven. Some repos have strong CI/local checks; `finite-skills`
    has almost none at the repo level.
 7. Full-fidelity local work often needs privileged context: model keys,
-   MicroSandbox capability, SSH to `lat2`, Apple signing, phone hardware, or
-   production-like host secrets.
+   MicroSandbox capability, SSH to production hosts, Apple signing, phone
+   hardware, or production-like host secrets.
 
 ## Unification Ideas
 
@@ -586,7 +586,7 @@ provider keys, or the full platform checkout.
 
 ### 6. Make Search Locally Reproducible
 
-Add a `finite-search` local stack profile that does not require `lat2`:
+Add a `finite-search` local stack profile that does not require production SSH:
 
 ```bash
 just local-up

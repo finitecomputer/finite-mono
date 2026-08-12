@@ -33,8 +33,9 @@ Avoid: search-result ranking, agent reasoning, long-term memory.
 **Latitude Host**
 
 A Latitude.sh machine reachable from the operator laptop through SSH aliases
-such as `lat1` and `lat2`. Latitude hosts are the first target for this repo's
-plain Docker deployment.
+such as `lat1` and `lat2`. The current production search services run on
+`lat1` through the mono NixOS configuration; `lat2` is only the historical
+plain-Docker proof unless a new ADR says otherwise.
 
 Avoid: assuming the OVH smoke box is Latitude.
 
@@ -72,7 +73,8 @@ This repo should answer four questions quickly:
 
 ## Current Decisions
 
-- Use `lat2` as the first Docker target because Docker is already active there.
+- Use the lat1 NixOS module as the current deployed target; keep the old lat2
+  Docker proof as migration evidence only.
 - Keep SearXNG and Firecrawl as separate services behind separate smoke checks.
 - Run plain Docker before Tinfoil packaging.
 - Use root `CONTEXT.md` plus root `docs/adr/` as the domain-doc layout.
@@ -86,4 +88,3 @@ This repo should answer four questions quickly:
 - Tinfoil attestation-gated key release.
 - A custom agent UI.
 - Replacing hosted providers before benchmark evidence exists.
-

@@ -33,11 +33,10 @@ What is done:
 - `main` is the active branch.
 - GitHub Issues are configured for the bootstrap PRD and tracer-bullet slices.
 - GitHub Actions runs `scripts/check-static.sh`.
-- `lat2` preflight works over SSH.
-- Docker Compose is installed on `lat2`.
-- SearXNG is deployed on `lat2` and bound to host-local port `8080`.
-- Firecrawl is deployed from upstream source on `lat2` and bound to host-local
-  port `3002`.
+- The original lat2 Docker proof passed and is retained in dated runbooks.
+- Current production search runs from the mono NixOS configuration on `lat1`.
+- SearXNG is deployed on `lat1` and bound to host-local port `8080`.
+- Firecrawl is deployed on `lat1` and bound to host-local port `3002`.
 - SearXNG and Firecrawl strict smokes pass through SSH tunnels.
 - Hermes has been proven against both endpoints using its own web provider
   tool layer and a one-shot agent run.
@@ -49,12 +48,12 @@ What is done:
 
 ## Current Target
 
-Start on `lat2`:
+Start on `lat1`:
 
 | Alias | Hostname | Provider | Notes |
 | --- | --- | --- | --- |
-| `lat2` | `finite-lat-2` | Latitude.sh | First Docker target. Docker and Compose are active. |
-| `lat1` | `finite-lat-1` | Latitude.sh | Has k3s active; Docker inactive. |
+| `lat1` | `finite-lat-1` | Latitude.sh | Current NixOS app server; finite-search runs as loopback-only podman containers. |
+| `lat2` | `finite-lat-2` | Latitude.sh | Historical Docker proof and legacy CI/build host; do not deploy search here. |
 | `smoke` | `ovh-vps-smoke` | OVH | Existing Finite smoke box, not Latitude. |
 
 ## Quick Start
@@ -68,14 +67,14 @@ scripts/check-static.sh
 Remote host preflight:
 
 ```bash
-scripts/doctor.sh lat2
+scripts/doctor.sh lat1
 ```
 
-The services are deliberately host-local on `lat2`. For local smokes, open SSH
+The services are deliberately host-local on `lat1`. For local smokes, open SSH
 tunnels in one shell:
 
 ```bash
-ssh -L 18080:127.0.0.1:8080 -L 13002:127.0.0.1:3002 lat2 -N
+ssh -L 18080:127.0.0.1:8080 -L 13002:127.0.0.1:3002 lat1 -N
 ```
 
 Then run service smokes from this repo:
@@ -126,13 +125,13 @@ scripts/probe-stack.sh
 The first operational milestone was not "perfect private browsing infra." It
 was:
 
-1. `lat2` has a simple Docker deploy path with Compose available.
+1. The historical lat2 Docker proof showed a simple deploy path with Compose.
 2. SearXNG returns JSON search results.
 3. Firecrawl returns readable content for a normal public URL.
 4. A Hermes runtime can point `web_search` and `web_extract` at those services.
 5. Resource and latency evidence is recorded.
-6. The remaining Tinfoil work is documented as a follow-up, not mixed into the
-   first Docker proof.
+6. The current production deployment is owned by `infra/nixos/` on lat1; the
+   remaining Tinfoil work stays separate from that migration record.
 
 ## GitHub Issues
 

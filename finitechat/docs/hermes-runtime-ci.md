@@ -3,12 +3,13 @@
 ## Problem Statement
 
 The Hermes runtime testing loop needs to prove the same image through Docker and
-the current confidential runner lane without waiting on slow GitHub-hosted
-Docker builds or rebuilding the image inside each test layer.
+the current confidential runner lane without rebuilding the image inside each
+test layer or scheduling Docker builds on `finite-lat-2`.
 
 ## Acceptance Criteria
 
-- The Docker runtime smoke runs on a Finite-controlled x86_64 Docker host.
+- The Docker runtime smoke builds with Depot remote builders from GitHub
+  Actions.
 - The runtime image is built once before the Docker smoke.
 - The Docker smoke uses that prebuilt image instead of rebuilding inside the
   test.
@@ -20,33 +21,31 @@ Docker builds or rebuilding the image inside each test layer.
 
 ## Current Runner
 
-- Host: `finite-lat-2`
-- GitHub runner name: `finite-lat-2-finitechat-hermes-runtime`
-- Repo: `finitecomputer/finitechat`
-- Labels: `self-hosted`, `Linux`, `X64`, `finite-lat-2`, `docker`,
-  `hermes-runtime`
-- Systemd unit:
-  `actions.runner.finitecomputer-finitechat.finite-lat-2-finitechat-hermes-runtime.service`
-- Runner directory: `/srv/github-runner/finitechat-hermes-runtime`
+Current runtime image proof lives in `finite-mono`:
 
-The repository is public, so self-hosted execution is intentionally scoped to the
-Docker runtime job. Pull requests run the normal GitHub-hosted test job but do
-not run the self-hosted Docker runtime smoke.
+- Build-only source preflight:
+  `.github/workflows/hermes-runtime-smoke.yml`
+- Build-once promotion path:
+  `.github/workflows/runtime-image.yml`
+- Runner: `depot-ubuntu-24.04`
+- Builder: `depot build` through `depot/setup-action` OIDC
+- Project id: `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or shared `DEPOT_PROJECT_ID`
+
+The old `finite-lat-2-finitechat-hermes-runtime` self-hosted runner path is
+retired for mono Docker image CI. Keep lat2 runner references only as
+historical evidence or operator inventory until the legacy repo runners are
+removed.
 
 ## Image Flow
 
-1. `scripts/hermes-build-runtime-image.py` stages the Docker build context and
-   builds `ghcr.io/<owner>/finite-chat-hermes-runtime:<sha>` locally on the
-   self-hosted runner.
-2. Pushes to `main` run `scripts/hermes-durable-home-docker-smoke.py` against
-   the prebuilt image. This is the default Phala-shaped `/home/node` gate.
-3. Explicit Tinfoil dispatches run `scripts/hermes-sidecar-docker-smoke.sh` with
-   `FINITE_DOCKER_IMAGE=<that image>` and `FINITE_DOCKER_SKIP_IMAGE_BUILD=1`.
-4. `scripts/hermes-publish-proven-image.py` inspects the selected smoke report
-   and pushes the same local image ID to GHCR when the matching publish input is
-   set.
-5. `scripts/hermes-tinfoil-handoff.py` and
-   `scripts/hermes-tinfoil-canary-artifacts.py` consume the publish report.
+1. `finitecomputer-v2/scripts/build_runtime_image.py` builds the canonical
+   monorepo runtime image with `FC_RUNTIME_IMAGE_ENGINE=depot`.
+2. The smoke workflow uses `depot build --load` so the exact built image is
+   available in the runner's local Docker daemon for optional Docker smokes.
+3. The publish workflow builds the canonical image once, validates and smokes
+   that local image ID, then pushes the same bytes to GHCR.
+4. Tinfoil handoff artifacts consume the published image digest only after an
+   explicit Tinfoil dispatch.
 
 ## Dispatch
 
@@ -63,23 +62,20 @@ scripts/hermes-github-publish-gate.py \
 For a raw workflow dispatch:
 
 ```sh
-gh workflow run ci.yml \
-  -R finitecomputer/finitechat \
+gh workflow run runtime-image.yml \
+  -R finitecomputer/finite-mono \
   --ref <branch> \
-  -f docker_smoke=true \
-  -f publish_runtime_image=true \
-  -f restic_backend=s3 \
-  -f restic_prefix=agent-runtimes/<canary>/ci-smoke/restic
+  -f version=<date-based-version>
 ```
 
 Use the Phala durable-home gate when proving the current hosted-agent runtime:
 
 ```sh
-gh workflow run ci.yml \
-  -R finitecomputer/finitechat \
+gh workflow run hermes-runtime-smoke.yml \
+  -R finitecomputer/finite-mono \
   --ref <branch> \
   -f durable_home_docker_smoke=true \
-  -f publish_phala_runtime_image=true
+  -f chat_interruption_smoke=true
 ```
 
 ## Current Caveat

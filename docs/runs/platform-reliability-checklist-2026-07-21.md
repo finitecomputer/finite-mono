@@ -45,7 +45,8 @@ is historical, not current authority.
 
 ## Parked / later
 
-- [ ] Keep finite-lat-2 CI/build-only; reconsider it for Agent capacity later.
+- [ ] Keep finite-lat-2 out of Agent capacity; it remains the production
+  x86_64 Nix build host until that deploy path is replaced.
 - [ ] Revisit Latitude Kubernetes only at the trigger recorded in
   [`parking-lot.md`](parking-lot.md).
 - [ ] Preserve provider-neutral Runner boundaries for future Phala/TEE work;

@@ -1,7 +1,7 @@
 check:
     scripts/check-static.sh
 
-doctor host="lat2":
+doctor host="lat1":
     scripts/doctor.sh {{host}}
 
 smoke-searxng url="http://127.0.0.1:8080":

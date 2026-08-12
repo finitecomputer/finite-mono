@@ -1,7 +1,8 @@
 # Deploying finite-sites to finite-lat-2
 
 > **SUPERSEDED 2026-07-09 — DO NOT RUN.** Sites and its edge moved to
-> `finite-lat-1`; `finite-lat-2` is the CI/build host. Current Sites deployment
+> `finite-lat-1`; `finite-lat-2` is the remaining Nix build host and legacy
+> runner inventory. Current Sites deployment
 > authority is [`infra/runbooks/deploy-sites.md`](../../runbooks/deploy-sites.md).
 > Everything below is historical evidence of the former build-on-box flow,
 > including sections labelled “today” or “target.” Do not restart services,

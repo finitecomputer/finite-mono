@@ -1,9 +1,10 @@
 # GitHub Actions runners on finite-lat-2
 
-> Post-2026-07-09 cutover, **running CI is lat2's live role** — sites, search,
-> and the core tunnel moved to lat1. The mono runner `finite-lat-2-mono` is
-> registered and online (see the DONE note below); the 3 legacy-repo runners
-> stay until their repos are archived.
+> Post-2026-08-12 Docker CI migration, **finite-mono Docker/image workflows no
+> longer target lat2**. Sites, search, and the core tunnel moved to lat1 in the
+> 2026-07-09 cutover; Docker/image CI moved to Depot. The mono runner
+> `finite-lat-2-mono` and the 3 legacy-repo runners are installed
+> legacy/operator inventory until they are explicitly deregistered.
 
 Captured 2026-07-08. **Three** self-hosted runners (the old inventory said
 one), all version **2.335.1**, all `User=ubuntu`, each a systemd service
@@ -26,12 +27,13 @@ material, never in this repo.
 Note: `nix-daemon.service` runs on this box; the tinfoil runner's `nix` label
 is real capacity, not aspiration.
 
-> **DONE 2026-07-08**: a new runner `finite-lat-2-mono` (labels
+> **HISTORICAL 2026-07-08**: a new runner `finite-lat-2-mono` (labels
 > `self-hosted,Linux,X64,finite-lat-2,docker,nix`) is registered against
 > finitecomputer/finite-mono at `/srv/github-runner/finite-mono` (systemd
 > `actions.runner.finitecomputer-finite-mono.finite-lat-2-mono.service`),
 > verified online. Repo setting "require approval for all outside
-> collaborators" is set (public repo + self-hosted runner mitigation). The
+> collaborators" is set (public repo + self-hosted runner mitigation). Current
+> mono Docker/image workflows should use Depot instead of this runner. The
 > three legacy-repo runners stay until their repos are archived, then get
 > removed per the steps below.
 
@@ -117,12 +119,13 @@ sudo systemctl enable --now finite-lat2-runner-maintenance.timer
 systemctl list-timers finite-lat2-runner-maintenance.timer
 ```
 
-New containerized self-hosted lanes must use a per-attempt checkout path such
-as `<lane>-${{ github.run_id }}-${{ github.run_attempt }}` and set each command's
-working directory to it. After uploading diagnostics, an `if: always()` step
-must validate and remove that exact checkout. Never rely on a later lane being
-able to clean or re-own it; add a new explicit aged-name rule here as the crash
-fallback when introducing a new checkout family.
+Do not add new containerized mono CI lanes to lat2. If an emergency temporary
+self-hosted lane is explicitly approved, it must use a per-attempt checkout path
+such as `<lane>-${{ github.run_id }}-${{ github.run_attempt }}` and set each
+command's working directory to it. After uploading diagnostics, an
+`if: always()` step must validate and remove that exact checkout. Never rely on
+a later lane being able to clean or re-own it; add a new explicit aged-name
+rule here as the crash fallback when introducing a new checkout family.
 
 ## Bounded stale-listener restart
 
@@ -173,11 +176,15 @@ disabled for diagnosis or removed from `/etc/systemd/system` and
 `/usr/local/sbin`, followed by `sudo systemctl daemon-reload`. No runner
 registration, credential, or service-unit rollback is required.
 
-## Cutover checklist — re-register against finitecomputer/finite-mono
+## Historical cutover checklist — do not use for new mono CI
 
-Runners are repo-scoped. For mono CI to build images on this box, each
-runner (or a new runner) must be registered against
-`finitecomputer/finite-mono`. Per runner:
+New finite-mono Docker/image workflows should use Depot runners/builders, not a
+lat2 self-hosted runner. Keep the checklist below only for understanding the
+July 2026 migration history or for removing old registrations.
+
+Runners are repo-scoped. The historical plan below would have registered each
+legacy runner against `finitecomputer/finite-mono` so mono CI could build
+images on lat2. Do not use this for new Docker/image lanes.
 
 1. Get a registration token: repo Settings → Actions → Runners → New
    self-hosted runner (or `gh api -X POST
@@ -190,10 +197,8 @@ runner (or a new runner) must be registered against
    ./config.sh remove --token <REMOVAL_TOKEN_FROM_OLD_REPO>
    ```
 
-3. Re-register. **Preserve the exact custom labels** — finitechat's existing
-   workflows select runners by `hermes-runtime` (and `docker`,
-   `finite-lat-2`); migrated workflows in finite-mono must keep matching.
-   Exact shape (placeholders, never real tokens):
+3. Re-register. **Historical only:** this preserved custom labels used by the
+   archived legacy workflows. Exact shape (placeholders, never real tokens):
 
    ```sh
    ./config.sh \
@@ -211,9 +216,9 @@ runner (or a new runner) must be registered against
    - finitecomputer-tinfoil-runtime: `finite-lat-2,nix,docker,tinfoil-runtime`
    - finitecomputer-v2-runtime: `finite-lat-2`
 
-4. Verify: the runner shows Idle under finite-mono's Settings → Actions →
-   Runners with the expected labels, and a mono workflow with
-   `runs-on: [self-hosted, hermes-runtime]` (etc.) picks it up.
+4. Historical verification: the runner showed Idle under finite-mono's
+   Settings → Actions → Runners with the expected labels, and a mono workflow
+   with `runs-on: [self-hosted, hermes-runtime]` (etc.) picked it up.
 
 Sequencing: the three legacy repos keep CI until their workflows land in
 finite-mono. Either re-register one runner at a time as each repo's CI

@@ -1,5 +1,5 @@
 [Unit]
-Description=Conservative disk maintenance for finite-lat-2 CI runners
+Description=Conservative disk maintenance for finite-lat-2 legacy runners
 After=docker.service
 
 [Service]
