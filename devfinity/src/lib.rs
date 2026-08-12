@@ -226,6 +226,13 @@ const CACHED_INFERENCE_KEY_FILE: &str = "finite-private-upstream.key";
 const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
 const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
 const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
+const DEVFINITY_FINITE_SAAS_CORE_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_CORE_BIN";
+const DEVFINITY_FINITECHAT_SERVER_BIN_ENV: &str = "DEVFINITY_FINITECHAT_SERVER_BIN";
+const DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV: &str = "DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN";
+const DEVFINITY_FINITESITESD_BIN_ENV: &str = "DEVFINITY_FINITESITESD_BIN";
+const DEVFINITY_FINITE_IDENTITYD_BIN_ENV: &str = "DEVFINITY_FINITE_IDENTITYD_BIN";
+const DEVFINITY_FINITE_BRAIN_BIN_ENV: &str = "DEVFINITY_FINITE_BRAIN_BIN";
+const DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_RUNNER_BIN";
 
 #[derive(Clone)]
 struct WorkosStagingConfig {
@@ -1101,24 +1108,116 @@ impl Stack {
             &self.repo_root,
             process,
         );
-        let build_command = if self.profile.includes_runtime() {
-            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-identity --bin finite-identityd && cargo build -p finite-brain-app && cargo build -p finite-saas-local && cargo build -p finite-saas-runner"
+        let build_commands = self.rust_build_commands();
+        let command = if build_commands.is_empty() {
+            String::from("printf '%s\\n' 'devfinity service binaries supplied by package outputs'")
         } else {
-            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-identity --bin finite-identityd && cargo build -p finite-brain-app"
+            build_commands.join(" && ")
         };
         self.write_managed_command(
             yaml,
             process,
-            // One build per package, matching each service's `cargo run -p`
-            // resolution: a combined `-p A -p B -p C` build unifies features
-            // across the packages (resolver 2), producing artifacts the
-            // per-package runs don't reuse — on a cold cache every service
-            // then recompiles its whole dep stack inside the readiness window.
-            &[String::from(build_command)],
+            // For Cargo fallbacks, keep one build per package, matching each
+            // service's `cargo run -p` resolution: a combined `-p A -p B -p C`
+            // build unifies features across the packages (resolver 2),
+            // producing artifacts the per-package runs don't reuse.
+            &[command],
             &[],
         );
         let _ = writeln!(yaml, "    availability:");
         let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn rust_build_commands(&self) -> Vec<String> {
+        let mut commands = Vec::new();
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITE_SAAS_CORE_BIN_ENV,
+            "cargo build -p finite-saas-core",
+        );
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITECHAT_SERVER_BIN_ENV,
+            "cargo build -p finitechat-server",
+        );
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV,
+            "cargo build -p finitechat-hosted-device",
+        );
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITESITESD_BIN_ENV,
+            "cargo build -p finitesitesd",
+        );
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITE_IDENTITYD_BIN_ENV,
+            "cargo build -p finite-identity --bin finite-identityd",
+        );
+        push_cargo_build_if_missing(
+            &mut commands,
+            DEVFINITY_FINITE_BRAIN_BIN_ENV,
+            "cargo build -p finite-brain-app",
+        );
+        if self.profile.includes_runtime() {
+            commands.push("cargo build -p finite-saas-local".to_string());
+            push_cargo_build_if_missing(
+                &mut commands,
+                DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV,
+                "cargo build -p finite-saas-runner",
+            );
+        }
+        commands
+    }
+
+    fn finite_saas_core_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITE_SAAS_CORE_BIN_ENV,
+            "cargo run -p finite-saas-core --",
+        )
+    }
+
+    fn finitechat_server_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITECHAT_SERVER_BIN_ENV,
+            "cargo run -p finitechat-server --",
+        )
+    }
+
+    fn finitechat_hosted_device_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV,
+            "cargo run -p finitechat-hosted-device",
+        )
+    }
+
+    fn finitesitesd_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITESITESD_BIN_ENV,
+            "cargo run -p finitesitesd --",
+        )
+    }
+
+    fn finite_identityd_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITE_IDENTITYD_BIN_ENV,
+            "cargo run -p finite-identity --bin finite-identityd --",
+        )
+    }
+
+    fn finite_brain_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITE_BRAIN_BIN_ENV,
+            "cargo run -p finite-brain-app",
+        )
+    }
+
+    fn finite_saas_runner_command(&self) -> String {
+        service_command(
+            DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV,
+            "cargo run -p finite-saas-runner --",
+        )
     }
 
     fn write_postgres(&self, yaml: &mut String) {
@@ -1293,7 +1392,7 @@ wait "$postgres_pid"
                     ". {}",
                     shell_quote(&self.core_secret_file().display().to_string())
                 ),
-                String::from("exec cargo run -p finite-saas-core -- serve"),
+                format!("exec {} serve", self.finite_saas_core_command()),
             ],
             &[],
         );
@@ -1363,7 +1462,8 @@ wait "$postgres_pid"
         let process = ManagedProcess::FiniteChat;
         let sqlite = self.finitechat_dir().join("server.sqlite3");
         let command = format!(
-            "cargo run -p finitechat-server -- serve {}:{} --sqlite {}",
+            "{} serve {}:{} --sqlite {}",
+            self.finitechat_server_command(),
             self.service_bind_host(),
             self.ports.finitechat,
             shell_quote(&sqlite.display().to_string())
@@ -1410,7 +1510,7 @@ wait "$postgres_pid"
                     ". {}",
                     shell_quote(&self.identity_authority_secret_file().display().to_string())
                 ),
-                String::from("exec cargo run -p finitechat-hosted-device"),
+                format!("exec {}", self.finitechat_hosted_device_command()),
             ],
             &[],
         );
@@ -1451,7 +1551,7 @@ wait "$postgres_pid"
         let data = self.finitesites_dir();
         let command = format!(
             concat!(
-                "cargo run -p finitesitesd -- serve ",
+                "{} serve ",
                 "--data {} ",
                 "--listen {}:{} ",
                 "--api-url {} ",
@@ -1461,6 +1561,7 @@ wait "$postgres_pid"
                 "--site-port {} ",
                 "--app-runner none"
             ),
+            self.finitesitesd_command(),
             shell_quote(&data.display().to_string()),
             if self.profile.includes_runtime() {
                 "0.0.0.0"
@@ -1518,7 +1619,7 @@ wait "$postgres_pid"
                     ". {}",
                     shell_quote(&self.identity_authority_secret_file().display().to_string())
                 ),
-                String::from("exec cargo run -p finite-brain-app"),
+                format!("exec {}", self.finite_brain_command()),
             ],
             &[],
         );
@@ -1578,11 +1679,12 @@ wait "$postgres_pid"
             ),
             format!(
                 concat!(
-                    "exec cargo run -p finite-identity --bin finite-identityd -- serve ",
+                    "exec {} serve ",
                     "--data {} --external-base-url {} --listen 127.0.0.1:{} ",
                     "--finite-vip-domain finite.vip ",
                     "--mailer dev --dev-print-email-tokens yes"
                 ),
+                self.finite_identityd_command(),
                 shell_quote(&self.finite_identity_dir().display().to_string()),
                 shell_quote(&self.finite_identity_url()),
                 self.ports.finite_identity,
@@ -1764,16 +1866,19 @@ wait "$postgres_pid"
         let process = ManagedProcess::RuntimeArtifact;
         let report = self.runtime_image_dir().join("build-report.json");
         let runner_artifact_env = self.runtime_image_dir().join("runner-artifact.sh");
-        let command = String::from(concat!(
-            "cargo run -p finite-saas-core -- runtime-artifact-upsert ",
-            "--artifact-id \"$artifact_id\" ",
-            "--kind oci_image ",
-            "--reference \"$reference\" ",
-            "--version-label devfinity-worktree ",
-            "--state-schema-version runtime-state-v1 ",
-            "--hermes-source-ref hermes-agent==0.20.0 ",
-            "--promoted"
-        ));
+        let command = format!(
+            concat!(
+                "{} runtime-artifact-upsert ",
+                "--artifact-id \"$artifact_id\" ",
+                "--kind oci_image ",
+                "--reference \"$reference\" ",
+                "--version-label devfinity-worktree ",
+                "--state-schema-version runtime-state-v1 ",
+                "--hermes-source-ref hermes-agent==0.20.0 ",
+                "--promoted"
+            ),
+            self.finite_saas_core_command()
+        );
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -1844,7 +1949,7 @@ wait "$postgres_pid"
                 shell_quote(&self.runner_secret_file().display().to_string())
             ));
         }
-        command.push("exec cargo run -p finite-saas-runner -- serve".to_string());
+        command.push(format!("exec {} serve", self.finite_saas_runner_command()));
 
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
@@ -3860,6 +3965,22 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn service_command(env_name: &str, cargo_command: &str) -> String {
+    service_command_from_env_value(nonempty_env_value(env_name), cargo_command)
+}
+
+fn service_command_from_env_value(value: Option<String>, cargo_command: &str) -> String {
+    value
+        .map(|binary| shell_quote(&binary))
+        .unwrap_or_else(|| cargo_command.to_string())
+}
+
+fn push_cargo_build_if_missing(commands: &mut Vec<String>, env_name: &str, cargo_command: &str) {
+    if nonempty_env_value(env_name).is_none() {
+        commands.push(cargo_command.to_string());
+    }
+}
+
 fn nonempty_env(name: &str) -> bool {
     nonempty_env_value(name).is_some()
 }
@@ -4208,6 +4329,21 @@ mod tests {
     #[test]
     fn env_exports_are_shell_quoted() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn service_command_prefers_supplied_binary_path() {
+        assert_eq!(
+            service_command_from_env_value(
+                Some("/nix/store/example finite/bin/finite-saas-core".to_string()),
+                "cargo run -p finite-saas-core --",
+            ),
+            "'/nix/store/example finite/bin/finite-saas-core'"
+        );
+        assert_eq!(
+            service_command_from_env_value(None, "cargo run -p finite-saas-core --"),
+            "cargo run -p finite-saas-core --"
+        );
     }
 
     #[test]
