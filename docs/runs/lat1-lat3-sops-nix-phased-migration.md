@@ -136,23 +136,29 @@ rg -n \
 
 ## Phase 1: Nix Contract and SOPS Plumbing
 
-- [ ] Add `sops-nix` to `flake.nix` and import its module for
+Progress 2026-08-12: foundation plumbing added with all entries still on the
+implicit empty contract. No service consumer is pointed at SOPS yet. The
+host-level contract evaluates values-free on this Darwin workstation; production
+closure build/eval proof on finite-lat-2 is still required before switching any
+consumer.
+
+- [x] Add `sops-nix` to `flake.nix` and import its module for
       `finite-lat-1` and `finite-lat-3`.
-- [ ] Add host `age` identity installation instructions:
+- [x] Add host `age` identity installation instructions:
       `/var/lib/sops-nix/finite-lat-1.agekey` and
       `/var/lib/sops-nix/finite-lat-3.agekey`, root-only.
 - [ ] Add `infra/nixos/secrets/.sops.yaml` with human/recovery recipients and
       host recipients.
-- [ ] Add `infra/nixos/modules/secrets.nix` with the `finite.secrets.files`
+- [x] Add `infra/nixos/modules/secrets.nix` with the `finite.secrets.files`
       option schema.
-- [ ] Implement backend resolution so `config.finite.secrets.files.<name>.path`
+- [x] Implement backend resolution so `config.finite.secrets.files.<name>.path`
       returns the legacy path for `backend = "legacy"` and the decrypted SOPS
       path for `backend = "sops"`.
-- [ ] Preserve owner, group, mode, required env names, and consumer metadata
+- [x] Preserve owner, group, mode, required env names, and consumer metadata
       in the contract even while entries still use `backend = "legacy"`.
-- [ ] Add a host-generic checker that reads the Nix contract and validates
+- [x] Add a host-generic checker that reads the Nix contract and validates
       metadata/name completeness without emitting values.
-- [ ] Add tests proving the checker never prints secret values.
+- [x] Add tests proving the checker never prints secret values.
 - [ ] Build/evaluate both host configs before any service is pointed at SOPS.
 
 ## Phase 2: One-Secret SOPS Pilot

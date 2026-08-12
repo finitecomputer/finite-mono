@@ -148,6 +148,18 @@ lat1-secret-bootstrap-contract:
     python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null
     python3 -m unittest scripts.tests.test_check_lat1_secret_bootstrap
 
+# Values-free NixOS secret contract shape. Host coverage gates stay separate
+# until rendered lat2 eval is wired into the migration.
+nixos-secrets-contract:
+    python3 scripts/check_nixos_secrets_contract.py
+    python3 -m unittest scripts.tests.test_nixos_secrets_contract
+
+# Synthetic deletion, watermark, active-job, and stale-lease safety contract
+# for finite-lat-2's operator-installed runner guardrails.
+lat2-runner-guardrails-contract:
+    bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
+    python3 -m unittest scripts.tests.test_lat2_runner_guardrails
+
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
     bash scripts/tests/test_devfinity_brain_readiness.sh
