@@ -252,7 +252,13 @@ in
     systemd.timers.finite-litestream-health = {
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "20min";
+        # OnActiveSec, not OnBootSec: on a long-up host a freshly started
+        # timer with OnBootSec in the past fires DURING the activation that
+        # introduces it, before the initial snapshot upload has produced any
+        # LTX entries — failing the oneshot and making switch-to-configuration
+        # report status 4 (the #466 monitoring-unit deploy-noise class). The
+        # first check lands 20 minutes after (re)activation instead.
+        OnActiveSec = "20min";
         OnUnitActiveSec = "5min";
       };
     };
