@@ -68,13 +68,6 @@ nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     set -euo pipefail
     exec scripts/build-lat1-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
 
-# Legacy fallback: evaluate and build immutable system + disko outputs on
-# finite-lat-2. Kept until the CI closure artifact deploy path is live-proven.
-nixos-build-lat1 rev:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    exec scripts/nix-build-lat2 {{ quote(rev) }}
-
 # Full lat1 deploy from a CI-built closure artifact: copy/switch lat1, then
 # verify the running closure and dashboard digest by state.
 [positional-arguments]
@@ -83,19 +76,10 @@ deploy-lat1-closure artifact_dir *args:
     set -euo pipefail
     exec scripts/deploy-lat1-closure-cache "$@"
 
-# Legacy fallback deploy for a committed main rev: prebuild on lat2,
-# copy/switch lat1, then verify the running closure and dashboard digest by
-# state. Prefer deploy-lat1-closure after CI closure artifact validation.
-[positional-arguments]
-deploy-lat1 rev *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    exec scripts/deploy-lat1 "$@"
-
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
-    bash -n scripts/deploy-lat1 scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
+    bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
     python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
     python3 -m unittest scripts.tests.test_lat1_closure_artifact
 

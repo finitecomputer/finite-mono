@@ -2,7 +2,7 @@
 
 > **HISTORICAL 2026-07-08 SITES CAPTURE — DO NOT RUN.** Sites moved to
 > `finite-lat-1` on 2026-07-09, and lat2 now holds legacy runner inventory plus
-> fallback build/deploy evidence.
+> historical service captures.
 > Do not move old Sites files, install or enable these timers, or use `/data`
 > as a Finite recovery target. Current backup and restore procedures live under
 > [`infra/runbooks/`](../../runbooks/).

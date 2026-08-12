@@ -50,13 +50,13 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   `infra/nixos/` and re-deploy; land any emergency change back within a day
   (rule above). To roll config back fast: `nixos-rebuild switch --rollback`.
 
-## lat2 — finite-lat-2 (64.34.80.19) — Nix build host and legacy runners (Ubuntu+nix)
+## lat2 — finite-lat-2 (64.34.80.19) — legacy runners and historical captures (Ubuntu+nix)
 
 Post-cutover lat2 is no longer an app host. Its finite-saas-sites,
 finite-search, and finite-core-tunnel units are **DISABLED** (those services
-moved to lat1). Docker/image CI now runs through Depot. Lat2 remains the
-approved x86_64 production Nix build driver and still has installed legacy
-GitHub Actions runners until they are explicitly removed.
+moved to lat1). Docker/image CI and production Nix closure builds now run
+through Depot-backed CI. Lat2 still has installed legacy GitHub Actions runners
+until they are explicitly removed.
 
 - **Get on:** `ssh finite-lat-2` (user `ubuntu`).
 - **Logs:**
@@ -70,6 +70,8 @@ GitHub Actions runners until they are explicitly removed.
 - **Note:** do NOT re-enable the migrated units here (sites/search/tunnel) —
   they are authoritative on lat1 now; a second sites writer especially is a
   split-brain risk.
+- **Do not build or deploy from here.** There is no supported lat2 fallback for
+  Docker/image CI, production Nix builds, or lat1 deploys.
 - **Trap:** `/tmp` is a 94G tmpfs — never park a backup or artifact there
   (`infra/hosts/lat2/backups.md`).
 

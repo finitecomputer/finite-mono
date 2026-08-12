@@ -216,7 +216,7 @@ release. “Canary first in one loop” is ordering, not a canary gate.
 
 #### 2. Add a deploy impact preflight
 
-Before `switch-to-configuration`, `scripts/deploy-lat1` should compare the
+Before `switch-to-configuration`, `scripts/deploy-lat1-closure-cache` should compare the
 current and candidate closures and print the services whose unit definitions or
 executables will change. The caller must declare the expected deploy class or
 expected service set. A dashboard-only request must fail before activation if

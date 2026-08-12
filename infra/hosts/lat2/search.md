@@ -1,7 +1,7 @@
 # finite-search on finite-lat-2
 
 > **SUPERSEDED 2026-07-09 — DO NOT DEPLOY FROM THIS FILE.** Search moved to
-> `finite-lat-1`; lat2 remains CI/build infrastructure. This is a dated
+> `finite-lat-1`; lat2 no longer provides CI/build infrastructure. This is a dated
 > 2026-07-08 capture only. Current topology is
 > [`infra/README.md`](../../README.md), and current Search configuration lives
 > under [`infra/nixos/`](../../nixos/).

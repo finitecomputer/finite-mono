@@ -10,7 +10,7 @@ Acceptance: `finite-lat-3` runs the pinned NixOS configuration on mirrored
 root and data storage with swap and is the only Runner accepting new Standard-
 Agent creation, with a hard limit of 32. `finite-lat-1` remains available for
 existing-Agent lifecycle work, and `finite-lat-2` remains outside Agent
-capacity while the lat1 NixOS build path moves to CI closure artifacts.
+capacity and outside build/deploy paths.
 
 ## Outcome and scope
 
@@ -42,7 +42,7 @@ admission-fence work and open lat3 directly with a 32-Agent hard limit.
 | Host | Current role and state | Next change |
 | --- | --- | --- |
 | `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. The PR #134 WireGuard peer, peer-scoped firewall rules, private Core socket proxy, credential keyring Core, and root-only key are active declarative configuration; no `/run` bridge override remains. Both current system and system profile resolve to the exact merged closure. Root and `/data` remain single-disk. | Keep existing Agents in place. The next destructive storage step requires the accepted backup/empty-target restore gate and a separate maintenance window. |
-| `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix fallback Nix build helper plus legacy runner inventory. Docker/image CI moved to Depot after this run opened, and the routine lat1 NixOS closure build path is moving to Depot-backed CI artifacts. | No role or storage change. Keep it out of routine Docker/image CI, routine production Nix builds, Agent capacity, and recovery authority. |
+| `finite-lat-2` (`64.34.80.19`) | Historical service captures plus legacy runner inventory. Docker/image CI moved to Depot after this run opened, and the lat1 NixOS closure build path moved to Depot-backed CI artifacts. | No role or storage change. Keep it out of Docker/image CI, production Nix builds, deploy driving, Agent capacity, and recovery authority. |
 | `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and keep lat2 out of Agent capacity. |
 
 The pinned lat3 nixpkgs revision is
@@ -185,9 +185,9 @@ are not gates for the Runner slice.
 
 - lat1 remains the control/app plane and lifecycle Runner for existing Agents.
 - lat3 becomes the only initial creator for new Standard Agents.
-- lat2 remains outside Agent capacity and holds only legacy runner inventory
-  plus fallback build/deploy evidence until the CI closure-artifact path is
-  live-proven; Docker/image CI is no longer scheduled there.
+- lat2 remains outside Agent capacity and holds only historical captures plus
+  legacy runner inventory; Docker/image CI and production Nix builds are no
+  longer scheduled there.
 - Existing Runtimes keep their persisted source host and source machine. There
   is no automatic failover or migration.
 - Exactly one Standard Runner is undrained for creation during this rollout.

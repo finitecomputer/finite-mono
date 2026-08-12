@@ -74,8 +74,7 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 > `lat1-nixos-closure-REV` artifact, then run
 > `just deploy-lat1-closure <artifact-dir>`. That copies the prebuilt closure
 > from the artifact's file binary cache, switches lat1, and verifies the
-> running closure by state. The older `just deploy-lat1 REV` path still builds
-> on lat2 and exists only as a fallback until this artifact path is live-proven.
+> running closure by state. There is no supported lat2 fallback path.
 
 To roll a reviewed, healthy existing Runtime cohort after the deployment has
 passed its normal verification, use the separate prepare/execute workflow with

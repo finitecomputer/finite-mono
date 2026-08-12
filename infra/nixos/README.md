@@ -57,70 +57,27 @@ adds Kata/containerd and a timer-disabled Runner configured for a drained
 private-path proof. It is not customer capacity or a Recovery Authority until
 the synthetic handoff passes. The authoritative sequence and dated evidence are in
 `docs/runs/finite-lat-capacity-and-redundancy.md`. Production lat1 closure
-builds are moving to the `Lat1 NixOS Closure` workflow; lat2's services and
-storage are unchanged.
+builds use the `Lat1 NixOS Closure` workflow; lat2's services and storage are
+unchanged.
 
 ## Deploy story
 
 ### Bare-metal rebuild (paused; historical transcript follows)
 
-Do not run the commands below as a current procedure. They summarize the
-2026-07-09 cutover and remain useful only for artifact handoff and incident
-evidence. A new recovery-proved procedure is governed by
-`docs/runs/finite-lat-capacity-and-redundancy.md`; until it is exercised, start
-an incident with `infra/runbooks/break-glass.md` and preserve state.
-
-```sh
-set -euo pipefail
-git fetch origin --prune
-REV="$(git rev-parse HEAD)" # must be the pushed, reviewed 40-hex commit
-[[ "$REV" =~ ^[0-9a-f]{40}$ ]]
-git merge-base --is-ancestor "$REV" origin/main
-SYSTEM="$(just nixos-build-lat1 "$REV")" # gate before you wipe; record this path
-printf 'REV=%s\nSYSTEM=%s\n' "$REV" "$SYSTEM"
-```
-
-Enter lat2 with temporary agent forwarding:
-
-```sh
-ssh -A ubuntu@finite-lat-2
-```
-
-On lat2, paste the recorded values and run this fail-closed block. Do not
-recompute either value:
-
-```sh
-set -euo pipefail
-REV='<exact-40-hex-rev-from-prebuild>'
-SYSTEM='<exact-/nix/store-path-from-prebuild>'
-[[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
-[[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-ROOT="$HOME/.local/state/finite-mono/lat1-closures/$REV"
-DISKO_ROOT="$HOME/.local/state/finite-mono/lat1-disko-scripts/$REV"
-test -L "$ROOT"
-test -L "$DISKO_ROOT"
-test "$(readlink -f "$ROOT")" = "$SYSTEM"
-DISKO="$(readlink -f "$DISKO_ROOT")"
-[[ "$DISKO" =~ ^/nix/store/[0-9a-z]{32}-[^/[:space:]]+$ ]] || exit 64
-test -x "$DISKO"
-nix path-info --option builders '' "$SYSTEM" >/dev/null
-nix path-info --option builders '' "$DISKO" >/dev/null
-ssh -o BatchMode=yes root@64.34.82.77 true
-# Constrain the Nix subprocesses launched by nixos-anywhere as well.
-export NIX_CONFIG='builders ='
-nix run --option builders '' github:nix-community/nixos-anywhere -- \
-  --build-on local \
-  --store-paths "$DISKO" "$SYSTEM" \
-  --target-host root@64.34.82.77 --phases kexec,disko,install
-```
-
-Then the secrets checklist below + the data restore in the runbook.
+Do not run the original lat2-driven cutover transcript. The helper and commands
+that built and drove the install from `finite-lat-2` have been removed in the
+hard cut. A future recovery-proved bare-metal procedure must consume a
+`lat1-nixos-closure-REV` artifact, prove the complete Recovery Set, and replace
+this historical section before any destructive reinstall is considered
+repeatable. Until then, start an incident with `infra/runbooks/break-glass.md`
+and preserve state.
 
 Do not run Nix evaluation, `nix build`, `nixos-rebuild`, or `nixos-anywhere`
 for the production closure on macOS. Nix would inherit `/etc/nix/machines` or
 the operator's personal builder settings. The historical transcript below used
-lat2 as the x86_64 Linux builder/driver; the current routine deploy path is the
-CI-built closure artifact documented in `infra/runbooks/deploy-core.md`.
+lat2 as the x86_64 Linux builder/driver; that path is no longer supported. The
+current routine deploy path is the CI-built closure artifact documented in
+`infra/runbooks/deploy-core.md`.
 
 ### Every deploy after that
 
@@ -137,12 +94,10 @@ The routine deploy path is:
    the exact `SYSTEM` path in a transient systemd unit, and verifies
    `/run/current-system` equals that path.
 
-Do not build production closures on the Mac, clawland, lat1, or lat2. The old
-`just deploy-lat1 REV` helper still exists as a lat2 fallback until the artifact
-flow has live deployment evidence; do not treat it as the normal path. Rollback
-remains `ssh root@64.34.82.77 nixos-rebuild switch --rollback`, or the same
-artifact workflow for a previous known-good revision followed by
-`just deploy-lat1-closure`.
+Do not build production closures on the Mac, clawland, lat1, or lat2. There is
+no lat2 fallback deploy path. Rollback remains
+`ssh root@64.34.82.77 nixos-rebuild switch --rollback`, or the same artifact
+workflow for a previous known-good revision followed by `just deploy-lat1-closure`.
 
 ## Secrets bootstrap checklist (values NEVER in this repo)
 

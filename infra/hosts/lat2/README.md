@@ -3,18 +3,16 @@
 > **ROLE CHANGE 2026-08-12 — lat2 is no longer the mono Docker CI box.** The
 > consolidation cutover **migrated finitesitesd (sites), finite-search, and the
 > finite-core-tunnel to lat1**; those services are **DISABLED** here. Docker
-> and image CI moved to Depot. Routine lat1 NixOS closure builds are moving to
-> the `Lat1 NixOS Closure` CI artifact workflow; lat2 keeps only legacy runner
-> inventory and the old Nix helper as fallback until that artifact path is
-> live-proven. Its GitHub runners are installed legacy/operator inventory until
-> they are explicitly removed (`runners.md`). The Services / Ports / Secrets
-> tables below are the **pre-cutover** capture; the sites/search/tunnel rows are
-> historical.
+> and image CI moved to Depot. Lat1 NixOS closure builds moved to the
+> `Lat1 NixOS Closure` CI artifact workflow. Lat2 keeps only historical service
+> captures and legacy runner inventory until they are explicitly removed
+> (`runners.md`). The Services / Ports / Secrets tables below are the
+> **pre-cutover** capture; the sites/search/tunnel rows are historical.
 
 Formerly the dedicated sites + search + CI-runner box; now legacy runner
-inventory plus fallback build/deploy evidence. Captured read-only 2026-07-08
-(before the sites/search/tunnel migration and the later Docker CI migration to
-Depot).
+inventory plus historical service captures. Captured read-only 2026-07-08
+(before the sites/search/tunnel migration and the later Docker/Nix build
+migrations to Depot-backed CI).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
   7.0.0-15-generic, x86-64.
