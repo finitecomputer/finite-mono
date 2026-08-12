@@ -23,6 +23,7 @@ in
     ../../modules/postgres.nix
     ../../modules/backups.nix
     ../../modules/monitoring.nix
+    ../../modules/finite-litestream.nix
   ];
 
   networking.hostName = "finite-lat-1";
@@ -43,6 +44,29 @@ in
   # repository dedicated to lat1 so encryption and retention are not coupled
   # to clawland's finitecomputer archives.
   finite.recoveryBackup.borgRepository = "fm2890@fm2890.rsync.net:finitecomputer/finite-lat-1";
+
+  # Continuous chat-database replication to Latitude object storage
+  # (modules/finite-litestream.nix). Endpoint and bucket are non-secret;
+  # credentials live only in the operator-placed env file declared in
+  # secret-bootstrap-contract.json. Region choice (measured from this host,
+  # 2026-08-12): chi is 29ms away vs nyc's 48ms, and object storage exists
+  # only in those two regions today. Off-host is the point — same-DC would
+  # defeat DR — but the nearer region wins for the future blob phase, whose
+  # downloads proxy through this server per-request.
+  finite.litestream = {
+    enable = true;
+    replica = {
+      endpoint = "https://objects.chi.storage.sh";
+      bucket = "finite-lat-1-litestream";
+    };
+    dbs = [
+      {
+        name = "finite-chat-server";
+        path = "/var/lib/private/finite-chat/data/server.sqlite3";
+        owningService = "finitechat-server.service";
+      }
+    ];
+  };
 
   # Static public addressing via systemd-networkd, matched by the WAN NIC's
   # MAC (90:5a:08:2e:63:1b, derived from the capture's eno1 link-local

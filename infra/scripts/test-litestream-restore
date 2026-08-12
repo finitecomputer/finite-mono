@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Synthetic, fully offline litestream replicate -> restore -> integrity drill.
+#
+# Proves the exact toolchain (litestream 0.5) and command shapes the DR
+# runbook relies on (infra/runbooks/litestream-chat-replication.md), using a
+# `file` replica so CI needs no bucket, credentials, or network. The drill
+# asserts CONTINUOUS capture: rows inserted after the replicator started must
+# be present in the restored copy, not just the initial snapshot.
+set -euo pipefail
+
+command -v litestream >/dev/null || {
+  echo "test-litestream-restore: litestream not on PATH (run inside nix develop)" >&2
+  exit 1
+}
+command -v sqlite3 >/dev/null || {
+  echo "test-litestream-restore: sqlite3 not on PATH (run inside nix develop)" >&2
+  exit 1
+}
+
+scratch=$(mktemp -d)
+replicator_pid=""
+cleanup() {
+  if [ -n "$replicator_pid" ]; then
+    kill "$replicator_pid" >/dev/null 2>&1 || true
+    wait "$replicator_pid" 2>/dev/null || true
+  fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+db="$scratch/server.sqlite3"
+config="$scratch/litestream.yml"
+
+sqlite3 "$db" \
+  "PRAGMA journal_mode=WAL;
+   CREATE TABLE delivery_entries (seq INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+   INSERT INTO delivery_entries VALUES (1, 'pre-replication row');"
+
+cat > "$config" <<EOF
+dbs:
+  - path: $db
+    meta-path: $scratch/meta
+    replica:
+      type: file
+      path: $scratch/replica
+      sync-interval: 200ms
+EOF
+
+litestream replicate -config "$config" > "$scratch/replicate.log" 2>&1 &
+replicator_pid=$!
+
+# Wait for the initial sync instead of sleeping blind.
+for _ in $(seq 1 50); do
+  [ -d "$scratch/replica/ltx" ] && break
+  sleep 0.2
+done
+[ -d "$scratch/replica/ltx" ] || {
+  echo "test-litestream-restore: replica never received the initial snapshot" >&2
+  cat "$scratch/replicate.log" >&2
+  exit 1
+}
+
+# Continuous capture: these rows exist only in WAL frames shipped after start.
+sqlite3 "$db" "INSERT INTO delivery_entries VALUES (2, 'post-start row'), (3, 'post-start row');"
+deadline=$(( $(date +%s) + 15 ))
+while :; do
+  entries=$(litestream ltx -config "$config" "$db" | tail -n +2 | wc -l)
+  [ "$entries" -ge 2 ] && break
+  [ "$(date +%s)" -ge "$deadline" ] && {
+    echo "test-litestream-restore: post-start WAL frames never replicated" >&2
+    cat "$scratch/replicate.log" >&2
+    exit 1
+  }
+  sleep 0.3
+done
+
+kill "$replicator_pid"
+wait "$replicator_pid" 2>/dev/null || true
+replicator_pid=""
+
+restored="$scratch/restored.sqlite3"
+litestream restore -config "$config" -o "$restored" "$db"
+
+[ "$(sqlite3 "$restored" 'PRAGMA integrity_check;')" = ok ] || {
+  echo "test-litestream-restore: restored database failed integrity_check" >&2
+  exit 1
+}
+[ "$(sqlite3 "$restored" 'SELECT count(*) FROM delivery_entries;')" = 3 ] || {
+  echo "test-litestream-restore: restored database is missing post-start rows" >&2
+  exit 1
+}
+[ "$(sqlite3 "$restored" "SELECT payload FROM delivery_entries WHERE seq = 3;")" = 'post-start row' ] || {
+  echo "test-litestream-restore: restored row content mismatch" >&2
+  exit 1
+}
+
+# Negative: restoring a path litestream was never configured for must fail.
+if litestream restore -config "$config" -o "$scratch/nope.sqlite3" "$scratch/unconfigured.sqlite3" >/dev/null 2>&1; then
+  echo "test-litestream-restore: restore of an unconfigured path unexpectedly succeeded" >&2
+  exit 1
+fi
+
+# Negative: restore must refuse to clobber an existing file.
+if litestream restore -config "$config" -o "$restored" "$db" >/dev/null 2>&1; then
+  echo "test-litestream-restore: restore over an existing file unexpectedly succeeded" >&2
+  exit 1
+fi
+
+echo "test-litestream-restore: replicate -> restore -> integrity drill passed"

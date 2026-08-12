@@ -63,6 +63,14 @@ def main() -> None:
             str(recovery["maximum_age_seconds"]),
         ],
     )
+    require_all(
+        ROOT / "infra" / "nixos" / "modules" / "finite-litestream.nix",
+        [
+            recovery["litestream_service_unit"].removesuffix(".service"),
+            recovery["litestream_health_unit"].removesuffix(".service"),
+            recovery["litestream_success_stamp"].removeprefix("/var/lib/finite-litestream/"),
+        ],
+    )
 
     expected_distribution = """select ar.source_host_id, ra.version_label, count(*)
   from agent_runtimes ar
