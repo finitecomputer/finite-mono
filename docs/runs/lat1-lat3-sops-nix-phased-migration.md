@@ -168,13 +168,21 @@ not chat, Agent state, Core, Caddy, or recovery.
 Fallback pilot: `searxng.env`, only if Search is explicitly accepted as lower
 blast radius for this rollout.
 
-- [ ] Choose exactly one pilot secret.
-- [ ] Leave all other secrets absent from `finite.secrets.files` and on their
+Progress 2026-08-12: selected `metrics-remote-write.env` as the pilot. Alloy is
+the only prepared consumer: it falls back to `/etc/finite/metrics-remote-write.env`
+while the SOPS contract entry is absent, and will read
+`config.finite.secrets.files."metrics-remote-write".path` after the pilot entry
+is added. Encryption and the actual switch are blocked until real
+human/recovery and host recipients are recorded in `.sops.yaml` and the live
+pilot value is staged without printing it.
+
+- [x] Choose exactly one pilot secret.
+- [x] Leave all other secrets absent from `finite.secrets.files` and on their
       existing host-file paths.
 - [ ] Encrypt the pilot value into its planned SOPS file without printing it.
 - [ ] Add only the pilot contract entry to `finite.secrets.files`.
-- [ ] Update only the pilot consumer to use
-      `config.finite.secrets.files.<name>.path`.
+- [x] Update only the pilot consumer to use
+      `config.finite.secrets.files.<name>.path` when the pilot entry exists.
 - [ ] Build the affected host closure on the approved Linux builder.
 - [ ] Run `scripts/finite-status` before rollout.
 - [ ] Deploy the affected host.
