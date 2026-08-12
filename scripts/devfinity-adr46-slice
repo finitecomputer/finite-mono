@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ADR-0046 principal-grants slice: Alice invites Bob's account to her Personal
-# Brain through the invite preflight -> approval card -> commit spine, Bob's
-# principals accept, and content flows both ways with provenance.
+# Brain from the Brain UI (invite-by-email plan preview -> approval card ->
+# signed approval -> commit), Bob's principals accept, and content flows with
+# provenance. Then the reverse: Bob bootstraps his own Brain from the CLI,
+# preflights and directly commits the plan for Alice's account, Alice accepts
+# in the browser, and Alice's agent reads Bob's seeded note.
 #
 # Run it through the devfinity stack wrapper:
 #   scripts/with-dev-env scripts/devfinity-adr46-slice-up
@@ -266,14 +269,14 @@ hosted_signed_request() {
   curl_brain_json "$method" "$path" "$auth_header" "$body_text"
 }
 
-# NIP-98-sign inside Alice's runtime container with her agent key (fbrain
-# signer sign prints the signed kind-27235 event JSON), then curl from here.
-alice_agent_signed_request() {
+# NIP-98-sign with Bob's host-side fbrain identity (fbrain signer sign prints
+# the signed kind-27235 event JSON), then curl from here.
+bob_signed_request() {
   local method="$1"
   local path="$2"
   local body_text="${3:-}"
   local -a sign_args=(
-    fbrain signer sign --kind 27235
+    signer sign --kind 27235
     --tag "u,$dashboard_origin$path"
     --tag "method,$method"
   )
@@ -283,8 +286,8 @@ alice_agent_signed_request() {
     sign_args+=(--tag "payload,$sha")
   fi
   local event_json auth_header
-  event_json="$(runtime_exec "$alice_container_id" "${sign_args[@]}")" || {
-    echo "agent-side event signing failed for $method $path" >&2
+  event_json="$(bob_fbrain "${sign_args[@]}")" || {
+    echo "Bob-side event signing failed for $method $path" >&2
     return 1
   }
   auth_header="Nostr $(printf '%s' "$event_json" | base64 | tr -d '\n')"
@@ -615,122 +618,48 @@ if (!agents.some((agent) => agent.managedAgentEmail === agentEmail)) {
 JS
 note "Core account-agent-roster for $BOB_EMAIL: human + 1 agent ($bob_agent_email), rosterRevision=1"
 
-say "Act 3: AliceAgent preflights the invitation plan for Bob"
-preflight_body="$(node -e 'process.stdout.write(JSON.stringify({ target: process.argv[1] }))' "$BOB_EMAIL")"
-alice_agent_signed_request POST "/v1/brains/$brain_id/invitations/preflight" "$preflight_body" \
-  >"$scratch/preflight.json" || fail "invitation preflight failed"
-node - "$scratch/preflight.json" "$bob_npub" "$bob_agent_npub" <<'JS' || fail "preflight plan is missing Bob's principals"
-const fs = require("node:fs");
-const plan = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const [bobNpub, bobAgentNpub] = process.argv.slice(3);
-if (!plan.planId || !/^sha256:[0-9a-f]{64}$/.test(plan.planHash || "")) {
-  throw new Error(`plan identity missing: ${JSON.stringify(plan)}`);
-}
-if (plan.human?.npub !== bobNpub) throw new Error(`human: ${JSON.stringify(plan.human)}`);
-const agents = plan.agents || [];
-if (!agents.some((agent) => agent.agentNpub === bobAgentNpub && agent.status === "active")) {
-  throw new Error(`agents: ${JSON.stringify(agents)} exclusions: ${JSON.stringify(plan.exclusions)}`);
-}
-if (Number(plan.rosterRevision) < 1) throw new Error(`rosterRevision: ${JSON.stringify(plan)}`);
-JS
-plan_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).planId)' "$scratch/preflight.json")"
-plan_hash="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).planHash)' "$scratch/preflight.json")"
-note "plan $plan_id: human=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).human.npub)' "$scratch/preflight.json")"
-note "plan $plan_id: agent=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).agents[0].agentNpub)' "$scratch/preflight.json") rosterRevision=1"
-note "planHash: $plan_hash"
+if [[ "${ADR46_HANDS_ON:-}" == "1" ]]; then
+  say "Hands-on mode: the provisioned stack waits for the two-role browser/CLI test"
+  note "dashboard (Alice's browser): $dashboard_url"
+  note "Alice's Personal Brain: $brain_id (bootstrapped; shared-with-bob/alice-seed.md seeded)"
+  note "Bob's roster is live: $BOB_EMAIL -> human + agent $bob_agent_email"
+  note "Alice's agent container id: $alice_container_id"
+  cat <<EOF
 
-say "Act 4: AliceAgent asks for an approval card (invite-commit)"
-approval_request_body="$(node -e '
-  process.stdout.write(JSON.stringify({ action: "invite-commit", planId: process.argv[1] }));
-' "$plan_id")"
-alice_agent_signed_request POST "/v1/brains/$brain_id/approval-requests" "$approval_request_body" \
-  >"$scratch/approval-request.json" || fail "approval request creation failed"
-node - "$scratch/approval-request.json" <<'JS' || fail "approval request is not pending"
-const fs = require("node:fs");
-const request = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (!request.id || request.status !== "pending") throw new Error(JSON.stringify(request));
-if (request.action !== "invite-commit" || request.payload?.planId == null) {
-  throw new Error(JSON.stringify(request));
-}
-if (!/^[0-9a-f]{32}$/.test(request.payload?.nonce || "")) throw new Error(JSON.stringify(request));
-JS
-request_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).id)' "$scratch/approval-request.json")"
-approval_nonce="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).payload.nonce)' "$scratch/approval-request.json")"
-approval_expires_at="$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).payload.expiresAt))' "$scratch/approval-request.json")"
-note "approval request $request_id is pending (nonce $approval_nonce, 15-minute TTL)"
+  Bob's CLI (second terminal, any directory):
 
-say "Act 5: Alice sees the card and approves with her chat-client signature"
-hosted_signed_request "$ALICE_SUBJECT" GET "/v1/brains/$brain_id/metadata" \
-  >"$scratch/metadata-alice.json" || fail "Alice could not read Brain metadata"
-node - "$scratch/metadata-alice.json" "$request_id" <<'JS' || fail "pendingApprovals card is not on Alice's metadata"
-const fs = require("node:fs");
-const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const pending = metadata.pendingApprovals || [];
-if (!pending.some((entry) => entry.id === process.argv[3] && entry.status === "pending")) {
-  throw new Error(`pendingApprovals: ${JSON.stringify(pending)}`);
-}
-JS
-note "Alice's Brain metadata shows pendingApprovals card $request_id"
+    export FINITE_HOME="$bob_fbrain_home"
+    export FBRAIN_WORKING_TREE_ROOT="$bob_fbrain_tree_root"
+    export FINITE_BRAIN_SERVER_URL="$brain_url"
+    export FINITE_BRAIN_PUBLIC_BASE_URL="$dashboard_origin"
+    export FINITE_IDENTITY_AUTHORITY="$identity_url"
+    export PATH="$repo_root/target/debug:\$PATH"
 
-approval_event="$(hosted_op "$ALICE_SUBJECT" approveBrainAction "$(node -e '
-  process.stdout.write(JSON.stringify({
-    brainId: process.argv[1],
-    action: "invite-commit",
-    planId: process.argv[2],
-    targetNpubs: [],
-    nonce: process.argv[3],
-    expiresAt: Number(process.argv[4]),
-  }));
-' "$brain_id" "$plan_id" "$approval_nonce" "$approval_expires_at")")" || fail "hosted approveBrainAction failed"
-approval_event_id="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).id))' "$approval_event")"
-approval_signer_pubkey="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).pubkey))' "$approval_event")"
-note "Alice's hosted chat device signed approval event $approval_event_id (kind 30078)"
+  Then follow finite-brain/docs/runbooks/adr46-hands-on-test.md.
+  Press Ctrl-C in this terminal to shut the stack down.
 
-approval_submission="$(node -e '
-  process.stdout.write(JSON.stringify({
-    approvalEventJson: JSON.stringify(JSON.parse(process.argv[1])),
-    requestId: process.argv[2],
-  }));
-' "$approval_event" "$request_id")"
-alice_agent_signed_request POST "/v1/brains/$brain_id/approvals" "$approval_submission" \
-  >"$scratch/approval-result.json" || fail "approval submission failed"
-node - "$scratch/approval-result.json" "$BOB_EMAIL" "$bob_agent_email" <<'JS' || fail "approval did not commit per-principal invitations"
-const fs = require("node:fs");
-const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const [email, agentEmail] = process.argv.slice(3);
-if (result.status !== "applied" || result.action !== "invite-commit") throw new Error(JSON.stringify(result));
-const invitations = result.result?.invitations || [];
-const refs = invitations.map((entry) => entry.ref).sort();
-if (JSON.stringify(refs) !== JSON.stringify([email, agentEmail].sort())) {
-  throw new Error(`invitations: ${JSON.stringify(invitations)}`);
-}
-for (const entry of invitations) {
-  if (entry.invitation?.status !== "pending" || !entry.invitation?.id || !entry.invitation?.inviteCode) {
-    throw new Error(`invitation not accept-ready: ${JSON.stringify(entry)}`);
-  }
-}
-JS
-note "approval applied: commit wrote one invitation per principal (Bob + BobAgent)"
+EOF
+  sleep infinity
+  exit 0
+fi
 
-bob_human_invite_code="$(node - "$scratch/approval-result.json" "$BOB_EMAIL" <<'JS'
-const fs = require("node:fs");
-const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const entry = result.result.invitations.find((item) => item.ref === process.argv[3]);
-process.stdout.write(entry.invitation.inviteCode);
-JS
+say "Act 3: Alice invites Bob from the Brain UI (plan preview -> approval card -> commit)"
+invite_browser_output="$(
+  DEVFINITY_BRAIN_INVITE_EMAIL="$BOB_EMAIL" \
+  DEVFINITY_BRAIN_INVITE_AGENT_EMAIL="$bob_agent_email" \
+  brain_browser_smoke invite-by-email "" "$brain_id"
 )"
-bob_agent_invitation_id="$(node - "$scratch/approval-result.json" "$bob_agent_email" <<'JS'
-const fs = require("node:fs");
-const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const entry = result.result.invitations.find((item) => item.ref === process.argv[3]);
-process.stdout.write(entry.invitation.id);
-JS
-)"
-note "Bob's inviteCode: $bob_human_invite_code; BobAgent's invitation id: $bob_agent_invitation_id"
+printf '%s\n' "$invite_browser_output" >&2
+note "Alice previewed the resolved plan, sent it for approval, and approved the card in the browser"
 
-say "Act 6: provenance on the committed invitations (Brain DB)"
+say "Act 4: browser-driven commit landed with provenance (Brain DB)"
+approval_event_id="$(sqlite3 -readonly "$brain_db" \
+  "SELECT approval_event_id FROM brain_approval_requests WHERE brain_id = '$brain_id' AND action = 'invite-commit' AND status = 'approved' ORDER BY created_at DESC LIMIT 1")"
+[[ -n "$approval_event_id" ]] || fail "no approved invite-commit Approval request in the Brain DB"
+note "the browser-approved card resolved to approval event $approval_event_id"
+
 sqlite3 -readonly "$brain_db" \
-  "SELECT user_id, origin_kind, origin_ref, roster_revision FROM brain_invitations WHERE brain_id = '$brain_id' ORDER BY user_id" \
+  "SELECT user_id, origin_kind, origin_ref, roster_revision, status, invite_code, id FROM brain_invitations WHERE brain_id = '$brain_id' ORDER BY user_id" \
   >"$scratch/invitation-provenance.txt"
 cat "$scratch/invitation-provenance.txt"
 node - "$scratch/invitation-provenance.txt" "$bob_npub" "$bob_agent_npub" "$approval_event_id" <<'JS' || fail "invitation provenance is wrong"
@@ -746,11 +675,35 @@ for (const row of rows) {
   if (row[1] !== "approval") throw new Error(`origin_kind: ${row}`);
   if (row[2] !== approvalEventId) throw new Error(`origin_ref: ${row}`);
   if (Number(row[3]) < 1) throw new Error(`roster_revision: ${row}`);
+  if (row[4] !== "pending") throw new Error(`status: ${row}`);
+  if (!row[5].startsWith("invite-") || !row[6].startsWith("invitation-")) {
+    throw new Error(`accept-ready identifiers: ${row}`);
+  }
 }
 JS
 note "both invitations carry origin_kind=approval, origin_ref=$approval_event_id, roster_revision=1"
 
-say "Act 7: Bob's principals accept their invitations"
+bob_human_invite_code="$(node - "$scratch/invitation-provenance.txt" "$bob_npub" <<'JS'
+const fs = require("node:fs");
+const row = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").filter(Boolean)
+  .map((line) => line.split("|"))
+  .find((candidate) => candidate[0] === process.argv[3]);
+if (!row) process.exit(1);
+process.stdout.write(row[5]);
+JS
+)"
+bob_agent_invitation_id="$(node - "$scratch/invitation-provenance.txt" "$bob_agent_npub" <<'JS'
+const fs = require("node:fs");
+const row = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").filter(Boolean)
+  .map((line) => line.split("|"))
+  .find((candidate) => candidate[0] === process.argv[3]);
+if (!row) process.exit(1);
+process.stdout.write(row[6]);
+JS
+)"
+note "Bob's inviteCode: $bob_human_invite_code; BobAgent's invitation id: $bob_agent_invitation_id"
+
+say "Act 5: Bob's principals accept their invitations"
 hosted_signed_request "$BOB_SUBJECT" POST "/v1/brain-invitation-links/$bob_human_invite_code/accept" \
   >"$scratch/bob-accept.json" || fail "Bob's acceptance failed"
 node - "$scratch/bob-accept.json" <<'JS' || fail "Bob's invitation did not flip to accepted"
@@ -769,7 +722,7 @@ if (invitation.status !== "accepted") throw new Error(JSON.stringify(invitation)
 JS
 note "BobAgent accepted its per-principal invitation with its own key"
 
-say "Act 8: AliceAgent wraps the Folder key for BobAgent"
+say "Act 6: AliceAgent wraps the Folder key for BobAgent"
 runtime_exec "$alice_container_id" fbrain admin folder-access grant \
   --brain "$brain_id" \
   --folder shared-with-bob \
@@ -777,7 +730,7 @@ runtime_exec "$alice_container_id" fbrain admin folder-access grant \
   --json >"$scratch/bob-agent-grant.json" || fail "folder-access grant failed"
 note "AliceAgent issued a signed Folder Key Grant to BobAgent (issuer=AliceAgent, origin_kind=direct)"
 
-say "Act 9: BobAgent syncs, reads Alice's note, and writes back"
+say "Act 7: BobAgent syncs, reads Alice's note, and writes back"
 bob_fbrain brain list --json >"$scratch/bob-agent-brains.json"
 node - "$scratch/bob-agent-brains.json" "$brain_id" <<'JS' || fail "BobAgent cannot see Alice's Brain"
 const fs = require("node:fs");
@@ -814,7 +767,7 @@ printf '# Bob was here\n\n%s\n' "$bob_note" >"$bob_tree/shared-with-bob/bob-repl
 )
 note "BobAgent wrote bob-reply.md and pushed it"
 
-say "Act 10: Alice's side reads Bob's note back"
+say "Act 8: Alice's side reads Bob's note back"
 alice_read_started="$(date +%s)"
 while true; do
   runtime_exec -w "$alice_tree" "$alice_container_id" fbrain sync now --json >/dev/null 2>&1 || true
@@ -830,7 +783,7 @@ while true; do
 done
 note "AliceAgent synced and reads bob-reply.md in its own Working Tree"
 
-say "Act 11: provenance finale (Brain DB)"
+say "Act 9: provenance finale (Brain DB)"
 note "brain_members rows for Bob's principals:"
 sqlite3 -readonly "$brain_db" \
   "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members WHERE brain_id = '$brain_id' ORDER BY user_id" \
@@ -867,9 +820,179 @@ JS
 note "members: delegated_by=Alice's approval signer, origin_kind=approval, origin_ref=approval event"
 note "folder_key_grants: issuer=AliceAgent, origin_kind=direct"
 
+say "Act 10: Bob bootstraps his own Brain from the CLI and seeds a note"
+bob_fbrain brain bootstrap-personal --json >"$scratch/bob-brain.json" || fail "Bob's Brain bootstrap failed"
+bob_brain_id="$(node - "$scratch/bob-brain.json" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const brainId = response.brain?.brainId || response.brainId || response.brain_id || "";
+if (!brainId) process.exit(1);
+process.stdout.write(brainId);
+JS
+)" || fail "Bob's Brain bootstrap response had no Brain id"
+[[ -n "$bob_brain_id" ]] || fail "Bob's Brain bootstrap did not return a Brain id"
+note "Bob's Brain: $bob_brain_id"
+
+bob_fbrain folder create shared-with-alice \
+  --brain "$bob_brain_id" \
+  --name "Shared with Alice" \
+  --path shared-with-alice \
+  --json >/dev/null
+bob_fbrain open "$bob_brain_id" --json >/dev/null
+bob_own_tree="$bob_fbrain_tree_root/$bob_brain_id"
+(
+  cd "$bob_own_tree"
+  bob_fbrain sync now --json >/dev/null
+)
+bob_seed="Bob seed note $(date +%s)-$$: this page existed before Alice joined."
+printf '# Bob seed\n\n%s\n' "$bob_seed" >"$bob_own_tree/shared-with-alice/bob-seed.md"
+(
+  cd "$bob_own_tree"
+  bob_fbrain sync now --json >/dev/null
+)
+note "Folder shared-with-alice created; Bob seeded bob-seed.md"
+
+say "Act 11: Bob preflights and commits the invitation plan for Alice (CLI direct commit)"
+bob_preflight_body="$(node -e 'process.stdout.write(JSON.stringify({ target: process.argv[1] }))' "$ALICE_EMAIL")"
+bob_signed_request POST "/v1/brains/$bob_brain_id/invitations/preflight" "$bob_preflight_body" \
+  >"$scratch/bob-preflight.json" || fail "Bob's invitation preflight for Alice failed"
+node - "$scratch/bob-preflight.json" "$alice_npub" "$alice_agent_npub" <<'JS' || fail "Bob's preflight plan is missing Alice's principals"
+const fs = require("node:fs");
+const plan = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [aliceNpub, aliceAgentNpub] = process.argv.slice(3);
+if (!plan.planId || !/^sha256:[0-9a-f]{64}$/.test(plan.planHash || "")) {
+  throw new Error(`plan identity missing: ${JSON.stringify(plan)}`);
+}
+if (plan.human?.npub !== aliceNpub) throw new Error(`human: ${JSON.stringify(plan.human)}`);
+const agents = plan.agents || [];
+if (!agents.some((agent) => agent.agentNpub === aliceAgentNpub && agent.status === "active")) {
+  throw new Error(`agents: ${JSON.stringify(agents)} exclusions: ${JSON.stringify(plan.exclusions)}`);
+}
+JS
+bob_plan_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).planId)' "$scratch/bob-preflight.json")"
+bob_plan_hash="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).planHash)' "$scratch/bob-preflight.json")"
+note "plan $bob_plan_id resolves Alice + AliceAgent (roster from Core, bindings from the identity authority)"
+
+bob_commit_body="$(node -e '
+  process.stdout.write(JSON.stringify({ planId: process.argv[1], planHash: process.argv[2] }));
+' "$bob_plan_id" "$bob_plan_hash")"
+bob_signed_request POST "/v1/brains/$bob_brain_id/invitations/commit" "$bob_commit_body" \
+  >"$scratch/bob-commit.json" || fail "Bob's direct plan commit failed"
+node - "$scratch/bob-commit.json" "$ALICE_EMAIL" "$agent_email" <<'JS' || fail "Bob's commit did not write per-principal invitations for Alice"
+const fs = require("node:fs");
+const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [email, agentEmail] = process.argv.slice(3);
+if (result.status !== "committed") throw new Error(JSON.stringify(result));
+const invitations = result.invitations || [];
+const refs = invitations.map((entry) => entry.ref).sort();
+if (JSON.stringify(refs) !== JSON.stringify([email, agentEmail].sort())) {
+  throw new Error(`invitations: ${JSON.stringify(invitations)} skipped: ${JSON.stringify(result.skipped)}`);
+}
+for (const entry of invitations) {
+  if (entry.invitation?.status !== "pending" || !entry.invitation?.id || !entry.invitation?.inviteCode) {
+    throw new Error(`invitation not accept-ready: ${JSON.stringify(entry)}`);
+  }
+}
+JS
+alice_human_invite_code="$(node - "$scratch/bob-commit.json" "$ALICE_EMAIL" <<'JS'
+const fs = require("node:fs");
+const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const entry = result.invitations.find((item) => item.ref === process.argv[3]);
+process.stdout.write(entry.invitation.inviteCode);
+JS
+)"
+alice_agent_invitation_id="$(node - "$scratch/bob-commit.json" "$agent_email" <<'JS'
+const fs = require("node:fs");
+const result = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const entry = result.invitations.find((item) => item.ref === process.argv[3]);
+process.stdout.write(entry.invitation.id);
+JS
+)"
+note "Alice's inviteCode: $alice_human_invite_code; AliceAgent's invitation id: $alice_agent_invitation_id"
+
+say "Act 12: Alice accepts Bob's invitation in the browser"
+accept_browser_output="$(
+  DEVFINITY_BRAIN_INVITE_CODE="$alice_human_invite_code" \
+  brain_browser_smoke accept-invite "" "$bob_brain_id"
+)"
+printf '%s\n' "$accept_browser_output" >&2
+note "Alice pasted the Invite Code in the Brain UI and joined Bob's Brain"
+
+say "Act 13: AliceAgent accepts, Bob wraps the Folder key, Alice's side reads Bob's note"
+runtime_exec "$alice_container_id" fbrain invite brain accept --id "$alice_agent_invitation_id" --json \
+  >"$scratch/alice-agent-accept.json" || fail "AliceAgent's acceptance failed"
+node - "$scratch/alice-agent-accept.json" <<'JS' || fail "AliceAgent's invitation did not flip to accepted"
+const fs = require("node:fs");
+const invitation = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (invitation.status !== "accepted") throw new Error(JSON.stringify(invitation));
+JS
+note "AliceAgent accepted its per-principal invitation with its own key"
+
+bob_fbrain admin folder-access grant \
+  --brain "$bob_brain_id" \
+  --folder shared-with-alice \
+  --target "$alice_agent_npub" \
+  --json >"$scratch/alice-agent-grant.json" || fail "Bob's folder-access grant failed"
+note "Bob issued a signed Folder Key Grant to AliceAgent (issuer=Bob, origin_kind=direct)"
+
+runtime_exec "$alice_container_id" fbrain open "$bob_brain_id" --json >"$scratch/alice-agent-open-bob-brain.json" \
+  || fail "AliceAgent could not open Bob's Brain"
+alice_tree_on_bob_brain="/data/workspace/finitebrain/$bob_brain_id"
+alice_bob_sync_started="$(date +%s)"
+while true; do
+  runtime_exec -w "$alice_tree_on_bob_brain" "$alice_container_id" fbrain sync now --json >/dev/null 2>&1 || true
+  if runtime_exec "$alice_container_id" /bin/bash -lc '
+      grep -Fq "this page existed before Alice joined" "$1/shared-with-alice/bob-seed.md" 2>/dev/null
+    ' _ "$alice_tree_on_bob_brain"; then
+    break
+  fi
+  if (( "$(date +%s)" - alice_bob_sync_started >= 120 )); then
+    fail "AliceAgent did not receive bob-seed.md within 120s"
+  fi
+  sleep 3
+done
+note "AliceAgent synced Bob's Brain and reads bob-seed.md from before it joined"
+
+say "Act 14: reverse-direction provenance (Brain DB)"
+note "brain_members rows for Alice's principals in Bob's Brain:"
+sqlite3 -readonly "$brain_db" \
+  "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members WHERE brain_id = '$bob_brain_id' ORDER BY user_id" \
+  | tee "$scratch/reverse-member-provenance.txt"
+sqlite3 -readonly "$brain_db" \
+  "SELECT recipient_npub, issuer_npub, delegated_by_npub, origin_kind FROM folder_key_grants WHERE brain_id = '$bob_brain_id' AND recipient_npub = '$alice_agent_npub'" \
+  | tee "$scratch/reverse-grant-provenance.txt"
+node - \
+  "$scratch/reverse-member-provenance.txt" \
+  "$scratch/reverse-grant-provenance.txt" \
+  "$alice_npub" "$alice_agent_npub" "$bob_agent_npub" "$bob_plan_id" <<'JS' \
+  || fail "reverse-direction member/grant provenance is wrong"
+const fs = require("node:fs");
+const [membersPath, grantsPath, aliceNpub, aliceAgentNpub, bobAgentNpub, bobPlanId] =
+  process.argv.slice(2);
+const memberRows = fs.readFileSync(membersPath, "utf8").trim().split("\n").filter(Boolean)
+  .map((line) => line.split("|"));
+for (const principal of [aliceNpub, aliceAgentNpub]) {
+  const row = memberRows.find((candidate) => candidate[0] === principal);
+  if (!row) throw new Error(`no brain_members row for ${principal}`);
+  if (row[1] !== bobAgentNpub) throw new Error(`delegated_by for ${principal}: ${row}`);
+  if (row[2] !== "invitation") throw new Error(`origin_kind for ${principal}: ${row}`);
+  if (row[3] !== bobPlanId) throw new Error(`origin_ref for ${principal}: ${row}`);
+}
+const grantRows = fs.readFileSync(grantsPath, "utf8").trim().split("\n").filter(Boolean)
+  .map((line) => line.split("|"));
+if (grantRows.length !== 1) throw new Error(`folder_key_grants rows: ${JSON.stringify(grantRows)}`);
+const grant = grantRows[0];
+if (grant[1] !== bobAgentNpub) throw new Error(`grant issuer_npub: ${grant}`);
+if (grant[2] !== "") throw new Error(`grant delegated_by should be empty: ${grant}`);
+if (grant[3] !== "direct") throw new Error(`grant origin_kind: ${grant}`);
+JS
+note "members: delegated_by=Bob's CLI principal, origin_kind=invitation, origin_ref=Bob's plan"
+note "folder_key_grants: issuer=Bob, origin_kind=direct"
+
 say "ADR-0046 slice PASSED"
 echo "brain_id=$brain_id"
-echo "plan_id=$plan_id"
+echo "bob_brain_id=$bob_brain_id"
+echo "bob_plan_id=$bob_plan_id"
 echo "approval_event_id=$approval_event_id"
 echo "alice_npub=$alice_npub"
 echo "alice_agent_npub=$alice_agent_npub"
