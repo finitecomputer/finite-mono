@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Select the Rust package scope that should be checked for a CI run."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from collections import defaultdict, deque
+from pathlib import PurePosixPath
+
+
+GLOBAL_EXACT_PATHS = {
+    ".github/workflows/ci.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "flake.lock",
+    "flake.nix",
+    "justfile",
+}
+
+GLOBAL_PREFIXES = (
+    ".cargo/",
+    ".github/actions/",
+    "devfinity/",
+    "infra/",
+    "scripts/",
+)
+
+GLOBAL_SUFFIXES = (
+    ".capnp",
+    ".graphql",
+    ".proto",
+    ".sql",
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", default=os.environ.get("PR_BASE_SHA"))
+    parser.add_argument("--head", default=os.environ.get("PR_HEAD_SHA") or os.environ.get("GITHUB_SHA"))
+    parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
+    parser.add_argument("--github-output")
+    parser.add_argument("--summary")
+    parser.add_argument(
+        "--changed-file",
+        action="append",
+        dest="changed_files",
+        help="Override git diff input; useful for tests and local dry-runs.",
+    )
+    args = parser.parse_args()
+
+    selection = select_package_scope(args)
+    write_outputs(args.github_output, selection)
+    write_summary(args.summary, selection)
+
+    print(f"Rust CI scope: {selection['mode']}")
+    print(f"Reason: {selection['reason']}")
+    print(f"Cargo package args: {selection['cargo_args']}")
+    if selection["packages"]:
+        print("Packages:")
+        for package in selection["packages"].split(","):
+            print(f"  - {package}")
+
+    return 0
+
+
+def select_package_scope(args: argparse.Namespace) -> dict[str, str]:
+    if args.event != "pull_request":
+        return full_selection(f"{args.event or 'non-pull-request'} event runs the full Rust workspace")
+
+    try:
+        changed_files = args.changed_files or changed_files_from_git(args.base, args.head)
+    except subprocess.CalledProcessError as error:
+        print(f"failed to compute changed files; falling back to full Rust workspace: {error}", file=sys.stderr)
+        return full_selection("could not compute the pull request diff")
+
+    normalized_paths = [normalize_path(path) for path in changed_files if normalize_path(path)]
+    if not normalized_paths:
+        return full_selection("empty pull request diff")
+
+    global_path = next((path for path in normalized_paths if is_global_path(path)), None)
+    if global_path is not None:
+        return full_selection(f"{global_path} can affect the whole Rust workspace")
+
+    metadata = cargo_metadata()
+    packages = workspace_packages(metadata)
+    package_by_name = {package["name"]: package for package in packages}
+    package_dirs = package_directories(packages)
+
+    changed_packages: set[str] = set()
+    for path in normalized_paths:
+        owner = owning_package(path, package_dirs)
+        if owner is None:
+            return full_selection(f"{path} is not owned by a Cargo workspace package")
+        changed_packages.add(owner)
+
+    if not changed_packages:
+        return full_selection("no changed Cargo workspace package could be identified")
+
+    dependents = reverse_dependents(package_by_name)
+    affected = transitive_reverse_dependencies(changed_packages, dependents)
+    ordered_packages = [package["name"] for package in packages if package["name"] in affected]
+    cargo_args = " ".join(f"-p {package}" for package in ordered_packages)
+    return {
+        "mode": "affected",
+        "reason": "selected changed Cargo packages and their workspace reverse dependents",
+        "cargo_args": cargo_args,
+        "packages": ",".join(ordered_packages),
+    }
+
+
+def changed_files_from_git(base: str | None, head: str | None) -> list[str]:
+    if not base or not head:
+        raise subprocess.CalledProcessError(2, ["git", "diff"], "missing base or head")
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}", "--"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return completed.stdout.splitlines()
+
+
+def cargo_metadata() -> dict:
+    completed = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return json.loads(completed.stdout)
+
+
+def workspace_packages(metadata: dict) -> list[dict]:
+    workspace_ids = set(metadata["workspace_members"])
+    return [package for package in metadata["packages"] if package["id"] in workspace_ids]
+
+
+def package_directories(packages: list[dict]) -> list[tuple[str, str]]:
+    package_dirs = []
+    for package in packages:
+        manifest_path = normalize_path(package["manifest_path"])
+        directory = str(PurePosixPath(manifest_path).parent)
+        package_dirs.append((directory, package["name"]))
+    package_dirs.sort(key=lambda item: len(item[0]), reverse=True)
+    return package_dirs
+
+
+def owning_package(path: str, package_dirs: list[tuple[str, str]]) -> str | None:
+    for package_dir, package_name in package_dirs:
+        if path == f"{package_dir}/Cargo.toml" or path.startswith(f"{package_dir}/"):
+            return package_name
+    return None
+
+
+def reverse_dependents(package_by_name: dict[str, dict]) -> dict[str, set[str]]:
+    dependents: dict[str, set[str]] = defaultdict(set)
+    workspace_names = set(package_by_name)
+    for package in package_by_name.values():
+        for dependency in package["dependencies"]:
+            dependency_name = dependency["name"]
+            if dependency.get("source") is None and dependency_name in workspace_names:
+                dependents[dependency_name].add(package["name"])
+    return dependents
+
+
+def transitive_reverse_dependencies(changed_packages: set[str], dependents: dict[str, set[str]]) -> set[str]:
+    affected = set(changed_packages)
+    queue = deque(changed_packages)
+    while queue:
+        package = queue.popleft()
+        for dependent in dependents.get(package, set()):
+            if dependent not in affected:
+                affected.add(dependent)
+                queue.append(dependent)
+    return affected
+
+
+def is_global_path(path: str) -> bool:
+    return (
+        path in GLOBAL_EXACT_PATHS
+        or path.startswith(GLOBAL_PREFIXES)
+        or path.endswith(GLOBAL_SUFFIXES)
+    )
+
+
+def normalize_path(path: str) -> str:
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        try:
+            path = os.path.relpath(path, os.getcwd())
+        except ValueError:
+            return path
+    return path.replace(os.sep, "/").lstrip("./")
+
+
+def full_selection(reason: str) -> dict[str, str]:
+    return {
+        "mode": "full",
+        "reason": reason,
+        "cargo_args": "--workspace",
+        "packages": "",
+    }
+
+
+def write_outputs(path: str | None, selection: dict[str, str]) -> None:
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as stream:
+        for key in ("mode", "reason", "cargo_args", "packages"):
+            stream.write(f"{key}={selection[key]}\n")
+
+
+def write_summary(path: str | None, selection: dict[str, str]) -> None:
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write("### Rust package scope\n\n")
+        stream.write(f"- Mode: `{selection['mode']}`\n")
+        stream.write(f"- Reason: {selection['reason']}\n")
+        stream.write(f"- Cargo args: `{selection['cargo_args']}`\n")
+        if selection["packages"]:
+            stream.write(f"- Packages: `{selection['packages']}`\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
