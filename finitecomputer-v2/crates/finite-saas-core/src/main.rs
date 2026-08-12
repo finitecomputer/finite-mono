@@ -343,6 +343,12 @@ struct RuntimeColdRelocateExactCliArgs {
     expected_agent_npub: String,
     #[arg(long)]
     durable_state_manifest_sha256: String,
+    /// Recovery variant: the operator has verified via the relocation
+    /// runbook's bounded probe that no container or task exists for the
+    /// source machine. Accepts a `stale` source and waives the succeeded
+    /// stop receipt; all exact-match checks still apply.
+    #[arg(long)]
+    source_compute_absent: bool,
     #[arg(long)]
     admin_email: String,
     #[arg(long)]
@@ -1240,6 +1246,7 @@ async fn runtime_cold_relocate_exact_command(
             target_source_host_id: args.target_source_host_id,
             expected_agent_npub: args.expected_agent_npub,
             durable_state_manifest_sha256: args.durable_state_manifest_sha256,
+            operator_observed_compute_absent: args.source_compute_absent,
             now: args.now,
         })
         .await

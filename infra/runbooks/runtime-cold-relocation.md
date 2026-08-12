@@ -41,6 +41,44 @@ name is not authority to select a Runtime.
 Abort on any mismatch. Do not delete, rename, or modify source state as part of
 this procedure.
 
+## ABSENT-COMPUTE RECOVERY VARIANT
+
+For a Runtime whose source compute NO LONGER EXISTS (container and task both
+gone — e.g. cleared by a containerd restart after a poisoned record), the
+stopped-container preconditions above are unsatisfiable: the runtime reads
+`stale`, not `offline` (a stop against absent compute fails, and failed
+controls mark it stale), and no succeeded stop receipt can exist for the
+binding. The `--source-compute-absent` flag on the enqueue accepts exactly
+those two deviations; every other exact-match check still applies, and the
+attestation is recorded in the `runtime_relocation.v1` envelope for
+lease-time validation.
+
+Before using the flag, the operator MUST run the bounded absence probe on the
+source host and see both results exactly:
+
+```sh
+timeout 15 nerdctl --namespace finite inspect '<SOURCE_MACHINE_ID>' ; echo "exit: $?"
+# required: fatal "no such object <SOURCE_MACHINE_ID>" — NOT a timeout, NOT
+# "context deadline exceeded" (that is a poisoned record, a different repair)
+timeout 15 ctr -n finite tasks list | grep -c '<SOURCE_MACHINE_ID>'
+# required: 0
+```
+
+Absence is a stronger single-writer guarantee than a stop receipt — no
+compute exists to resume writing — but only when genuinely proven: a probe
+that times out or errors proves nothing and the flag must not be used.
+
+**Recovery boundary for this variant.** The full-host quiesced Borg archive
+precondition may be replaced by a SCOPED boundary, because the only state at
+risk is one already-cold durable tree: record the `state-manifest` hash
+(step 1) and take a dedicated off-host archive of the single durable
+directory before the transfer. The stopped source tree still remains intact
+on the source host until the observation window passes.
+
+Everything else in STEPS applies unchanged, with step 1's "container exists
+and is stopped + stop receipt" replaced by the probe above, and step 3's
+enqueue carrying `--source-compute-absent`.
+
 ## STEPS
 
 ### 1. Capture the exact stopped source

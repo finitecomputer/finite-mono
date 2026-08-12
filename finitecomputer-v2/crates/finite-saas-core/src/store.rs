@@ -5020,9 +5020,16 @@ where
         return Err(CoreError::RuntimeSpecMismatch);
     }
     let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-    if placement.runner_class != crate::RunnerClass::Kata
-        || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Offline
-    {
+    // `offline` is the cleanly-stopped precondition. Under the operator's
+    // compute-absent attestation, `stale` is also frozen: a failed control
+    // marks a runtime stale, and absent compute can never reach `offline`
+    // because the stop that would record it fails by definition.
+    let source_status_frozen = match runtime.host_facts.runtime_status {
+        RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Stale => input.operator_observed_compute_absent,
+        _ => false,
+    };
+    if placement.runner_class != crate::RunnerClass::Kata || !source_status_frozen {
         return Err(CoreError::RuntimeControlUnsupported);
     }
     let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
@@ -5051,9 +5058,14 @@ where
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
-    if client
-        .query_opt(
-            "SELECT 1
+    // The succeeded stop receipt proves no writer survives on the source.
+    // Under the compute-absent attestation there is nothing to stop and the
+    // receipt is unobtainable; absence itself (verified by the operator's
+    // bounded probe per the relocation runbook) is the stronger guarantee.
+    if !input.operator_observed_compute_absent
+        && client
+            .query_opt(
+                "SELECT 1
              FROM runtime_control_requests
              WHERE agent_runtime_id = $1
                AND source_host_id = $2
@@ -5061,15 +5073,15 @@ where
                AND kind = 'stop'
                AND status = 'succeeded'
              LIMIT 1",
-            &[
-                &runtime.id,
-                &runtime.source_host_id,
-                &runtime.source_machine_id,
-            ],
-        )
-        .await
-        .map_err(store_error)?
-        .is_none()
+                &[
+                    &runtime.id,
+                    &runtime.source_host_id,
+                    &runtime.source_machine_id,
+                ],
+            )
+            .await
+            .map_err(store_error)?
+            .is_none()
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
@@ -5094,6 +5106,7 @@ where
         target_source_host_id: target_source_host_id.clone(),
         expected_agent_npub,
         durable_state_manifest_sha256: manifest,
+        source_compute_absent: input.operator_observed_compute_absent,
     });
     let active_sql = "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
                display_name, runner_class, hosting_tier, placement_runner_class,
@@ -9186,6 +9199,7 @@ mod tests {
                     target_source_host_id: target_host.to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: None,
                 })
                 .await
@@ -9281,6 +9295,7 @@ mod tests {
                     target_source_host_id: target_host.to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: None,
                 })
                 .await
