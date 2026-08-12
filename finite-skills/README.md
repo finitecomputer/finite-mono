@@ -33,6 +33,18 @@ Run from the monorepo root:
 just skills check
 ```
 
+For local human spot checks of web-design skill variants, use the Promptfoo +
+Playwright harness in `ab-testing/`:
+
+```sh
+just skills ab-setup
+just skills ab-test-mock
+```
+
+Set `OPENAI_API_KEY` and run `just skills ab-test` for real model-generated
+artifacts. The root `just` path enters the pinned dev shell, which provides a
+Node version compatible with current Promptfoo.
+
 The current checker is only a static floor. A Runtime image change must also
 prove that a new Agent Home discovers the bundled baseline, restart or image
 replacement leaves an already installed baseline and user-owned skills
