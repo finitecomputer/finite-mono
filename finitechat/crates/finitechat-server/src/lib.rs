@@ -81,6 +81,12 @@ mod legacy_store;
 mod projections;
 mod routes;
 mod state;
+// The normalized SQLite delivery engine (storage rewrite, Core PR 3). Nothing
+// is routed to it yet: the server still runs the legacy op-log engine, and the
+// engine is proven by the upstream conformance suite in its unit tests. The
+// `allow(dead_code)` comes off when the server switches engines.
+#[allow(dead_code)]
+mod store;
 mod validate;
 
 pub use routes::http_router;

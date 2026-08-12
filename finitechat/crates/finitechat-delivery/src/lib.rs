@@ -980,7 +980,15 @@ fn validate_page_limit(limit: usize) -> Result<(), HttpServerError> {
     }
 }
 
-fn digest_transport_message(message: &TransportMessage) -> [u8; 32] {
+/// The canonical dedup digest shared with durable engines.
+///
+/// SHA-256 over id/payload/timestamp/causal deps/source/envelope with 8-byte
+/// big-endian length prefixes and an envelope tag byte (0 = GroupMessage,
+/// 1 = Welcome). Two publishes with the same message id are the same message
+/// iff their digests are equal; durable implementations must persist and
+/// compare exactly this digest so duplicate-replay decisions agree with the
+/// in-memory reference.
+pub fn digest_transport_message(message: &TransportMessage) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hash_len_prefixed(&mut hasher, message.id.as_slice());
     hash_len_prefixed(&mut hasher, &message.payload);
