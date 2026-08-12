@@ -928,6 +928,14 @@ pub struct RuntimeRelocationV1 {
     pub target_source_host_id: String,
     pub expected_agent_npub: String,
     pub durable_state_manifest_sha256: String,
+    /// Operator-attested recovery variant: the source compute no longer
+    /// exists (container/task absent at the provider), so there is no stop
+    /// receipt to present and the runtime reads `stale`, not `offline`.
+    /// Absence is a stronger single-writer guarantee than a stop receipt —
+    /// the runbook's bounded absence probe is the attestation's basis.
+    /// Additive within runtime_relocation.v1; absent means false.
+    #[serde(default)]
+    pub source_compute_absent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1470,6 +1478,15 @@ pub struct AdminRuntimeRelocateExactInput {
     pub target_source_host_id: String,
     pub expected_agent_npub: String,
     pub durable_state_manifest_sha256: String,
+    /// Recovery variant (same attestation pattern as
+    /// `AdminArchiveUnrecoverableRuntimeInput`): the operator has verified
+    /// via the runbook's bounded probe that no container or task exists for
+    /// the source machine. Relaxes exactly two gates — `stale` is accepted
+    /// alongside `offline`, and the succeeded-stop-receipt requirement is
+    /// waived (stopping absent compute fails by definition). Every other
+    /// exact-match check still applies.
+    #[serde(default)]
+    pub operator_observed_compute_absent: bool,
     pub now: Option<String>,
 }
 
@@ -2045,9 +2062,19 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Ok(());
     };
     let existing_runtime = existing_runtime.ok_or(CoreError::RuntimeSpecMismatch)?;
+    // `offline` is the cleanly-stopped case; `stale` is acceptable only when
+    // the envelope itself was minted under the operator's compute-absent
+    // attestation (a failed control marks a runtime stale, and absent
+    // compute can never produce the stop receipt that would make it
+    // offline).
+    let source_status_frozen = match existing_runtime.host_facts.runtime_status {
+        RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Stale => relocation.source_compute_absent,
+        _ => false,
+    };
     let source_is_frozen = relocation.source_host_id == existing_runtime.source_host_id
         && relocation.source_machine_id == existing_runtime.source_machine_id
-        && existing_runtime.host_facts.runtime_status == RuntimeSummaryStatus::Offline;
+        && source_status_frozen;
     let target_is_registered = relocation.target_source_host_id == existing_runtime.source_host_id
         && relocation.source_machine_id == existing_runtime.source_machine_id;
     if request.agent_runtime_id.as_deref() != Some(existing_runtime.id.as_str())
@@ -7966,6 +7993,7 @@ mod tests {
                     target_source_host_id: "oslo-host-3".to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: Some("2026-05-25T13:01:00Z".to_string()),
                 })
                 .await
@@ -8028,6 +8056,7 @@ mod tests {
                     target_source_host_id: "oslo-host-3".to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: Some("2026-05-25T13:05:00Z".to_string()),
                 })
                 .await
@@ -8125,6 +8154,125 @@ mod tests {
                     && link["agent_runtime_id"] == runtime_id.as_str()
                     && link["active"] == true
             }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cold_relocation_with_absent_compute_accepts_stale_and_waives_stop_receipt() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "eddie-case@finite.vip",
+                "workos-eddie-case",
+                "absent-create",
+                "finite-kata-absent",
+                "artifact-v1",
+                "2026-08-12T13:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let relocate_input = |absent: bool, now: &str| AdminRuntimeRelocateExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-absent".to_string(),
+                target_source_host_id: "oslo-host-3".to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "c".repeat(64),
+                operator_observed_compute_absent: absent,
+                now: Some(now.to_string()),
+            };
+
+            // The attestation is not a bypass: an online runtime stays
+            // unrelocatable even with the flag set.
+            let online = db
+                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T13:01:00Z"))
+                .await
+                .unwrap_err();
+            assert!(matches!(online, CoreError::RuntimeControlUnsupported));
+
+            // Reach `stale` the way absent compute does in production: a
+            // control request that fails at the provider.
+            let restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "eddie-case@finite.vip".to_string(),
+                    workos_user_id: "workos-eddie-case".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-08-12T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+            let restart_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(capacity),
+                    now: Some("2026-08-12T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(restart_lease.request.id, restart.id);
+            db.fail_runtime_control_request(FailRuntimeControlRequestInput {
+                request_id: restart.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "restart-lease".to_string(),
+                failure_message: "no such object finite-kata-absent".to_string(),
+                now: Some("2026-08-12T13:04:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Stale
+            );
+
+            // Without the attestation, `stale` (and the missing stop
+            // receipt) keep refusing — the existing posture is pinned.
+            let unattested = db
+                .admin_request_runtime_relocate_exact(relocate_input(false, "2026-08-12T13:05:00Z"))
+                .await
+                .unwrap_err();
+            assert!(matches!(unattested, CoreError::RuntimeControlUnsupported));
+
+            // With it, the enqueue succeeds despite `stale` and despite the
+            // runtime never having a succeeded stop, and the attestation
+            // rides the envelope for lease-time validation.
+            let relocation = db
+                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T13:06:00Z"))
+                .await
+                .unwrap();
+            assert_eq!(
+                relocation.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert_eq!(
+                relocation.target_source_host_id.as_deref(),
+                Some("oslo-host-3")
+            );
+            let envelope = relocation.relocation.as_ref().unwrap().v1();
+            assert!(envelope.source_compute_absent);
+            assert_eq!(envelope.source_machine_id, "finite-kata-absent");
         })
         .await;
     }
