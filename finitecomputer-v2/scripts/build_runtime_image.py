@@ -18,7 +18,7 @@ MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 DEFAULT_IMAGE_ENGINE = "docker"
-IMAGE_ENGINES = ("docker", "apple-container")
+IMAGE_ENGINES = ("docker", "depot", "apple-container")
 
 BUILD_EXCLUDES = [
     ".DS_Store",
@@ -201,8 +201,9 @@ def parse_args() -> argparse.Namespace:
         choices=IMAGE_ENGINES,
         default=os.environ.get("FC_RUNTIME_IMAGE_ENGINE", DEFAULT_IMAGE_ENGINE),
         help=(
-            "image engine to use; docker remains the release/CI default, "
-            "apple-container uses Apple's container CLI"
+            "image engine to use; docker builds locally, depot builds remotely "
+            "and loads the image into Docker, apple-container uses Apple's "
+            "container CLI"
         ),
     )
     parser.add_argument(
@@ -241,6 +242,8 @@ def build_image(
     dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
     if args.engine == "docker":
         build = ["docker", "build"]
+    elif args.engine == "depot":
+        build = ["depot", "build"]
     else:
         build = ["container", "build"]
     build.extend(
@@ -263,17 +266,21 @@ def build_image(
         build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
     if args.no_cache:
         build.append("--no-cache")
+    if args.engine == "depot":
+        # The release workflow must run local Docker smokes against the exact
+        # image that will be tagged and pushed after the proof passes.
+        build.append("--load")
     build.append(str(context))
     run(build, timeout=7200, capture=False)
 
     if args.push:
-        if args.engine == "docker":
+        if args.engine in {"docker", "depot"}:
             push = ["docker", "push", args.image_ref]
         else:
             push = ["container", "image", "push", args.image_ref]
         run(push, timeout=3600, capture=False)
 
-    if args.engine == "docker":
+    if args.engine in {"docker", "depot"}:
         return docker_image_metadata(args.image_ref)
     return apple_image_metadata(args.image_ref)
 

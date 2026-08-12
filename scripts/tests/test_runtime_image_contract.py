@@ -91,11 +91,25 @@ class RuntimeImageContractTests(unittest.TestCase):
         self.assertTrue(
             any("cannot build/publish" in item for item in self.violations())
         )
+        self.write(
+            workflow,
+            "name: Phala image\nrun: depot build -f deploy/phala/Dockerfile .",
+        )
+        self.assertTrue(
+            any("cannot build/publish" in item for item in self.violations())
+        )
 
     def test_second_agent_runtime_publisher_fails(self) -> None:
         self.write(
             ".github/workflows/runtime-backup-publisher.yml",
             "name: backup\nrun: docker push ghcr.io/example/agent-runtime:latest",
+        )
+        self.assertTrue(
+            any("sole Agent Runtime publisher" in item for item in self.violations())
+        )
+        self.write(
+            ".github/workflows/runtime-backup-publisher.yml",
+            "name: backup\nrun: depot build --push -t ghcr.io/example/agent-runtime:latest .",
         )
         self.assertTrue(
             any("sole Agent Runtime publisher" in item for item in self.violations())

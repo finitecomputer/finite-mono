@@ -39,7 +39,9 @@ WORKFLOW_BUILD_OR_PUBLISH = (
     re.compile(r"\bpodman\s+(?:build|push|tag)\b", re.IGNORECASE),
     re.compile(r"\bbuildah\s+(?:bud|build|push|tag)\b", re.IGNORECASE),
     re.compile(r"\boras\s+push\b", re.IGNORECASE),
+    re.compile(r"\bdepot\s+(?:build|bake)\b", re.IGNORECASE),
     re.compile(r"docker/build-push-action", re.IGNORECASE),
+    re.compile(r"depot/build-push-action", re.IGNORECASE),
     re.compile(r"build_runtime_image\.py", re.IGNORECASE),
     re.compile(r"\bpackages\s*:\s*write\b", re.IGNORECASE),
 )
@@ -231,6 +233,8 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
                 for pattern in (
                     r"\bdocker\s+push\b",
                     r"docker/build-push-action",
+                    r"\bdepot\s+build\b[^\n]*\s--push\b",
+                    r"depot/build-push-action",
                     r"\boras\s+push\b",
                 )
             )

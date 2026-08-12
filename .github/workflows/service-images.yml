@@ -28,12 +28,14 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
 
       - name: Resolve image parameters
         id: params
@@ -75,13 +77,18 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ steps.params.outputs.name }}
           VERSION: ${{ inputs.version }}
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_SERVICE_IMAGES_PROJECT_ID || vars.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
         run: |
-          docker buildx create --use
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_SERVICE_IMAGES_PROJECT_ID or DEPOT_PROJECT_ID repository variable"
+            exit 1
+          fi
           BUILD_ARGS=()
           if [ "${{ inputs.image }}" = "private-limiter" ]; then
             BUILD_ARGS+=(--build-arg "FINITE_MONO_REV=$GITHUB_SHA")
           fi
-          docker buildx build \
+          depot build \
             --platform linux/amd64 \
             "${BUILD_ARGS[@]}" \
             --file "${{ steps.params.outputs.dockerfile }}" \
@@ -92,7 +99,7 @@ jobs:
             "${{ steps.params.outputs.context }}"
           DIGEST="$(jq -r '."containerimage.digest"' image-metadata.json)"
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::docker buildx did not return an image digest"
+            echo "::error::depot build did not return an image digest"
             cat image-metadata.json
             exit 1
           fi

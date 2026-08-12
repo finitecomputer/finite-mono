@@ -30,6 +30,7 @@ env:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   docker-runtime-smoke:
@@ -42,6 +43,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,7 +62,15 @@ jobs:
           echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
 
       - name: Build canonical runtime image
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
+          FC_RUNTIME_IMAGE_ENGINE: depot
         run: |
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID repository variable"
+            exit 1
+          fi
           ../finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$RUNTIME_IMAGE_REF" \
             --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
