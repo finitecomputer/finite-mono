@@ -23,6 +23,20 @@ break-glass custody. After those public recipients and the host public
 recipients are known, add `infra/nixos/secrets/.sops.yaml` creation rules before
 encrypting any production material.
 
+## Operator Key Setup
+
+Run:
+
+```sh
+just nixos-sops-operator-key
+```
+
+The helper creates `~/.config/sops/age/keys.txt` if it is missing, or uses
+`SOPS_AGE_KEY_FILE` when that environment variable is already set. It sets the
+key directory to `0700`, the key file to `0600`, and prints only the public
+`age1...` recipient. Add that public recipient to `.sops.yaml`; never commit or
+share the private key file.
+
 ## Ingesting A Secret
 
 Use `just nixos-sops-ingest` to encrypt plaintext from stdin into this

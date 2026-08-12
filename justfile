@@ -154,6 +154,16 @@ nixos-secrets-contract:
     python3 scripts/check_nixos_secrets_contract.py
     python3 -m unittest scripts.tests.test_nixos_secrets_contract
     python3 -m unittest scripts.tests.test_nixos_sops_ingest
+    python3 -m unittest scripts.tests.test_nixos_sops_operator_key
+
+# Create or inspect the local operator age key used by SOPS. Prints only the
+# public age recipient; the private key stays in SOPS_AGE_KEY_FILE or
+# ~/.config/sops/age/keys.txt.
+[positional-arguments]
+nixos-sops-operator-key *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_operator_key.py "$@"
 
 # Encrypt one NixOS SOPS secret from stdin into infra/nixos/secrets.
 # Example:
