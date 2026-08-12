@@ -862,7 +862,6 @@ pub trait AppReconciler: Send + Sync + 'static {
 struct CoreState {
     data_dir: PathBuf,
     server_url: String,
-    http_client: OnceLock<reqwest::blocking::Client>,
     account_secret: NostrSecretKey,
     fixed_now_unix_seconds: Option<u64>,
     store: SqliteClientStore,
@@ -7835,7 +7834,6 @@ impl CoreState {
         Ok(Self {
             data_dir,
             server_url: options.server_url,
-            http_client: OnceLock::new(),
             account_secret,
             fixed_now_unix_seconds,
             store,
@@ -7889,11 +7887,7 @@ impl CoreState {
     }
 
     fn delivery_for(&self, server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-        let client = self
-            .http_client
-            .get_or_init(reqwest::blocking::Client::new)
-            .clone();
-        delivery_for_with_client(server_url, client)
+        delivery_for_with_client(server_url, shared_blocking_http_client())
     }
 
     fn generate_object_id(&mut self, prefix: &str) -> Result<String, FiniteChatCoreError> {
@@ -8210,7 +8204,7 @@ impl CoreState {
         let prepared = prepare_attachment_upload(plaintext, metadata).map_err(client_error)?;
         let request = prepare_blossom_upload_http_request(&prepared).map_err(client_error)?;
         let upload_url = format!("{}{}", server_url.trim_end_matches('/'), request.path);
-        let response = reqwest::blocking::Client::new()
+        let response = shared_blocking_http_client()
             .put(upload_url)
             .header(CONTENT_TYPE, request.content_type)
             .body(request.body.to_vec())
@@ -8241,7 +8235,7 @@ impl CoreState {
         let content_type = normalize_image_upload_content_type(content_type)?;
         validate_image_upload(bytes, content_type)?;
         let upload_url = format!("{}/upload", self.server_url.trim_end_matches('/'));
-        let response = reqwest::blocking::Client::new()
+        let response = shared_blocking_http_client()
             .put(upload_url)
             .header(CONTENT_TYPE, content_type)
             .body(bytes.to_vec())
@@ -8284,7 +8278,7 @@ impl CoreState {
         }
 
         let request = prepare_blossom_download_http_request(reference).map_err(client_error)?;
-        let response = reqwest::blocking::Client::new()
+        let response = shared_blocking_http_client()
             .get(request.url)
             .send()
             .map_err(delivery_error)?;
@@ -11736,8 +11730,19 @@ fn nostr_identity_from_secret(
     })
 }
 
+/// Process-wide blocking HTTP client. `reqwest::blocking::Client::new()`
+/// allocates a fresh connection pool (sockets, an event loop thread) and
+/// PANICS if the builder fails — under fd exhaustion every per-call
+/// construction both deepens the exhaustion and turns it into a panic storm
+/// (2026-08-12: ~275k panics in 8 minutes from the hosted-device long-poll
+/// loops). Construct once, clone the handle (it is an Arc internally).
+fn shared_blocking_http_client() -> reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::blocking::Client::new).clone()
+}
+
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    delivery_for_with_client(server_url, reqwest::blocking::Client::new())
+    delivery_for_with_client(server_url, shared_blocking_http_client())
 }
 
 fn delivery_for_with_client(
