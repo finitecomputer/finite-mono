@@ -130,6 +130,8 @@ jobs:
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
@@ -149,14 +151,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Select Rust package scope
+        id: rust_scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        env:
+          RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
+        run: cargo clippy --locked $RUST_CI_CARGO_ARGS --all-targets -- -D warnings
 
       - name: Test workspace
-        run: nix develop .#rust-ci --command just test
+        env:
+          RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
+        run: |
+          nix develop .#rust-ci --command bash -euxo pipefail -c '
+            cargo run --quiet --locked -p devfinity -- run -- cargo test --locked "$@"
+          ' bash $RUST_CI_CARGO_ARGS
 
   dashboard:
     name: Dashboard
