@@ -34,6 +34,11 @@ in
     };
 
     serviceConfig = {
+      # systemd's default soft fd limit (1024) starved the hosted-device daemon
+      # of sockets during the 2026-08-12 sync burst (reqwest Client::new EMFILE
+      # -> "Chat is unavailable"). Raise it for every long-running platform
+      # service; the hard limit already allows it.
+      LimitNOFILE = 65536;
       ExecStart = "${finitePackages.finite-brain}/bin/finite-brain";
       EnvironmentFile = [
         "/etc/finite/identity-operator.env"
