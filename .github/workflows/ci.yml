@@ -489,6 +489,10 @@ jobs:
           # path keeps their artifacts from poisoning this package checkout.
           path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - name: Select Cachix push mode
         id: cachix
         env:
@@ -744,6 +748,10 @@ jobs:
           # checkout per attempt so those artifacts cannot poison checkout.
           path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         run: nix develop --command just brain-product-matrix
