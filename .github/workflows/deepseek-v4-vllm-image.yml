@@ -37,13 +37,14 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/deepseek-v4-vllm
           VERSION: ${{ inputs.version }}
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || vars.DEPOT_PROJECT_ID }}
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || secrets.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           DEPOT_DISABLE_OTEL: "1"
         run: |
           version_ref="$IMAGE:$VERSION"
           sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
           if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::set DEPOT_DEEPSEEK_VLLM_PROJECT_ID or DEPOT_PROJECT_ID repository variable"
+            echo "::error::set DEPOT_DEEPSEEK_VLLM_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
             exit 1
           fi
           depot build \

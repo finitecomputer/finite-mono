@@ -63,12 +63,13 @@ jobs:
 
       - name: Build canonical runtime image
         env:
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID }}
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           DEPOT_DISABLE_OTEL: "1"
           FC_RUNTIME_IMAGE_ENGINE: depot
         run: |
           if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID repository variable"
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
             exit 1
           fi
           ../finitecomputer-v2/scripts/build_runtime_image.py \
