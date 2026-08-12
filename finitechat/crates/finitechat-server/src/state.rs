@@ -101,7 +101,13 @@ pub struct HttpServerState {
     welcome_claims: Arc<Mutex<HashMap<MessageId, WelcomeClaimRecord>>>,
     push_tokens: Arc<Mutex<BTreeMap<String, PushTokenRecord>>>,
     push_wakes: Arc<Mutex<BTreeMap<String, PushWakeOutboxRecord>>>,
-    blob_objects: Arc<Mutex<BTreeMap<String, BlobObject>>>,
+    /// Blob metadata only (tens of bytes per blob). Payload bytes live in
+    /// SQLite and are read per request; they are never resident in RAM on a
+    /// durable server.
+    blob_meta: Arc<Mutex<BTreeMap<String, BlobMeta>>>,
+    /// Payload fallback for store-less servers (`HttpServerState::default()`
+    /// in tests and dev tooling). A durable server never inserts here.
+    blob_bytes_in_memory: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     /// Canonical externally reachable origin used in durable blob references.
     /// Request-derived hosts remain the local-development fallback only.
     public_url: Option<String>,
@@ -121,6 +127,32 @@ pub struct HttpServerState {
 pub(crate) struct BlobObject {
     pub(crate) content_type: String,
     pub(crate) bytes: Vec<u8>,
+}
+
+/// Which storage backend holds a blob's payload bytes. Only `Sqlite` is
+/// written today; `Object` is the S3 phase's marker, parsed now so a rolled-
+/// forward database never fails to load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlobBackend {
+    Sqlite,
+    Object,
+}
+
+impl BlobBackend {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sqlite" => Some(Self::Sqlite),
+            "object" => Some(Self::Object),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BlobMeta {
+    pub(crate) size_bytes: u64,
+    pub(crate) content_type: String,
+    pub(crate) backend: BlobBackend,
 }
 
 #[derive(Clone)]
@@ -167,7 +199,8 @@ impl HttpServerState {
             welcome_claims: Arc::new(Mutex::new(HashMap::new())),
             push_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             push_wakes: Arc::new(Mutex::new(BTreeMap::new())),
-            blob_objects: Arc::new(Mutex::new(BTreeMap::new())),
+            blob_meta: Arc::new(Mutex::new(BTreeMap::new())),
+            blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
@@ -233,7 +266,9 @@ impl HttpServerState {
         let welcome_claims = store.load_welcome_claims()?;
         let push_tokens = store.load_push_tokens()?;
         let push_wakes = store.load_push_wakes()?;
-        let blob_objects = store.load_blob_objects()?;
+        // Meta only: payload bytes stay in SQLite and are read per request,
+        // so boot cost and RSS no longer scale with stored blob volume.
+        let blob_meta = store.load_blob_meta()?;
         Ok(Self {
             service: Arc::new(Mutex::new(service)),
             publish_idempotency: Arc::new(Mutex::new(publish_idempotency)),
@@ -250,7 +285,8 @@ impl HttpServerState {
             welcome_claims: Arc::new(Mutex::new(welcome_claims)),
             push_tokens: Arc::new(Mutex::new(push_tokens)),
             push_wakes: Arc::new(Mutex::new(push_wakes)),
-            blob_objects: Arc::new(Mutex::new(blob_objects)),
+            blob_meta: Arc::new(Mutex::new(blob_meta)),
+            blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
@@ -268,9 +304,13 @@ impl HttpServerState {
         validate_blob_upload(bytes, content_type)?;
 
         let sha256 = sha256_hex(bytes);
-        let mut objects = self.blob_objects.lock().expect("HTTP blob objects mutex");
-        if let Some(existing) = objects.get(&sha256) {
-            if existing.bytes.as_slice() == bytes {
+        let mut meta = self.blob_meta.lock().expect("HTTP blob meta mutex");
+        if let Some(existing) = meta.get(&sha256) {
+            // Content addressing makes matching digest + length an identity
+            // match. The old byte-for-byte comparison required every payload
+            // resident in RAM and could only diverge from this check on a
+            // sha256 collision.
+            if existing.size_bytes == bytes.len() as u64 {
                 return Ok(BlobDescriptor {
                     url: blob_url(self.public_url.as_deref(), headers, &sha256),
                     sha256,
@@ -281,13 +321,19 @@ impl HttpServerState {
         }
 
         if let Some(store) = &self.store {
-            store.upsert_blob_object(&sha256, content_type, bytes)?;
+            store.insert_blob_object(&sha256, content_type, bytes)?;
+        } else {
+            self.blob_bytes_in_memory
+                .lock()
+                .expect("HTTP blob bytes mutex")
+                .insert(sha256.clone(), bytes.to_vec());
         }
-        objects.insert(
+        meta.insert(
             sha256.clone(),
-            BlobObject {
+            BlobMeta {
+                size_bytes: bytes.len() as u64,
                 content_type: content_type.to_owned(),
-                bytes: bytes.to_vec(),
+                backend: BlobBackend::Sqlite,
             },
         );
         Ok(BlobDescriptor {
@@ -299,13 +345,47 @@ impl HttpServerState {
 
     pub(crate) fn get_blob_object(&self, sha256: &str) -> Result<BlobObject, ServerHttpError> {
         validate_blob_sha256(sha256)?;
-        let objects = self.blob_objects.lock().expect("HTTP blob objects mutex");
-        objects
-            .get(sha256)
-            .cloned()
-            .ok_or_else(|| ServerHttpError::BlobNotFound {
+        let meta = {
+            let metas = self.blob_meta.lock().expect("HTTP blob meta mutex");
+            metas.get(sha256).cloned()
+        };
+        let Some(meta) = meta else {
+            return Err(ServerHttpError::BlobNotFound {
                 sha256: sha256.to_owned(),
-            })
+            });
+        };
+        let bytes = if let Some(store) = &self.store {
+            let Some(bytes) = store.load_blob_payload(sha256)? else {
+                // Meta says present; a missing payload row is corruption, not
+                // a 404 a client could mistake for permanent deletion.
+                return Err(DurableStoreError::BlobObjectCorrupt {
+                    sha256: sha256.to_owned(),
+                }
+                .into());
+            };
+            // Boot used to verify every stored blob up front; the same
+            // verification now runs per read on just the requested object.
+            if bytes.len() as u64 != meta.size_bytes || sha256 != sha256_hex(&bytes) {
+                return Err(DurableStoreError::BlobObjectCorrupt {
+                    sha256: sha256.to_owned(),
+                }
+                .into());
+            }
+            bytes
+        } else {
+            self.blob_bytes_in_memory
+                .lock()
+                .expect("HTTP blob bytes mutex")
+                .get(sha256)
+                .cloned()
+                .ok_or_else(|| ServerHttpError::BlobNotFound {
+                    sha256: sha256.to_owned(),
+                })?
+        };
+        Ok(BlobObject {
+            content_type: meta.content_type,
+            bytes,
+        })
     }
 
     /// Raw delivery-contract publish, also used by the shared delivery

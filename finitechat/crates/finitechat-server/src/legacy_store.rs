@@ -19,14 +19,20 @@ use serde_json::Value;
 
 use crate::projections::HttpRoomMembershipProjection;
 use crate::state::{
-    AccountRoomDirectoryMutation, AccountRoomDirectoryRecord, BlobObject, DurableStateSnapshot,
-    KeyPackageClaimIdempotencyRecord, KeyPackageInventoryRecord, KeyPackageInventoryState,
-    PublishIdempotencyRecord, PublishMutation, PushWakeOutboxRecord, WelcomeClaimRecord,
-    consume_key_packages_from_persisted_message, finite_key_package_metadata,
+    AccountRoomDirectoryMutation, AccountRoomDirectoryRecord, BlobBackend, BlobMeta,
+    DurableStateSnapshot, KeyPackageClaimIdempotencyRecord, KeyPackageInventoryRecord,
+    KeyPackageInventoryState, PublishIdempotencyRecord, PublishMutation, PushWakeOutboxRecord,
+    WelcomeClaimRecord, consume_key_packages_from_persisted_message, finite_key_package_metadata,
     mark_next_key_package_claimed, retire_older_finite_key_packages,
 };
-use crate::validate::sha256_hex;
 use crate::{DurableStoreError, SNAPSHOT_ZSTD_LEVEL};
+
+pub(crate) fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PersistedOperation {
@@ -156,9 +162,26 @@ impl SqliteHttpDeliveryStore {
                 size_bytes INTEGER NOT NULL,
                 content_type TEXT NOT NULL,
                 ciphertext BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS http_blob_meta (
+                sha256 TEXT PRIMARY KEY,
+                size_bytes INTEGER NOT NULL,
+                content_type TEXT NOT NULL,
+                backend TEXT NOT NULL CHECK (backend IN ('sqlite','object')),
+                created_at_ms INTEGER NOT NULL,
+                migrated_at_ms INTEGER
             );",
         )?;
         ensure_blob_content_type_column(&conn)?;
+        // Databases written before http_blob_meta existed carry payload rows
+        // only; give each a meta row so boot never has to touch payloads.
+        conn.execute(
+            "INSERT OR IGNORE INTO http_blob_meta
+                 (sha256, size_bytes, content_type, backend, created_at_ms)
+             SELECT sha256, size_bytes, content_type, 'sqlite', ?1
+             FROM http_blob_objects",
+            params![unix_now_ms()],
+        )?;
         drop(conn);
         Ok(store)
     }
@@ -429,13 +452,11 @@ impl SqliteHttpDeliveryStore {
         Ok(wakes)
     }
 
-    pub(crate) fn load_blob_objects(
-        &self,
-    ) -> Result<BTreeMap<String, BlobObject>, DurableStoreError> {
+    pub(crate) fn load_blob_meta(&self) -> Result<BTreeMap<String, BlobMeta>, DurableStoreError> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT sha256, size_bytes, content_type, ciphertext
-             FROM http_blob_objects
+            "SELECT sha256, size_bytes, content_type, backend
+             FROM http_blob_meta
              ORDER BY sha256 ASC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -443,39 +464,66 @@ impl SqliteHttpDeliveryStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, u64>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
-        let mut objects = BTreeMap::new();
+        let mut meta = BTreeMap::new();
         for row in rows {
-            let (sha256, size_bytes, content_type, bytes) = row?;
-            if size_bytes != bytes.len() as u64 || sha256 != sha256_hex(&bytes) {
-                return Err(DurableStoreError::BlobObjectCorrupt { sha256 });
-            }
-            objects.insert(
+            let (sha256, size_bytes, content_type, backend) = row?;
+            let backend = BlobBackend::parse(&backend).ok_or_else(|| {
+                DurableStoreError::BlobObjectCorrupt {
+                    sha256: sha256.clone(),
+                }
+            })?;
+            meta.insert(
                 sha256,
-                BlobObject {
+                BlobMeta {
+                    size_bytes,
                     content_type,
-                    bytes,
+                    backend,
                 },
             );
         }
-        Ok(objects)
+        Ok(meta)
     }
 
-    pub(crate) fn upsert_blob_object(
+    pub(crate) fn load_blob_payload(
+        &self,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, DurableStoreError> {
+        let conn = self.connection();
+        let bytes = conn
+            .query_row(
+                "SELECT ciphertext FROM http_blob_objects WHERE sha256 = ?1",
+                params![sha256],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn insert_blob_object(
         &self,
         sha256: &str,
         content_type: &str,
         bytes: &[u8],
     ) -> Result<(), DurableStoreError> {
-        let conn = self.connection();
-        conn.execute(
+        let mut conn = self.connection();
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "INSERT INTO http_blob_objects (sha256, size_bytes, content_type, ciphertext)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(sha256) DO NOTHING",
             params![sha256, bytes.len() as u64, content_type, bytes],
         )?;
+        transaction.execute(
+            "INSERT INTO http_blob_meta
+                 (sha256, size_bytes, content_type, backend, created_at_ms)
+             VALUES (?1, ?2, ?3, 'sqlite', ?4)
+             ON CONFLICT(sha256) DO NOTHING",
+            params![sha256, bytes.len() as u64, content_type, unix_now_ms()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 

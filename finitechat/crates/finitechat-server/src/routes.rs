@@ -177,14 +177,23 @@ async fn upload_blob_object(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<BlobDescriptor>, ServerHttpError> {
-    Ok(Json(state.put_blob_object(&headers, &body)?))
+    // Blob payloads go to SQLite (hashing + fsync of up to 32 MiB): run on
+    // the blocking pool so the async runtime is never parked on them.
+    let descriptor = tokio::task::spawn_blocking(move || state.put_blob_object(&headers, &body))
+        .await
+        .expect("blob upload task")?;
+    Ok(Json(descriptor))
 }
 
 async fn download_blob_object(
     State(state): State<HttpServerState>,
     AxumPath(sha256): AxumPath<String>,
 ) -> Result<impl IntoResponse, ServerHttpError> {
-    let object = state.get_blob_object(&sha256)?;
+    // Payload reads come from SQLite with a per-read hash verification of up
+    // to 32 MiB: blocking-pool work, same as uploads.
+    let object = tokio::task::spawn_blocking(move || state.get_blob_object(&sha256))
+        .await
+        .expect("blob download task")?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, object.content_type)],
