@@ -90,3 +90,12 @@ and the workflow files themselves.
   `docs/agents/triage-labels.md`.
 - **Domain documentation:** Multi-context monorepo guidance. See
   `docs/agents/domain.md`.
+- **Organization Brain:** Finite has an organization FiniteBrain instance that
+  holds wiki/postmortem/runbook knowledge outside the git tree. `fbrain` is the
+  CLI control plane that materializes FiniteBrain content into a local plaintext
+  Working Tree; when the user refers to "the Brain", org wiki pages,
+  postmortems, runbooks, or Brain paths that are not in git, use `fbrain` to
+  open, sync, and search that content before assuming it is missing. Typical
+  read flow: `fbrain doctor`, `fbrain brain list`, `fbrain open ...`,
+  `fbrain sync now --summary`, `fbrain conflicts --json`. For non-read-only
+  Brain work, follow `finite-brain/skills/finitebrain/SKILL.md`.
