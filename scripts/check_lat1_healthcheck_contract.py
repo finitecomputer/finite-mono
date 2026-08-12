@@ -27,7 +27,8 @@ PROBED_SERVICE_UNITS = [
 ]
 HEALTH_PROBES = tuple(finite_status.CONTRACT["healthcheck"]["probes"])
 METRICS_DIRECTORY = "/run/finite-monitoring"
-METRICS_ENVIRONMENT_FILE = "/etc/finite/grafana-cloud-metrics.env"
+METRICS_ENVIRONMENT_FILE = "/etc/finite/metrics-remote-write.env"
+METRICS_REMOTE_WRITE_URL = "https://metrics-ingest.finite.computer/api/v1/write"
 
 
 def nix_eval(attribute: str, *, raw: bool = False) -> str:
@@ -158,9 +159,10 @@ def main() -> None:
         "finite_service_health_status",
         "node_textfile_mtime_seconds",
         "node_textfile_scrape_error",
-        'sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")',
-        'sys.env("GRAFANA_CLOUD_PROMETHEUS_USERNAME")',
-        'sys.env("GRAFANA_CLOUD_PROMETHEUS_PASSWORD")',
+        METRICS_REMOTE_WRITE_URL,
+        'prometheus.remote_write "finite_monitoring"',
+        'sys.env("FINITE_METRICS_REMOTE_WRITE_USERNAME")',
+        'sys.env("FINITE_METRICS_REMOTE_WRITE_PASSWORD")',
     ):
         if expected not in alloy_config:
             raise SystemExit(f"Alloy config is missing {expected!r}")
