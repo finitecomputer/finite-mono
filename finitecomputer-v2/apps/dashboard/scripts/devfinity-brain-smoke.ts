@@ -545,6 +545,7 @@ async function prepareOrganizationBrain(
   timeoutMs: number,
 ): Promise<Set<string>> {
   await openManageBrains(brain);
+  await ensureManageBrainsSignerConnected(brain);
   const existingIds = new Set(
     await brain
       .locator("#manageBrainsList .brain-switch-button")
@@ -574,6 +575,21 @@ async function prepareOrganizationBrain(
     async () => "Organization Brain Create action did not become ready",
   );
   return existingIds;
+}
+
+async function ensureManageBrainsSignerConnected(brain: FrameLocator) {
+  const connect = brain.locator("#manageBrainsConnectSignerButton");
+  await assertEventually(
+    async () => !(await connect.isVisible()) || (await connect.isEnabled()),
+    30_000,
+    async () => "Manage Brains signer connection action did not become ready",
+  );
+  if (await connect.isVisible()) await connect.click();
+  await assertEventually(
+    async () => !(await connect.isVisible()),
+    30_000,
+    async () => "Manage Brains signer connection did not complete",
+  );
 }
 
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
