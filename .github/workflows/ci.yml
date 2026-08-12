@@ -741,12 +741,18 @@ jobs:
     if: needs.changes.outputs.run_brain_product_matrix == 'true'
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           # Containerized failures preserve root-owned diagnostics. Use a fresh
           # checkout per attempt so those artifacts cannot poison checkout.
           path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
@@ -754,7 +760,16 @@ jobs:
           use-flakehub: false
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-        run: nix develop --command just brain-product-matrix
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
+          DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE: depot
+        run: |
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
+            exit 1
+          fi
+          nix develop --command just brain-product-matrix
       - name: Remove canceled matrix runtime
         if: always()
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}

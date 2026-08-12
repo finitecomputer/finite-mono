@@ -67,7 +67,9 @@ RUN set -eux; \
       *) echo "unsupported gws architecture: ${TARGETARCH}" >&2; exit 64 ;; \
     esac; \
     archive="google-workspace-cli-${gws_arch}-unknown-linux-gnu.tar.gz"; \
-    curl -fsSLo "/tmp/${archive}" \
+    curl --fail --show-error --silent --location \
+      --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 \
+      --output "/tmp/${archive}" \
       "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/${archive}"; \
     echo "${gws_sha256}  /tmp/${archive}" | sha256sum --check -; \
     tar -xzf "/tmp/${archive}" -C /tmp ./gws; \
@@ -78,7 +80,9 @@ RUN set -eux; \
 RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
     && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
-    && curl -fsSLo /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
+    && curl --fail --show-error --silent --location \
+      --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 \
+      --output /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
     && echo "${HERMES_AGENT_DIST_SHA256}  /tmp/hermes-agent.tar.gz" | sha256sum --check - \
     && HERMES_NIX_BUILD=1 /runtime/hermes-venv/bin/pip install --no-cache-dir \
       "hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz" \
