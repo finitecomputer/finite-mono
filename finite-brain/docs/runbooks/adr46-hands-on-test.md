@@ -115,7 +115,10 @@ bob_brain_curl() {
 6. Click **Approve**. Observe "Approval applied" — the hosted identity signs
    the approval artifact and the server commits one invitation per principal
    (Bob + his agent).
-7. Back in **Settings → Invitations**, observe two pending invitations.
+7. Back in **Settings → Invitations**, observe two pending invitations. Each
+   pending invitation's `publicInstructionsUrl` (`…/llms.txt`) now resolves
+   without auth for npub invitations too — it prints the target npub, the
+   invitation id, and the exact accept command.
 
 (Optional denial path: repeat steps 1–5 and click **Dismiss** instead; the
 card resolves without signing anything.)

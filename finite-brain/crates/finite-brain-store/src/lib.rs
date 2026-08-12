@@ -2385,7 +2385,9 @@ fn ensure_share_link_available(
     Ok(())
 }
 
-fn timestamp_expired(expires_at: &str, now: &str) -> bool {
+/// Fail-closed lifecycle check: true when `expires_at` is at or before `now`,
+/// or when either timestamp cannot be parsed as RFC3339.
+pub fn timestamp_expired(expires_at: &str, now: &str) -> bool {
     if expires_at.is_empty() {
         return false;
     }

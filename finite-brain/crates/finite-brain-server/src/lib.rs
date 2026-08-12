@@ -36,7 +36,7 @@ use finite_brain_store::{
     MountedFolderState, PersonalAgentFolderRotation, SharedFolderConnectionStatus,
     SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredShareLink,
     StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput,
-    SyncRecordType, VisibleBrain, VisibleBrainRole,
+    SyncRecordType, VisibleBrain, VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -1525,6 +1525,40 @@ fn public_invite_instructions_text() -> String {
      5. Only a trusted FiniteBrain client or agent runtime should unwrap bootstrap \
      material and create durable claim grants.\n"
         .to_owned()
+}
+
+fn npub_invite_instructions_text(
+    state: &ServerState,
+    invitation: &StoredBrainInvitation,
+) -> Option<String> {
+    let target_npub = invitation.user_id.as_ref()?;
+    let public_base = state.public_base_url.trim_end_matches('/');
+    Some(format!(
+        "FiniteBrain public invite instructions\n\n\
+         This is an npub-targeted FiniteBrain invitation: it can be accepted only by \
+         the Nostr key whose npub matches the target below. This public page is safe \
+         to read without authentication. It intentionally omits the Brain identity, \
+         Folder identity, access scope, inviter identity, Folder Keys, bootstrap \
+         plaintext, and encrypted invite structure.\n\n\
+         Target npub: {target}\n\
+         Invitation id: {id}\n\n\
+         Workflow:\n\
+         1. Act with the Nostr key that matches the target npub above; no other key \
+         can accept this invitation.\n\
+         2. Run the accept command, authenticated as that key, against this Brain \
+         server:\n   fbrain invite brain accept --id {id} --server {public_base}\n\
+         3. The equivalent authenticated route is:\n   POST \
+         {public_base}/v1/invitations/{id}/accept\n\
+         4. Keep any URL fragment or inviteSecret value client-side. Never paste it \
+         into server-visible request bodies, query strings, logs, analytics \
+         redirects, email replies, or issue trackers.\n\n\
+         This page resolves only while the invitation can still be accepted. Once \
+         the invitation is accepted, expired, or revoked, this URL returns the same \
+         generic unavailable response as an unknown invite code; ask the inviter for \
+         a fresh invitation.\n",
+        target = target_npub.as_str(),
+        id = invitation.id,
+    ))
 }
 
 fn access_label(access: FolderAccessMode) -> &'static str {
@@ -8059,6 +8093,284 @@ mod tests {
         assert_eq!(listed.invitations[0].status, "accepted");
     }
 
+    async fn unauthed_get(router: Router, path: &str) -> axum::response::Response {
+        // No AUTHORIZATION header: pins the public, unauthenticated posture of
+        // the llms.txt surface.
+        router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("valid unauthenticated request"),
+            )
+            .await
+            .expect("unauthenticated response")
+    }
+
+    async fn create_npub_invitation(
+        router: Router,
+        admin_keys: &Keys,
+        target_npub: &str,
+    ) -> BrainInvitationResponse {
+        let create_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        let create = authed_request(
+            router,
+            admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(create_body),
+            TEST_NOW,
+        )
+        .await;
+        if create.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(create).await;
+            panic!("npub invitation create failed: {}", body.error);
+        }
+        read_json_with_limit(create, 128 * 1024).await
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_public_instructions_serve_accept_steps_while_pending() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let admin_npub = npub(&admin_keys);
+        let target_npub = npub(&target_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invitation = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+
+        // Sentinel: the advertised public URL resolves instead of 404ing.
+        assert_eq!(
+            invitation.public_instructions_url.as_deref(),
+            Some(format!("{TEST_BASE_URL}{}", invitation.public_instructions_path).as_str())
+        );
+        let public_instructions = unauthed_get(router, &invitation.public_instructions_path).await;
+        assert_eq!(public_instructions.status(), StatusCode::OK);
+        assert_eq!(
+            public_instructions
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let public_instructions = read_text(public_instructions).await;
+        assert!(public_instructions.contains("npub-targeted FiniteBrain invitation"));
+        assert!(public_instructions.contains(&target_npub));
+        assert!(public_instructions.contains(&invitation.id));
+        assert!(public_instructions.contains(&format!(
+            "fbrain invite brain accept --id {} --server {TEST_BASE_URL}",
+            invitation.id
+        )));
+        assert!(public_instructions.contains(&format!(
+            "POST {TEST_BASE_URL}/v1/invitations/{}/accept",
+            invitation.id
+        )));
+
+        // Negative content assertions against known-sensitive fixture values.
+        for forbidden in [
+            admin_npub.as_str(),
+            "acme",
+            "Acme",
+            "getting-started",
+            "restricted",
+            invitation.invite_code.as_str(),
+            "bootstrapWrappedEventJson",
+            "bootstrapPayloadHash",
+            invitation.accept_path.as_str(),
+        ] {
+            assert!(
+                !public_instructions.contains(forbidden),
+                "npub public instructions leaked {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_public_instructions_hide_terminal_expired_and_unknown_codes() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let other_target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let other_target_npub = npub(&other_target_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Accepted invitation: resolves while pending, unavailable afterwards.
+        let accepted = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+        let pending_instructions =
+            unauthed_get(router.clone(), &accepted.public_instructions_path).await;
+        assert_eq!(pending_instructions.status(), StatusCode::OK);
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!("/v1/invitations/{}/accept", accepted.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        assert_error(
+            unauthed_get(router.clone(), &accepted.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Revoked invitation: unavailable.
+        let revoked = create_npub_invitation(router.clone(), &admin_keys, &other_target_npub).await;
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            &format!("/v1/invitations/{}", revoked.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+        assert_error(
+            unauthed_get(router.clone(), &revoked.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Expired-but-pending invitation: unavailable (fail-closed clock).
+        {
+            let mut store = state.store.lock().expect("store mutex");
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(other_target_npub.clone()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-15T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .expect("expired invitation fixture");
+        }
+        assert_error(
+            unauthed_get(
+                router.clone(),
+                "/v1/brain-invitation-links/invite-expired/llms.txt",
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Unknown code: identity-hiding posture unchanged.
+        assert_error(
+            unauthed_get(
+                router,
+                "/v1/brain-invitation-links/invite-never-existed/llms.txt",
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_llms_txt_walk_grants_membership_end_to_end() {
+        // The 2026-08-11 repro: create an npub invite, open its llms.txt with
+        // zero auth, follow the printed accept command as the target, and land
+        // as a Brain member.
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invitation = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+
+        let public_instructions = unauthed_get(
+            router.clone(),
+            invitation
+                .public_instructions_url
+                .as_deref()
+                .expect("public instructions url")
+                .strip_prefix(TEST_BASE_URL)
+                .expect("public instructions url is on the test base"),
+        )
+        .await;
+        assert_eq!(public_instructions.status(), StatusCode::OK);
+        let public_instructions = read_text(public_instructions).await;
+        assert!(public_instructions.contains(&target_npub));
+
+        // Follow the page verbatim: parse the invitation id and server URL out
+        // of the printed accept command rather than trusting the create
+        // response.
+        let accept_command = public_instructions
+            .lines()
+            .find(|line| line.contains("fbrain invite brain accept --id "))
+            .expect("instructions print the accept command");
+        let invitation_id = accept_command
+            .split("--id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("accept command carries an invitation id");
+        let server = accept_command
+            .split("--server ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("accept command carries a server url");
+        assert_eq!(server, TEST_BASE_URL);
+        assert!(invitation_id.starts_with("invitation-"));
+
+        let accept_route = format!("{server}/v1/invitations/{invitation_id}/accept");
+        let accept_route = accept_route
+            .strip_prefix(TEST_BASE_URL)
+            .expect("accept route is on the test base");
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            accept_route,
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+
+        let metadata = get_metadata(router.clone(), &target_keys, "acme", TEST_NOW).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(metadata.members.contains(&target_npub));
+
+        // After acceptance the page falls back to the generic unavailable
+        // response instead of revealing anything.
+        assert_error(
+            unauthed_get(router, &invitation.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn email_brain_invitation_creates_bootstrap_and_claims_access_without_secret() {
         let admin_keys = Keys::generate();
@@ -8217,6 +8529,9 @@ mod tests {
             );
         }
         assert!(public_instructions.contains("inviteSecret"));
+        // The email variant is pinned byte-for-byte: the npub work must not
+        // change the email proof workflow text.
+        assert_eq!(public_instructions, public_invite_instructions_text());
 
         let proof_created_at = format_unix_timestamp(TEST_NOW).unwrap();
         let post_proof_body = serde_json::json!({

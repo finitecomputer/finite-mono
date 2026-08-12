@@ -843,17 +843,36 @@ pub(crate) async fn public_brain_invitation_instructions_handler(
     State(state): State<ServerState>,
     AxumPath(invite_code): AxumPath<String>,
 ) -> Result<Response, ApiError> {
-    {
+    let invitation = {
         let store = state.store.lock().map_err(lock_error)?;
-        let invitation = store.load_brain_invitation_by_code(&invite_code)?;
-        if invitation.target_kind != BrainInvitationTargetKind::EmailBootstrap {
-            return Err(StoreError::UnavailableLink {
-                kind: "brain invitation",
+        store.load_brain_invitation_by_code(&invite_code)?
+    };
+    match invitation.target_kind {
+        BrainInvitationTargetKind::EmailBootstrap => {
+            Ok(text_response(public_invite_instructions_text()))
+        }
+        BrainInvitationTargetKind::Npub => {
+            // E1: the npub variant reveals the target npub and invitation id,
+            // so it resolves only while the invitation is still acceptable;
+            // terminal and expired invitations get the identity-hiding
+            // unavailable response, same as unknown codes.
+            let now = server_timestamp(&state);
+            if invitation.status != LinkStatus::Pending
+                || timestamp_expired(&invitation.expires_at, &now)
+            {
+                return Err(StoreError::UnavailableLink {
+                    kind: "brain invitation",
+                }
+                .into());
             }
-            .into());
+            let text = npub_invite_instructions_text(&state, &invitation).ok_or(
+                StoreError::UnavailableLink {
+                    kind: "brain invitation",
+                },
+            )?;
+            Ok(text_response(text))
         }
     }
-    Ok(text_response(public_invite_instructions_text()))
 }
 
 pub(crate) async fn post_proof_brain_invitation_instructions_handler(

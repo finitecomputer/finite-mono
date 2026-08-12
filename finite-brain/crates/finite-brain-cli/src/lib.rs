@@ -3699,6 +3699,7 @@ fn brain_invites<W: Write>(
         }
         Some("accept") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
+            reject_invite_code_as_invitation_id(&id)?;
             let route = format!("/v1/invitations/{id}/accept");
             let response = signed_json_request(env, args, "POST", &route, None)?;
             write_command_response(output, json, &response)
@@ -3712,6 +3713,17 @@ fn brain_invites<W: Write>(
         Some(other) => Err(CliError::InvalidCommand(format!("invite brain {other}"))),
         None => Err(CliError::MissingArgument("invite brain command")),
     }
+}
+
+fn reject_invite_code_as_invitation_id(id: &str) -> Result<(), CliError> {
+    if id.starts_with("invite-") {
+        return Err(CliError::InvalidInput(format!(
+            "{id} is an invite code, not an invitation id; open the invitation's public \
+             instructions (GET /v1/brain-invitation-links/{id}/llms.txt on the Brain server) \
+             and run the accept command it prints for the matching invitation id"
+        )));
+    }
+    Ok(())
 }
 
 fn claim_email_folder_invitation<W: Write>(
@@ -8495,6 +8507,41 @@ mod tests {
         assert!(requests[0].0.starts_with(
             "POST /v1/invitations/invitation-4f82a37c1b82bcdd54973c466cdde914/accept"
         ));
+    }
+
+    #[test]
+    fn invite_brain_accept_rejects_an_invite_code_with_a_pointer() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+
+        let mut output = Vec::new();
+        let error = run_with_env(
+            [
+                "invite",
+                "brain",
+                "accept",
+                "--id",
+                "invite-0fe6eda60e1bf6e662acb8e2b5c425d9",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("invite code, not an invitation id"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "/v1/brain-invitation-links/invite-0fe6eda60e1bf6e662acb8e2b5c425d9/llms.txt"
+            ),
+            "{message}"
+        );
+        assert!(output.is_empty());
     }
 
     #[test]
