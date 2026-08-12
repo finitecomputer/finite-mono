@@ -5,7 +5,7 @@ name: Hermes runtime smoke
 # a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
 # sole publication path.
 #
-# Dispatch-only because it runs on the self-hosted lat2 Docker runner. Keep the
+# Dispatch-only while the production-image proof stays explicit. Keep the
 # production-image proof explicit until it has enough green history to become
 # a normal main-branch gate.
 
@@ -34,7 +34,7 @@ permissions:
 jobs:
   docker-runtime-smoke:
     name: Docker runtime smoke
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 75
     defaults:
       run:

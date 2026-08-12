@@ -480,14 +480,13 @@ jobs:
     name: Nix service packages
     needs: changes
     if: needs.changes.outputs.run_nix_service_packages == 'true'
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
-          # Other containerized self-hosted jobs can preserve root-owned
-          # diagnostics. A fresh path keeps their artifacts from poisoning
-          # this clean package-build checkout.
+          # Docker-backed jobs can preserve root-owned diagnostics. A fresh
+          # path keeps their artifacts from poisoning this package checkout.
           path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Select Cachix push mode
@@ -736,7 +735,7 @@ jobs:
     name: Brain full-product matrix
     needs: changes
     if: needs.changes.outputs.run_brain_product_matrix == 'true'
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

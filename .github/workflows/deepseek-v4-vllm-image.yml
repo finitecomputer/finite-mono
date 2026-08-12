@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       packages: write

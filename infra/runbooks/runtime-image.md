@@ -13,10 +13,9 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 
 ## PRECONDITIONS
 
-- The `finite-lat-2-mono` self-hosted GitHub Actions runner (on lat2, the CI
-  runner box post-cutover) is registered against finite-mono — both workflows
-  below queue forever without it. Image builds run in CI on lat2; lat1 launches
-  only the resulting digest-pinned artifact.
+- Depot-managed GitHub Actions runner access is available for the
+  `depot-ubuntu-24.04` label. Image builds run in CI on ephemeral Depot
+  runners; lat1 launches only the resulting digest-pinned artifact.
 - The tree state you are building is on the ref you dispatch (the single
   checkout SHA pins finitechat + finite-sites + finite-brain + finite-skills
   together; that is the whole point of the mono adaptation — see the header in

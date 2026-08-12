@@ -6,8 +6,8 @@ name: Agent Runtime Image
 # all pinned by the single checkout SHA — so the multi-clone (and the whole
 # per-repo ref input surface) disappears.
 #
-# NOTE: runs on the self-hosted finite-lat-2 runner, which must be registered
-# against this repo (see infra/hosts/lat2/runners.md for the cutover checklist).
+# NOTE: runs on Depot-managed GitHub Actions runners by default. The publication
+# contract still proves the exact local Docker image ID before pushing tags.
 
 run-name: Publish agent runtime ${{ inputs.version }}
 
@@ -19,9 +19,9 @@ on:
         required: true
         type: string
       runs_on_json:
-        description: "GitHub runner labels JSON"
+        description: "GitHub runner label JSON string or labels array"
         required: true
-        default: '["self-hosted","finite-lat-2"]'
+        default: '"depot-ubuntu-24.04"'
         type: string
 
 concurrency:
@@ -113,10 +113,9 @@ jobs:
 
           docker tag "$VERSION_REF" "$SHA_REF"
           docker push "$SHA_REF"
-          # finite-lat-2 intentionally runs the host Docker package and does
-          # not require the optional buildx plugin. Pulling the just-pushed
-          # tag records the registry manifest in RepoDigests, which gives us
-          # the same immutable proof without coupling publication to buildx.
+          # Keep publication independent of buildx. Pulling the just-pushed
+          # tag records the registry manifest in RepoDigests, preserving the
+          # immutable proof without coupling publication to a builder plugin.
           docker pull "$SHA_REF" >/dev/null
           SHA_DIGEST="$(
             docker image inspect "$SHA_REF" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
