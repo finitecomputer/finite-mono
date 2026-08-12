@@ -322,6 +322,8 @@ jobs:
         run: nix develop --command just stripe-price-contract
       - name: Hosted Recovery Set contract
         run: nix develop --command just hosted-recovery-contract
+      - name: Litestream recovery contract
+        run: nix develop --command just litestream-recovery-contract
       - name: lat1 secret bootstrap contract
         run: nix develop --command just lat1-secret-bootstrap-contract
       - name: lat2 runner guardrails contract

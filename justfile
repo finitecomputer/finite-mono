@@ -126,6 +126,11 @@ hosted-recovery-contract:
     python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
     infra/scripts/test-hosted-web-chat-restore
 
+# Synthetic offline litestream replicate -> restore -> integrity proof.
+litestream-recovery-contract:
+    bash -n infra/scripts/test-litestream-restore
+    infra/scripts/test-litestream-restore
+
 # Values-free file/mode/name contract for rebuilding lat1 secret inputs.
 lat1-secret-bootstrap-contract:
     python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null

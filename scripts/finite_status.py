@@ -72,6 +72,12 @@ CONTRACT: dict[str, Any] = {
         "borg_health_unit": "finite-hosted-web-chat-offsite-health.service",
         "borg_success_stamp": "/var/lib/finitecomputer/backups/hosted-web-chat-last-success",
         "maximum_age_seconds": 180_000,
+        "litestream_service_unit": "finite-litestream.service",
+        "litestream_health_unit": "finite-litestream-health.service",
+        "litestream_success_stamp": "/var/lib/finite-litestream/health-last-success",
+        # The health timer refreshes the stamp every 5 minutes when replication
+        # is verified end-to-end; 30 minutes of silence is red.
+        "litestream_maximum_age_seconds": 1_800,
     },
     "rollout": {
         "state_root": ".local-state/runtime-rollouts",
@@ -604,6 +610,20 @@ def collect_recovery(hostname: str) -> dict[str, Any]:
             raw[key] = systemd_properties(unit)
         except CollectionError as error:
             raw[key] = {"error": str(error)}
+
+    litestream_stamp = Path(recovery["litestream_success_stamp"])
+    try:
+        raw["litestream_last_success_epoch"] = int(
+            litestream_stamp.read_text(encoding="utf-8").strip()
+        )
+    except (OSError, ValueError) as error:
+        raw["litestream_last_success_error"] = f"cannot read {litestream_stamp}: {error}"
+    for key in ("litestream_service_unit", "litestream_health_unit"):
+        unit = recovery[key]
+        try:
+            raw[key] = systemd_properties(unit)
+        except CollectionError as error:
+            raw[key] = {"error": str(error)}
     return raw
 
 
@@ -1084,6 +1104,28 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
     job_status = unit_status(raw.get("borg_job_unit", {}), active_required=False)
     health_status = unit_status(raw.get("borg_health_unit", {}), active_required=False)
     statuses.extend([stamp_status, job_status, health_status])
+
+    litestream_epoch = raw.get("litestream_last_success_epoch")
+    if isinstance(litestream_epoch, int):
+        litestream_age = int(now.timestamp()) - litestream_epoch
+        litestream_stamp_status = (
+            "green"
+            if 0 <= litestream_age
+            <= CONTRACT["recovery"]["litestream_maximum_age_seconds"]
+            else "red"
+        )
+    else:
+        litestream_age = None
+        litestream_stamp_status = "unknown"
+    litestream_service_status = unit_status(
+        raw.get("litestream_service_unit", {}), active_required=True
+    )
+    litestream_health_status = unit_status(
+        raw.get("litestream_health_unit", {}), active_required=False
+    )
+    statuses.extend(
+        [litestream_stamp_status, litestream_service_status, litestream_health_status]
+    )
     return {
         "status": combine_status(statuses),
         "applicable": True,
@@ -1099,6 +1141,19 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
             "age_seconds": borg_age,
             "stamp_status": stamp_status,
             "error": raw.get("borg_last_success_error"),
+        },
+        "litestream": {
+            "completion_mechanism": (
+                "health timer verifies replicated LTX freshness and writes a success stamp"
+            ),
+            "service_unit": CONTRACT["recovery"]["litestream_service_unit"],
+            "service_status": litestream_service_status,
+            "health_unit": CONTRACT["recovery"]["litestream_health_unit"],
+            "health_status": litestream_health_status,
+            "last_success_epoch": litestream_epoch,
+            "age_seconds": litestream_age,
+            "stamp_status": litestream_stamp_status,
+            "error": raw.get("litestream_last_success_error"),
         },
     }
 

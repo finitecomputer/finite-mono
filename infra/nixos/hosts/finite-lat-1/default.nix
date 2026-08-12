@@ -23,6 +23,7 @@ in
     ../../modules/postgres.nix
     ../../modules/backups.nix
     ../../modules/monitoring.nix
+    ../../modules/finite-litestream.nix
   ];
 
   networking.hostName = "finite-lat-1";
@@ -43,6 +44,25 @@ in
   # repository dedicated to lat1 so encryption and retention are not coupled
   # to clawland's finitecomputer archives.
   finite.recoveryBackup.borgRepository = "fm2890@fm2890.rsync.net:finitecomputer/finite-lat-1";
+
+  # Continuous chat-database replication to Latitude object storage
+  # (modules/finite-litestream.nix). Endpoint and bucket are non-secret;
+  # credentials live only in the operator-placed env file declared in
+  # secret-bootstrap-contract.json.
+  finite.litestream = {
+    enable = true;
+    replica = {
+      endpoint = "https://objects.nyc.storage.sh";
+      bucket = "finite-lat-1-litestream";
+    };
+    dbs = [
+      {
+        name = "finite-chat-server";
+        path = "/var/lib/private/finite-chat/data/server.sqlite3";
+        owningService = "finitechat-server.service";
+      }
+    ];
+  };
 
   # Static public addressing via systemd-networkd, matched by the WAN NIC's
   # MAC (90:5a:08:2e:63:1b, derived from the capture's eno1 link-local

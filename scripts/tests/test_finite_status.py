@@ -152,6 +152,31 @@ class FiniteStatusTests(unittest.TestCase):
             self.assertEqual(checked, 1)
             self.assertEqual(failures, [])
 
+    def test_litestream_recovery_evidence_is_scored_in_the_recovery_boundary(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+
+        fresh = finite_status.build_recovery(raw["recovery"], now)
+        self.assertEqual(fresh["litestream"]["stamp_status"], "green")
+        self.assertEqual(fresh["litestream"]["service_status"], "green")
+        self.assertEqual(
+            fresh["litestream"]["service_unit"], "finite-litestream.service"
+        )
+
+        stale = dict(raw["recovery"])
+        stale["litestream_last_success_epoch"] = int(now.timestamp()) - 7200
+        report = finite_status.build_recovery(stale, now)
+        self.assertEqual(report["litestream"]["stamp_status"], "red")
+        self.assertEqual(report["status"], "red")
+
+        missing = dict(raw["recovery"])
+        del missing["litestream_last_success_epoch"]
+        missing["litestream_last_success_error"] = "cannot read stamp"
+        missing["litestream_service_unit"] = {"error": "unit not found"}
+        report = finite_status.build_recovery(missing, now)
+        self.assertEqual(report["litestream"]["stamp_status"], "unknown")
+        self.assertNotEqual(report["status"], "green")
+
     def test_interrupted_rollout_is_reported_without_repair(self) -> None:
         raw = {
             "exists": True,

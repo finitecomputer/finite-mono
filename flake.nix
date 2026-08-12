@@ -107,6 +107,10 @@
           overlays = [ (import rust-overlay) ];
         };
         gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
+        # Litestream comes from the lat1 platform pin: 25.11's litestream is
+        # 0.3.x and marked insecure, and the restore drill must use the same
+        # 0.5 config format the host runs (modules/finite-litestream.nix).
+        litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
         rustVersion = "1.93.1";
         # Keep this in sync with the CI Rust workspace pin so cached Cargo
         # artifacts are reusable between clippy and Nix-shell test commands.
@@ -150,11 +154,15 @@
         devShells.default = pkgs.mkShell {
           packages =
             rustBasePackages
-            ++ [ gcxCli ]
+            ++ [
+              gcxCli
+              litestreamCli
+            ]
             ++ (with pkgs; [
               nodejs_24
               pnpm
               rsync
+              sqlite
               xxd
               rustToolchain
             ])
