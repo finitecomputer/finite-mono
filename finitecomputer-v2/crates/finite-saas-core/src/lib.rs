@@ -45,15 +45,19 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0016_runtime_cold_relocation.sql"),
     "\n",
-    include_str!("../migrations/0017_rfc3339_reads.sql")
+    include_str!("../migrations/0017_rfc3339_reads.sql"),
+    "\n",
+    include_str!("../migrations/0018_finite_private_5x_profile.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
+pub const FINITE_PRIVATE_5X_LIMIT_PROFILE: &str = "finite-private-generous-5x-v1";
 const DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS: i64 = 5 * 60 * 60;
 const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 100_000_000;
+const FINITE_PRIVATE_5X_BURST_LIMIT_UNITS: i64 = 500_000_000;
 const DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS: Option<i64> = None;
 const FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
@@ -1115,7 +1119,31 @@ pub struct FinitePrivateAdminAuditEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct FinitePrivateAdminProject {
+    pub id: String,
+    pub display_name: String,
+    pub agent_runtime_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateAdminAccount {
+    pub user_id: String,
+    pub email: String,
+    pub grant: FinitePrivateGrant,
+    pub api_keys: Vec<FinitePrivateApiKey>,
+    pub projects: Vec<FinitePrivateAdminProject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct FinitePrivateAdminState {
+    /// Account-centric operator view. The legacy flat arrays remain during the
+    /// additive dashboard/Core rollout so mixed versions fail gracefully.
+    #[serde(default)]
+    pub accounts: Vec<FinitePrivateAdminAccount>,
+    #[serde(default)]
+    pub profiles: Vec<FinitePrivateLimitProfile>,
     pub grants: Vec<FinitePrivateGrant>,
     pub api_keys: Vec<FinitePrivateApiKey>,
     pub admin_audit_events: Vec<FinitePrivateAdminAuditEvent>,
@@ -1537,6 +1565,15 @@ pub struct AdminRevokeFinitePrivateApiKeyInput {
 pub struct AdminResetFinitePrivateUsageWindowInput {
     pub admin_verified_email: String,
     pub grant_id: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminAssignFinitePrivateLimitProfileInput {
+    pub admin_verified_email: String,
+    pub grant_id: String,
+    pub limit_profile_id: String,
     pub now: Option<String>,
 }
 
@@ -7535,6 +7572,8 @@ mod tests {
         assert!(CORE_SCHEMA_SQL.contains("TIMESTAMPTZ"));
         assert!(CORE_SCHEMA_SQL.contains("finite-private-generous-v2"));
         assert!(CORE_SCHEMA_SQL.contains("100000000"));
+        assert!(CORE_SCHEMA_SQL.contains(FINITE_PRIVATE_5X_LIMIT_PROFILE));
+        assert!(CORE_SCHEMA_SQL.contains("500000000"));
         assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
     }

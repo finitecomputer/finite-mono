@@ -4,24 +4,25 @@ use crate::launch_codes::{
 };
 use crate::store::{CoreStore, VisibleProject};
 use crate::{
-    AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
-    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
-    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest,
-    AgentRuntime, BillingOverview, BillingSubscriptionStatus, BrainAgentAccount,
-    CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateDailyResetResult,
-    FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
-    FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    AdminAssignFinitePrivateLimitProfileInput, AdminIssueFinitePrivateFriendKeyInput,
+    AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
+    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeInput,
+    AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, AgentRuntime,
+    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, CancelAgentCreationRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
+    CustomerBillingAccount, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
+    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
@@ -373,6 +374,13 @@ pub struct AdminRuntimeUpgradeRequest {
 pub struct AdminIssueFinitePrivateFriendKeyRequest {
     pub email: String,
     pub limit_profile_id: Option<String>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminAssignFinitePrivateLimitProfileRequest {
+    pub limit_profile_id: String,
     pub now: Option<String>,
 }
 
@@ -796,6 +804,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         .route(
             "/api/core/v1/admin/finite-private/grants/{grant_id}/window-reset",
             post(admin_reset_finite_private_usage_window),
+        )
+        .route(
+            "/api/core/v1/admin/finite-private/grants/{grant_id}/limit-profile",
+            post(admin_assign_finite_private_limit_profile),
         )
         .route("/api/core/v1/me", get(me))
         .route("/api/core/v1/me/dashboard-summary", get(dashboard_summary))
@@ -1295,6 +1307,26 @@ async fn admin_reset_finite_private_usage_window(
             .admin_reset_finite_private_usage_window(AdminResetFinitePrivateUsageWindowInput {
                 admin_verified_email: identity.email,
                 grant_id,
+                now: input.now,
+            })
+            .await?,
+    ))
+}
+
+async fn admin_assign_finite_private_limit_profile(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(grant_id): Path<String>,
+    Json(input): Json<AdminAssignFinitePrivateLimitProfileRequest>,
+) -> Result<Json<FinitePrivateGrant>, ApiError> {
+    let identity = require_admin_identity(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .admin_assign_finite_private_limit_profile(AdminAssignFinitePrivateLimitProfileInput {
+                admin_verified_email: identity.email,
+                grant_id,
+                limit_profile_id: input.limit_profile_id,
                 now: input.now,
             })
             .await?,
@@ -5544,6 +5576,13 @@ mod tests {
                     "/api/core/v1/admin/finite-private/grants/grant_x/window-reset".to_string(),
                     serde_json::json!({}),
                 ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/finite-private/grants/grant_x/limit-profile".to_string(),
+                    serde_json::json!({
+                        "limitProfileId": crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+                    }),
+                ),
             ] {
                 for headers in [
                     identity_headers("stranger@finite.vip", "true"),
@@ -5795,6 +5834,23 @@ mod tests {
             let key_id = issued["api_key"]["id"].as_str().unwrap().to_string();
             let grant_id = issued["grant"]["id"].as_str().unwrap().to_string();
 
+            let (status, assigned) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/finite-private/grants/{grant_id}/limit-profile"),
+                &admin,
+                Some(serde_json::json!({
+                    "limitProfileId": crate::FINITE_PRIVATE_5X_LIMIT_PROFILE,
+                    "now": "2026-05-25T12:30:00Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                assigned["limit_profile_id"],
+                crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+            );
+
             // Core never stores or re-serves the raw key: the whole admin state
             // must not contain it anywhere.
             let (status, admin_state) = send_json(
@@ -5807,6 +5863,21 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert!(!admin_state.to_string().contains(&raw_key));
+            assert_eq!(admin_state["accounts"][0]["email"], "friend@finite.vip");
+            assert_eq!(
+                admin_state["accounts"][0]["grant"]["limit_profile_id"],
+                crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+            );
+            assert!(
+                admin_state["profiles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|profile| {
+                        profile["id"] == crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+                            && profile["burst_limit_units"] == 500_000_000
+                    })
+            );
 
             // Rotate returns a brand-new one-time raw key and revokes the old key.
             let (status, rotated) = send_json(
@@ -5910,6 +5981,7 @@ mod tests {
                 "finite_private.api_key.admin_rotate",
                 "finite_private.api_key.admin_revoke",
                 "finite_private.grant.admin_window_reset",
+                "finite_private.grant.admin_assign_limit_profile",
             ] {
                 assert!(
                     admin_actions.contains(&expected.to_string()),

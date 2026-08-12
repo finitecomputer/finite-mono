@@ -14,6 +14,7 @@ import {
 import {
   adminOpsIssueLaunchCodeBatchAction,
   adminOpsIssueFriendKeyAction,
+  adminOpsAssignFinitePrivateLimitProfileAction,
   adminOpsRotateKeyAction,
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
@@ -31,11 +32,13 @@ import {
   launchCodeDownloadFilename,
   launchCodeDownloadText,
   launchCodeHostingTierLabel,
+  finitePrivateProfileLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
   type OneTimeKeyActionState,
   type OneTimeLaunchCodeActionState,
 } from "@/lib/admin-ops";
+import type { CoreFinitePrivateLimitProfile } from "@/lib/core-client";
 
 const IDLE_STATE: OneTimeKeyActionState = { status: "idle" };
 const IDLE_LAUNCH_CODE_STATE: OneTimeLaunchCodeActionState = { status: "idle" };
@@ -114,7 +117,11 @@ function OneTimeKeyPanel({ state }: { state: OneTimeKeyActionState }) {
 }
 
 /** Friend-key issue form with one-time raw-key display. */
-export function AdminFriendKeyIssueForm() {
+export function AdminFriendKeyIssueForm({
+  profiles,
+}: {
+  profiles: CoreFinitePrivateLimitProfile[];
+}) {
   const [state, formAction] = useActionState(adminOpsIssueFriendKeyAction, IDLE_STATE);
 
   return (
@@ -135,18 +142,66 @@ export function AdminFriendKeyIssueForm() {
         <Input id="adminFriendKeyEmail" name="email" type="email" required />
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="adminFriendKeyLimitProfile">Limit profile (optional)</Label>
-        <Input
-          id="adminFriendKeyLimitProfile"
-          name="limitProfileId"
-          placeholder="finite-private-generous-v2"
-        />
+        <Label htmlFor="adminFriendKeyLimitProfile">Limit profile</Label>
+        {profiles.length > 0 ? (
+          <Select name="limitProfileId" defaultValue={profiles[0].id} required>
+            <SelectTrigger id="adminFriendKeyLimitProfile" className="w-full">
+              <SelectValue placeholder="Choose a limit" />
+            </SelectTrigger>
+            <SelectContent>
+              {profiles.map((profile) => (
+                <SelectItem key={profile.id} value={profile.id}>
+                  {finitePrivateProfileLabel(profile.id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-sm text-muted-foreground">Default 1× profile</p>
+        )}
       </div>
       <FormActionButton className="w-fit" pendingLabel="Issuing...">
         <KeyRoundIcon />
         Issue key
       </FormActionButton>
       <OneTimeKeyPanel state={state} />
+    </form>
+  );
+}
+
+export function AdminFinitePrivateProfileForm({
+  grantId,
+  currentProfileId,
+  profiles,
+}: {
+  grantId: string;
+  currentProfileId: string;
+  profiles: CoreFinitePrivateLimitProfile[];
+}) {
+  return (
+    <form
+      action={adminOpsAssignFinitePrivateLimitProfileAction}
+      className="flex flex-wrap items-end gap-2"
+    >
+      <input type="hidden" name="grantId" value={grantId} />
+      <div className="grid min-w-56 gap-1.5">
+        <Label htmlFor={`finitePrivateProfile-${grantId}`}>Usage limit</Label>
+        <Select name="limitProfileId" defaultValue={currentProfileId} required>
+          <SelectTrigger id={`finitePrivateProfile-${grantId}`} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {profiles.map((profile) => (
+              <SelectItem key={profile.id} value={profile.id}>
+                {finitePrivateProfileLabel(profile.id)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <FormActionButton variant="outline" size="sm" pendingLabel="Saving...">
+        Save limit
+      </FormActionButton>
     </form>
   );
 }

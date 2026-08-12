@@ -141,6 +141,29 @@ export type CoreFinitePrivateApiKey = {
   updated_at: string;
 };
 
+export type CoreFinitePrivateLimitProfile = {
+  id: string;
+  burst_window_seconds: number;
+  burst_limit_units: number;
+  weekly_limit_units?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreFinitePrivateAdminProject = {
+  id: string;
+  displayName: string;
+  agentRuntimeId?: string | null;
+};
+
+export type CoreFinitePrivateAdminAccount = {
+  userId: string;
+  email: string;
+  grant: CoreFinitePrivateGrant;
+  apiKeys: CoreFinitePrivateApiKey[];
+  projects: CoreFinitePrivateAdminProject[];
+};
+
 export type CoreFinitePrivateAdminAuditEvent = {
   id: string;
   action: string;
@@ -154,6 +177,10 @@ export type CoreFinitePrivateAdminAuditEvent = {
 };
 
 export type CoreFinitePrivateAdminState = {
+  /** Additive account-centric view; absent on an N-1 Core. */
+  accounts?: CoreFinitePrivateAdminAccount[];
+  /** Additive assignable-profile catalog; absent on an N-1 Core. */
+  profiles?: CoreFinitePrivateLimitProfile[];
   grants: CoreFinitePrivateGrant[];
   apiKeys: CoreFinitePrivateApiKey[];
   adminAuditEvents: CoreFinitePrivateAdminAuditEvent[];
@@ -1136,6 +1163,27 @@ export async function adminResetCoreFinitePrivateWindow(grantId: string) {
       requiredString(grantId, "Grant id is required.")
     )}/window-reset`,
     { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminAssignCoreFinitePrivateLimitProfile(input: {
+  grantId: string;
+  limitProfileId: string;
+}) {
+  const grantId = requiredString(input.grantId, "Grant id is required.");
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>(
+    `/api/core/v1/admin/finite-private/grants/${encodeURIComponent(grantId)}/limit-profile`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        limitProfileId: requiredString(
+          input.limitProfileId,
+          "Limit profile is required."
+        ),
+      }),
+    }
   );
   invalidateCoreReadCache();
   return result;

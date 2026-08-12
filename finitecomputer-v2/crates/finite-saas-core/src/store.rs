@@ -4,18 +4,19 @@ use crate::launch_codes::{
     prepare_launch_code_batch,
 };
 use crate::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
-    AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
-    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
-    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
-    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, CORE_SCHEMA_SQL,
-    CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
+    AdminArchiveUnrecoverableRuntimeInput, AdminAssignFinitePrivateLimitProfileInput,
+    AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
+    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
+    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
+    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
+    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
+    ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
+    BrainAgentAccount, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
     FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
     FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
     FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
@@ -844,6 +845,17 @@ impl CoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
+    pub async fn admin_assign_finite_private_limit_profile(
+        &self,
+        input: AdminAssignFinitePrivateLimitProfileInput,
+    ) -> CoreResult<FinitePrivateGrant> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_assign_finite_private_limit_profile(&*tx, input).await?;
         self.finish(tx).await?;
         Ok(result)
     }
@@ -3816,9 +3828,8 @@ where
     Ok(())
 }
 
-/// Mirror `ensure_finite_private_limit_profile`: an existing profile is
-/// returned; the DEFAULT profile is created on demand matching the in-memory
-/// spec; any other missing profile is an error.
+/// Return an existing profile, create one of Core's built-in profiles on
+/// demand, and reject unknown profile identifiers.
 async fn ensure_finite_private_limit_profile_row<C>(
     client: &C,
     id: &str,
@@ -3838,9 +3849,13 @@ where
     {
         return Ok(());
     }
-    if id != crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE {
-        return Err(CoreError::FinitePrivateLimitProfileNotFound);
-    }
+    let burst_limit_units = match id {
+        crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE => {
+            crate::DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS
+        }
+        crate::FINITE_PRIVATE_5X_LIMIT_PROFILE => crate::FINITE_PRIVATE_5X_BURST_LIMIT_UNITS,
+        _ => return Err(CoreError::FinitePrivateLimitProfileNotFound),
+    };
     client
         .execute(
             "INSERT INTO finite_private_limit_profiles (
@@ -3849,9 +3864,9 @@ where
              VALUES ($1, $2, $3, $4, $5::text::timestamptz, $5::text::timestamptz)
              ON CONFLICT (id) DO NOTHING",
             &[
-                &crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE,
+                &id,
                 &crate::DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS,
-                &crate::DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS,
+                &burst_limit_units,
                 &crate::DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS,
                 &now,
             ],
@@ -7064,6 +7079,56 @@ where
     Ok(grant)
 }
 
+async fn postgres_admin_assign_finite_private_limit_profile<C>(
+    client: &C,
+    input: AdminAssignFinitePrivateLimitProfileInput,
+) -> CoreResult<FinitePrivateGrant>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let grant_id =
+        trim_to_option(Some(&input.grant_id)).ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    let limit_profile_id = trim_to_option(Some(&input.limit_profile_id))
+        .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
+    ensure_finite_private_limit_profile_row(client, &limit_profile_id, &now).await?;
+    let previous = select_finite_private_grant(client, &grant_id, true)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    client
+        .execute(
+            "UPDATE finite_private_grants
+             SET limit_profile_id = $2, updated_at = $3::text::timestamptz
+             WHERE id = $1",
+            &[&grant_id, &limit_profile_id, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    let grant = select_finite_private_grant(client, &grant_id, false)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "finite_private.grant.admin_assign_limit_profile",
+            target_type: "grant",
+            target_id: &grant.id,
+            grant_id: Some(&grant.id),
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "previousLimitProfileId": previous.limit_profile_id,
+                "limitProfileId": grant.limit_profile_id.clone(),
+            }),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(grant)
+}
+
 async fn postgres_reserve_finite_private_usage<C>(
     client: &C,
     input: ReserveFinitePrivateUsageInput,
@@ -7643,21 +7708,21 @@ where
     C: GenericClient + Sync,
 {
     let grant_sql = format!(
-        "SELECT id, user_id, limit_profile_id, status,
-                CASE WHEN current_window_started_at IS NULL THEN NULL
+        "SELECT fp_grant.id, fp_grant.user_id, fp_grant.limit_profile_id, fp_grant.status,
+                CASE WHEN fp_grant.current_window_started_at IS NULL THEN NULL
                      ELSE {started} END AS current_window_started_at,
-                current_window_used_units, burst_window_epoch,
-                {created} AS created_at, {updated} AS updated_at
-         FROM finite_private_grants
-         ORDER BY created_at, id",
-        started = rfc3339_col("current_window_started_at"),
-        created = rfc3339_col("created_at"),
-        updated = rfc3339_col("updated_at"),
+                fp_grant.current_window_used_units, fp_grant.burst_window_epoch,
+                {created} AS created_at, {updated} AS updated_at,
+                account.normalized_email
+         FROM finite_private_grants AS fp_grant
+         JOIN users AS account ON account.id = fp_grant.user_id
+         ORDER BY fp_grant.created_at, fp_grant.id",
+        started = rfc3339_col("fp_grant.current_window_started_at"),
+        created = rfc3339_col("fp_grant.created_at"),
+        updated = rfc3339_col("fp_grant.updated_at"),
     );
-    let grants = client
-        .query(&grant_sql, &[])
-        .await
-        .map_err(store_error)?
+    let grant_rows = client.query(&grant_sql, &[]).await.map_err(store_error)?;
+    let grants = grant_rows
         .iter()
         .map(finite_private_grant_from_row)
         .collect::<CoreResult<Vec<_>>>()?;
@@ -7676,8 +7741,70 @@ where
         .iter()
         .map(finite_private_api_key_from_row)
         .collect::<CoreResult<Vec<_>>>()?;
+    let profile_sql = format!(
+        "SELECT id, burst_window_seconds, burst_limit_units, weekly_limit_units,
+                {created} AS created_at, {updated} AS updated_at
+         FROM finite_private_limit_profiles
+         ORDER BY id",
+        created = rfc3339_col("created_at"),
+        updated = rfc3339_col("updated_at"),
+    );
+    let profiles = client
+        .query(&profile_sql, &[])
+        .await
+        .map_err(store_error)?
+        .iter()
+        .map(finite_private_limit_profile_from_row)
+        .collect::<Vec<_>>();
+    let project_rows = client
+        .query(
+            "SELECT project.id, project.owner_user_id, project.display_name,
+                    link.agent_runtime_id
+             FROM projects AS project
+             JOIN finite_private_grants AS fp_grant
+               ON fp_grant.user_id = project.owner_user_id
+             LEFT JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.active = TRUE
+             ORDER BY project.display_name, project.id",
+            &[],
+        )
+        .await
+        .map_err(store_error)?;
+    let mut projects_by_user = BTreeMap::<String, Vec<FinitePrivateAdminProject>>::new();
+    for row in project_rows {
+        projects_by_user
+            .entry(row.get("owner_user_id"))
+            .or_default()
+            .push(FinitePrivateAdminProject {
+                id: row.get("id"),
+                display_name: row.get("display_name"),
+                agent_runtime_id: row.get("agent_runtime_id"),
+            });
+    }
+    let mut accounts = grant_rows
+        .iter()
+        .zip(grants.iter())
+        .map(|(row, grant)| FinitePrivateAdminAccount {
+            user_id: grant.user_id.clone(),
+            email: row.get("normalized_email"),
+            grant: grant.clone(),
+            api_keys: api_keys
+                .iter()
+                .filter(|key| key.grant_id == grant.id)
+                .cloned()
+                .collect(),
+            projects: projects_by_user.remove(&grant.user_id).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by(|left, right| {
+        left.email
+            .cmp(&right.email)
+            .then_with(|| left.user_id.cmp(&right.user_id))
+    });
     let admin_audit_events = postgres_finite_private_admin_audit_events(client).await?;
     Ok(FinitePrivateAdminState {
+        accounts,
+        profiles,
         grants,
         api_keys,
         admin_audit_events,
@@ -10087,8 +10214,17 @@ mod tests {
                 .await
                 .unwrap()
                 .get(0);
+            let five_x_limit: i64 = raw
+                .query_one(
+                    "SELECT burst_limit_units FROM finite_private_limit_profiles WHERE id = $1",
+                    &[&crate::FINITE_PRIVATE_5X_LIMIT_PROFILE],
+                )
+                .await
+                .unwrap()
+                .get(0);
             assert_eq!(old_limit, 100_000_000);
             assert_eq!(new_limit, 100_000_000);
+            assert_eq!(five_x_limit, 500_000_000);
             let usage_index_exists: bool = raw
                 .query_one(
                     "SELECT to_regclass('finite_private_reservations_grant_status_epoch_created_idx') IS NOT NULL",
@@ -10322,6 +10458,17 @@ mod tests {
                 .unwrap()
                 .expect("admin ops request should lease");
             assert_eq!(lease.request.id, created.request.id);
+            let provisioned_owner_key = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-admin-ops-{run}"),
+                    lease_token: format!("lease-admin-ops-{run}"),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    source_machine_id: Some(machine_id.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap();
             let completed = store
                 .complete_agent_creation_request(CompleteAgentCreationRequestInput {
                     request_id: lease.request.id.clone(),
@@ -10365,6 +10512,19 @@ mod tests {
                 Some(*kata_runtime_capabilities().v1())
             );
             assert!(overview.runtime_link_active);
+            let owner_account = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .accounts
+                .into_iter()
+                .find(|account| account.email == owner_email)
+                .expect("provisioned owner should have a correlated Finite Private account");
+            assert_eq!(owner_account.grant.id, provisioned_owner_key.grant.id);
+            assert!(owner_account.projects.iter().any(|project| {
+                project.id == project_id
+                    && project.agent_runtime_id.as_deref() == Some(runtime_id.as_str())
+            }));
 
             // Admin restart persists a leasable control request.
             let restart = store
@@ -10454,6 +10614,49 @@ mod tests {
                 .unwrap();
             assert!(!repeated_reset.performed);
 
+            let before_assignment = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .accounts
+                .into_iter()
+                .find(|account| account.email == friend_email)
+                .unwrap()
+                .grant;
+            let assigned = store
+                .admin_assign_finite_private_limit_profile(
+                    AdminAssignFinitePrivateLimitProfileInput {
+                        admin_verified_email: admin_email.clone(),
+                        grant_id: issued.grant.id.clone(),
+                        limit_profile_id: crate::FINITE_PRIVATE_5X_LIMIT_PROFILE.to_string(),
+                        now: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                assigned.limit_profile_id,
+                crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+            );
+            assert_eq!(
+                assigned.current_window_used_units,
+                before_assignment.current_window_used_units
+            );
+            assert_eq!(
+                assigned.burst_window_epoch,
+                before_assignment.burst_window_epoch
+            );
+            let assigned_usage = store
+                .finite_private_usage_status_for_api_key(
+                    &raw_key,
+                    true,
+                    Some("2026-07-21T12:03:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(assigned_usage.burst_limit_units, 500_000_000);
+
             let rotated = store
                 .admin_rotate_finite_private_api_key(AdminRotateFinitePrivateApiKeyInput {
                     admin_verified_email: admin_email.clone(),
@@ -10466,6 +10669,17 @@ mod tests {
             assert_ne!(rotated.id, issued.api_key.id);
 
             let admin_state = store.finite_private_admin_state().await.unwrap();
+            let account = admin_state
+                .accounts
+                .iter()
+                .find(|account| account.email == friend_email)
+                .unwrap();
+            assert_eq!(account.grant.id, issued.grant.id);
+            assert_eq!(account.api_keys.len(), 2);
+            assert!(admin_state.profiles.iter().any(|profile| {
+                profile.id == crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+                    && profile.burst_limit_units == 500_000_000
+            }));
             let old_key = admin_state
                 .api_keys
                 .iter()
@@ -10513,6 +10727,7 @@ mod tests {
                 "finite_private.api_key.admin_rotate",
                 "finite_private.api_key.admin_revoke",
                 "finite_private.grant.admin_window_reset",
+                "finite_private.grant.admin_assign_limit_profile",
             ] {
                 assert!(
                     admin_actions.contains(&expected.to_string()),
