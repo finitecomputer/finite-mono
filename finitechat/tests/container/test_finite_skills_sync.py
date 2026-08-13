@@ -282,8 +282,15 @@ class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
         )
 
         for requirement in requirements:
-            self.assertIn(requirement, dockerfile)
             self.assertIn(requirement, setup)
+        self.assertIn("ARG HERMES_AGENT_STORE_PATH", dockerfile)
+        self.assertIn("ARG HERMES_AGENT_PYTHON_PATH", dockerfile)
+        self.assertIn("COPY .finite-hermes-nix-store/nix/store /nix/store", dockerfile)
+        self.assertIn(
+            '"${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c '
+            "'import googleapiclient, google_auth_httplib2, google_auth_oauthlib'",
+            dockerfile,
+        )
         for module in ("googleapiclient", "google_auth_oauthlib", "google_auth_httplib2"):
             self.assertIn(module, runtime_image_workflow)
         ensure_deps = setup.split("def _ensure_deps():", 1)[1].split("def check_auth():", 1)[0]
