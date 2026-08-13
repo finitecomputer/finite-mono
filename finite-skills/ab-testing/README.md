@@ -25,8 +25,9 @@ pnpm install --frozen-lockfile
 pnpm run browsers
 ```
 
-Real runs default to Finite Private. The harness accepts a skill-specific key
-override, then follows the same local key convention as devfinity:
+Real runs default to the Devfinity local Finite agent, backed by Finite
+Private. The harness accepts a skill-specific key override, then follows the
+same local key convention as devfinity:
 `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`, then the general
 `FINITE_PRIVATE_API_KEY`, a cached key under `DEVFINITY_STATE_DIR`, then the
 default cache at
@@ -39,11 +40,17 @@ root:
 just dev inference-key
 ```
 
-Then generate artifacts:
+Then generate artifacts with the product-accurate local Finite/Hermes agent:
 
 ```sh
 just skills ab-test
 ```
+
+The default Devfinity runner uses the Apple Container SaaS profile, so it needs
+the same host prerequisites as `just dev saas-smoke` (`container system start`
+on a supported Apple silicon macOS host). Set
+`SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1` to use Devfinity's Docker runtime profile
+for disposable local runs.
 
 To test one custom build prompt without editing `promptfooconfig.yaml`:
 
@@ -89,9 +96,8 @@ pnpm run open
 
 1. Promptfoo runs every brief in `promptfooconfig.yaml` against two provider
    variants.
-2. Each provider gives the model the selected `SKILL.md` as installed-agent
-   guidance, sends the same build prompt as the user task, and writes the
-   resulting single-file HTML artifact under `runs/latest/artifacts`.
+2. The selected runner sends the same build prompt to both variants and writes
+   the resulting single-file HTML artifact under `runs/latest/artifacts`.
 3. Playwright opens every generated HTML page at desktop and mobile viewports
    and captures screenshots.
 4. `scripts/build-review.mjs` creates a side-by-side human review page with
@@ -109,16 +115,23 @@ loaded skill text, and regenerate from the browser. Edited skills are saved
 under `runs/editable/`; the source `../skills/.../SKILL.md` files are not
 changed.
 
-For an accurate skill test, use the `Isolated Codex agents` runner and turn off
-`Mock`. That runner starts a separate `codex exec` process for each variant,
-inside a separate workspace, with `--ignore-user-config`, `--ignore-rules`, and
-exactly one configured skill file. Each child gets a random scratch workspace
-and a minimal environment, so parent `SKILL_AB_*` values are not visible to the
-agent. The prompt sent to each child process does not include either skill file,
-either skill path, the variant label, or any A/B test wording; the child only
-receives the build prompt and a requirement to use its configured local skill.
-The direct provider runner is only a faster model-call approximation, and mock
-mode is only for checking the harness UI.
+For an accurate product skill test, use the `Devfinity local Finite agent`
+runner and turn off `Mock`. That runner starts a disposable Devfinity SaaS
+stack for each variant, installs a managed-skills tree containing exactly one
+selected skill, restarts Hermes inside that local runtime, sends the build task
+through the Hosted Web chat path, and copies back the generated HTML from the
+runtime workspace.
+
+The Devfinity prompt does not include either skill file, either skill path, the
+variant label, or any A/B wording. Isolation is provided by the runtime's
+managed-skills tree and disposable Devfinity state, not by prompt injection.
+
+The `Isolated Codex proxy` runner is useful when you want a faster isolated
+agent subprocess, but it is not the Finite product runtime. The
+`Direct Finite Private` runner is only a model-call approximation: it pastes
+the selected skill into a direct provider prompt and bypasses Hermes, chat,
+tools, managed-skills discovery, and runtime workspace behavior. Mock mode is
+only for checking the harness UI.
 
 ## Changing The Skills
 
@@ -139,7 +152,19 @@ pnpm run ab
 
 ## Model Settings
 
-Provider defaults:
+Runner settings:
+
+- `SKILL_AB_RUNNER=devfinity`: product-accurate local Finite/Hermes agent via
+  Devfinity.
+- `SKILL_AB_RUNNER=agent`: isolated Codex proxy with one configured skill.
+- `SKILL_AB_RUNNER=provider`: direct Finite Private/OpenAI model call.
+- `SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1`: use Devfinity's Docker runtime profile
+  instead of the default Apple Container profile.
+- `SKILL_AB_DEVFINITY_TIMEOUT_MS=1800000`
+- `SKILL_AB_AGENT_MODEL`: optional model override for isolated Codex agents.
+- `SKILL_AB_AGENT_TIMEOUT_MS=600000`
+
+Direct-provider defaults:
 
 - `SKILL_AB_PROVIDER=auto`
 - Finite Private is used when a local key is present.
@@ -159,14 +184,11 @@ Finite Private settings:
 
 Common settings:
 
-- `SKILL_AB_RUNNER=agent`: `agent` starts isolated Codex CLI runs; `provider`
-  uses direct Responses API calls.
-- `SKILL_AB_AGENT_MODEL`: optional model override for isolated Codex agents.
-- `SKILL_AB_AGENT_TIMEOUT_MS=600000`
 - `SKILL_AB_MODEL`
 - `SKILL_AB_MAX_OUTPUT_TOKENS=6000`
 - `SKILL_AB_TIMEOUT_MS=120000`
-- `SKILL_AB_MAX_CONCURRENCY`: forwarded to Promptfoo as `--max-concurrency`
+- `SKILL_AB_MAX_CONCURRENCY`: forwarded to Promptfoo as `--max-concurrency`.
+  Devfinity runs default to `1`.
 - `SKILL_AB_REPAIR_HTML=0`: disables the automatic second pass that converts
   non-HTML model output into a reviewable HTML artifact
 

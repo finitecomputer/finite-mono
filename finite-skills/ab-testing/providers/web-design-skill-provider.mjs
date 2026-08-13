@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ export default class WebDesignSkillProvider {
     const vars = context.vars ?? {};
     const caseId = sanitize(vars.caseId || vars.title || "case");
     const skillPath = this.resolveSkillPath();
+    const skillSourcePath = this.resolveSkillSourcePath(skillPath);
     const skillText = readFileSync(skillPath, "utf8");
     const skillName = parseSkillName(skillText) ?? path.basename(path.dirname(skillPath));
     const artifactDir = path.resolve(harnessRoot, this.config.outputDir ?? "./runs/latest/artifacts", caseId, sanitize(this.variant));
@@ -43,13 +44,19 @@ export default class WebDesignSkillProvider {
       brief: prompt,
       caseTitle: vars.title ?? vars.caseId ?? caseId,
     });
+    const finiteAgentPrompt = buildFiniteAgentPrompt({
+      brief: prompt,
+      caseTitle: vars.title ?? vars.caseId ?? caseId,
+      runId: caseId,
+    });
 
     const startedAt = new Date().toISOString();
     let output;
     let modelProvider;
     let model;
     let promptTranscript = directProviderPrompt.transcript;
-    let runner = resolveRunner(this.config);
+    const requestedRunner = resolveRunner(this.config);
+    let runner = requestedRunner;
     let tokenUsage;
 
     if (isMockMode(this.config)) {
@@ -57,7 +64,7 @@ export default class WebDesignSkillProvider {
       modelProvider = { name: "mock", baseUrl: null, keySource: null };
       runner = "mock";
       output = mockHtml({ caseId, caseTitle: vars.title ?? caseId, skillName, variant: this.variant });
-      promptTranscript = codexAgentPrompt;
+      promptTranscript = requestedRunner === "devfinity" ? finiteAgentPrompt.prompt : codexAgentPrompt;
       tokenUsage = { total: 0, prompt: 0, completion: 0 };
     } else if (runner === "agent") {
       model = process.env.SKILL_AB_AGENT_MODEL || "codex-default";
@@ -67,6 +74,30 @@ export default class WebDesignSkillProvider {
         prompt: codexAgentPrompt,
         skillPath,
         timeoutMs: Number(process.env.SKILL_AB_AGENT_TIMEOUT_MS || process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 600000),
+      });
+      output = response.output;
+      promptTranscript = response.prompt;
+      tokenUsage = {};
+    } else if (runner === "devfinity") {
+      const key = readFinitePrivateKey({ required: true });
+      model = "devfinity-local-hermes";
+      modelProvider = {
+        name: "devfinity-local-agent",
+        baseUrl: null,
+        keySource: key.keySource,
+        label: "Devfinity local Finite agent",
+      };
+      const response = await callDevfinityAgent({
+        artifactDir,
+        prompt: finiteAgentPrompt.prompt,
+        runtimeOutputPath: finiteAgentPrompt.runtimeOutputPath,
+        skillName,
+        skillPath,
+        skillSourcePath,
+        skillText,
+        timeoutMs: Number(process.env.SKILL_AB_DEVFINITY_TIMEOUT_MS || this.config.devfinityTimeoutMs || 1800000),
+        upstreamKey: key.apiKey,
+        variant: this.variant,
       });
       output = response.output;
       promptTranscript = response.prompt;
@@ -158,6 +189,22 @@ export default class WebDesignSkillProvider {
     }
     if (path.isAbsolute(configured)) {
       return configured;
+    }
+    return path.resolve(harnessRoot, configured);
+  }
+
+  resolveSkillSourcePath(fallbackPath) {
+    const envName = `SKILL_AB_${this.variant.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_SOURCE_PATH`;
+    const configured = process.env[envName] || this.config.skillSourcePath;
+    if (!configured) {
+      return fallbackPath;
+    }
+    if (path.isAbsolute(configured)) {
+      return configured;
+    }
+    const repoCandidate = path.resolve(repoRoot, configured);
+    if (existsSync(repoCandidate)) {
+      return repoCandidate;
     }
     return path.resolve(harnessRoot, configured);
   }
@@ -285,11 +332,11 @@ function normalizeProviderName(value) {
 }
 
 function resolveRunner(config = {}) {
-  const runner = String(process.env.SKILL_AB_RUNNER || config.runner || "agent").trim().toLowerCase();
-  if (runner === "agent" || runner === "provider") {
+  const runner = String(process.env.SKILL_AB_RUNNER || config.runner || "devfinity").trim().toLowerCase();
+  if (runner === "devfinity" || runner === "agent" || runner === "provider") {
     return runner;
   }
-  throw new Error(`Unsupported SKILL_AB_RUNNER "${runner}". Use "agent" or "provider".`);
+  throw new Error(`Unsupported SKILL_AB_RUNNER "${runner}". Use "devfinity", "agent", or "provider".`);
 }
 
 function trimTrailingSlash(value) {
@@ -381,6 +428,33 @@ Case title: ${caseTitle}
 When finished, reply with a short confirmation only.`;
 }
 
+function buildFiniteAgentPrompt({ brief, caseTitle, runId }) {
+  const runtimeOutputPath = `/data/workspace/local-web-builds/${runId}/index.html`;
+  return {
+    prompt: `Build this web artifact:
+
+${brief}
+
+Write the result to this exact file path in your runtime workspace:
+${runtimeOutputPath}
+
+Hard requirements:
+- Create a complete single-file HTML document at that path.
+- Inline all CSS and JavaScript.
+- Do not fetch external fonts, images, scripts, or stylesheets.
+- Use realistic copy, data, controls, and visual states.
+- Make the first viewport useful for judging the design.
+- Keep the artifact safe to open from a local file URL.
+- Do not mention these delivery instructions in the rendered UI.
+
+Case title: ${caseTitle}
+
+When finished, reply with the exact path you wrote and no code fence.`,
+    runId,
+    runtimeOutputPath,
+  };
+}
+
 async function callCodexAgent({ artifactDir, prompt, skillPath, timeoutMs }) {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), "skill-ab-agent-"));
   const outputDir = path.join(workspaceDir, "output");
@@ -414,6 +488,8 @@ async function callCodexAgent({ artifactDir, prompt, skillPath, timeoutMs }) {
   args.push(prompt);
 
   const result = await runCommand(process.env.SKILL_AB_CODEX_BIN || process.env.CODEX_CLI_PATH || "codex", args, {
+    cwd: harnessRoot,
+    env: codexAgentEnv(),
     timeoutMs,
   });
   writeFileSync(agentLogPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
@@ -433,40 +509,218 @@ async function callCodexAgent({ artifactDir, prompt, skillPath, timeoutMs }) {
   };
 }
 
-async function runCommand(command, args, { timeoutMs }) {
+async function callDevfinityAgent({
+  artifactDir,
+  prompt,
+  runtimeOutputPath,
+  skillName,
+  skillPath,
+  skillSourcePath,
+  skillText,
+  timeoutMs,
+  upstreamKey,
+  variant,
+}) {
+  const outputDir = path.join(artifactDir, "devfinity-output");
+  mkdirSync(outputDir, { recursive: true });
+
+  const promptPath = path.join(artifactDir, "devfinity-prompt.txt");
+  const resultPath = path.join(outputDir, "result.json");
+  const logPath = path.join(artifactDir, "devfinity-agent.log");
+  const stateDir = path.join(artifactDir, "devfinity-state");
+  const skillBundle = prepareDevfinitySkillBundle({
+    artifactDir,
+    skillName,
+    skillPath,
+    skillSourcePath,
+    skillText,
+  });
+  writeFileSync(promptPath, prompt, "utf8");
+
+  const env = devfinityEnv({
+    promptPath,
+    resultPath,
+    runtimeOutputPath,
+    skillBundleDir: skillBundle.bundleRoot,
+    upstreamKey,
+    variant,
+  });
+  const args = [
+    "run",
+    "-p",
+    "devfinity",
+    "--",
+    "--state-dir",
+    stateDir,
+    "up",
+    "--headless",
+  ];
+  if (process.env.SKILL_AB_DEVFINITY_DOCKER_RUNTIME === "1") {
+    args.push("--docker-runtime");
+  }
+  args.push("--", process.execPath, "finite-skills/ab-testing/scripts/run-devfinity-agent-turn.mjs");
+
+  const result = await runCommand(process.env.SKILL_AB_DEVFINITY_CARGO_BIN || "cargo", args, {
+    cwd: repoRoot,
+    env,
+    timeoutMs,
+  });
+  writeFileSync(logPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
+
+  if (!existsSync(resultPath)) {
+    throw new Error(`Devfinity runner did not write ${displayPath(resultPath)}`);
+  }
+  const payload = JSON.parse(readFileSync(resultPath, "utf8"));
+  return {
+    output: String(payload.html || payload.finalReply || ""),
+    prompt,
+  };
+}
+
+function prepareDevfinitySkillBundle({ artifactDir, skillName, skillPath, skillSourcePath, skillText }) {
+  const bundleRoot = path.join(artifactDir, "devfinity-skill-bundle");
+  rmSync(bundleRoot, { recursive: true, force: true });
+
+  const sourceDir = path.dirname(skillSourcePath);
+  const relDir = skillRelativeDir(skillSourcePath, skillName);
+  const targetDir = path.join(bundleRoot, relDir);
+  mkdirSync(path.dirname(targetDir), { recursive: true });
+  if (existsSync(sourceDir)) {
+    cpSync(sourceDir, targetDir, { recursive: true, force: true });
+  } else {
+    mkdirSync(targetDir, { recursive: true });
+  }
+  writeFileSync(path.join(targetDir, "SKILL.md"), `${skillText.trim()}\n`, "utf8");
+  writeFileSync(
+    path.join(artifactDir, "devfinity-skill-bundle.json"),
+    JSON.stringify(
+      {
+        bundleRoot,
+        installedSkillDir: relDir,
+        sourceSkillPath: skillSourcePath,
+        editedSkillPath: skillPath,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  return { bundleRoot, relDir };
+}
+
+function skillRelativeDir(skillSourcePath, skillName) {
+  const skillsRoot = path.resolve(harnessRoot, "../skills");
+  const sourceDir = path.dirname(skillSourcePath);
+  const relative = path.relative(skillsRoot, sourceDir);
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    return relative;
+  }
+  return path.join("ab-test", sanitize(skillName || path.basename(sourceDir)));
+}
+
+function devfinityEnv({ promptPath, resultPath, runtimeOutputPath, skillBundleDir, upstreamKey, variant }) {
+  const env = { ...process.env };
+  for (const name of [
+    "OPENAI_API_KEY",
+    "SKILL_AB_FINITE_PRIVATE_KEY",
+    "FINITE_PRIVATE_API_KEY",
+    "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE",
+  ]) {
+    delete env[name];
+  }
+  env.FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY = upstreamKey;
+  env.SKILL_AB_DEVFINITY_PROMPT_FILE = promptPath;
+  env.SKILL_AB_DEVFINITY_RESULT_FILE = resultPath;
+  env.SKILL_AB_DEVFINITY_RUNTIME_OUTPUT_PATH = runtimeOutputPath;
+  env.SKILL_AB_DEVFINITY_SKILL_BUNDLE_DIR = skillBundleDir;
+  env.SKILL_AB_DEVFINITY_VARIANT = variant;
+  env.DEVFINITY_PORT_OFFSET = env.SKILL_AB_DEVFINITY_PORT_OFFSET || String(devfinityPortOffset(variant, promptPath));
+  env.DEVFINITY_APPLE_CONTAINER_NAME_PREFIX =
+    env.SKILL_AB_DEVFINITY_APPLE_CONTAINER_NAME_PREFIX || `finite-ab-${hashString(`${variant}:${promptPath}`).slice(0, 10)}`;
+  return env;
+}
+
+function devfinityPortOffset(variant, promptPath) {
+  return 1000 + (Number.parseInt(hashString(`${variant}:${promptPath}`).slice(0, 6), 16) % 30000);
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (const byte of Buffer.from(String(value))) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+async function runCommand(command, args, { cwd = harnessRoot, env = process.env, timeoutMs }) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: harnessRoot,
-      env: codexAgentEnv(),
+      cwd,
+      detached: true,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout = [];
     const stderr = [];
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    let settled = false;
+    let killTimeout = null;
+    const timeout =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            killProcessGroup(child, "SIGTERM");
+            killTimeout = setTimeout(() => killProcessGroup(child, "SIGKILL"), 5000);
+            reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
+          }, timeoutMs)
+        : null;
+
+    const settle = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (killTimeout) {
+        clearTimeout(killTimeout);
+      }
+      callback(value);
+    };
 
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
+      settle(reject, error);
     });
     child.on("exit", (code, signal) => {
-      clearTimeout(timeout);
       const result = {
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
       };
       if (code === 0) {
-        resolve(result);
+        settle(resolve, result);
         return;
       }
       const tail = `${result.stdout}\n${result.stderr}`.slice(-4000).trim();
-      reject(new Error(`${path.basename(command)} exited with ${signal ?? code}${tail ? `\n${tail}` : ""}`));
+      settle(reject, new Error(`${path.basename(command)} exited with ${signal ?? code}${tail ? `\n${tail}` : ""}`));
     });
   });
+}
+
+function killProcessGroup(child, signal) {
+  if (!child.pid) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
 }
 
 function codexAgentEnv() {

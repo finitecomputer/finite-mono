@@ -119,11 +119,11 @@ async function handleRegenerate(request, response) {
     "utf8",
   );
 
-  currentJob = startRegenerateJob({ maxConcurrency, mock, prompt, runner, title });
+  currentJob = startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkills, title });
   return sendJson(response, 202, { job: publicJob(currentJob) });
 }
 
-function startRegenerateJob({ maxConcurrency, mock, prompt, runner, title }) {
+function startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkills, title }) {
   const job = {
     exitCode: null,
     finishedAt: null,
@@ -138,7 +138,9 @@ function startRegenerateJob({ maxConcurrency, mock, prompt, runner, title }) {
     SKILL_AB_MAX_CONCURRENCY: String(maxConcurrency),
     SKILL_AB_RUNNER: runner,
     SKILL_AB_SKILL_A_PATH: editableSkillPath("skill-a"),
+    SKILL_AB_SKILL_A_SOURCE_PATH: selectedSkills["skill-a"]?.sourcePath || "",
     SKILL_AB_SKILL_B_PATH: editableSkillPath("skill-b"),
+    SKILL_AB_SKILL_B_SOURCE_PATH: selectedSkills["skill-b"]?.sourcePath || "",
   };
   if (mock) {
     env.SKILL_AB_MOCK = "1";
@@ -198,7 +200,7 @@ function readEditorState() {
     maxConcurrency: editableState.maxConcurrency || normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY || 1),
     mock: typeof editableState.mock === "boolean" ? editableState.mock : process.env.SKILL_AB_MOCK === "1",
     prompt,
-    runner: normalizeRunner(editableState.runner || process.env.SKILL_AB_RUNNER || "agent"),
+    runner: normalizeRunner(editableState.runner || process.env.SKILL_AB_RUNNER || "devfinity"),
     title,
     variants: variants.map((variant) => {
       const editablePath = editableSkillPath(variant.variant);
@@ -383,11 +385,11 @@ function normalizeMaxConcurrency(value) {
 }
 
 function normalizeRunner(value) {
-  const runner = String(value || "agent").trim().toLowerCase();
-  if (runner === "agent" || runner === "provider") {
+  const runner = String(value || "devfinity").trim().toLowerCase();
+  if (runner === "devfinity" || runner === "agent" || runner === "provider") {
     return runner;
   }
-  return "agent";
+  return "devfinity";
 }
 
 function displayPath(filePath) {
