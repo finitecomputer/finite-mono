@@ -454,14 +454,35 @@ async function loadBrainProductClient(page: Page, url: string): Promise<FrameLoc
 async function createPersonalBrain(brain: FrameLocator, agentEmail: string) {
   await openManageBrains(brain);
   const create = brain.locator("#manageCreatePersonalBrainButton");
+  const connectSigner = brain.locator("#manageBrainsConnectSignerButton");
   await create.waitFor({ state: "visible", timeout: 30_000 });
   await brain.locator("#managePersonalAgentEmailInput").fill(agentEmail);
-  await create.waitFor({ state: "visible", timeout: 30_000 });
+
+  const timeoutMs = 30_000;
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const createReadyMessage =
+    "Personal Brain Create stayed disabled because signer, config, or readerBusy was not ready";
+  const createReadyOrSignerConnected = async () =>
+    (await create.isEnabled()) || !(await connectSigner.isVisible());
+
   await assertEventually(
-    async () => create.isEnabled(),
-    30_000,
-    async () => "Personal Brain Create action did not become ready after Agent resolution",
+    createReadyOrSignerConnected,
+    remaining(),
+    async () => createReadyMessage,
   );
+  if (!(await create.isEnabled())) {
+    if (remaining() <= 0) throw new Error(createReadyMessage);
+    await closeManageBrainsIfOpen(brain);
+    await openManageBrains(brain);
+    await brain.locator("#managePersonalAgentEmailInput").fill(agentEmail);
+    await create.waitFor({ state: "visible", timeout: remaining() });
+    await assertEventually(
+      async () => create.isEnabled(),
+      remaining(),
+      async () => createReadyMessage,
+    );
+  }
   await create.click();
 }
 

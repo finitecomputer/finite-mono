@@ -524,6 +524,46 @@ function organizationCollaborationPanelTestSeams() {
   return { context: testContext, elements: testElements, seams };
 }
 
+function manageBrainsCreateReadyTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_MANAGE_BRAINS_CREATE_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_MANAGE_BRAINS_CREATE_TEST_SEAMS__?.({ state, bind, renderManageBrainsModal });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The Manage Brains create test must capture the Product Client's real modal seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-manage-brains-create.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured Manage Brains create seams");
+  return { context: testContext, elements: testElements, seams };
+}
+
 function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   const testElements = new Map();
   const testContext = {
@@ -2007,6 +2047,49 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
 }
 
+function assertManagePersonalBrainCreateEnablesAfterEmailFill() {
+  const harness = manageBrainsCreateReadyTestSeams();
+  const { state, bind, renderManageBrainsModal } = harness.seams;
+  const emailInput = harness.context.document.getElementById("managePersonalAgentEmailInput");
+  const createButton = harness.context.document.getElementById("manageCreatePersonalBrainButton");
+
+  bind();
+  state.config = { apiBase: "http://finite.test" };
+  state.readerBusy = true;
+  state.signerStatus = "checking";
+  state.manageBrainsModalOpen = true;
+  state.visibleBrains = [];
+  renderManageBrainsModal();
+  assert.equal(
+    createButton.disabled,
+    true,
+    "Create stays disabled while readerBusy or the signer is disconnected"
+  );
+
+  emailInput.value = "agent@finite.vip";
+  emailInput.dispatch("input");
+  assert.equal(
+    createButton.disabled,
+    true,
+    "Filling the personal-agent email must not enable Create while canCreate is still false"
+  );
+
+  state.readerBusy = false;
+  state.signerStatus = "connected";
+  assert.equal(
+    createButton.disabled,
+    true,
+    "Create stays disabled until a render re-evaluates canCreate"
+  );
+
+  emailInput.dispatch("input");
+  assert.equal(
+    createButton.disabled,
+    false,
+    "Filling the personal-agent email re-renders so Create can enable once canCreate is true"
+  );
+}
+
 function assertNestedManageBrainReturnContract() {
   const nestedManage = clipboardInvitationFeedbackTestSeams({});
   const nestedState = nestedManage.seams.state;
@@ -2350,6 +2433,14 @@ assert.match(htmlSource, /id="manageBrainsConnectSignerButton"/);
 assert.match(htmlSource, /id="manageCreateOrganizationBrainButton"/);
 assert.match(source, /manageBrainsButton[\s\S]{0,120}openManageBrainsModal\(\)/);
 assert.match(source, /manageBrainsLoadButton[\s\S]{0,120}manageBrainsLoadAction\(\)/);
+assert.match(
+  source,
+  /managePersonalAgentEmailInput[\s\S]{0,120}addEventListener\("input", renderManageBrainsOnPersonalAgentEmail\)/
+);
+assert.match(
+  source,
+  /managePersonalAgentEmailInput[\s\S]{0,120}addEventListener\("change", renderManageBrainsOnPersonalAgentEmail\)/
+);
 assert.doesNotMatch(source, /accessLoadBrainButton/);
 assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
 assert.match(
@@ -3980,6 +4071,7 @@ function brainNotificationBehaviorTestSeams(options = {}) {
 
   await assertClipboardInvitationFeedbackContracts();
   await assertBrainSwitcherLoadsSelectedBrain();
+  assertManagePersonalBrainCreateEnablesAfterEmailFill();
   assertNestedManageBrainReturnContract();
   assertModalFocusAndContextRouteContracts();
 
