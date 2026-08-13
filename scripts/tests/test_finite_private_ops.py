@@ -17,6 +17,7 @@ OPS = ROOT / "infra/runbooks/finite-private-ops.sh"
 class MockFinitePrivateHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     fail_request_two = False
+    required_model: str | None = None
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -33,11 +34,30 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
-        if self.path != "/v1/chat/completions":
+        if self.path not in ("/v1/chat/completions", "/v1/responses"):
             self.send_error(404)
             return
         length = int(self.headers.get("content-length", "0"))
         payload = json.loads(self.rfile.read(length))
+        if (
+            self.required_model is not None
+            and payload.get("model") != self.required_model
+        ):
+            body = b'{"error":"unexpected model"}'
+            self.send_response(400)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/v1/responses":
+            body = b'{"id":"response-mixed-version"}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.fail_request_two and self.headers.get("x-request-id", "").endswith(
             "_2"
         ):
@@ -49,7 +69,12 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload.get("stream") is not True:
-            self.send_error(400, "streaming required")
+            body = b'{"choices":[{"message":{"content":"finite private ok"}}]}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         chunks = [
             'data: {"id":"mock","choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n',
@@ -82,6 +107,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         MockFinitePrivateHandler.fail_request_two = False
+        MockFinitePrivateHandler.required_model = None
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
@@ -122,6 +148,12 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         self.assertIn(
             "no further inference requests were issued after failure", result.stderr
         )
+
+    def test_mixed_version_canary_exercises_the_historical_request_alias(self) -> None:
+        MockFinitePrivateHandler.required_model = "glm-5-2"
+        result = self.run_ops("mixed-version-canary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Mixed-version Finite Private compatibility passed", result.stdout)
 
 
 if __name__ == "__main__":

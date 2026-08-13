@@ -28,6 +28,8 @@ Read-only commands:
   canary              Run an authenticated non-streaming chat canary.
   stream-canary       Run chat streaming through the terminal SSE [DONE].
   responses-canary    Run an authenticated non-streaming /v1/responses canary.
+  mixed-version-canary
+                      Prove older glm-5-2 requests through the current limiter.
   repeated-id-canary  Send two calls with one caller x-request-id.
   load-canary [N]     Run N concurrent streaming calls and report latency/throughput.
   load-sweep          Run the guarded 1,4,8,16,32,64,128,256,512,1024 maintenance sweep.
@@ -204,6 +206,16 @@ print(json.dumps(payload, sort_keys=True))
 PY
   rm -f "$curl_config" "$response_file"
   trap - RETURN
+}
+
+mixed_version_canary() {
+  # DeepSeek is the canonical product model. This local override exercises only
+  # the historical request name that already-issued Runtimes may still send.
+  local MODEL="glm-5-2"
+  canary
+  stream_canary
+  responses_canary
+  echo "Mixed-version Finite Private compatibility passed"
 }
 
 repeated_id_canary() {
@@ -507,6 +519,7 @@ case "$command" in
   canary) canary ;;
   stream-canary) stream_canary ;;
   responses-canary) responses_canary ;;
+  mixed-version-canary) mixed_version_canary ;;
   repeated-id-canary) repeated_id_canary ;;
   load-canary)
     shift

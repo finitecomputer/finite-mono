@@ -68,6 +68,7 @@ CONTRACT: dict[str, Any] = {
         "model_variable": "FC_RUNNER_FINITE_PRIVATE_MODEL",
         "expected_base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
         "expected_model": "deepseek-v4-flash-0731",
+        "mixed_version_models": ["glm-5-2"],
     },
     "recovery": {
         "snapshot_root": "/data/recovery-snapshots/hosted-web-chat",
@@ -515,12 +516,16 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
     raw["runner_environment"] = {}
     # Match systemd EnvironmentFile ordering: the operator file loads last and
     # may deliberately override the Nix-rendered shared role.
-    for path_key in ("shared_environment_file", "environment_file"):
+    for path_key, result_key in (
+        ("shared_environment_file", "runner_shared_environment"),
+        ("environment_file", "runner_operator_environment"),
+    ):
         try:
-            raw["runner_environment"].update(
-                read_environment_values(Path(runner[path_key]), runner_keys)
-            )
+            values = read_environment_values(Path(runner[path_key]), runner_keys)
+            raw[result_key] = values
+            raw["runner_environment"].update(values)
         except CollectionError as error:
+            raw[result_key] = {}
             raw["errors"].append(str(error))
     return raw
 
@@ -1063,14 +1068,40 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
             else "red"
         )
     finite_private_model = runner_env.get(runner_contract["model_variable"])
+    shared_model = raw.get("runner_shared_environment", {}).get(
+        runner_contract["model_variable"]
+    )
+    operator_model = raw.get("runner_operator_environment", {}).get(
+        runner_contract["model_variable"]
+    )
     if finite_private_model is None:
         finite_private_model_status = "unknown"
+        finite_private_model_state = "unresolved"
+    elif finite_private_model == runner_contract["expected_model"]:
+        finite_private_model_status = "green"
+        finite_private_model_state = "canonical"
+    elif finite_private_model in runner_contract["mixed_version_models"]:
+        if shared_model is None:
+            finite_private_model_status = "unknown"
+            finite_private_model_state = "unresolved-shared-role"
+        elif (
+            shared_model == runner_contract["expected_model"]
+            and operator_model == finite_private_model
+        ):
+            finite_private_model_status = "red"
+            finite_private_model_state = "stale-operator-override"
+        elif shared_model in runner_contract["mixed_version_models"]:
+            # Before the canonical Runner role is deployed, the historical
+            # request name is a deliberately served mixed-version alias. It
+            # must not block the independent scheduler promotion.
+            finite_private_model_status = "green"
+            finite_private_model_state = "mixed-version-compatibility"
+        else:
+            finite_private_model_status = "red"
+            finite_private_model_state = "unexpected-shared-role"
     else:
-        finite_private_model_status = (
-            "green"
-            if finite_private_model == runner_contract["expected_model"]
-            else "red"
-        )
+        finite_private_model_status = "red"
+        finite_private_model_state = "unexpected"
     statuses.extend(
         [
             timer_status,
@@ -1092,6 +1123,9 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
         "finite_private_base_url_status": finite_private_base_url_status,
         "finite_private_model": finite_private_model,
         "finite_private_model_status": finite_private_model_status,
+        "finite_private_model_state": finite_private_model_state,
+        "finite_private_shared_model": shared_model,
+        "finite_private_operator_model": operator_model,
     }
     return {
         "status": combine_status(statuses),
@@ -1426,7 +1460,8 @@ def render_human(report: dict[str, Any]) -> str:
         )
         lines.append(
             f"    Finite Private: model={runner['finite_private_model'] or 'unknown'} "
-            f"{badge(runner['finite_private_model_status'])}; "
+            f"{badge(runner['finite_private_model_status'])} "
+            f"({runner['finite_private_model_state']}); "
             f"route={runner['finite_private_base_url'] or 'unknown'} "
             f"{badge(runner['finite_private_base_url_status'])}"
         )

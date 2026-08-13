@@ -42,11 +42,116 @@ The third change affects health/accounting fallback records only when a request
 or response omits its model. vLLM continues to serve both names, so an older
 Runtime that explicitly sends `glm-5-2` remains compatible.
 
+This promotion does not rename the Tinfoil container. The current production
+identity remains `kimi-k2-6` for mixed-version continuity. A temporary isolated
+evaluation container uses the explicit non-production name
+`deepseek-v4-release-candidate`; the eventual stable production service name
+is `finite-private`, handled only by the separate routing migration.
+
+## SATELLITE RELEASE PREPARATION
+
+The satellite's `main` branch is stale and must not be the source of this
+release. Current production and the immediate rollback are commit
+`e337db3606d67c53387113700362adec7b4dfdf7`, tagged
+`v2026-08-05-deepseek-v4-flash-0731-retry-2-3`. Create the release branch from
+that exact commit, never from satellite `main`:
+
+```bash
+export SATELLITE_REPO='finitecomputer/confidential-kimi-k2-6'
+export ROLLBACK_TAG='v2026-08-05-deepseek-v4-flash-0731-retry-2-3'
+export ROLLBACK_COMMIT='e337db3606d67c53387113700362adec7b4dfdf7'
+export SATELLITE_BRANCH='ops/deepseek-v4-128-2048-REPLACE_DATE'
+export TARGET_TAG='REPLACE_WITH_UNIQUE_DEEPSEEK_128_2048_TAG'
+export EXPECTED_CANDIDATE_SHA256='22a3b8030aeb2a47dab8547690cf125880f630d3163bcb713534fb43bffa8907'
+export FINITE_MONO_CHECKOUT="$(pwd)"
+export SATELLITE_CHECKOUT='REPLACE_WITH_CLEAN_SATELLITE_CHECKOUT'
+
+gh repo clone "$SATELLITE_REPO" "$SATELLITE_CHECKOUT"
+cd "$SATELLITE_CHECKOUT"
+git fetch origin --tags
+test "$(git rev-list -n 1 "$ROLLBACK_TAG")" = "$ROLLBACK_COMMIT"
+git switch --create "$SATELLITE_BRANCH" "$ROLLBACK_COMMIT"
+cp "$FINITE_MONO_CHECKOUT/infra/tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml" tinfoil-config.yml
+```
+
+Review the decoded diff against the rollback tag. Its only semantic changes
+must be the 64 to 128 sequence limit, the 512 to 2,048 batched-token limit, and
+the missing-model fallback label becoming canonical DeepSeek. Checkpoint, MPK,
+both image digests, secrets, route, parser, context, numerical format, and
+parallelism must be byte-for-byte unchanged. Record the candidate checksum:
+
+```bash
+git diff "$ROLLBACK_TAG" -- tinfoil-config.yml
+test "$(sha256sum tinfoil-config.yml | cut -d ' ' -f 1)" = \
+  "$EXPECTED_CANDIDATE_SHA256"
+```
+
+After review, commit and push that exact satellite file. Dispatch the satellite
+workflow on the reviewed branch explicitly; never omit `--ref`:
+
+```bash
+export SATELLITE_COMMIT="$(git rev-parse HEAD)"
+gh workflow run tinfoil-release.yml \
+  --repo "$SATELLITE_REPO" \
+  --ref "$SATELLITE_BRANCH" \
+  -f version="$TARGET_TAG"
+```
+
+Require the release tag to resolve to `$SATELLITE_COMMIT`, both publish jobs to
+pass, and the release to contain `tinfoil-deployment.json` and `tinfoil.hash`.
+Retain both assets and their SHA-256 values. Publication is preparation, not
+authority to relaunch production.
+
+The quality gate requires a separately approved, temporary eight-H200
+evaluation container running the exact measured tag. It must not replace,
+relaunch, or share the production name:
+
+```bash
+export EVALUATION_CONTAINER='deepseek-v4-release-candidate'
+export EVALUATION_HOST='REPLACE_WITH_APPROVED_NON_PRODUCTION_8XH200_HOST'
+
+tinfoil container create "$EVALUATION_CONTAINER" \
+  --repo "$SATELLITE_REPO" \
+  --tag "$TARGET_TAG" \
+  --host "$EVALUATION_HOST" \
+  --secret VLLM_API_KEY \
+  --secret VLLM_INTERNAL_API_KEY \
+  --secret FINITE_USAGE_API_SERVICE_KEY
+```
+
+Creating or later deleting that container requires its own explicit approval.
+If a separate eight-H200 host is unavailable, stop; production is never the
+evaluation target. Retain the quality reports before requesting approved
+cleanup of the temporary container.
+
 ## PRECONDITIONS
 
-1. Run `scripts/finite-status --json` from the correctly profiled production
-   host and retain the output. Any red or unresolved unknown result stops the
-   rollout.
+1. Run the exact merged `scripts/finite-status --json` and companion
+   `scripts/finite_status.py` from the correctly profiled production host and
+   retain the output with the mono commit SHA. Until the command is installed
+   by the normal NixOS deployment, use an exact read-only checkout or install
+   those two files together as described in `infra/runbooks/README.md`; do not
+   deploy NixOS merely to prepare this scheduler update. Any red or unresolved
+   unknown result stops the rollout. Before the canonical Runner role is
+   deployed, `mixed-version-compatibility` is an expected green state. After
+   that role is deployed, an operator file forcing the historical alias is
+   `stale-operator-override` and red.
+
+   If the command is not yet installed, the minimal staging path during the
+   separately authorized maintenance window is:
+
+   ```bash
+   export MONO_SHA="$(git rev-parse HEAD)"
+   export STATUS_DIR="/root/finite-status-$MONO_SHA"
+   ssh root@64.34.82.77 "install -d -m 0700 '$STATUS_DIR'"
+   scp scripts/finite-status scripts/finite_status.py \
+     "root@64.34.82.77:$STATUS_DIR/"
+   ssh root@64.34.82.77 "chmod 0500 '$STATUS_DIR/finite-status' && cd '$STATUS_DIR' && ./finite-status --json"
+   ```
+
+   This installs only the canonical read-only collector files and does not
+   restart or deploy a service. Retain the exact directory and output for the
+   matching post-rollout observation.
 2. Confirm Tinfoil reports the production container ready on the fixed host at
    the exact rollback tag above, with eight H200s and the expected three secret
    names. Never print secret values.
@@ -56,10 +161,12 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
    infra/runbooks/finite-private-ops.sh gate
    infra/runbooks/finite-private-ops.sh stream-canary
    infra/runbooks/finite-private-ops.sh responses-canary
+   infra/runbooks/finite-private-ops.sh mixed-version-canary
    ```
 
 4. Capture three one-way and three 32-way baselines and retain their medians.
-   Confirm all reservations settle and no canary reservation remains reserved.
+   Confirm all canonical and mixed-version canary reservations settle and no
+   canary reservation remains reserved.
 5. Run both repository contracts:
 
    ```bash
@@ -70,9 +177,11 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
 6. Diff the decoded candidate against the rollback deployment. Any checkpoint,
    MPK, runtime image, limiter image, secret, route, parser, context, numerical
    format, or parallelism change is a stop condition.
-7. Record an exact new satellite commit, release tag, deployment artifact,
-   Tinfoil hash, and candidate SHA-256 in `compat/matrix.toml` in the same
-   reviewed promotion change.
+7. Open a small reviewed finite-mono promotion change that records the exact
+   new satellite commit, release tag, `tinfoil-deployment.json` SHA-256,
+   `tinfoil.hash` SHA-256, and candidate-config SHA-256 in
+   `compat/matrix.toml`. That evidence cannot be filled in before publication;
+   the follow-up must merge before production approval.
 8. On an isolated evaluation target running the exact release candidate, run
    the fixed scored corpus in `scripts/check_deepseek_v4_0731_quality.py`
    against both lanes. The hosted reference must be DeepSeek's hosted
@@ -136,7 +245,8 @@ Then:
    128/2,048 scheduler arguments.
 2. Require `/live`, `/health`, invalid-key rejection, ordinary chat,
    streaming, Responses API, high/max reasoning, tool parsing, and Core
-   settlement to pass.
+   settlement to pass. Run `mixed-version-canary` as an existing-Runtime edge;
+   DeepSeek remains the canonical label even while that request alias works.
 3. Before admitting normal traffic, sweep concurrency progressively through 1,
    4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm all measured request
    shapes and DP ranks. Stop on the first failure and require a clean single
@@ -197,6 +307,7 @@ infra/runbooks/finite-private-ops.sh wait-ready
 infra/runbooks/finite-private-ops.sh gate
 infra/runbooks/finite-private-ops.sh stream-canary
 infra/runbooks/finite-private-ops.sh responses-canary
+infra/runbooks/finite-private-ops.sh mixed-version-canary
 infra/runbooks/finite-private-ops.sh load-canary 1
 infra/runbooks/finite-private-ops.sh load-canary 32
 scripts/finite-status --json

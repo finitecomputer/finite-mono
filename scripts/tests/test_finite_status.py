@@ -89,6 +89,12 @@ class FiniteStatusTests(unittest.TestCase):
 
     def test_runner_glm_override_is_red(self) -> None:
         raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_shared_environment"] = {
+            "FC_RUNNER_FINITE_PRIVATE_MODEL": "deepseek-v4-flash-0731"
+        }
+        raw["host_health"]["runner_operator_environment"] = {
+            "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
+        }
         raw["host_health"]["runner_environment"][
             "FC_RUNNER_FINITE_PRIVATE_MODEL"
         ] = "glm-5-2"
@@ -98,7 +104,48 @@ class FiniteStatusTests(unittest.TestCase):
         runner = report["sections"]["host_health"]["runner"]
         self.assertEqual(runner["finite_private_model"], "glm-5-2")
         self.assertEqual(runner["finite_private_model_status"], "red")
+        self.assertEqual(
+            runner["finite_private_model_state"], "stale-operator-override"
+        )
         self.assertEqual(report["sections"]["host_health"]["status"], "red")
+
+    def test_runner_mixed_version_alias_is_green_before_canonical_role_deploy(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_shared_environment"] = {
+            "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
+        }
+        raw["host_health"]["runner_operator_environment"] = {
+            "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
+        }
+        raw["host_health"]["runner_environment"][
+            "FC_RUNNER_FINITE_PRIVATE_MODEL"
+        ] = "glm-5-2"
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["finite_private_model_status"], "green")
+        self.assertEqual(
+            runner["finite_private_model_state"], "mixed-version-compatibility"
+        )
+
+    def test_runner_mixed_version_alias_is_unknown_without_shared_role(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_shared_environment"] = {}
+        raw["host_health"]["runner_operator_environment"] = {
+            "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
+        }
+        raw["host_health"]["runner_environment"][
+            "FC_RUNNER_FINITE_PRIVATE_MODEL"
+        ] = "glm-5-2"
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["finite_private_model_status"], "unknown")
+        self.assertEqual(
+            runner["finite_private_model_state"], "unresolved-shared-role"
+        )
 
     def test_json_has_four_sections_and_red_exit(self) -> None:
         result = subprocess.run(

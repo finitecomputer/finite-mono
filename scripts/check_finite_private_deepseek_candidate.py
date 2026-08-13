@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 from pathlib import Path
 
@@ -10,6 +11,8 @@ OFF_CANDIDATE = Path(
     "infra/tinfoil/confidential-kimi-k2-6/"
     "tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml"
 )
+RUNBOOK = Path("infra/runbooks/finite-private-deepseek-production-update.md")
+SATELLITE_ROLLBACK_COMMIT = "e337db3606d67c53387113700362adec7b4dfdf7"
 MODEL_REPO = (
     'repo: "deepseek-ai/DeepSeek-V4-Flash-0731@'
     '7872f01b1d1fe23eabc4c98b48bffcef5a386062"'
@@ -132,6 +135,31 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         return [f"missing DeepSeek candidate: {error.filename}"]
 
     violations.extend(_validate_one(off_text, release_ready=release_ready))
+    try:
+        runbook_text = (root / RUNBOOK).read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        violations.append(f"missing DeepSeek production runbook: {error.filename}")
+        return violations
+
+    if SATELLITE_ROLLBACK_COMMIT not in runbook_text:
+        violations.append(
+            "DeepSeek runbook lacks the exact satellite rollback commit"
+        )
+    for anchor in (
+        'never from satellite `main`',
+        '--ref "$SATELLITE_BRANCH"',
+        "deepseek-v4-release-candidate",
+        "mixed-version-canary",
+        "compat/matrix.toml",
+    ):
+        if anchor not in runbook_text:
+            violations.append(f"DeepSeek runbook lacks release anchor: {anchor}")
+
+    candidate_sha256 = hashlib.sha256(off_text.encode()).hexdigest()
+    if candidate_sha256 not in runbook_text:
+        violations.append(
+            "DeepSeek runbook does not pin the checked-in candidate SHA-256"
+        )
     return violations
 
 
