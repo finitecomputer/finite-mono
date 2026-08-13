@@ -452,7 +452,7 @@ Initial Nix scope:
 - [ ] Check Fedimint's `flake.nix`, dev shell, and package outputs before
       designing the Finite flake.
 - [ ] Root dev shell for Rust toolchain and common native dependencies.
-- [ ] Optional Cachix/substituter policy if build times justify it.
+- [x] Optional Cachix/substituter policy if build times justify it.
 - [ ] Rust package builds for key binaries.
 
 Deferred Nix scope:
