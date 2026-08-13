@@ -14,6 +14,12 @@ Everything is pinned by Nix — do not install Rust/Node/Postgres yourself.
 4. `direnv allow` — the flake dev shell provides rustc/cargo, just,
    process-compose, Postgres, and friends.
 
+The flake advertises Finite's public Cachix cache. On first use, Nix may ask
+you to accept the cache config for `https://finite.cachix.org`; accepting lets
+Nix substitute cached Finite-built packages instead of rebuilding them locally.
+If your Nix install does not accept flake cache config, run `cachix use finite`
+once or add the substituter and public key from `flake.nix` to your Nix config.
+
 No direnv? Prefix commands with `scripts/with-dev-env`.
 
 ## 2. Choose a local loop
