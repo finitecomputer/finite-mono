@@ -14,6 +14,7 @@ mod requester_context;
 mod search;
 mod semantic_index;
 mod signer;
+mod skill;
 mod state;
 mod sync_engine;
 mod wiki;
@@ -37,6 +38,7 @@ pub(crate) use output::*;
 pub(crate) use requester_context::*;
 pub(crate) use search::*;
 pub(crate) use signer::*;
+pub(crate) use skill::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
 pub(crate) use wiki::*;
@@ -121,6 +123,9 @@ where
     {
         return help(output);
     }
+    if take_flag(&mut args, "--skill") {
+        return print_skill(output);
+    }
     let command = args.first().cloned().unwrap_or_else(|| "help".to_owned());
     match command.as_str() {
         "help" | "--help" | "-h" => help(output),
@@ -154,7 +159,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -12539,6 +12544,29 @@ mod tests {
                 "GET /v1/my-invitations HTTP/1.1".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn skill_flag_prints_the_self_contained_agent_guide() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let mut output = Vec::new();
+        run_with_env(["--skill"], env, &mut output).unwrap();
+        let guide = String::from_utf8(output).unwrap();
+        for expected in [
+            "# fbrain skill guide",
+            "fbrain open personal",
+            "fbrain sync now --summary",
+            "fbrain invite brain create",
+            "fbrain invite brain accept --id",
+            "preflight",
+            "admin ensure-access",
+            "llms.txt",
+            "Provenance",
+            "Error glossary",
+        ] {
+            assert!(guide.contains(expected), "guide is missing: {expected}");
+        }
     }
 
     #[test]
