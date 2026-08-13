@@ -92,7 +92,10 @@ with a delete condition.
 - Keep Hermes pinned through the root flake across image, smoke, and release
   defaults. The runtime image asserts the packaged version through
   `HERMES_AGENT_VERSION` in `deploy/finite-computer/images/runtime.Dockerfile`;
-  do not restate a version here. The production Finite Chat bridge is
+  do not restate a version here. Baseline agent CLIs (Node from Hermes, bun,
+  deno, uv, ffmpeg, Playwright browsers) are `.#agent-runtime-toolchains` on
+  the same flake; the image copies that closure and does not pin tarball
+  hashes. The production Finite Chat bridge is
   supervised by `finite-agentd` and is the only process that holds the inbound
   Finite Chat sync stream. Hermes and `finite-agentd` consume separate durable
   loopback inboxes; reconnect uses

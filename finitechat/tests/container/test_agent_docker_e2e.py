@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MONOREPO_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
 
 IMAGE = os.environ.get("FINITE_DOCKER_IMAGE", "finite-agent-docker-e2e")
 SKIP_IMAGE_BUILD = os.environ.get("FINITE_DOCKER_SKIP_IMAGE_BUILD", "").lower() in {
@@ -945,9 +945,12 @@ class AgentDockerE2ETest(unittest.TestCase):
                 {
                     "attr": hermes_runtime.attr,
                     "python_attr": hermes_runtime.python_attr,
+                    "toolchain_attr": hermes_runtime.toolchain_attr,
                     "nix_system": hermes_runtime.nix_system,
                     "store_path": hermes_runtime.store_path,
                     "python_store_path": hermes_runtime.python_store_path,
+                    "toolchain_store_path": hermes_runtime.toolchain_store_path,
+                    "playwright_browsers_path": hermes_runtime.playwright_browsers_path,
                     "closure_count": hermes_runtime.closure_count,
                 },
             )
@@ -959,12 +962,9 @@ class AgentDockerE2ETest(unittest.TestCase):
                         "build",
                         "--platform",
                         HERMES_RUNTIME_PLATFORM,
-                        "--build-arg",
-                        f"HERMES_AGENT_VERSION={HERMES_AGENT_VERSION}",
-                        "--build-arg",
-                        f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
-                        "--build-arg",
-                        f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
+                        *image_build_args(
+                            hermes_runtime, hermes_agent_version=HERMES_AGENT_VERSION
+                        ),
                         "--tag",
                         IMAGE,
                         "--file",

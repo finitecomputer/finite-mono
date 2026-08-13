@@ -21,6 +21,8 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "COPY .finite-hermes-nix-store/nix/store /nix/store",
     "ARG HERMES_AGENT_STORE_PATH",
     "ARG HERMES_AGENT_PYTHON_PATH",
+    "ARG AGENT_RUNTIME_TOOLCHAIN_PATH",
+    "ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
     "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
     "COPY finite-skills/skills /runtime/finite-skills",
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
@@ -34,6 +36,7 @@ CANONICAL_DOCKERFILE_ANCHORS = (
 CANONICAL_WORKFLOW_ANCHORS = (
     "--report target/runtime-image-durable-smoke/report.json",
     'open("finitechat/target/runtime-image-durable-smoke/report.json")',
+    'test "$(command -v bun)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/bun"',
 )
 
 WORKFLOW_BUILD_OR_PUBLISH = (

@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
 
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
 DEFAULT_HERMES_VERSION = "0.20.0"
@@ -927,9 +927,12 @@ def main() -> int:
                     "docker.hermes_nix_runtime_staged",
                     attr=hermes_runtime.attr,
                     python_attr=hermes_runtime.python_attr,
+                    toolchain_attr=hermes_runtime.toolchain_attr,
                     nix_system=hermes_runtime.nix_system,
                     store_path=hermes_runtime.store_path,
                     python_store_path=hermes_runtime.python_store_path,
+                    toolchain_store_path=hermes_runtime.toolchain_store_path,
+                    playwright_browsers_path=hermes_runtime.playwright_browsers_path,
                     closure_count=hermes_runtime.closure_count,
                 )
                 docker(
@@ -938,12 +941,9 @@ def main() -> int:
                         "build",
                         "--platform",
                         opts.platform,
-                        "--build-arg",
-                        f"HERMES_AGENT_VERSION={opts.hermes_agent_version}",
-                        "--build-arg",
-                        f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
-                        "--build-arg",
-                        f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
+                        *image_build_args(
+                            hermes_runtime, hermes_agent_version=opts.hermes_agent_version
+                        ),
                         "--tag",
                         image,
                         "--file",
