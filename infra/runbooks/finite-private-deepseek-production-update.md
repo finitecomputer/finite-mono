@@ -177,14 +177,16 @@ the separately approved relaunch window.
    the follow-up must merge before production approval.
 8. Run the fixed scored corpus in
    `scripts/check_deepseek_v4_0731_quality.py` against the current live
-   DeepSeek service and DeepSeek's hosted V4-Flash-0731 reference before the
-   window. This is the correct pre-update quality baseline because the
-   candidate changes scheduler admission and the missing-model accounting
-   label only; the checkpoint, runtime image, parser, sampling configuration,
-   and model topology are identical. Record the hosted endpoint hostname,
-   advertised model, and returned model/fingerprint fields. Keep both JSON
-   reports under `.local-state/deepseek-quality/$TARGET_TAG/` and require every
-   case at both `high` and `max` effort to pass:
+   DeepSeek service before the window. Use the same approved canary credential
+   as the protocol and accounting gates. This is the correct pre-update quality
+   baseline because the candidate changes scheduler admission and the
+   missing-model accounting label only; the checkpoint, runtime image, parser,
+   sampling configuration, and model topology are identical. The exact
+   128/2,048 recipe already has retained isolated performance and protocol
+   evidence, so this scheduler-only promotion does not require a second hosted
+   DeepSeek credential or a new model-quality comparison. Keep the JSON report
+   under `.local-state/deepseek-quality/$TARGET_TAG/` and require every case at
+   both `high` and `max` effort to pass:
 
    ```bash
    export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
@@ -198,23 +200,13 @@ the separately approved relaunch window.
      --model deepseek-v4-flash-0731 \
      --lane self-hosted \
      > "$QUALITY_DIR/production-before.json"
-
-   python3 scripts/check_deepseek_v4_0731_quality.py \
-     --endpoint https://api.deepseek.com \
-     --model deepseek-v4-flash \
-     --api-key-env DEEPSEEK_HOSTED_API_KEY \
-     --lane deepseek-hosted \
-     > "$QUALITY_DIR/hosted-reference.json"
    ```
 
-   The script sends the same version-controlled cases and reasoning efforts to
-   both lanes. The self-hosted lane retains DeepSeek's official sampling
-   parameters; DeepSeek's hosted thinking mode ignores those sampling fields,
-   so the hosted lane omits them. It checks deterministic correctness,
-   instruction following, parsed reasoning, and tool selection, emits the
-   `finite-deepseek-quality-v1` report schema, and never accepts or records raw
-   keys. Any failed case or unresolved reference-identity mismatch stops the
-   rollout. Repeat the self-hosted lane after relaunch as required below.
+   The script checks deterministic correctness, instruction following, parsed
+   reasoning, and tool selection, emits the `finite-deepseek-quality-v1` report
+   schema, and never records the canary key. Any failed case or returned-model
+   mismatch stops the rollout. Repeat the same self-hosted command after
+   relaunch as required below.
 9. Obtain explicit approval for the exact measured tag and the eight-GPU
    maintenance interruption. Passing tests is not rollout authority.
 
