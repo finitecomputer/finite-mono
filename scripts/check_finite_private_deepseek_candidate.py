@@ -148,12 +148,18 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
     for anchor in (
         'never from satellite `main`',
         '--ref "$SATELLITE_BRANCH"',
-        "deepseek-v4-release-candidate",
+        "control.inf12.tinfoil.sh",
+        "one active eight-H200 cluster",
         "mixed-version-canary",
         "compat/matrix.toml",
     ):
         if anchor not in runbook_text:
             violations.append(f"DeepSeek runbook lacks release anchor: {anchor}")
+
+    if "deepseek-v4-release-candidate" in runbook_text:
+        violations.append(
+            "DeepSeek runbook incorrectly requires a second eight-H200 candidate target"
+        )
 
     candidate_sha256 = hashlib.sha256(off_text.encode()).hexdigest()
     if candidate_sha256 not in runbook_text:

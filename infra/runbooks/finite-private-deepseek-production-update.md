@@ -43,10 +43,18 @@ or response omits its model. vLLM continues to serve both names, so an older
 Runtime that explicitly sends `glm-5-2` remains compatible.
 
 This promotion does not rename the Tinfoil container. The current production
-identity remains `kimi-k2-6` for mixed-version continuity. A temporary isolated
-evaluation container uses the explicit non-production name
-`deepseek-v4-release-candidate`; the eventual stable production service name
-is `finite-private`, handled only by the separate routing migration.
+identity remains `kimi-k2-6` for mixed-version continuity; the eventual stable
+production service name is `finite-private`, handled only by the separate
+routing migration.
+
+There is one active eight-H200 cluster. The winning 128/2,048 recipe was
+already measured on the temporary `gpu-lab` container at
+`control.inf12.tinfoil.sh`; that lab target was deleted after the retained
+measurements were captured. Do not require, create, or budget for a second
+eight-H200 target during this release. The existing performance evidence is
+applicable only while the candidate checksum and the byte-level identity gates
+below prove that the checkpoint, images, model settings, topology, context, and
+all other serving arguments remain unchanged.
 
 ## SATELLITE RELEASE PREPARATION
 
@@ -102,27 +110,9 @@ pass, and the release to contain `tinfoil-deployment.json` and `tinfoil.hash`.
 Retain both assets and their SHA-256 values. Publication is preparation, not
 authority to relaunch production.
 
-The quality gate requires a separately approved, temporary eight-H200
-evaluation container running the exact measured tag. It must not replace,
-relaunch, or share the production name:
-
-```bash
-export EVALUATION_CONTAINER='deepseek-v4-release-candidate'
-export EVALUATION_HOST='REPLACE_WITH_APPROVED_NON_PRODUCTION_8XH200_HOST'
-
-tinfoil container create "$EVALUATION_CONTAINER" \
-  --repo "$SATELLITE_REPO" \
-  --tag "$TARGET_TAG" \
-  --host "$EVALUATION_HOST" \
-  --secret VLLM_API_KEY \
-  --secret VLLM_INTERNAL_API_KEY \
-  --secret FINITE_USAGE_API_SERVICE_KEY
-```
-
-Creating or later deleting that container requires its own explicit approval.
-If a separate eight-H200 host is unavailable, stop; production is never the
-evaluation target. Retain the quality reports before requesting approved
-cleanup of the temporary container.
+Publishing the satellite release does not create a container. The release
+reuses the measured configuration; production remains on its current tag until
+the separately approved relaunch window.
 
 ## PRECONDITIONS
 
@@ -182,26 +172,29 @@ cleanup of the temporary container.
    `tinfoil.hash` SHA-256, and candidate-config SHA-256 in
    `compat/matrix.toml`. That evidence cannot be filled in before publication;
    the follow-up must merge before production approval.
-8. On an isolated evaluation target running the exact release candidate, run
-   the fixed scored corpus in `scripts/check_deepseek_v4_0731_quality.py`
-   against both lanes. The hosted reference must be DeepSeek's hosted
-   V4-Flash-0731 service; record its endpoint hostname, advertised model, and
-   returned model/fingerprint fields with the reports. Keep both JSON reports
-   under `.local-state/deepseek-quality/$TARGET_TAG/` and require every case at
-   both `high` and `max` effort to pass:
+8. Run the fixed scored corpus in
+   `scripts/check_deepseek_v4_0731_quality.py` against the current live
+   DeepSeek service and DeepSeek's hosted V4-Flash-0731 reference before the
+   window. This is the correct pre-update quality baseline because the
+   candidate changes scheduler admission and the missing-model accounting
+   label only; the checkpoint, runtime image, parser, sampling configuration,
+   and model topology are identical. Record the hosted endpoint hostname,
+   advertised model, and returned model/fingerprint fields. Keep both JSON
+   reports under `.local-state/deepseek-quality/$TARGET_TAG/` and require every
+   case at both `high` and `max` effort to pass:
 
    ```bash
    export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
-   export CANDIDATE_ENDPOINT='REPLACE_WITH_ISOLATED_CANDIDATE_BASE_URL'
+   export CURRENT_ENDPOINT="${FINITE_PRIVATE_ENDPOINT:-https://kimi-k2-6.finite.containers.tinfoil.dev}"
    QUALITY_DIR=".local-state/deepseek-quality/$TARGET_TAG"
    mkdir -p "$QUALITY_DIR"
    chmod 700 "$QUALITY_DIR"
 
    python3 scripts/check_deepseek_v4_0731_quality.py \
-     --endpoint "$CANDIDATE_ENDPOINT/v1" \
+     --endpoint "$CURRENT_ENDPOINT/v1" \
      --model deepseek-v4-flash-0731 \
      --lane self-hosted \
-     > "$QUALITY_DIR/candidate.json"
+     > "$QUALITY_DIR/production-before.json"
 
    python3 scripts/check_deepseek_v4_0731_quality.py \
      --endpoint https://api.deepseek.com \
@@ -212,13 +205,13 @@ cleanup of the temporary container.
    ```
 
    The script sends the same version-controlled cases and reasoning efforts to
-   both lanes. The self-hosted lane retains the candidate's official sampling
+   both lanes. The self-hosted lane retains DeepSeek's official sampling
    parameters; DeepSeek's hosted thinking mode ignores those sampling fields,
    so the hosted lane omits them. It checks deterministic correctness,
    instruction following, parsed reasoning, and tool selection, emits the
    `finite-deepseek-quality-v1` report schema, and never accepts or records raw
    keys. Any failed case or unresolved reference-identity mismatch stops the
-   rollout.
+   rollout. Repeat the self-hosted lane after relaunch as required below.
 9. Obtain explicit approval for the exact measured tag and the eight-GPU
    maintenance interruption. Passing tests is not rollout authority.
 
@@ -247,11 +240,15 @@ Then:
    streaming, Responses API, high/max reasoning, tool parsing, and Core
    settlement to pass. Run `mixed-version-canary` as an existing-Runtime edge;
    DeepSeek remains the canonical label even while that request alias works.
-3. Before admitting normal traffic, sweep concurrency progressively through 1,
-   4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm all measured request
-   shapes and DP ranks. Stop on the first failure and require a clean single
-   request after each successful tier. Never issue a larger tier or recovery
-   load after a failed request tier.
+   Repeat the self-hosted quality command from precondition 8 against the
+   relaunched production target and retain it as `production-after.json`; every
+   case at both `high` and `max` effort must pass before the rollout is declared
+   successful.
+3. As soon as readiness returns, monitor live traffic and sweep concurrency
+   progressively through 1, 4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm
+   all measured request shapes and DP ranks. Stop on the first failure and
+   require a clean single request after each successful tier. Never issue a
+   larger tier or recovery load after a failed request tier.
 4. Repeat the one-way and 32-way baselines three times. Candidate median
    throughput must be at least 90% of the pre-update median and median p95
    completion latency no more than 125% of the pre-update median.
