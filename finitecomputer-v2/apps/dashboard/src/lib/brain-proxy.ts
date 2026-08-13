@@ -53,7 +53,7 @@ export function brainProxyRequestHeaders(source: Pick<Headers, "get">) {
 
 export async function proxyBrainRequest(
   request: NextRequest,
-  prefix: "/client" | "/v1" | "/_admin" | "/health",
+  prefix: "/client" | "/v1" | "/health",
   path: string[] = [],
   options: { clientCapability?: string; parentOrigin?: string } = {},
 ) {

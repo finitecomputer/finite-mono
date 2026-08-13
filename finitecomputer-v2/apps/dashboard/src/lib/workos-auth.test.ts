@@ -109,8 +109,8 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/api/device-links/account-binding"), false);
   assert.equal(workosProxyBypassPath("/api/device-links/approve/other"), false);
   assert.equal(workosProxyBypassPath("/health"), true);
-  assert.equal(workosProxyBypassPath("/_admin"), true);
-  assert.equal(workosProxyBypassPath("/_admin/brains"), true);
+  assert.equal(workosProxyBypassPath("/_admin"), false);
+  assert.equal(workosProxyBypassPath("/_admin/brains"), false);
   assert.equal(workosProxyBypassPath("/v1"), true);
   assert.equal(workosProxyBypassPath("/v1/brains"), true);
   assert.equal(workosProxyBypassPath("/client"), false);
