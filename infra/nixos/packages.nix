@@ -87,6 +87,13 @@ let
     );
 in
 {
+  # CI/local harness
+  devfinity = mkWorkspaceCrate {
+    pname = "devfinity";
+    dir = "devfinity";
+    sourcePaths = [ "devfinity" ];
+  };
+
   # Servers
   finite-saas-core = mkWorkspaceCrate {
     pname = "finite-saas-core";

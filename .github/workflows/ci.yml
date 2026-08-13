@@ -544,6 +544,7 @@ jobs:
           set -euo pipefail
 
           packages=(
+            ".#packages.x86_64-linux.devfinity"
             ".#packages.x86_64-linux.finite-saas-core"
             ".#packages.x86_64-linux.finite-saas-local"
             ".#packages.x86_64-linux.finite-saas-runner"
@@ -683,6 +684,7 @@ jobs:
             rm -f "$log_file"
           }
 
+          fetch_cached_output .#packages.x86_64-linux.devfinity DEVFINITY_BIN bin/devfinity
           fetch_cached_output .#packages.x86_64-linux.finite-saas-core DEVFINITY_FINITE_SAAS_CORE_BIN bin/finite-saas-core
           fetch_cached_output .#packages.x86_64-linux.finite-saas-local DEVFINITY_FINITE_SAAS_LOCAL_BIN bin/finite-saas-local
           fetch_cached_output .#packages.x86_64-linux.finitechat-server DEVFINITY_FINITECHAT_SERVER_BIN bin/finitechat-server
@@ -698,7 +700,9 @@ jobs:
         # before a trusted package job has populated Cachix for a new commit.
         run: |
           nix develop .#devfinity-ci --command bash -euxo pipefail -c '
-            cargo build --locked -p devfinity
+            if [[ -z "${DEVFINITY_BIN:-}" ]]; then
+              cargo build --locked -p devfinity
+            fi
             if [[ -z "${DEVFINITY_FINITE_SAAS_CORE_BIN:-}" ]]; then
               cargo build --locked -p finite-saas-core
             fi
@@ -728,7 +732,14 @@ jobs:
           # Keep CI headroom for package substitution, dashboard startup, and
           # any local Cargo fallback if an expected package output is absent.
           DEVFINITY_READY_TIMEOUT_SECS: "600"
-        run: nix develop .#devfinity-ci --command just dev smoke
+        run: |
+          nix develop .#devfinity-ci --command bash -euxo pipefail -c '
+            if [[ -n "${DEVFINITY_BIN:-}" ]]; then
+              "$DEVFINITY_BIN" --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
+            else
+              just dev smoke
+            fi
+          '
       - name: Dump devfinity logs on failure
         if: failure()
         run: |
@@ -796,6 +807,7 @@ jobs:
             rm -f "$log_file"
           }
 
+          fetch_cached_output .#packages.x86_64-linux.devfinity DEVFINITY_BIN bin/devfinity
           fetch_cached_output .#packages.x86_64-linux.finite-saas-core DEVFINITY_FINITE_SAAS_CORE_BIN bin/finite-saas-core
           fetch_cached_output .#packages.x86_64-linux.finite-saas-local DEVFINITY_FINITE_SAAS_LOCAL_BIN bin/finite-saas-local
           fetch_cached_output .#packages.x86_64-linux.finite-saas-runner DEVFINITY_FINITE_SAAS_RUNNER_BIN bin/finite-saas-runner
