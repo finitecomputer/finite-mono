@@ -41,9 +41,12 @@ just skills ab-setup
 just skills ab-test-mock
 ```
 
-Set `OPENAI_API_KEY` and run `just skills ab-test` for real model-generated
+Run `just dev inference-key` once if the local Finite Private upstream key has
+not been cached yet, then run `just skills ab-test` for real model-generated
 artifacts. The root `just` path enters the pinned dev shell, which provides a
-Node version compatible with current Promptfoo.
+Node version compatible with current Promptfoo. Use
+`SKILL_AB_PROVIDER=openai OPENAI_API_KEY=...` only when intentionally testing
+against OpenAI instead of Finite Private.
 
 The current checker is only a static floor. A Runtime image change must also
 prove that a new Agent Home discovers the bundled baseline, restart or image

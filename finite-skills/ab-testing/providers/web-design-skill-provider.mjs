@@ -1,9 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const providerDir = path.dirname(fileURLToPath(import.meta.url));
 const harnessRoot = path.resolve(providerDir, "..");
+const repoRoot = path.resolve(harnessRoot, "../..");
+const finitePrivateDefaultBaseUrl = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
+const finitePrivateDefaultModel = "glm-5-2";
+const openAIDefaultBaseUrl = "https://api.openai.com/v1";
+const openAIDefaultModel = "gpt-5-mini";
 
 export default class WebDesignSkillProvider {
   constructor(options = {}) {
@@ -36,19 +41,26 @@ export default class WebDesignSkillProvider {
 
     const startedAt = new Date().toISOString();
     let output;
-    let model = process.env.SKILL_AB_MODEL || this.config.model || "gpt-5-mini";
+    let modelProvider;
+    let model;
     let tokenUsage;
 
     if (isMockMode(this.config)) {
       model = "mock";
+      modelProvider = { name: "mock", baseUrl: null, keySource: null };
       output = mockHtml({ caseId, caseTitle: vars.title ?? caseId, skillName, variant: this.variant });
       tokenUsage = { total: 0, prompt: 0, completion: 0 };
     } else {
-      const response = await callOpenAI({
+      modelProvider = resolveModelProvider(this.config);
+      model = modelProvider.model;
+      const response = await callResponsesApi({
+        apiKey: modelProvider.apiKey,
+        baseUrl: modelProvider.baseUrl,
         model,
         prompt: generatedPrompt,
         maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
         timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
+        providerLabel: modelProvider.label,
       });
       output = response.output;
       tokenUsage = response.tokenUsage;
@@ -65,6 +77,9 @@ export default class WebDesignSkillProvider {
           caseId,
           caseTitle: vars.title ?? caseId,
           model,
+          modelProvider: modelProvider.name,
+          baseUrl: modelProvider.baseUrl,
+          keySource: modelProvider.keySource,
           skillName,
           skillPath: path.relative(harnessRoot, skillPath),
           startedAt,
@@ -103,6 +118,143 @@ export default class WebDesignSkillProvider {
   }
 }
 
+function resolveModelProvider(config = {}) {
+  const requestedProvider = normalizeProviderName(process.env.SKILL_AB_PROVIDER || config.provider || "auto");
+  if (requestedProvider === "finite-private") {
+    return finitePrivateProvider(config);
+  }
+  if (requestedProvider === "openai") {
+    return openAIProvider(config);
+  }
+  if (requestedProvider !== "auto") {
+    throw new Error(`Unsupported SKILL_AB_PROVIDER "${requestedProvider}". Use "auto", "finite-private", or "openai".`);
+  }
+
+  const finitePrivateKey = readFinitePrivateKey({ required: false });
+  if (finitePrivateKey) {
+    return finitePrivateProvider(config, finitePrivateKey);
+  }
+  if (process.env.OPENAI_API_KEY) {
+    return openAIProvider(config);
+  }
+
+  throw new Error(
+    [
+      "A non-mock skill A/B run needs a model API key.",
+      "Run `just dev inference-key` to cache a Finite Private key locally, set `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`,",
+      "or use `SKILL_AB_PROVIDER=openai OPENAI_API_KEY=... pnpm run ab`.",
+      "Use `pnpm run ab:mock` to test the harness without API calls.",
+    ].join(" "),
+  );
+}
+
+function finitePrivateProvider(config = {}, preloadedKey = null) {
+  const key = preloadedKey ?? readFinitePrivateKey({ required: true });
+  return {
+    name: "finite-private",
+    label: "Finite Private",
+    apiKey: key.apiKey,
+    keySource: key.keySource,
+    baseUrl: trimTrailingSlash(
+      process.env.SKILL_AB_FINITE_PRIVATE_BASE_URL ||
+        process.env.FINITE_PRIVATE_BASE_URL ||
+        process.env.FC_RUNNER_FINITE_PRIVATE_BASE_URL ||
+        config.finitePrivateBaseUrl ||
+        config.baseUrl ||
+        finitePrivateDefaultBaseUrl,
+    ),
+    model:
+      process.env.SKILL_AB_MODEL ||
+      process.env.FINITE_PRIVATE_MODEL ||
+      process.env.FC_RUNNER_FINITE_PRIVATE_MODEL ||
+      config.model ||
+      finitePrivateDefaultModel,
+  };
+}
+
+function openAIProvider(config = {}) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY is required when SKILL_AB_PROVIDER=openai. Use `pnpm run ab:mock` to test the harness without API calls.",
+    );
+  }
+  return {
+    name: "openai",
+    label: "OpenAI",
+    apiKey,
+    keySource: "env:OPENAI_API_KEY",
+    baseUrl: trimTrailingSlash(process.env.OPENAI_BASE_URL || config.openAIBaseUrl || config.baseUrl || openAIDefaultBaseUrl),
+    model: process.env.SKILL_AB_MODEL || config.model || openAIDefaultModel,
+  };
+}
+
+function readFinitePrivateKey({ required }) {
+  const envCandidates = [
+    ["SKILL_AB_FINITE_PRIVATE_KEY", process.env.SKILL_AB_FINITE_PRIVATE_KEY],
+    ["FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY", process.env.FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY],
+    ["FINITE_PRIVATE_API_KEY", process.env.FINITE_PRIVATE_API_KEY],
+  ];
+  for (const [name, value] of envCandidates) {
+    if (value?.trim()) {
+      return validateFinitePrivateKey(value, `env:${name}`);
+    }
+  }
+
+  const keyFileCandidates = [
+    process.env.SKILL_AB_FINITE_PRIVATE_KEY_FILE,
+    process.env.DEVFINITY_STATE_DIR
+      ? path.join(resolveRepoRelativePath(process.env.DEVFINITY_STATE_DIR), "credentials", "finite-private-upstream.key")
+      : null,
+    path.join(repoRoot, ".local-state/devfinity/credentials/finite-private-upstream.key"),
+  ].filter(Boolean);
+  for (const keyFile of keyFileCandidates) {
+    const absolutePath = path.isAbsolute(keyFile) ? keyFile : path.resolve(repoRoot, keyFile);
+    if (existsSync(absolutePath)) {
+      return validateFinitePrivateKey(readFileSync(absolutePath, "utf8"), `file:${displayPath(absolutePath)}`);
+    }
+  }
+
+  if (required) {
+    throw new Error(
+      [
+        "Finite Private runs require a local upstream key.",
+        "Run `just dev inference-key`, set `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`,",
+        "or set `SKILL_AB_FINITE_PRIVATE_KEY_FILE` to a local key file.",
+      ].join(" "),
+    );
+  }
+  return null;
+}
+
+function validateFinitePrivateKey(value, keySource) {
+  const apiKey = String(value ?? "").trim();
+  if (!/^fpk_live_[0-9a-fA-F]{64}$/.test(apiKey)) {
+    throw new Error(`Finite Private API key from ${keySource} is not in the expected fpk_live_ format.`);
+  }
+  return { apiKey, keySource };
+}
+
+function normalizeProviderName(value) {
+  return String(value ?? "auto").trim().toLowerCase();
+}
+
+function trimTrailingSlash(value) {
+  return String(value).replace(/\/+$/g, "");
+}
+
+function resolveRepoRelativePath(filePath) {
+  return path.isAbsolute(filePath) ? filePath : path.resolve(repoRoot, filePath);
+}
+
+function displayPath(filePath) {
+  const relative = path.relative(repoRoot, filePath);
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    return relative;
+  }
+  return filePath;
+}
+
 function buildPrompt({ brief, caseTitle, skillName, skillPath, skillText, variant }) {
   return `You are running a local A/B test of an agent skill for web design work.
 
@@ -134,16 +286,11 @@ ${brief}
 `;
 }
 
-async function callOpenAI({ model, prompt, maxOutputTokens, timeoutMs }) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is required for non-mock skill A/B runs. Use `pnpm run ab:mock` to test the harness without API calls.");
-  }
-
+async function callResponsesApi({ apiKey, baseUrl, model, prompt, maxOutputTokens, timeoutMs, providerLabel }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"}/responses`, {
+    const response = await fetch(`${baseUrl}/responses`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -169,11 +316,11 @@ async function callOpenAI({ model, prompt, maxOutputTokens, timeoutMs }) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const message = data?.error?.message || `${response.status} ${response.statusText}`;
-      throw new Error(`OpenAI request failed: ${message}`);
+      throw new Error(`${providerLabel} request failed: ${message}`);
     }
 
     return {
-      output: responseOutputText(data),
+      output: responseOutputText(data, providerLabel),
       tokenUsage: {
         total: data?.usage?.total_tokens,
         prompt: data?.usage?.input_tokens,
@@ -185,7 +332,7 @@ async function callOpenAI({ model, prompt, maxOutputTokens, timeoutMs }) {
   }
 }
 
-function responseOutputText(data) {
+function responseOutputText(data, providerLabel) {
   if (typeof data.output_text === "string" && data.output_text.trim()) {
     return data.output_text;
   }
@@ -199,7 +346,7 @@ function responseOutputText(data) {
   }
   const output = parts.join("\n").trim();
   if (!output) {
-    throw new Error("OpenAI response did not include text output");
+    throw new Error(`${providerLabel} response did not include text output`);
   }
   return output;
 }

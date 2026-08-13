@@ -25,10 +25,23 @@ pnpm install --frozen-lockfile
 pnpm run browsers
 ```
 
-Real runs use the OpenAI Responses API:
+Real runs default to Finite Private. The harness accepts a skill-specific key
+override, then follows the same local key convention as devfinity:
+`FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`, then the general
+`FINITE_PRIVATE_API_KEY`, a cached key under `DEVFINITY_STATE_DIR`, then the
+default cache at
+`.local-state/devfinity/credentials/finite-private-upstream.key`.
+
+If you have not cached the key locally yet, run this once from the monorepo
+root:
 
 ```sh
-export OPENAI_API_KEY=...
+just dev inference-key
+```
+
+Then generate artifacts:
+
+```sh
 just skills ab-test
 ```
 
@@ -84,16 +97,40 @@ pnpm run ab
 
 ## Model Settings
 
-Defaults:
+Provider defaults:
 
-- `SKILL_AB_MODEL=gpt-5-mini`
+- `SKILL_AB_PROVIDER=auto`
+- Finite Private is used when a local key is present.
+- OpenAI is used only when no Finite Private key is found and `OPENAI_API_KEY`
+  is set, or when `SKILL_AB_PROVIDER=openai` is set.
+
+Finite Private settings:
+
+- Key env vars: `SKILL_AB_FINITE_PRIVATE_KEY`,
+  `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`, or `FINITE_PRIVATE_API_KEY`
+- Key file override: `SKILL_AB_FINITE_PRIVATE_KEY_FILE`
+- Devfinity state override: `DEVFINITY_STATE_DIR`
+- Base URL: `SKILL_AB_FINITE_PRIVATE_BASE_URL`, `FINITE_PRIVATE_BASE_URL`, or
+  `FC_RUNNER_FINITE_PRIVATE_BASE_URL`
+- Default base URL: `https://kimi-k2-6.finite.containers.tinfoil.dev/v1`
+- Default model: `glm-5-2`
+
+Common settings:
+
+- `SKILL_AB_MODEL`
 - `SKILL_AB_MAX_OUTPUT_TOKENS=6000`
 - `SKILL_AB_TIMEOUT_MS=120000`
 
 Override them as environment variables:
 
 ```sh
-SKILL_AB_MODEL=gpt-5-mini pnpm run ab
+SKILL_AB_MODEL=glm-5-2 pnpm run ab
+```
+
+OpenAI is still available as an explicit fallback:
+
+```sh
+SKILL_AB_PROVIDER=openai OPENAI_API_KEY=... SKILL_AB_MODEL=gpt-5-mini pnpm run ab
 ```
 
 ## Adding Cases
