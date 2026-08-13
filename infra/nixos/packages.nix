@@ -92,6 +92,12 @@ in
     pname = "devfinity";
     dir = "devfinity";
     sourcePaths = [ "devfinity" ];
+    extraAttrs.postPatch = ''
+      # The binary package does not run devfinity tests; avoid pulling the
+      # test-only finitechat-core path dependency into this Nix source closure.
+      substituteInPlace devfinity/Cargo.toml \
+        --replace-fail 'finitechat-core = { path = "../finitechat/crates/finitechat-core" }' ""
+    '';
   };
 
   # Servers
