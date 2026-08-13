@@ -24,16 +24,10 @@ RUN cargo build --locked --release \
 
 FROM python:3.13-slim-trixie
 ARG HERMES_AGENT_VERSION=0.20.0
-# Upstream retired the PyPI/brew channels in v0.20.0 (v2026.8.3); supported
-# channels are now the shell installer, Docker, and Nix. We install from the
-# immutable GitHub source tarball with a pinned sha256 instead. The source
-# build guard (setup.py) only permits wheel builds under HERMES_NIX_BUILD=1 —
-# we set it explicitly here; NOTE this means we do NOT get their Nix
-# derivation's extra hardening (notably the pinned SQLite WAL-reset-fix
-# shared library and Node 26 toolchain from their own Dockerfile). Those are
-# known gaps tracked on the bump PR, to close before the fleet rollout.
-ARG HERMES_AGENT_DIST_URL=https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.8.3.tar.gz
-ARG HERMES_AGENT_DIST_SHA256=370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be
+ARG HERMES_AGENT_STORE_PATH
+ARG HERMES_AGENT_PYTHON_PATH
+ARG HERMES_AGENT_NIX_ATTR
+ARG HERMES_AGENT_NIX_SYSTEM
 ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
 ARG TARGETARCH
@@ -42,6 +36,8 @@ LABEL org.opencontainers.image.title="Finite Computer v2 Agent Runtime"
 LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono"
 LABEL org.opencontainers.image.revision="${FINITE_MONO_REV}"
 LABEL computer.finite.runtime.hermes-agent-version="${HERMES_AGENT_VERSION}"
+LABEL computer.finite.runtime.hermes-agent-nix-attr="${HERMES_AGENT_NIX_ATTR}"
+LABEL computer.finite.runtime.hermes-agent-nix-system="${HERMES_AGENT_NIX_SYSTEM}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -77,30 +73,19 @@ RUN set -eux; \
     rm -f "/tmp/${archive}" /tmp/gws; \
     gws --version
 
-RUN python -m venv /runtime/hermes-venv \
-    && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
-    && curl --fail --show-error --silent --location \
-      --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 \
-      --output /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
-    && echo "${HERMES_AGENT_DIST_SHA256}  /tmp/hermes-agent.tar.gz" | sha256sum --check - \
-    && HERMES_NIX_BUILD=1 /runtime/hermes-venv/bin/pip install --no-cache-dir \
-      "hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz" \
-      "google-api-python-client==2.198.0" \
-      "google-auth-oauthlib==1.4.0" \
-      "google-auth-httplib2==0.4.0" \
-    && mkdir -p /tmp/hermes-dist \
-    && tar -xzf /tmp/hermes-agent.tar.gz -C /tmp/hermes-dist --strip-components=1 \
-    && cd /tmp/hermes-dist \
-    && find agent tools hermes_cli gateway tui_gateway cron acp_adapter plugins providers \
-        -type f ! -name "*.py" ! -name "*.pyc" ! -path "*/__pycache__/*" -print0 \
-        | tar --null -cf - --files-from - \
-        | tar -xf - -C /runtime/hermes-venv/lib/python3.13/site-packages/ \
-    && cd / \
-    && rm -rf /tmp/hermes-dist /tmp/hermes-agent.tar.gz \
-    && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
-    && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
-    && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp
+COPY .finite-hermes-nix-store/nix/store /nix/store
+
+RUN test -n "${HERMES_AGENT_STORE_PATH}" \
+    && test -n "${HERMES_AGENT_PYTHON_PATH}" \
+    && test -x "${HERMES_AGENT_STORE_PATH}/bin/hermes" \
+    && test -x "${HERMES_AGENT_PYTHON_PATH}/bin/python3" \
+    && test "$("${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')" = "${HERMES_AGENT_VERSION}" \
+    && "${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import googleapiclient, google_auth_httplib2, google_auth_oauthlib' \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes" /usr/local/bin/hermes \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-agent" /usr/local/bin/hermes-agent \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
+    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python3 \
+    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
@@ -134,7 +119,9 @@ RUN chmod +x \
       /runtime/healthcheck.sh
 RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
 
-ENV PATH="/runtime/hermes-venv/bin:/usr/local/bin:${PATH}"
+ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
+ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
+ENV PATH="${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
 ENV FINITECHAT_HOME=/data/agent
 # Shared Finite identity contract: identity.json on the durable mount.
 ENV FINITE_HOME=/data/agent

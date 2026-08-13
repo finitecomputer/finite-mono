@@ -488,7 +488,7 @@ def main() -> int:
         smoke.wait_container_log(name, "FINITE_AGENT_RUNTIME real_hermes_gateway=true", timeout=180)
         health = smoke.wait_container_http_json(name, "/healthz", timeout=120, name="agent")
         version_result = smoke.run(
-            ["docker", "exec", name, "/runtime/hermes-venv/bin/hermes", "--version"],
+            ["docker", "exec", name, "hermes", "--version"],
             timeout=30,
         )
         version = parse_hermes_version(version_result.stdout)

@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(MONOREPO_ROOT))
+
+from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 DEFAULT_IMAGE_ENGINE = "docker"
@@ -112,9 +116,7 @@ def docker_image_metadata(image: str) -> dict[str, Any]:
 
 
 def apple_image_metadata(image: str) -> dict[str, Any]:
-    payload = json.loads(
-        run(["container", "image", "inspect", image], timeout=60).stdout
-    )
+    payload = json.loads(run(["container", "image", "inspect", image], timeout=60).stdout)
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         raise SystemExit(f"unexpected Apple Container image inspect output for {image}")
 
@@ -175,13 +177,11 @@ def native_linux_platform() -> str:
         "x86_64": "amd64",
     }.get(machine)
     if architecture is None:
-        raise SystemExit(
-            f"unsupported native architecture for container image build: {machine}"
-        )
+        raise SystemExit(f"unsupported native architecture for container image build: {machine}")
     return f"linux/{architecture}"
 
 
-def effective_build_platform(engine: str, requested: str | None) -> str | None:
+def effective_build_platform(engine: str, requested: str | None) -> str:
     if requested:
         return requested
     return native_linux_platform()
@@ -213,9 +213,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hermes-agent-version",
-        default=os.environ.get(
-            "FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION
-        ),
+        default=os.environ.get("FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION),
         help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
     )
     parser.add_argument(
@@ -235,9 +233,25 @@ def build_image(
     context: Path,
     *,
     mono_sha: str,
-    platform: str | None,
+    platform: str,
 ) -> dict[str, Any]:
     stage_repo(MONOREPO_ROOT, context)
+    hermes_runtime = stage_runtime_closure(
+        MONOREPO_ROOT,
+        context,
+        system=nix_system_for_platform(platform),
+    )
+    if hermes_runtime.version != args.hermes_agent_version:
+        raise SystemExit(
+            "Hermes Nix runtime version mismatch: "
+            f"expected {args.hermes_agent_version}, got {hermes_runtime.version}"
+        )
+    print(
+        "Staged "
+        f"{hermes_runtime.attr} ({hermes_runtime.closure_count} Nix store paths) "
+        f"for {platform}",
+        flush=True,
+    )
 
     dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
     if args.engine == "docker":
@@ -255,15 +269,22 @@ def build_image(
             "--build-arg",
             f"HERMES_AGENT_VERSION={args.hermes_agent_version}",
             "--build-arg",
+            f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
+            "--build-arg",
+            f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
+            "--build-arg",
+            f"HERMES_AGENT_NIX_ATTR={hermes_runtime.attr}",
+            "--build-arg",
+            f"HERMES_AGENT_NIX_SYSTEM={hermes_runtime.nix_system}",
+            "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",
         ]
     )
-    if platform:
-        build.extend(["--platform", platform])
-        # Docker's legacy builder accepts --platform but does not populate the
-        # BuildKit TARGETARCH argument. Pass the already-validated architecture
-        # explicitly so release, smoke, and Apple builds select the same tools.
-        build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
+    build.extend(["--platform", platform])
+    # Docker's legacy builder accepts --platform but does not populate the
+    # BuildKit TARGETARCH argument. Pass the already-validated architecture
+    # explicitly so release, smoke, and Apple builds select the same tools.
+    build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
     if args.no_cache:
         build.append("--no-cache")
     if args.engine == "depot":
@@ -281,8 +302,18 @@ def build_image(
         run(push, timeout=3600, capture=False)
 
     if args.engine in {"docker", "depot"}:
-        return docker_image_metadata(args.image_ref)
-    return apple_image_metadata(args.image_ref)
+        image_metadata = docker_image_metadata(args.image_ref)
+    else:
+        image_metadata = apple_image_metadata(args.image_ref)
+    image_metadata["hermes_nix_runtime"] = {
+        "attr": hermes_runtime.attr,
+        "python_attr": hermes_runtime.python_attr,
+        "nix_system": hermes_runtime.nix_system,
+        "store_path": hermes_runtime.store_path,
+        "python_store_path": hermes_runtime.python_store_path,
+        "closure_count": hermes_runtime.closure_count,
+    }
+    return image_metadata
 
 
 def main() -> int:

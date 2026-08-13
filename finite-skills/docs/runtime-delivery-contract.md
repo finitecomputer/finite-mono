@@ -38,7 +38,7 @@ failures after the exchange restore the prior baseline. It does not require a
 Runner operation or Runtime reboot.
 
 Hermes tools that scan the configured external directory read the replacement
-tree in place. Hermes 0.18.2 caches its slash-command name map, so newly added
+tree in place. The pinned Hermes runtime caches its slash-command name map, so newly added
 or removed skill names become visible after the user invokes
 `/reload-skills`; changed content at an existing path is already available.
 An in-flight model turn is not retroactively changed.

@@ -250,7 +250,7 @@ Current v2 runtime image expectations:
   Finite Private is the requested default profile and no key is present; after
   `config.yaml` exists, its model/provider block is Hermes/user-owned and a
   stale Runner default neither rewrites nor blocks that durable choice.
-- the runtime image packages Hermes Agent 0.18.2, `finitechat`, `fsite`,
+- the runtime image packages the root flake's pinned Nix Hermes runtime, `finitechat`, `fsite`,
   `fbrain`, the Finite Chat Hermes plugin, and the one-time Finite Skills
   baseline.
 
@@ -269,8 +269,8 @@ Current debt:
   empty-target restore proof. Runtime Retirement and Purge User Data remain
   unavailable until that Recovery Set design restores. This does not block
   normal first-slice launch/restart on preserved provider-durable state.
-- Hermes currently runs as root. The narrow sync command is shipped, but Hermes
-  0.18.2 still requires explicit `/reload-skills` for newly added or removed
+- Hermes currently runs as root. The narrow sync command is shipped, but the
+  pinned Hermes runtime still requires explicit `/reload-skills` for newly added or removed
   slash-command names. Do not replace that limitation with an automatic
   updater, Core desired state, Runtime Management Pipe command, or
   Runner-mounted checkout.

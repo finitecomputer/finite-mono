@@ -106,7 +106,7 @@ class RecordingPluginContext:
     def register_command(self, _name, **_kwargs):
         # This smoke exercises the real platform/media path. Command behavior
         # is covered by test_finite_platform_adapter; accepting registration
-        # here keeps the context faithful to Hermes 0.18.2's plugin contract.
+        # here keeps the context faithful to the pinned Hermes plugin contract.
         return None
 
 

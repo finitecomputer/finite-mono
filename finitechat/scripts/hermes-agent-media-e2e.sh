@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local Hermes adapter media end-to-end:
-#   real pip hermes-agent package + finitechat plugin + finitechat binaries
+#   real Nix-built Hermes Agent runtime + finitechat plugin + finitechat binaries
 #   finitechat user joins via invite URL, sends image media, then receives
 #   agent text and image media replies.
 # This test installs an echo set_message_handler callback. It proves adapter
@@ -20,5 +20,5 @@ exec env \
     FINITE_HERMES_AGENT_MEDIA_E2E_REPORT="$REPORT" \
     FINITECHAT_BIN="$REPO_ROOT/target/debug/finitechat" \
     FINITECHAT_SERVER_BIN="$REPO_ROOT/target/debug/finitechat-server" \
-    uvx --no-config --with hermes-agent python -m unittest \
-    tests.hermes.test_live_hermes_agent_media_e2e -v
+    nix develop "$REPO_ROOT/..#hermes-bridge-ci" --command bash -lc \
+    'exec "$HERMES_AGENT_RUNTIME_PYTHON" -m unittest tests.hermes.test_live_hermes_agent_media_e2e -v'

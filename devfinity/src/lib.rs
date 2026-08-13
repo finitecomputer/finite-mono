@@ -263,6 +263,7 @@ const DEVFINITY_FINITESITESD_BIN_ENV: &str = "DEVFINITY_FINITESITESD_BIN";
 const DEVFINITY_FINITE_IDENTITYD_BIN_ENV: &str = "DEVFINITY_FINITE_IDENTITYD_BIN";
 const DEVFINITY_FINITE_BRAIN_BIN_ENV: &str = "DEVFINITY_FINITE_BRAIN_BIN";
 const DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_RUNNER_BIN";
+const DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_LOCAL_BIN";
 
 #[derive(Clone)]
 struct WorkosStagingConfig {
@@ -1193,7 +1194,11 @@ impl Stack {
             "cargo build -p finite-brain-app",
         );
         if self.profile.includes_runtime() {
-            commands.push("cargo build -p finite-saas-local".to_string());
+            push_cargo_build_if_missing(
+                &mut commands,
+                DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV,
+                "cargo build -p finite-saas-local",
+            );
             push_cargo_build_if_missing(
                 &mut commands,
                 DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV,
@@ -1781,14 +1786,19 @@ wait "$postgres_pid"
             ". {}",
             shell_quote(&self.limiter_secret_file().display().to_string())
         );
+        let finite_saas_local_command = service_command(
+            DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV,
+            "cargo run -p finite-saas-local --",
+        );
         let command = format!(
             concat!(
-                "exec cargo run -p finite-saas-local -- finite-private-limiter-up ",
+                "exec {} finite-private-limiter-up ",
                 "--listen-addr {} ",
                 "--core-url {} ",
                 "--dashboard-url {} ",
                 "--agent-host {}"
             ),
+            finite_saas_local_command,
             shell_quote(&format!(
                 "{}:{}",
                 self.service_bind_host(),
@@ -1910,7 +1920,7 @@ wait "$postgres_pid"
                 "--reference \"$reference\" ",
                 "--version-label devfinity-worktree ",
                 "--state-schema-version runtime-state-v1 ",
-                "--hermes-source-ref hermes-agent==0.20.0 ",
+                "--hermes-source-ref nix:packages.x86_64-linux.hermes-agent-runtime ",
                 "--promoted"
             ),
             self.finite_saas_core_command()

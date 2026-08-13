@@ -5,7 +5,7 @@ This is intentionally stronger than the adapter echo tests:
 
   finitechat-server
   -> finitechat hermes serve
-  -> hermes-agent `gateway run --replace`
+  -> Nix-built Hermes Agent `gateway run --replace`
   -> throwaway finitechat client joins via invite URL
 
 The pass condition is that Hermes admits the pending join through the
@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MONOREPO_ROOT = REPO_ROOT.parent
 DEFAULT_REPORT = REPO_ROOT / "target/hermes-real-gateway-admission-smoke/report.json"
+DEFAULT_HERMES_NIX_SHELL = f"{MONOREPO_ROOT}#hermes-bridge-ci"
 
 
 class SmokeFailure(RuntimeError):
@@ -53,8 +55,9 @@ def parse_args() -> argparse.Namespace:
         default=int(os.environ.get("FINITECHAT_HERMES_REAL_GATEWAY_TIMEOUT_MS", "30000")),
     )
     parser.add_argument(
-        "--hermes-package",
-        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", "hermes-agent==0.18.2"),
+        "--hermes-nix-shell",
+        default=os.environ.get("FINITECHAT_HERMES_NIX_SHELL", DEFAULT_HERMES_NIX_SHELL),
+        help="Nix dev shell that provides the pinned Hermes Agent runtime.",
     )
     parser.add_argument(
         "--skip-build", action="store_true", help="Use existing target/debug binaries."
@@ -196,9 +199,8 @@ def main() -> int:
     server_bin = Path(
         os.environ.get("FINITECHAT_SERVER_BIN", REPO_ROOT / "target/debug/finitechat-server")
     )
-    uvx_bin = shutil.which("uvx")
-    if uvx_bin is None:
-        raise SmokeFailure("uvx is required to run hermes-agent 0.17")
+    if shutil.which("nix") is None:
+        raise SmokeFailure("nix is required to run the pinned Hermes Agent runtime")
 
     if not args.skip_build:
         run(
@@ -236,7 +238,7 @@ def main() -> int:
         "sidecar_url": service_url,
         "finitechat_bin": str(finitechat_bin),
         "server_bin": str(server_bin),
-        "hermes_package": args.hermes_package,
+        "hermes_nix_shell": args.hermes_nix_shell,
         "timeout_ms": args.timeout_ms,
         "steps": [],
     }
@@ -397,10 +399,10 @@ def main() -> int:
         gateway_log = logs_dir / "hermes-gateway.log"
         gateway = subprocess.Popen(
             [
-                uvx_bin,
-                "--no-config",
-                "--from",
-                args.hermes_package,
+                "nix",
+                "develop",
+                args.hermes_nix_shell,
+                "--command",
                 "hermes",
                 "gateway",
                 "run",

@@ -103,6 +103,15 @@ in
       "finitecomputer-v2/crates/finite-saas-runner"
     ];
   };
+  finite-saas-local = mkWorkspaceCrate {
+    pname = "finite-saas-local";
+    dir = "finitecomputer-v2/crates/finite-saas-local";
+    sourcePaths = [
+      "finitecomputer-v2/crates/finite-private-limiter"
+      "finitecomputer-v2/crates/finite-saas-core"
+      "finitecomputer-v2/crates/finite-saas-local"
+    ];
+  };
   finitechat-server = mkWorkspaceCrate {
     pname = "finitechat-server";
     dir = "finitechat/crates/finitechat-server";

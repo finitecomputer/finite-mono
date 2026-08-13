@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Real iPhone + real pip hermes-agent package + finitechat plugin.
+# Real iPhone + real Nix-built Hermes Agent runtime + finitechat plugin.
 # This test installs an echo set_message_handler callback. It proves adapter
 # transport/media wiring through a phone, not real Hermes gateway/model behavior.
 #
@@ -28,5 +28,5 @@ env \
     FINITE_IOS_DEVICE_HERMES_AGENT_MEDIA_E2E_REPORT="$REPO_ROOT/target/ios-device-hermes-agent-media-e2e/report.json" \
     FINITECHAT_BIN="$REPO_ROOT/target/debug/finitechat" \
     FINITECHAT_SERVER_BIN="$REPO_ROOT/target/debug/finitechat-server" \
-    uvx --no-config --with hermes-agent python -m unittest \
-    tests.hermes.test_live_ios_device_hermes_media_e2e -v
+    nix develop "$REPO_ROOT/..#hermes-bridge-ci" --command bash -lc \
+    'exec "$HERMES_AGENT_RUNTIME_PYTHON" -m unittest tests.hermes.test_live_ios_device_hermes_media_e2e -v'
