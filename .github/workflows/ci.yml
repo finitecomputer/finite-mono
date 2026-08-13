@@ -26,9 +26,14 @@ jobs:
     outputs:
       run_rust: ${{ steps.detect.outputs.run_rust }}
       run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
+      run_dashboard_browser: ${{ steps.detect.outputs.run_dashboard_browser }}
       run_electron_alpha: ${{ steps.detect.outputs.run_electron_alpha }}
       run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
       run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
+      run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
+      run_search_check: ${{ steps.detect.outputs.run_search_check }}
+      run_self_hosted_monitoring_contract: ${{ steps.detect.outputs.run_self_hosted_monitoring_contract }}
+      run_finite_status_contract: ${{ steps.detect.outputs.run_finite_status_contract }}
       run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
       run_devfinity_smoke: ${{ steps.detect.outputs.run_devfinity_smoke }}
       run_brain_product_matrix: ${{ steps.detect.outputs.run_brain_product_matrix }}
@@ -48,80 +53,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          run_rust=false
-          run_dashboard=false
-          run_electron_alpha=false
-          run_hermes_bridge=false
-          run_nix_checks=false
-          run_nix_service_packages=false
-          run_devfinity_smoke=false
-          run_brain_product_matrix=false
-
-          select_all() {
-            run_rust=true
-            run_dashboard=true
-            # Electron CI remains disabled until we actually build and ship an
-            # Electron surface again; the current alpha artifact is unused.
-            # Re-enable this when Electron becomes an active product target.
-            run_electron_alpha=false
-            run_hermes_bridge=true
-            run_nix_checks=true
-            run_nix_service_packages=true
-            run_devfinity_smoke=true
-            run_brain_product_matrix=true
-          }
-
-          case "$GITHUB_EVENT_NAME" in
-            pull_request)
-              diff_range="$PR_BASE_SHA...$PR_HEAD_SHA"
-              ;;
-            push)
-              diff_range="$PUSH_BEFORE_SHA..$PUSH_HEAD_SHA"
-              ;;
-            merge_group)
-              # Merge queue validation must report every required check on the
-              # synthetic merge group SHA.
-              select_all
-              diff_range=
-              ;;
-            *)
-              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
-
-          if [[ -n "$diff_range" ]]; then
-            changed_files="$RUNNER_TEMP/ci-changed-files"
-            # Surface both sides of a rename so the old path still selects its harness.
-            git diff --name-only --no-renames "$diff_range" -- > "$changed_files"
-
-            while IFS= read -r path; do
-              case "$path" in
-                docs/*|README.md|CONTRIBUTING.md|AGENTS.md|CONTEXT-MAP.md)
-                  ;;
-                finitecomputer-v2/apps/dashboard/*|finitechat/packages/finitechat-chat-ui/*)
-                  run_dashboard=true
-                  run_nix_checks=true
-                  run_devfinity_smoke=true
-                  ;;
-                *)
-                  select_all
-                  break
-                  ;;
-              esac
-            done < "$changed_files"
-          fi
-
-          {
-            echo "run_rust=$run_rust"
-            echo "run_dashboard=$run_dashboard"
-            echo "run_electron_alpha=$run_electron_alpha"
-            echo "run_hermes_bridge=$run_hermes_bridge"
-            echo "run_nix_checks=$run_nix_checks"
-            echo "run_nix_service_packages=$run_nix_service_packages"
-            echo "run_devfinity_smoke=$run_devfinity_smoke"
-            echo "run_brain_product_matrix=$run_brain_product_matrix"
-          } >> "$GITHUB_OUTPUT"
+          scripts/ci/select-harnesses \
+            --github-output "$GITHUB_OUTPUT" \
+            --summary "$GITHUB_STEP_SUMMARY"
 
   rust:
     name: Rust workspace
@@ -212,6 +146,7 @@ jobs:
         run: pnpm test
 
       - name: Test dashboard product flows
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
         run: pnpm run test:browser
 
       - name: Build dashboard
@@ -442,10 +377,10 @@ jobs:
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
 
-  nix-checks:
-    name: Skills + search static checks (nix shell)
+  skills-check:
+    name: Skills static check
     needs: changes
-    if: needs.changes.outputs.run_nix_checks == 'true'
+    if: needs.changes.outputs.run_skills_check == 'true'
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -456,10 +391,66 @@ jobs:
           use-flakehub: false
       - name: Skills check
         run: nix develop --command just skills check
-      - name: Brain product language check
-        run: nix develop --command just brain-language-check
+
+  search-check:
+    name: Search static check
+    needs: changes
+    if: needs.changes.outputs.run_search_check == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
       - name: Search check
         run: nix develop --command just search check
+
+  self-hosted-monitoring-contract:
+    name: Self-hosted monitoring contract
+    needs: changes
+    if: needs.changes.outputs.run_self_hosted_monitoring_contract == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+      - name: Self-hosted monitoring contract
+        run: nix develop --command just self-hosted-monitoring-contract
+
+  finite-status-contract:
+    name: Finite status contract
+    needs: changes
+    if: needs.changes.outputs.run_finite_status_contract == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+      - name: Finite status contract
+        run: nix develop --command just finite-status-contract
+
+  nix-checks:
+    name: Nix static contracts
+    needs: changes
+    if: needs.changes.outputs.run_nix_checks == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+      - name: Brain product language check
+        run: nix develop --command just brain-language-check
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
       - name: Finite Private DeepSeek production candidate contract
@@ -468,12 +459,8 @@ jobs:
         run: nix develop --command just lat1-rollout-contract
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
-      - name: Self-hosted monitoring contract
-        run: nix develop --command just self-hosted-monitoring-contract
       - name: Kata Runner host anti-drift contract
         run: nix develop --command just runner-host-contract
-      - name: Canonical read-only platform status contract
-        run: nix develop --command just finite-status-contract
       - name: Identity edge route contract
         run: nix develop --command just identity-edge-contract
       - name: Stripe Price contract
@@ -879,6 +866,10 @@ jobs:
       - dashboard
       - electron-alpha
       - hermes-bridge
+      - skills-check
+      - search-check
+      - self-hosted-monitoring-contract
+      - finite-status-contract
       - nix-checks
       - nix-service-packages
       - devfinity-smoke
@@ -889,11 +880,20 @@ jobs:
       RUN_RUST: ${{ needs.changes.outputs.run_rust }}
       RESULT_RUST: ${{ needs.rust.result }}
       RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
+      RUN_DASHBOARD_BROWSER: ${{ needs.changes.outputs.run_dashboard_browser }}
       RESULT_DASHBOARD: ${{ needs.dashboard.result }}
       RUN_ELECTRON_ALPHA: ${{ needs.changes.outputs.run_electron_alpha }}
       RESULT_ELECTRON_ALPHA: ${{ needs['electron-alpha'].result }}
       RUN_HERMES_BRIDGE: ${{ needs.changes.outputs.run_hermes_bridge }}
       RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
+      RUN_SKILLS_CHECK: ${{ needs.changes.outputs.run_skills_check }}
+      RESULT_SKILLS_CHECK: ${{ needs['skills-check'].result }}
+      RUN_SEARCH_CHECK: ${{ needs.changes.outputs.run_search_check }}
+      RESULT_SEARCH_CHECK: ${{ needs['search-check'].result }}
+      RUN_SELF_HOSTED_MONITORING_CONTRACT: ${{ needs.changes.outputs.run_self_hosted_monitoring_contract }}
+      RESULT_SELF_HOSTED_MONITORING_CONTRACT: ${{ needs['self-hosted-monitoring-contract'].result }}
+      RUN_FINITE_STATUS_CONTRACT: ${{ needs.changes.outputs.run_finite_status_contract }}
+      RESULT_FINITE_STATUS_CONTRACT: ${{ needs['finite-status-contract'].result }}
       RUN_NIX_CHECKS: ${{ needs.changes.outputs.run_nix_checks }}
       RESULT_NIX_CHECKS: ${{ needs['nix-checks'].result }}
       RUN_NIX_SERVICE_PACKAGES: ${{ needs.changes.outputs.run_nix_service_packages }}
@@ -939,10 +939,29 @@ jobs:
           check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
           check_selected "Electron alpha" "$RUN_ELECTRON_ALPHA" "$RESULT_ELECTRON_ALPHA"
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
+          check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
+          check_selected "Search check" "$RUN_SEARCH_CHECK" "$RESULT_SEARCH_CHECK"
+          check_selected "Self-hosted monitoring contract" "$RUN_SELF_HOSTED_MONITORING_CONTRACT" "$RESULT_SELF_HOSTED_MONITORING_CONTRACT"
+          check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
           check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"
           check_selected "Nix service packages" "$RUN_NIX_SERVICE_PACKAGES" "$RESULT_NIX_SERVICE_PACKAGES"
           check_selected "devfinity smoke" "$RUN_DEVFINITY_SMOKE" "$RESULT_DEVFINITY_SMOKE"
           check_selected "Brain product matrix" "$RUN_BRAIN_PRODUCT_MATRIX" "$RESULT_BRAIN_PRODUCT_MATRIX"
+
+          case "$RUN_DASHBOARD_BROWSER" in
+            true)
+              if [[ "$RUN_DASHBOARD" != true ]]; then
+                echo "Dashboard browser e2e was selected without the Dashboard job" >&2
+                failed=true
+              fi
+              ;;
+            false)
+              ;;
+            *)
+              echo "Dashboard browser e2e has an invalid selection value: $RUN_DASHBOARD_BROWSER" >&2
+              failed=true
+              ;;
+          esac
 
           if [[ "$failed" == true ]]; then
             exit 1

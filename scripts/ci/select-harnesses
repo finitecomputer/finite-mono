@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Select the CI harnesses required by a changed path set."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, fields
+
+
+OUTPUT_NAMES = (
+    "run_rust",
+    "run_dashboard",
+    "run_dashboard_browser",
+    "run_electron_alpha",
+    "run_hermes_bridge",
+    "run_nix_checks",
+    "run_skills_check",
+    "run_search_check",
+    "run_self_hosted_monitoring_contract",
+    "run_finite_status_contract",
+    "run_nix_service_packages",
+    "run_devfinity_smoke",
+    "run_brain_product_matrix",
+)
+
+GLOBAL_EXACT_PATHS = {
+    ".github/workflows/ci.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "flake.lock",
+    "flake.nix",
+    "justfile",
+    "scripts/ci/select-harnesses",
+    "scripts/tests/test_ci_select_harnesses.py",
+}
+
+GLOBAL_PREFIXES = (
+    ".cargo/",
+    ".github/actions/",
+    ".github/workflows/",
+)
+
+GLOBAL_SUFFIXES = (
+    ".capnp",
+    ".graphql",
+    ".proto",
+    ".sql",
+)
+
+MONITORING_PREFIX = "infra/monitoring/self-hosted/"
+
+FINITE_STATUS_PATHS = {
+    "scripts/finite-status",
+    "scripts/finite_status.py",
+    "scripts/check_finite_status_contract.py",
+    "scripts/tests/test_finite_status.py",
+    "scripts/tests/test_finite_runtime_metrics.py",
+    "scripts/tests/fixtures/finite_status_aug1.json",
+}
+
+REMAINING_NIX_CHECK_PATHS = {
+    "scripts/check-brain-product-language.py",
+    "scripts/check_runtime_image_contract.py",
+    "scripts/check_runner_host_contract.py",
+    "scripts/identity-edge-contract-gate.py",
+    "scripts/check_lat1_healthcheck_contract.py",
+    "scripts/check_finite_private_deepseek_candidate.py",
+    "scripts/check_stripe_price_contract.py",
+    "scripts/check_lat1_secret_bootstrap.py",
+    "scripts/tests/test_runtime_image_contract.py",
+    "scripts/tests/test_identity_edge_contract_gate.py",
+    "scripts/tests/test_check_deepseek_v4_0731_quality.py",
+    "scripts/tests/test_finite_private_deepseek_candidate.py",
+    "scripts/tests/test_finite_private_ops.py",
+    "scripts/tests/test_check_lat1_secret_bootstrap.py",
+    "scripts/tests/test_snapshot_sqlite.py",
+    "scripts/tests/test_deploy_lat1_rollout.py",
+    "scripts/tests/test_lat1_closure_artifact.py",
+    "infra/scripts/test-hosted-web-chat-restore",
+    "infra/scripts/test-litestream-restore",
+    "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",
+}
+
+
+@dataclass
+class HarnessSelection:
+    run_rust: bool = False
+    run_dashboard: bool = False
+    run_dashboard_browser: bool = False
+    run_electron_alpha: bool = False
+    run_hermes_bridge: bool = False
+    run_nix_checks: bool = False
+    run_skills_check: bool = False
+    run_search_check: bool = False
+    run_self_hosted_monitoring_contract: bool = False
+    run_finite_status_contract: bool = False
+    run_nix_service_packages: bool = False
+    run_devfinity_smoke: bool = False
+    run_brain_product_matrix: bool = False
+
+    def select_all(self) -> None:
+        for field in fields(self):
+            setattr(self, field.name, True)
+        # Electron CI remains disabled until the Electron surface is active.
+        self.run_electron_alpha = False
+
+    def values(self) -> dict[str, str]:
+        return {
+            name: "true" if getattr(self, name) else "false"
+            for name in OUTPUT_NAMES
+        }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
+    parser.add_argument("--base", default=os.environ.get("PR_BASE_SHA"))
+    parser.add_argument("--head", default=os.environ.get("PR_HEAD_SHA"))
+    parser.add_argument("--push-base", default=os.environ.get("PUSH_BEFORE_SHA"))
+    parser.add_argument("--push-head", default=os.environ.get("PUSH_HEAD_SHA") or os.environ.get("GITHUB_SHA"))
+    parser.add_argument("--github-output")
+    parser.add_argument("--summary")
+    parser.add_argument(
+        "--changed-file",
+        action="append",
+        dest="changed_files",
+        help="Override git diff input; useful for tests and local dry-runs.",
+    )
+    args = parser.parse_args()
+
+    selection, reason, paths = select_harnesses(args)
+    write_outputs(args.github_output, selection)
+    write_summary(args.summary, selection, reason, paths)
+
+    print(f"CI harness selection: {reason}")
+    for name, value in selection.values().items():
+        print(f"{name}={value}")
+
+    return 0
+
+
+def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, list[str]]:
+    if args.changed_files is not None:
+        paths = normalized_paths(args.changed_files)
+        selection = select_for_paths(paths)
+        return selection, "changed-file override", paths
+
+    if args.event == "merge_group":
+        selection = HarnessSelection()
+        selection.select_all()
+        return selection, "merge queue runs every required harness", []
+
+    try:
+        paths = changed_files_for_event(args)
+    except subprocess.CalledProcessError as error:
+        print(f"failed to compute changed files; selecting every harness: {error}", file=sys.stderr)
+        selection = HarnessSelection()
+        selection.select_all()
+        return selection, "could not compute changed files", []
+
+    selection = select_for_paths(paths)
+    return selection, "selected from changed paths", paths
+
+
+def changed_files_for_event(args: argparse.Namespace) -> list[str]:
+    if args.event == "pull_request":
+        if not args.base or not args.head:
+            raise subprocess.CalledProcessError(2, ["git", "diff"], "missing pull request base or head")
+        diff_range = f"{args.base}...{args.head}"
+    elif args.event == "push":
+        if not args.push_base or set(args.push_base) == {"0"} or not args.push_head:
+            raise subprocess.CalledProcessError(2, ["git", "diff"], "missing usable push base or head")
+        diff_range = f"{args.push_base}..{args.push_head}"
+    else:
+        raise subprocess.CalledProcessError(2, ["git", "diff"], f"unsupported event: {args.event}")
+
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", diff_range, "--"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return normalized_paths(completed.stdout.splitlines())
+
+
+def select_for_paths(paths: list[str]) -> HarnessSelection:
+    selection = HarnessSelection()
+    for path in paths:
+        apply_path(selection, path)
+    return selection
+
+
+def apply_path(selection: HarnessSelection, path: str) -> None:
+    if not path:
+        return
+
+    if is_global_path(path):
+        selection.select_all()
+        return
+
+    if is_self_hosted_monitoring_path(path):
+        selection.run_self_hosted_monitoring_contract = True
+        return
+
+    if is_finite_skills_executable_doc(path):
+        selection.run_skills_check = True
+        return
+
+    if is_docs_only_path(path):
+        return
+
+    if path in FINITE_STATUS_PATHS:
+        selection.run_finite_status_contract = True
+        return
+
+    if path == "scripts/check_self_hosted_monitoring_contract.py":
+        selection.run_self_hosted_monitoring_contract = True
+        return
+
+    if path.startswith("finite-skills/"):
+        selection.run_skills_check = True
+        return
+
+    if path.startswith("finite-search/"):
+        selection.run_search_check = True
+        return
+
+    if path.startswith("finitecomputer-v2/apps/dashboard/"):
+        selection.run_dashboard = True
+        if is_dashboard_browser_path(path):
+            selection.run_dashboard_browser = True
+        return
+
+    if path.startswith("finitechat/packages/finitechat-chat-ui/"):
+        selection.run_dashboard = True
+        selection.run_dashboard_browser = True
+        return
+
+    if path in REMAINING_NIX_CHECK_PATHS:
+        selection.run_nix_checks = True
+        return
+
+    if path.startswith("infra/nixos/"):
+        selection.run_nix_checks = True
+        selection.run_nix_service_packages = True
+        return
+
+    selection.select_all()
+
+
+def is_global_path(path: str) -> bool:
+    return (
+        path in GLOBAL_EXACT_PATHS
+        or path.startswith(GLOBAL_PREFIXES)
+        or path.endswith(GLOBAL_SUFFIXES)
+    )
+
+
+def is_self_hosted_monitoring_path(path: str) -> bool:
+    return path.startswith(MONITORING_PREFIX)
+
+
+def is_finite_skills_executable_doc(path: str) -> bool:
+    return path.startswith("finite-skills/") and path.endswith("/SKILL.md")
+
+
+def is_docs_only_path(path: str) -> bool:
+    return path.endswith(".md") and not path.endswith("/SKILL.md") and path != "SKILL.md"
+
+
+def is_dashboard_browser_path(path: str) -> bool:
+    relative = path.removeprefix("finitecomputer-v2/apps/dashboard/")
+    if relative.startswith("src/lib/"):
+        return False
+    return relative.startswith(
+        (
+            "browser/",
+            "components/",
+            "public/",
+            "src/app/",
+            "src/components/",
+            "src/hooks/",
+            "src/styles/",
+        )
+    ) or relative == "src/proxy.ts"
+
+
+def normalized_paths(paths: list[str]) -> list[str]:
+    normalized = [normalize_path(path) for path in paths]
+    return [path for path in normalized if path]
+
+
+def normalize_path(path: str) -> str:
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        try:
+            path = os.path.relpath(path, os.getcwd())
+        except ValueError:
+            return path
+    return path.replace(os.sep, "/").lstrip("./")
+
+
+def write_outputs(path: str | None, selection: HarnessSelection) -> None:
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as stream:
+        for key, value in selection.values().items():
+            stream.write(f"{key}={value}\n")
+
+
+def write_summary(path: str | None, selection: HarnessSelection, reason: str, paths: list[str]) -> None:
+    if not path:
+        return
+    selected = [name.removeprefix("run_") for name, value in selection.values().items() if value == "true"]
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write("### CI harness selection\n\n")
+        stream.write(f"- Reason: {reason}\n")
+        stream.write(f"- Selected: `{', '.join(selected) if selected else 'none'}`\n")
+        if paths:
+            stream.write("- Changed paths:\n")
+            for changed_path in paths:
+                stream.write(f"  - `{changed_path}`\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
