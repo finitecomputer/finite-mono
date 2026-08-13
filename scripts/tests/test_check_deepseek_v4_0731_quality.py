@@ -36,7 +36,22 @@ class DeepSeekV40731QualityTests(unittest.TestCase):
         )
 
         self.assertNotIn("chat_template_kwargs", payload)
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("top_p", payload)
         self.assertEqual(payload["reasoning_effort"], "max")
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+
+    def test_hosted_tool_payload_omits_unsupported_tool_choice(self) -> None:
+        case = next(item for item in CASES if item.expected_tool)
+        payload = _payload(
+            case,
+            model="deepseek-v4-flash",
+            effort="high",
+            lane="deepseek-hosted",
+        )
+
+        self.assertIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
 
     def test_exact_answer_requires_separate_reasoning(self) -> None:
         response = {
@@ -118,7 +133,7 @@ class DeepSeekV40731QualityTests(unittest.TestCase):
         arguments = [
             "quality",
             "--endpoint",
-            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com",
             "--model",
             "deepseek-v4-flash",
             "--api-key-env",
@@ -152,6 +167,25 @@ class DeepSeekV40731QualityTests(unittest.TestCase):
 
         self.assertTrue(any("api.deepseek.com" in item for item in violations))
         self.assertTrue(any("some-other-model" in item for item in violations))
+
+    def test_hosted_identity_rejects_v1_suffix(self) -> None:
+        violations = _identity_violations(
+            endpoint="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            lane="deepseek-hosted",
+            results=[
+                {
+                    "case": "logic",
+                    "effort": "high",
+                    "passed": True,
+                    "response_model": "deepseek-v4-flash",
+                }
+            ],
+        )
+
+        self.assertTrue(
+            any("exactly https://api.deepseek.com" in item for item in violations)
+        )
 
 
 if __name__ == "__main__":

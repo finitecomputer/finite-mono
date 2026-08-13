@@ -95,16 +95,18 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
      > "$QUALITY_DIR/candidate.json"
 
    python3 scripts/check_deepseek_v4_0731_quality.py \
-     --endpoint https://api.deepseek.com/v1 \
+     --endpoint https://api.deepseek.com \
      --model deepseek-v4-flash \
      --api-key-env DEEPSEEK_HOSTED_API_KEY \
      --lane deepseek-hosted \
      > "$QUALITY_DIR/hosted-reference.json"
    ```
 
-   The script sends the same version-controlled cases and sampling parameters
-   to both lanes, checks deterministic correctness, instruction following,
-   parsed reasoning, and tool selection, emits the
+   The script sends the same version-controlled cases and reasoning efforts to
+   both lanes. The self-hosted lane retains the candidate's official sampling
+   parameters; DeepSeek's hosted thinking mode ignores those sampling fields,
+   so the hosted lane omits them. It checks deterministic correctness,
+   instruction following, parsed reasoning, and tool selection, emits the
    `finite-deepseek-quality-v1` report schema, and never accepts or records raw
    keys. Any failed case or unresolved reference-identity mismatch stops the
    rollout.
@@ -161,13 +163,14 @@ the Tinfoil scheduler update. New Runtime configuration should identify
 by the current Runtime image. User-owned custom provider settings are not
 rewritten.
 
-The latest already-published Runtime containing that narrow migration is:
+The current fleet-roll target, which also contains that narrow migration, is:
 
 ```text
-ghcr.io/finitecomputer/agent-runtime:2026-08-07.2@sha256:130ba3036991bbca7b99fae9dbd95f91c86018737004d65107791c1924eaa4ad
+ghcr.io/finitecomputer/agent-runtime:2026-08-11.1@sha256:c48da1985c9bbd0a820240d6224c20864f2e9950ac668238466ed38d733d866d
 ```
 
-It was built from `main` revision `0903b426` by workflow run `31222177824`.
+It was built from `main` revision `8404f98d` by successful workflow run
+`31525093333`.
 Publication is not proof of promotion or fleet rollout. Before using it,
 confirm its artifact record and current fleet distribution with
 `scripts/finite-status`, prove one disposable canary, and use the explicit

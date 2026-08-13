@@ -124,15 +124,18 @@ def _payload(
         "model": model,
         "messages": [{"role": "user", "content": case.prompt}],
         "reasoning_effort": effort,
-        "temperature": 1.0,
-        "top_p": 0.95,
         "max_tokens": 4096,
     }
     if lane == "self-hosted":
+        payload["temperature"] = 1.0
+        payload["top_p"] = 0.95
         payload["chat_template_kwargs"] = {"thinking": True}
+    else:
+        payload["thinking"] = {"type": "enabled"}
     if case.tools:
         payload["tools"] = list(case.tools)
-        payload["tool_choice"] = "auto"
+        if lane == "self-hosted":
+            payload["tool_choice"] = "auto"
     return payload
 
 
@@ -224,11 +227,14 @@ def _identity_violations(
     if lane == "deepseek-hosted" and (
         parsed_endpoint.scheme != "https"
         or parsed_endpoint.hostname != HOSTED_ENDPOINT_HOST
+        or parsed_endpoint.path not in ("", "/")
         or parsed_endpoint.username is not None
         or parsed_endpoint.password is not None
+        or parsed_endpoint.query
+        or parsed_endpoint.fragment
     ):
         violations.append(
-            f"hosted reference endpoint must be https://{HOSTED_ENDPOINT_HOST}"
+            f"hosted reference endpoint must be exactly https://{HOSTED_ENDPOINT_HOST}"
         )
     if not results:
         violations.append("quality report has no results")
