@@ -58,12 +58,6 @@ To test one custom build prompt without editing `promptfooconfig.yaml`:
 just skills ab-test-prompt 'Build a first screen for a browser dashboard that helps a renewable-energy operations team scan turbine health, open incidents, weather risk, and dispatch status.'
 ```
 
-To verify the harness without API calls:
-
-```sh
-just skills ab-test-mock
-```
-
 The review page is written to:
 
 ```text
@@ -109,18 +103,19 @@ The review page is for judging rendered output. The skill text is saved only in
 The review page stores winner picks and notes in browser local storage and can
 export them as JSON.
 
-When served through `pnpm run serve`, the review page also lets you edit the
-build prompt, choose a different `SKILL.md` file for either variant, edit the
-loaded skill text, and regenerate from the browser. Edited skills are saved
-under `runs/editable/`; the source `../skills/.../SKILL.md` files are not
-changed.
+When served through `pnpm run serve`, the review page lets you edit the build
+prompt, choose a different `SKILL.md` file for either variant, edit the loaded
+skill text, and click Generate. Generate always runs the real Devfinity local
+Finite agent path from the browser UI; it does not use synthetic previews.
+Edited skills are saved under `runs/editable/`; the source
+`../skills/.../SKILL.md` files are not changed.
 
-For an accurate product skill test, use the `Devfinity local Finite agent`
-runner and turn off `Mock`. That runner starts a disposable Devfinity SaaS
-stack for each variant, installs a managed-skills tree containing exactly one
-selected skill, restarts Hermes inside that local runtime, sends the build task
-through the Hosted Web chat path, and copies back the generated HTML from the
-runtime workspace.
+For an accurate product skill test, use the browser Generate flow or
+`SKILL_AB_RUNNER=devfinity`. The Devfinity runner starts a disposable
+Devfinity SaaS stack for each variant, installs a managed-skills tree
+containing exactly one selected skill, restarts Hermes inside that local
+runtime, sends the build task through the Hosted Web chat path, and copies back
+the generated HTML from the runtime workspace.
 
 The Devfinity prompt does not include either skill file, either skill path, the
 variant label, or any A/B wording. Isolation is provided by the runtime's
@@ -130,8 +125,7 @@ The `Isolated Codex proxy` runner is useful when you want a faster isolated
 agent subprocess, but it is not the Finite product runtime. The
 `Direct Finite Private` runner is only a model-call approximation: it pastes
 the selected skill into a direct provider prompt and bypasses Hermes, chat,
-tools, managed-skills discovery, and runtime workspace behavior. Mock mode is
-only for checking the harness UI.
+tools, managed-skills discovery, and runtime workspace behavior.
 
 ## Changing The Skills
 

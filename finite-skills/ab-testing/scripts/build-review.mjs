@@ -12,8 +12,12 @@ mkdirSync(reviewDir, { recursive: true });
 const artifacts = collectArtifacts();
 const screenshots = readJson(path.join(reviewDir, "screenshots.json"), []);
 const screenshotByArtifact = new Map();
+const artifactKeys = new Set(artifacts.map((artifact) => `${artifact.caseId}/${artifact.variant}`));
 for (const screenshot of screenshots) {
   const key = `${screenshot.caseId}/${screenshot.variant}`;
+  if (!artifactKeys.has(key)) {
+    continue;
+  }
   const existing = screenshotByArtifact.get(key) ?? [];
   existing.push(screenshot);
   screenshotByArtifact.set(key, existing);
@@ -33,11 +37,19 @@ function collectArtifacts() {
   for (const caseId of sortedDirs(artifactsDir)) {
     for (const variant of sortedDirs(path.join(artifactsDir, caseId))) {
       const dir = path.join(artifactsDir, caseId, variant);
-      const metadata = readJson(path.join(dir, "metadata.json"), {});
+      const htmlPath = path.join(dir, "index.html");
+      const metadataPath = path.join(dir, "metadata.json");
+      if (!existsSync(htmlPath) || !existsSync(metadataPath)) {
+        continue;
+      }
+      const metadata = readJson(metadataPath, {});
+      if (!isReviewableArtifact(metadata)) {
+        continue;
+      }
       items.push({
         caseId,
         caseTitle: metadata.caseTitle ?? caseId,
-        htmlPath: path.join(dir, "index.html"),
+        htmlPath,
         metadata,
         promptPath: path.join(dir, "prompt.txt"),
         rawPath: path.join(dir, "output.raw.md"),
@@ -46,6 +58,10 @@ function collectArtifacts() {
     }
   }
   return items;
+}
+
+function isReviewableArtifact(metadata) {
+  return metadata.runner !== "mock" && metadata.modelProvider !== "mock" && metadata.model !== "mock";
 }
 
 function groupByCase(artifacts) {
@@ -171,11 +187,13 @@ function renderReview(cases, screenshotByArtifact) {
   </header>
   <main>
     ${renderEditor()}
-    ${
-      cases.length
-        ? cases.map((item) => renderCase(item, screenshotByArtifact)).join("\n")
-        : '<div class="empty">No artifacts found. Run the Promptfoo eval first.</div>'
-    }
+    <section id="results">
+      ${
+        cases.length
+          ? cases.map((item) => renderCase(item, screenshotByArtifact)).join("\n")
+          : '<div class="empty">No real agent artifacts found. Click Generate to run the selected skills through the local Finite agent.</div>'
+      }
+    </section>
   </main>
   <script>
     const key = "finite-skills-ab-review-notes";
@@ -208,12 +226,11 @@ function renderReview(cases, screenshotByArtifact) {
 
     const editor = document.getElementById("input-editor");
     const promptInput = document.getElementById("prompt-input");
-    const mockInput = document.getElementById("mock-input");
     const maxConcurrencyInput = document.getElementById("max-concurrency-input");
-    const runnerInput = document.getElementById("runner-input");
     const regenerateButton = document.getElementById("regenerate-button");
     const editorStatus = document.getElementById("editor-status");
     const jobLog = document.getElementById("job-log");
+    const results = document.getElementById("results");
     let skillCatalog = [];
 
     loadEditorState();
@@ -232,18 +249,19 @@ function renderReview(cases, screenshotByArtifact) {
         };
       }
       setEditorEnabled(false);
-      setEditorStatus("Starting regeneration...");
+      setEditorStatus("Starting real agent generation...");
       jobLog.hidden = false;
       jobLog.textContent = "";
+      if (results) {
+        results.innerHTML = '<div class="empty">Generating real previews with the local Finite agent. This can take several minutes.</div>';
+      }
       try {
         const response = await fetch("/api/regenerate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             maxConcurrency: Number(maxConcurrencyInput.value || 1),
-            mock: mockInput.checked,
             prompt: promptInput.value,
-            runner: runnerInput.value,
             skills,
           }),
         });
@@ -267,9 +285,7 @@ function renderReview(cases, screenshotByArtifact) {
         const data = await response.json();
         skillCatalog = data.availableSkills || [];
         promptInput.value = data.prompt || "";
-        mockInput.checked = Boolean(data.mock);
         maxConcurrencyInput.value = data.maxConcurrency || 1;
-        runnerInput.value = data.runner || "devfinity";
         for (const variant of data.variants || []) {
           const input = document.getElementById("skill-input-" + variant.variant);
           const source = document.getElementById("skill-source-" + variant.variant);
@@ -298,7 +314,7 @@ function renderReview(cases, screenshotByArtifact) {
         jobLog.textContent = job.logs || "";
         jobLog.scrollTop = jobLog.scrollHeight;
         if (job.status === "complete") {
-          setEditorStatus("Regenerated. Reloading...");
+          setEditorStatus("Generated. Reloading previews...");
           window.location.href = "/review/index.html?t=" + Date.now();
           return;
         }
@@ -307,7 +323,7 @@ function renderReview(cases, screenshotByArtifact) {
           setEditorEnabled(true);
           return;
         }
-        setEditorStatus("Regenerating...");
+        setEditorStatus("Generating real previews...");
         setTimeout(() => pollJob(jobId), 1200);
       } catch (error) {
         setEditorStatus(error.message);
@@ -431,9 +447,8 @@ function renderEditor() {
         </div>
       </div>
       <div class="editor-actions">
-        <button class="primary" type="button" id="regenerate-button">Regenerate</button>
-        <label>Runner <select id="runner-input"><option value="devfinity">Devfinity local Finite agent</option><option value="agent">Isolated Codex proxy</option><option value="provider">Direct Finite Private</option></select></label>
-        <label><input id="mock-input" type="checkbox"> Mock</label>
+        <button class="primary" type="button" id="regenerate-button">Generate</button>
+        <span class="status-line">Devfinity local Finite agent</span>
         <label>Concurrency <input id="max-concurrency-input" type="number" min="1" max="8" step="1"></label>
       </div>
     </div>

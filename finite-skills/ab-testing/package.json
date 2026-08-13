@@ -9,7 +9,6 @@
   },
   "scripts": {
     "ab": "node scripts/run.mjs",
-    "ab:mock": "SKILL_AB_MOCK=1 node scripts/run.mjs",
     "ab:prompt": "node scripts/run-prompt.mjs",
     "browsers": "playwright install chromium",
     "eval": "node scripts/eval.mjs",

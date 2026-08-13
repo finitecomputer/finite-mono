@@ -16,10 +16,6 @@ ab-setup:
 ab-test:
     cd ab-testing && pnpm run ab
 
-# Verifies the skill A/B harness without model/API calls
-ab-test-mock:
-    cd ab-testing && pnpm run ab:mock
-
 # Serves the review UI with prompt/skill editing and regeneration APIs
 ab-serve:
     cd ab-testing && pnpm run serve

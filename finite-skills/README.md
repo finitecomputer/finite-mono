@@ -38,7 +38,7 @@ Playwright harness in `ab-testing/`:
 
 ```sh
 just skills ab-setup
-just skills ab-test-mock
+just skills ab-test
 ```
 
 Run `just dev inference-key` once if the local Finite Private upstream key has

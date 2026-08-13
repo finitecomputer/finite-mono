@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -92,8 +92,6 @@ async function handleRegenerate(request, response) {
 
   const title = String(payload.title || titleFromBrief(prompt)).trim();
   const maxConcurrency = normalizeMaxConcurrency(payload.maxConcurrency);
-  const mock = Boolean(payload.mock);
-  const runner = normalizeRunner(payload.runner);
 
   for (const variant of variants) {
     const file = editableSkillPath(variant.variant);
@@ -106,9 +104,8 @@ async function handleRegenerate(request, response) {
       {
         caseId: sanitize(title),
         maxConcurrency,
-        mock,
         prompt,
-        runner,
+        runner: "devfinity",
         selectedSkills,
         title,
         updatedAt: new Date().toISOString(),
@@ -119,11 +116,11 @@ async function handleRegenerate(request, response) {
     "utf8",
   );
 
-  currentJob = startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkills, title });
+  currentJob = startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title });
   return sendJson(response, 202, { job: publicJob(currentJob) });
 }
 
-function startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkills, title }) {
+function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
   const job = {
     exitCode: null,
     finishedAt: null,
@@ -136,17 +133,13 @@ function startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkil
     ...process.env,
     SKILL_AB_CASE_TITLE: title,
     SKILL_AB_MAX_CONCURRENCY: String(maxConcurrency),
-    SKILL_AB_RUNNER: runner,
+    SKILL_AB_RUNNER: "devfinity",
     SKILL_AB_SKILL_A_PATH: editableSkillPath("skill-a"),
     SKILL_AB_SKILL_A_SOURCE_PATH: selectedSkills["skill-a"]?.sourcePath || "",
     SKILL_AB_SKILL_B_PATH: editableSkillPath("skill-b"),
     SKILL_AB_SKILL_B_SOURCE_PATH: selectedSkills["skill-b"]?.sourcePath || "",
   };
-  if (mock) {
-    env.SKILL_AB_MOCK = "1";
-  } else {
-    delete env.SKILL_AB_MOCK;
-  }
+  delete env.SKILL_AB_MOCK;
 
   const child = spawn(process.execPath, ["scripts/run-prompt.mjs", prompt], {
     cwd: harnessRoot,
@@ -163,7 +156,12 @@ function startRegenerateJob({ maxConcurrency, mock, prompt, runner, selectedSkil
   });
   child.on("exit", (code, signal) => {
     job.exitCode = signal ?? code;
-    job.status = code === 0 ? "complete" : "failed";
+    if (code === 0) {
+      job.status = "complete";
+    } else {
+      rebuildEmptyReview(job, env);
+      job.status = "failed";
+    }
     job.finishedAt = new Date().toISOString();
   });
 
@@ -188,6 +186,25 @@ function publicJob(job) {
   };
 }
 
+function rebuildEmptyReview(job, env) {
+  const result = spawnSync(process.execPath, ["scripts/build-review.mjs"], {
+    cwd: harnessRoot,
+    env,
+    encoding: "utf8",
+  });
+  if (result.stdout) {
+    appendLog(job, result.stdout);
+  }
+  if (result.stderr) {
+    appendLog(job, result.stderr);
+  }
+  if (result.status === 0) {
+    appendLog(job, "Rebuilt the review page without stale previews.\n");
+  } else {
+    appendLog(job, `Could not rebuild the empty review page: ${result.signal ?? result.status}\n`);
+  }
+}
+
 function readEditorState() {
   const editableState = readJson(editableStatePath, {});
   const manifest = readJson(path.join(latestDir, "review/manifest.json"), {});
@@ -198,9 +215,8 @@ function readEditorState() {
   return {
     availableSkills: collectSkillCatalog(),
     maxConcurrency: editableState.maxConcurrency || normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY || 1),
-    mock: typeof editableState.mock === "boolean" ? editableState.mock : process.env.SKILL_AB_MOCK === "1",
     prompt,
-    runner: normalizeRunner(editableState.runner || process.env.SKILL_AB_RUNNER || "devfinity"),
+    runner: "devfinity",
     title,
     variants: variants.map((variant) => {
       const editablePath = editableSkillPath(variant.variant);
@@ -382,14 +398,6 @@ function normalizeMaxConcurrency(value) {
     return 1;
   }
   return Math.max(1, Math.min(8, Math.floor(number)));
-}
-
-function normalizeRunner(value) {
-  const runner = String(value || "devfinity").trim().toLowerCase();
-  if (runner === "devfinity" || runner === "agent" || runner === "provider") {
-    return runner;
-  }
-  return "devfinity";
 }
 
 function displayPath(filePath) {

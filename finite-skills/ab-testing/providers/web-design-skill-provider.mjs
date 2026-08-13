@@ -55,18 +55,10 @@ export default class WebDesignSkillProvider {
     let modelProvider;
     let model;
     let promptTranscript = directProviderPrompt.transcript;
-    const requestedRunner = resolveRunner(this.config);
-    let runner = requestedRunner;
+    const runner = resolveRunner(this.config);
     let tokenUsage;
 
-    if (isMockMode(this.config)) {
-      model = "mock";
-      modelProvider = { name: "mock", baseUrl: null, keySource: null };
-      runner = "mock";
-      output = mockHtml({ caseId, caseTitle: vars.title ?? caseId, skillName, variant: this.variant });
-      promptTranscript = requestedRunner === "devfinity" ? finiteAgentPrompt.prompt : codexAgentPrompt;
-      tokenUsage = { total: 0, prompt: 0, completion: 0 };
-    } else if (runner === "agent") {
+    if (runner === "agent") {
       model = process.env.SKILL_AB_AGENT_MODEL || "codex-default";
       modelProvider = { name: "codex-agent", baseUrl: null, keySource: null, label: "Codex isolated agent" };
       const response = await callCodexAgent({
@@ -232,10 +224,10 @@ function resolveModelProvider(config = {}) {
 
   throw new Error(
     [
-      "A non-mock skill A/B run needs a model API key.",
+      "A real skill A/B run needs a model API key.",
       "Run `just dev inference-key` to cache a Finite Private key locally, set `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`,",
       "or use `SKILL_AB_PROVIDER=openai OPENAI_API_KEY=... pnpm run ab`.",
-      "Use `pnpm run ab:mock` to test the harness without API calls.",
+      "The browser Generate flow always runs the real Devfinity local Finite agent path.",
     ].join(" "),
   );
 }
@@ -268,7 +260,7 @@ function openAIProvider(config = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "OPENAI_API_KEY is required when SKILL_AB_PROVIDER=openai. Use `pnpm run ab:mock` to test the harness without API calls.",
+      "OPENAI_API_KEY is required when SKILL_AB_PROVIDER=openai. For the product runner, run `just dev inference-key` from the repo root to cache the local Finite Private upstream key.",
     );
   }
   return {
@@ -527,7 +519,7 @@ async function callDevfinityAgent({
   const promptPath = path.join(artifactDir, "devfinity-prompt.txt");
   const resultPath = path.join(outputDir, "result.json");
   const logPath = path.join(artifactDir, "devfinity-agent.log");
-  const stateDir = path.join(artifactDir, "devfinity-state");
+  const stateDir = makeDevfinityStateDir({ artifactDir, variant });
   const skillBundle = prepareDevfinitySkillBundle({
     artifactDir,
     skillName,
@@ -560,11 +552,17 @@ async function callDevfinityAgent({
   }
   args.push("--", process.execPath, "finite-skills/ab-testing/scripts/run-devfinity-agent-turn.mjs");
 
-  const result = await runCommand(process.env.SKILL_AB_DEVFINITY_CARGO_BIN || "cargo", args, {
-    cwd: repoRoot,
-    env,
-    timeoutMs,
-  });
+  let result;
+  try {
+    result = await runCommand(process.env.SKILL_AB_DEVFINITY_CARGO_BIN || "cargo", args, {
+      cwd: repoRoot,
+      env,
+      timeoutMs,
+    });
+  } catch (error) {
+    writeFileSync(logPath, `${error.stdout || ""}\n${error.stderr || ""}\n${error.message}`.trim(), "utf8");
+    throw error;
+  }
   writeFileSync(logPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
 
   if (!existsSync(resultPath)) {
@@ -575,6 +573,14 @@ async function callDevfinityAgent({
     output: String(payload.html || payload.finalReply || ""),
     prompt,
   };
+}
+
+function makeDevfinityStateDir({ artifactDir, variant }) {
+  const stateRoot = path.resolve(process.env.SKILL_AB_DEVFINITY_STATE_ROOT || path.join(tmpdir(), "finite-skills-ab-devfinity"));
+  mkdirSync(stateRoot, { recursive: true });
+  const stateDir = mkdtempSync(path.join(stateRoot, `${sanitize(variant)}-`));
+  writeFileSync(path.join(artifactDir, "devfinity-state-path.txt"), `${stateDir}\n`, "utf8");
+  return stateDir;
 }
 
 function prepareDevfinitySkillBundle({ artifactDir, skillName, skillPath, skillSourcePath, skillText }) {
@@ -665,6 +671,10 @@ async function runCommand(command, args, { cwd = harnessRoot, env = process.env,
     const stderr = [];
     let settled = false;
     let killTimeout = null;
+    const output = () => ({
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    });
     const timeout =
       timeoutMs > 0
         ? setTimeout(() => {
@@ -674,7 +684,8 @@ async function runCommand(command, args, { cwd = harnessRoot, env = process.env,
             settled = true;
             killProcessGroup(child, "SIGTERM");
             killTimeout = setTimeout(() => killProcessGroup(child, "SIGKILL"), 5000);
-            reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
+            const result = output();
+            reject(commandError(`${path.basename(command)} timed out after ${timeoutMs}ms`, result));
           }, timeoutMs)
         : null;
 
@@ -698,18 +709,25 @@ async function runCommand(command, args, { cwd = harnessRoot, env = process.env,
       settle(reject, error);
     });
     child.on("exit", (code, signal) => {
-      const result = {
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-      };
+      const result = output();
       if (code === 0) {
         settle(resolve, result);
         return;
       }
       const tail = `${result.stdout}\n${result.stderr}`.slice(-4000).trim();
-      settle(reject, new Error(`${path.basename(command)} exited with ${signal ?? code}${tail ? `\n${tail}` : ""}`));
+      settle(
+        reject,
+        commandError(`${path.basename(command)} exited with ${signal ?? code}${tail ? `\n${tail}` : ""}`, result),
+      );
     });
   });
+}
+
+function commandError(message, result) {
+  const error = new Error(message);
+  error.stdout = result.stdout;
+  error.stderr = result.stderr;
+  return error;
 }
 
 function killProcessGroup(child, signal) {
@@ -900,10 +918,6 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function isMockMode(config) {
-  return process.env.SKILL_AB_MOCK === "1" || config.mock === true;
-}
-
 function shouldRepairHtml(config) {
   if (process.env.SKILL_AB_REPAIR_HTML === "0") {
     return false;
@@ -924,69 +938,4 @@ function addNumbers(left, right) {
     return undefined;
   }
   return (Number(left) || 0) + (Number(right) || 0);
-}
-
-function mockHtml({ caseId, caseTitle, skillName, variant }) {
-  const accent = variant === "skill-a" ? "#176f6b" : "#b2452f";
-  const secondary = variant === "skill-a" ? "#d9efe8" : "#f3ddd3";
-  const panel = variant === "skill-a" ? "#f7fbf8" : "#fff8f4";
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(caseTitle)}</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #20201d; background: ${panel}; }
-    main { min-height: 100vh; display: grid; grid-template-columns: 280px 1fr; }
-    aside { border-right: 1px solid #d8d1c4; padding: 28px; background: #fffdf8; }
-    .brand { font-weight: 800; letter-spacing: 0; font-size: 18px; margin-bottom: 28px; }
-    nav { display: grid; gap: 8px; }
-    nav span { display: block; padding: 10px 12px; border-radius: 6px; color: #5e5a52; }
-    nav span:first-child { color: #161613; background: ${secondary}; }
-    section { padding: 34px; }
-    .top { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-bottom: 28px; }
-    h1 { margin: 0; font-size: clamp(28px, 4vw, 58px); line-height: .95; max-width: 720px; }
-    .tag { padding: 8px 10px; border: 1px solid #d8d1c4; border-radius: 999px; background: #fffdf8; font-size: 13px; white-space: nowrap; }
-    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-    .panel { background: #fffdf8; border: 1px solid #d8d1c4; border-radius: 8px; padding: 18px; min-height: 160px; }
-    .panel strong { display: block; font-size: 13px; color: #69645a; margin-bottom: 16px; }
-    .metric { font-size: 42px; font-weight: 800; color: ${accent}; }
-    .bar { height: 10px; background: #e7dfd2; border-radius: 99px; overflow: hidden; margin-top: 18px; }
-    .bar span { display: block; height: 100%; width: 68%; background: ${accent}; }
-    .wide { grid-column: span 2; }
-    .rows { display: grid; gap: 10px; }
-    .row { display: flex; justify-content: space-between; border-top: 1px solid #ece5d8; padding-top: 10px; font-size: 14px; }
-    @media (max-width: 820px) {
-      main { grid-template-columns: 1fr; }
-      aside { border-right: 0; border-bottom: 1px solid #d8d1c4; }
-      .grid { grid-template-columns: 1fr; }
-      .wide { grid-column: span 1; }
-      .top { display: grid; }
-    }
-  </style>
-</head>
-<body>
-  <main data-case="${escapeHtml(caseId)}" data-skill="${escapeHtml(skillName)}">
-    <aside>
-      <div class="brand">Local Design Review</div>
-      <nav><span>Overview</span><span>Signals</span><span>Work queue</span><span>Settings</span></nav>
-    </aside>
-    <section>
-      <div class="top">
-        <h1>${escapeHtml(caseTitle)}</h1>
-        <div class="tag">${escapeHtml(variant)} mock artifact</div>
-      </div>
-      <div class="grid">
-        <div class="panel"><strong>Primary signal</strong><div class="metric">68%</div><div class="bar"><span></span></div></div>
-        <div class="panel"><strong>Open work</strong><div class="metric">14</div><div class="bar"><span style="width:44%"></span></div></div>
-        <div class="panel"><strong>Confidence</strong><div class="metric">A-</div><div class="bar"><span style="width:82%"></span></div></div>
-        <div class="panel wide"><strong>Recent activity</strong><div class="rows"><div class="row"><span>North queue stabilized</span><b>2m</b></div><div class="row"><span>Forecast risk moved down</span><b>9m</b></div><div class="row"><span>Review packet generated</span><b>18m</b></div></div></div>
-        <div class="panel"><strong>Next action</strong><p>Review the strongest visual hierarchy, spacing, and first-viewport clarity. This is mock output for harness verification.</p></div>
-      </div>
-    </section>
-  </main>
-</body>
-</html>`;
 }
