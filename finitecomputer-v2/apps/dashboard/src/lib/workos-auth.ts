@@ -60,7 +60,7 @@ const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
 // specified). Let those APIs reach Brain without replacing their authority
 // with an AuthKit session. Runtime callbacks likewise enforce their own
 // protocol boundary.
-const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1", "/_admin"] as const;
+const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1"] as const;
 
 type EnvSource = Record<string, string | undefined>;
 
