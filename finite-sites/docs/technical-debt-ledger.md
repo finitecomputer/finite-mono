@@ -9,8 +9,8 @@ delete condition is unfinished design, not accepted debt.
 `HttpMailer` (Resend/Postmark) ships behind the `Mailer` trait, selected
 with `--mailer` + `--mail-from`, key via env var. Remaining work is
 configuration, tracked in `docs/deploy-finite-lat-2.md` (domain
-verification + a real-inbox validation gate). The dev mailer remains the
-local default.
+verification + a real-inbox validation gate). Local and Devfinity select
+the dev mailer with `--mailer dev`; omitting the flag is an error.
 
 ## 2. Login-link rate limiting only; no platform-wide limits
 

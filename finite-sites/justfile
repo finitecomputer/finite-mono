@@ -19,7 +19,7 @@ fmt:
 
 # Run the dev server against .dev-data (registry, blobs, outbox, secret).
 dev:
-    cargo run -p finitesitesd -- serve --data .dev-data
+    cargo run -p finitesitesd -- serve --data .dev-data --mailer dev
 
 # Add an operator publish grant on the dev server's data dir.
 allow npub note="dev":
