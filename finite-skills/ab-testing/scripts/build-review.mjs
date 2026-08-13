@@ -52,10 +52,12 @@ function groupByCase(artifacts) {
   const cases = new Map();
   for (const artifact of artifacts) {
     const existing = cases.get(artifact.caseId) ?? {
+      brief: artifact.metadata.brief,
       caseId: artifact.caseId,
       caseTitle: artifact.caseTitle,
       variants: [],
     };
+    existing.brief ??= artifact.metadata.brief;
     existing.variants.push(artifact);
     cases.set(artifact.caseId, existing);
   }
@@ -109,12 +111,16 @@ function renderReview(cases, screenshotByArtifact) {
     .case:first-child { border-top: 0; }
     .case-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
     h2 { margin: 0; font-size: 18px; }
+    .brief { max-width: 880px; margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .winner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
     .winner label { display: inline-flex; gap: 6px; align-items: center; padding: 7px 9px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); }
     .variants { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     .variant { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .variant-head { padding: 14px 14px 12px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
     .variant-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; font-weight: 760; }
+    .status { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 650; background: #fff; color: var(--muted); }
+    .status.html { color: var(--accent); background: var(--accent-soft); }
+    .status.non-html { color: var(--danger); }
     .skill { color: var(--muted); font-size: 13px; word-break: break-word; }
     .links { display: flex; flex-wrap: wrap; gap: 8px; }
     a, button { color: var(--accent); }
@@ -188,6 +194,7 @@ function renderCase(item, screenshotByArtifact) {
       <div>
         <h2>${escapeHtml(item.caseTitle)}</h2>
         <div class="meta">${escapeHtml(item.caseId)}</div>
+        ${item.brief ? `<p class="brief">${escapeHtml(item.brief)}</p>` : ""}
       </div>
       <div class="winner">
         <span>Winner</span>
@@ -211,12 +218,15 @@ function renderVariant(artifact, screenshotByArtifact) {
   const relRaw = relativeFromReview(artifact.rawPath);
   const relPrompt = relativeFromReview(artifact.promptPath);
   const consoleErrors = screenshots.flatMap((shot) => shot.consoleErrors ?? []);
+  const outputKind = artifact.metadata.outputKind ?? "unknown";
+  const statusClass = outputKind === "html" || outputKind === "repaired-html" ? "html" : "non-html";
   return `<article class="variant">
     <div class="variant-head">
       <div class="variant-title">
         <span>${escapeHtml(artifact.variant)}</span>
-        <span class="meta">${escapeHtml(artifact.metadata.model ?? "")}</span>
+        <span class="status ${escapeAttr(statusClass)}">${escapeHtml(outputKind)}</span>
       </div>
+      <div class="meta">${escapeHtml(artifact.metadata.modelProvider ?? "")}${artifact.metadata.model ? ` · ${escapeHtml(artifact.metadata.model)}` : ""}</div>
       <div class="skill">${escapeHtml(artifact.metadata.skillName ?? "")} · ${escapeHtml(artifact.metadata.skillPath ?? "")}</div>
       <div class="links">
         <a href="${escapeAttr(relHtml)}" target="_blank" rel="noreferrer">Open HTML</a>

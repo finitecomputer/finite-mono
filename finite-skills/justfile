@@ -19,3 +19,7 @@ ab-test:
 # Verifies the skill A/B harness without model/API calls
 ab-test-mock:
     cd ab-testing && pnpm run ab:mock
+
+# Runs the skill A/B harness for one custom build prompt
+ab-test-prompt prompt:
+    cd ab-testing && pnpm run ab:prompt -- {{ quote(prompt) }}

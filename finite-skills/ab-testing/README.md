@@ -1,11 +1,11 @@
 # Skill A/B Testing Harness
 
-Local Promptfoo + Playwright harness for comparing two web-design-oriented
-agent skills with a human spot-check review page.
+Local Promptfoo + Playwright harness for comparing the rendered output of two
+web-design-oriented agent skills with a human spot-check review page.
 
 This is intentionally not a statistical product experiment. It answers a
-practical local question: "given the same design brief, which skill produces
-the more useful first-pass web UI artifact?"
+practical local question: "given the same build prompt, what does an agent
+produce when guided by each skill, and which result is more useful?"
 
 ## Setup
 
@@ -45,6 +45,12 @@ Then generate artifacts:
 just skills ab-test
 ```
 
+To test one custom build prompt without editing `promptfooconfig.yaml`:
+
+```sh
+just skills ab-test-prompt 'Build a first screen for a browser dashboard that helps a renewable-energy operations team scan turbine health, open incidents, weather risk, and dispatch status.'
+```
+
 To verify the harness without API calls:
 
 ```sh
@@ -68,12 +74,16 @@ pnpm run open
 
 1. Promptfoo runs every brief in `promptfooconfig.yaml` against two provider
    variants.
-2. Each provider loads one `SKILL.md`, asks the model for a complete
-   single-file HTML page, and writes the artifact under `runs/latest/artifacts`.
+2. Each provider gives the model the selected `SKILL.md` as installed-agent
+   guidance, sends the same build prompt as the user task, and writes the
+   resulting single-file HTML artifact under `runs/latest/artifacts`.
 3. Playwright opens every generated HTML page at desktop and mobile viewports
    and captures screenshots.
 4. `scripts/build-review.mjs` creates a side-by-side human review page with
    links to the generated HTML, raw model output, and exact prompt.
+
+The review page is for judging rendered output. The skill text is saved only in
+`prompt.txt` so runs are reproducible.
 
 The review page stores winner picks and notes in browser local storage and can
 export them as JSON.
@@ -120,11 +130,14 @@ Common settings:
 - `SKILL_AB_MODEL`
 - `SKILL_AB_MAX_OUTPUT_TOKENS=6000`
 - `SKILL_AB_TIMEOUT_MS=120000`
+- `SKILL_AB_MAX_CONCURRENCY`: forwarded to Promptfoo as `--max-concurrency`
+- `SKILL_AB_REPAIR_HTML=0`: disables the automatic second pass that converts
+  non-HTML model output into a reviewable HTML artifact
 
 Override them as environment variables:
 
 ```sh
-SKILL_AB_MODEL=glm-5-2 pnpm run ab
+SKILL_AB_MODEL=glm-5-2 SKILL_AB_MAX_CONCURRENCY=1 pnpm run ab
 ```
 
 OpenAI is still available as an explicit fallback:

@@ -30,13 +30,12 @@ export default class WebDesignSkillProvider {
     const artifactDir = path.resolve(harnessRoot, this.config.outputDir ?? "./runs/latest/artifacts", caseId, sanitize(this.variant));
     mkdirSync(artifactDir, { recursive: true });
 
-    const generatedPrompt = buildPrompt({
+    const agentPrompt = buildAgentPrompt({
       brief: prompt,
       caseTitle: vars.title ?? vars.caseId ?? caseId,
       skillName,
       skillPath,
       skillText,
-      variant: this.variant,
     });
 
     const startedAt = new Date().toISOString();
@@ -56,8 +55,8 @@ export default class WebDesignSkillProvider {
       const response = await callResponsesApi({
         apiKey: modelProvider.apiKey,
         baseUrl: modelProvider.baseUrl,
+        messages: agentPrompt.messages,
         model,
-        prompt: generatedPrompt,
         maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
         timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
         providerLabel: modelProvider.label,
@@ -66,20 +65,43 @@ export default class WebDesignSkillProvider {
       tokenUsage = response.tokenUsage;
     }
 
-    const html = extractHtml(output);
+    let extraction = extractHtml(output);
+    let outputKind = extraction.found ? "html" : "non-html";
+    if (!isMockMode(this.config) && !extraction.found && shouldRepairHtml(this.config)) {
+      const repair = await callResponsesApi({
+        apiKey: modelProvider.apiKey,
+        baseUrl: modelProvider.baseUrl,
+        messages: buildHtmlRepairMessages({ agentOutput: output, brief: prompt, caseTitle: vars.title ?? caseId }),
+        model,
+        maxOutputTokens: Number(process.env.SKILL_AB_REPAIR_MAX_OUTPUT_TOKENS || process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
+        timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
+        providerLabel: modelProvider.label,
+      });
+      const repaired = extractHtml(repair.output);
+      output = `${output}\n\n--- HTML repair pass output ---\n\n${repair.output}`;
+      tokenUsage = addTokenUsage(tokenUsage, repair.tokenUsage);
+      if (repaired.found) {
+        extraction = repaired;
+        outputKind = "repaired-html";
+      }
+    }
+
+    const html = extraction.html;
     writeFileSync(path.join(artifactDir, "index.html"), html, "utf8");
     writeFileSync(path.join(artifactDir, "output.raw.md"), output, "utf8");
-    writeFileSync(path.join(artifactDir, "prompt.txt"), generatedPrompt, "utf8");
+    writeFileSync(path.join(artifactDir, "prompt.txt"), agentPrompt.transcript, "utf8");
     writeFileSync(
       path.join(artifactDir, "metadata.json"),
       JSON.stringify(
         {
           caseId,
           caseTitle: vars.title ?? caseId,
+          brief: prompt,
           model,
           modelProvider: modelProvider.name,
           baseUrl: modelProvider.baseUrl,
           keySource: modelProvider.keySource,
+          outputKind,
           skillName,
           skillPath: path.relative(harnessRoot, skillPath),
           startedAt,
@@ -93,8 +115,8 @@ export default class WebDesignSkillProvider {
     );
 
     return {
-      output,
-      prompt: generatedPrompt,
+      output: html,
+      prompt: agentPrompt.transcript,
       tokenUsage,
       metadata: {
         artifactPath: path.relative(harnessRoot, path.join(artifactDir, "index.html")),
@@ -255,38 +277,81 @@ function displayPath(filePath) {
   return filePath;
 }
 
-function buildPrompt({ brief, caseTitle, skillName, skillPath, skillText, variant }) {
-  return `You are running a local A/B test of an agent skill for web design work.
+function buildAgentPrompt({ brief, caseTitle, skillName, skillPath, skillText }) {
+  const system = `You are an autonomous web design implementation agent.
 
-Use the skill below as the primary operating guidance for this generation. If
-the skill would normally ask clarifying questions, make reasonable assumptions
-from the brief instead so the evaluator receives a concrete artifact.
+You have exactly one local agent skill installed for this run. Use the installed
+skill silently as your operating guidance for design quality, implementation
+choices, verification standards, and tradeoffs. Do not summarize, critique,
+quote, compare, or explain the skill.
 
-Return only a complete single-file HTML document. Do not wrap it in Markdown.
-
-Hard requirements:
-- Inline all CSS and JavaScript.
-- Do not fetch external fonts, images, scripts, or stylesheets.
-- Use realistic copy, data, controls, and visual states.
-- Make the first viewport useful for judging the design.
-- Avoid mentioning the A/B test, variant, or skill name inside the rendered UI.
-- Keep the artifact safe to open from a local file URL.
-
-Variant: ${variant}
-Skill: ${skillName}
-Skill path: ${skillPath}
+Installed skill: ${skillName}
+Installed skill path: ${skillPath}
 
 <skill>
 ${skillText}
 </skill>
 
-<brief title="${caseTitle}">
+Your response is consumed by an automated visual review harness. The only valid
+response is a complete self-contained HTML document. The first bytes of your
+response must be <!doctype html>.`;
+
+  const user = `Build this web artifact:
+
 ${brief}
-</brief>
-`;
+
+Delivery requirements:
+- Return only a complete single-file HTML document.
+- Inline all CSS and JavaScript.
+- Do not fetch external fonts, images, scripts, or stylesheets.
+- Use realistic copy, data, controls, and visual states.
+- Make the first viewport useful for judging the design.
+- Do not mention the skill, the test harness, variants, or this prompt inside the rendered UI.
+- Keep the artifact safe to open from a local file URL.
+
+Case title: ${caseTitle}`;
+
+  return {
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    transcript: `<system>
+${system}
+</system>
+
+<user>
+${user}
+</user>
+`,
+  };
 }
 
-async function callResponsesApi({ apiKey, baseUrl, model, prompt, maxOutputTokens, timeoutMs, providerLabel }) {
+function buildHtmlRepairMessages({ agentOutput, brief, caseTitle }) {
+  return [
+    {
+      role: "system",
+      content:
+        "You convert an agent's prior response into the exact artifact required by a visual review harness. Return only a complete self-contained HTML document. The first bytes must be <!doctype html>.",
+    },
+    {
+      role: "user",
+      content: `The previous response did not contain a complete HTML document.
+
+Original build prompt:
+${brief}
+
+Case title: ${caseTitle}
+
+Previous response:
+${agentOutput}
+
+Now return only the complete single-file HTML artifact.`,
+    },
+  ];
+}
+
+async function callResponsesApi({ apiKey, baseUrl, messages, model, maxOutputTokens, timeoutMs, providerLabel }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -297,16 +362,7 @@ async function callResponsesApi({ apiKey, baseUrl, model, prompt, maxOutputToken
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        input: [
-          {
-            role: "system",
-            content: "You generate local, self-contained HTML/CSS web UI artifacts for design review.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
+        input: messages,
         max_output_tokens: maxOutputTokens,
         model,
       }),
@@ -358,10 +414,15 @@ function extractHtml(output) {
   if (htmlStart >= 0) {
     const sliced = candidate.slice(htmlStart);
     const end = sliced.toLowerCase().lastIndexOf("</html>");
-    return end >= 0 ? sliced.slice(0, end + "</html>".length).trim() : sliced.trim();
+    return {
+      found: true,
+      html: end >= 0 ? sliced.slice(0, end + "</html>".length).trim() : sliced.trim(),
+    };
   }
 
-  return `<!doctype html>
+  return {
+    found: false,
+    html: `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -379,7 +440,8 @@ function extractHtml(output) {
     <pre>${escapeHtml(output)}</pre>
   </main>
 </body>
-</html>`;
+</html>`,
+  };
 }
 
 function findHtmlStart(text) {
@@ -415,6 +477,28 @@ function escapeHtml(value) {
 
 function isMockMode(config) {
   return process.env.SKILL_AB_MOCK === "1" || config.mock === true;
+}
+
+function shouldRepairHtml(config) {
+  if (process.env.SKILL_AB_REPAIR_HTML === "0") {
+    return false;
+  }
+  return config.repairHtml !== false;
+}
+
+function addTokenUsage(left = {}, right = {}) {
+  return {
+    total: addNumbers(left.total, right.total),
+    prompt: addNumbers(left.prompt, right.prompt),
+    completion: addNumbers(left.completion, right.completion),
+  };
+}
+
+function addNumbers(left, right) {
+  if (typeof left !== "number" && typeof right !== "number") {
+    return undefined;
+  }
+  return (Number(left) || 0) + (Number(right) || 0);
 }
 
 function mockHtml({ caseId, caseTitle, skillName, variant }) {
