@@ -426,7 +426,20 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Observed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 9,
@@ -444,7 +457,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_component_build_info",
+          "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_build_info))",
           "format": "table",
           "instant": true,
           "range": false,
@@ -464,7 +477,6 @@
           "options": {
             "excludeByName": {
               "Time": true,
-              "Value": true,
               "__name__": true,
               "instance": true,
               "job": true
@@ -475,9 +487,11 @@
               "version": 2,
               "git_sha": 3,
               "image_digest": 4,
-              "source": 5
+              "source": 5,
+              "Value": 6
             },
             "renameByName": {
+              "Value": "Observed",
               "component": "Component",
               "git_sha": "Git SHA",
               "host": "Host",
@@ -515,7 +529,20 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Observed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -541,7 +568,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_runtime_artifact_info",
+          "expr": "1000 * topk by (source_host_id, artifact_id) (1, timestamp(finite_runtime_artifact_info))",
           "format": "table",
           "instant": true,
           "range": false,
@@ -561,7 +588,6 @@
           "options": {
             "excludeByName": {
               "Time": true,
-              "Value": true,
               "__name__": true,
               "instance": true,
               "job": true
@@ -570,9 +596,11 @@
               "source_host_id": 0,
               "artifact_id": 1,
               "version_label": 2,
-              "promoted": 3
+              "promoted": 3,
+              "Value": 4
             },
             "renameByName": {
+              "Value": "Observed",
               "artifact_id": "Artifact",
               "promoted": "Promoted",
               "source_host_id": "Source host",
@@ -608,7 +636,20 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Observed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -634,7 +675,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_component_version_mismatch == 1",
+          "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_version_mismatch == 1))",
           "format": "table",
           "instant": true,
           "range": false,
@@ -654,16 +695,17 @@
           "options": {
             "excludeByName": {
               "Time": true,
-              "Value": true,
               "__name__": true,
               "instance": true,
               "job": true
             },
             "indexByName": {
               "component": 0,
-              "host": 1
+              "host": 1,
+              "Value": 2
             },
             "renameByName": {
+              "Value": "Observed",
               "component": "Component",
               "host": "Host"
             }

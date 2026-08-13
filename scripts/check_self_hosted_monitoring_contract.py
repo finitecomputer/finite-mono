@@ -106,6 +106,23 @@ def main() -> None:
         if panel.get("datasource", {}).get("uid") != "finite-prometheus":
             raise SystemExit(f"panel {panel.get('title')!r} uses the wrong datasource")
 
+    panels_by_title = {panel.get("title"): panel for panel in dashboard["panels"]}
+    expected_table_queries = {
+        "Running Versions": "1000 * topk by (component, host) (1, timestamp(finite_component_build_info))",
+        "Runtime Artifacts": "1000 * topk by (source_host_id, artifact_id) (1, timestamp(finite_runtime_artifact_info))",
+        "Version Drift": "1000 * topk by (component, host) (1, timestamp(finite_component_version_mismatch == 1))",
+    }
+    for title, expected_query in expected_table_queries.items():
+        panel = panels_by_title.get(title)
+        if panel is None:
+            raise SystemExit(f"dashboard is missing {title!r}")
+        targets = panel.get("targets", [])
+        if not targets or targets[0].get("expr") != expected_query:
+            raise SystemExit(f"{title!r} must use the newest-sample table query")
+        rendered = json.dumps(panel, sort_keys=True)
+        require(rendered, '"Value": "Observed"', title)
+        require(rendered, '"dateTimeAsIso"', title)
+
     print("self-hosted monitoring contract: ok")
 
 
