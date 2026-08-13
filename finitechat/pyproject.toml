@@ -22,6 +22,9 @@ include = [
   "integrations",
   "tests",
 ]
+extraPaths = [
+  "..",
+]
 exclude = [
   "**/__pycache__",
   "target",
