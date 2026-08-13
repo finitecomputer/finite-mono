@@ -40,6 +40,19 @@ key directory to `0700`, the key file to `0600`, and prints only the public
 `age1...` recipient. Add that public recipient to `.sops.yaml`; never commit or
 share the private key file.
 
+## Testing Decrypt Access
+
+Run:
+
+```sh
+just test-sops-decrypt
+```
+
+The helper prints `true` when your current local age key can decrypt every
+existing NixOS SOPS secret file. It prints `false` with a short next-step
+message if you cannot decrypt existing files or if recipients are not configured
+yet. It never prints plaintext secret values.
+
 ## Ingesting A Secret
 
 Use `just nixos-sops-ingest` to encrypt plaintext from stdin into this

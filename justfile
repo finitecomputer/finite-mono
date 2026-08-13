@@ -155,6 +155,7 @@ nixos-secrets-contract:
     python3 -m unittest scripts.tests.test_nixos_secrets_contract
     python3 -m unittest scripts.tests.test_nixos_sops_ingest
     python3 -m unittest scripts.tests.test_nixos_sops_operator_key
+    python3 -m unittest scripts.tests.test_nixos_sops_test_decrypt
     python3 -m unittest scripts.tests.test_nixos_sops_updatekeys
 
 # Create or inspect the local operator age key used by SOPS. Prints only the
@@ -165,6 +166,13 @@ nixos-sops-operator-key *args:
     #!/usr/bin/env bash
     set -euo pipefail
     exec python3 scripts/nixos_sops_operator_key.py "$@"
+
+# Check whether the current operator can decrypt existing NixOS SOPS files.
+[positional-arguments]
+test-sops-decrypt *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_test_decrypt.py "$@"
 
 # Encrypt one NixOS SOPS secret from stdin into infra/nixos/secrets.
 # Example:

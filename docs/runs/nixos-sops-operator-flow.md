@@ -59,6 +59,20 @@ The new operator can decrypt existing files only after step 3. The person
 running `nixos-sops-updatekeys` must already be able to decrypt the existing
 files.
 
+## Test Operator Access
+
+Run:
+
+```sh
+just test-sops-decrypt
+```
+
+The helper prints `true` when the current local age key can decrypt every
+existing NixOS SOPS secret file. It prints `false` and a short next-step message
+when the operator cannot decrypt existing files, or when SOPS recipients have
+not been configured yet. It captures decrypted output and never prints
+plaintext.
+
 ## Add A Secret
 
 Make sure your private key is the one SOPS should use:
