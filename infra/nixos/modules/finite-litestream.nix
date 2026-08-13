@@ -206,10 +206,14 @@ in
               # of a unit load-time error.
               EnvironmentFile = "-${cfg.environmentFile}";
             };
-            # `litestream ltx` column format verified against 0.5.11
-            # (nixpkgs-lat3 pin): header row, then
-            # `level min_txid max_txid size created` with an ISO-8601 UTC
-            # timestamp in the last column.
+            # Freshness = replication LAG, not write recency: a quiet database
+            # legitimately produces no new LTX for hours (this false-alarmed
+            # on 2026-08-13). Green when the newest replicated txid has caught
+            # up to the local write position (`litestream_txid` metric,
+            # decimal, vs the hex max_txid column of `litestream ltx` — both
+            # verified against 0.5.11); only a replica that is BEHIND falls
+            # through to the LTX-age bound, which then tolerates in-flight
+            # syncs but flags a wedged one.
             script = ''
               set -euo pipefail
               env_file=${lib.escapeShellArg cfg.environmentFile}
@@ -220,20 +224,34 @@ in
               grep -q '^LITESTREAM_ACCESS_KEY_ID=' "$env_file"
               grep -q '^LITESTREAM_SECRET_ACCESS_KEY=' "$env_file"
               systemctl is-active --quiet finite-litestream.service
-              curl -fsS --max-time 10 http://${cfg.metricsAddress}/metrics | grep -q '^litestream_'
+              metrics=$(curl -fsS --max-time 10 http://${cfg.metricsAddress}/metrics)
+              printf '%s\n' "$metrics" | grep -q '^litestream_'
               now=$(date +%s)
               ${lib.concatStringsSep "\n" (map (db: ''
-                newest=$(litestream ltx -config /etc/litestream.yml ${lib.escapeShellArg db.path} \
-                  | tail -n +2 | awk '{print $NF}' | sort | tail -1)
-                if [ -z "$newest" ]; then
+                ltx_rows=$(litestream ltx -config /etc/litestream.yml ${lib.escapeShellArg db.path} | tail -n +2)
+                if [ -z "$ltx_rows" ]; then
                   echo "finite-litestream-health: no replicated LTX entries for ${db.name}" >&2
                   exit 1
                 fi
-                newest_epoch=$(date -d "$newest" +%s)
-                age=$(( now - newest_epoch ))
-                if [ "$age" -gt ${toString cfg.maximumReplicaAgeSeconds} ]; then
-                  echo "finite-litestream-health: ${db.name} replica is stale ($age seconds; newest LTX $newest)" >&2
-                  exit 1
+                replica_txid=$(( 16#$(printf '%s\n' "$ltx_rows" | awk '{print $3}' | sort | tail -1) ))
+                db_txid=$(printf '%s\n' "$metrics" \
+                  | awk -v needle='db="${db.path}"' \
+                      'index($0, "litestream_txid{") == 1 && index($0, needle) > 0 {printf "%.0f", $2}')
+                if [ -z "$db_txid" ]; then
+                  # Metric label sets can vary by version; without the local
+                  # position, fall back to the age bound alone.
+                  db_txid=-1
+                fi
+                if [ "$db_txid" -ge 0 ] && [ "$replica_txid" -ge "$db_txid" ]; then
+                  : # fully replicated; quiet databases stay green
+                else
+                  newest=$(printf '%s\n' "$ltx_rows" | awk '{print $NF}' | sort | tail -1)
+                  newest_epoch=$(date -d "$newest" +%s)
+                  age=$(( now - newest_epoch ))
+                  if [ "$age" -gt ${toString cfg.maximumReplicaAgeSeconds} ]; then
+                    echo "finite-litestream-health: ${db.name} replica is behind (db txid $db_txid, replica txid $replica_txid) and stale ($age seconds; newest LTX $newest)" >&2
+                    exit 1
+                  fi
                 fi
               '') cfg.dbs)}
               date +%s > /var/lib/finite-litestream/health-last-success
