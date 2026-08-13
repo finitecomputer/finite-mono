@@ -607,6 +607,55 @@ pub(crate) async fn list_brain_invitations_handler(
     Ok(Json(BrainInvitationListResponse { invitations }))
 }
 
+/// List the caller's own pending, non-expired npub-targeted Brain
+/// Invitations. Identity-hiding: the exact target sees their invitations,
+/// everyone else sees an empty list. Email Invite Bootstraps are not bound
+/// to an npub until claim, so they are excluded.
+pub(crate) async fn list_my_invitations_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Json<MyInvitationListResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let actor = UserId::new(actor)?;
+    let now = server_timestamp(&state);
+    let mut invitations = Vec::new();
+    {
+        let store = state.store.lock().map_err(lock_error)?;
+        for invitation in store.list_pending_brain_invitations_for_target(&actor, &now)? {
+            let brain_display_name = store.load_brain(&invitation.brain_id)?.brain.name;
+            let inviter_display =
+                known_identity_responses(&store, [invitation.created_by_npub.to_string()])?
+                    .into_iter()
+                    .next()
+                    .map(|identity| identity.display)
+                    .unwrap_or_else(|| invitation.created_by_npub.to_string());
+            let public_instructions_url = Some(absolute_public_url(
+                &state,
+                &public_invite_instructions_path(&invitation.invite_code),
+            ));
+            invitations.push(MyInvitationResponse {
+                id: invitation.id,
+                invite_code: invitation.invite_code,
+                brain_id: invitation.brain_id.to_string(),
+                brain_display_name: brain_display_name.to_string(),
+                inviter_display,
+                folder_scope: invitation
+                    .initial_folder_access
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                expires_at: invitation.expires_at,
+                public_instructions_url,
+                origin_kind: invitation.origin_kind.as_str().to_owned(),
+                origin_ref: invitation.origin_ref,
+            });
+        }
+    }
+    Ok(Json(MyInvitationListResponse { invitations }))
+}
+
 pub(crate) async fn create_brain_invitation_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

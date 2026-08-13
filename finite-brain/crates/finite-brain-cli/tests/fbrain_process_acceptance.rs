@@ -2088,6 +2088,28 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let brain_invitation: Value = serde_json::from_slice(&brain_invitation.stdout).unwrap();
     let brain_invitation_id = brain_invitation["id"].as_str().unwrap();
+    let invitee_pending = run(&home_b, &home_b, &["invite", "brain", "list", "--json"]);
+    assert!(
+        invitee_pending.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invitee_pending.stderr)
+    );
+    let invitee_pending: Value = serde_json::from_slice(&invitee_pending.stdout).unwrap();
+    let invitee_pending_entries = invitee_pending["invitations"].as_array().unwrap();
+    assert!(
+        invitee_pending_entries
+            .iter()
+            .any(|invitation| invitation["id"] == brain_invitation_id),
+        "an invitee without a Working Tree must see pending invitations addressed to them"
+    );
+    assert!(
+        invitee_pending_entries
+            .iter()
+            .all(|invitation| invitation["brainDisplayName"].is_string()
+                && invitation["expiresAt"].is_string()
+                && invitation["inviteCode"].is_string()),
+        "the invitee list must carry the fields needed to accept"
+    );
     let accepted_brain = run(
         &home_b,
         &home_b,

@@ -621,6 +621,111 @@ note "Core account-agent-roster for $BOB_EMAIL: human + 1 agent ($bob_agent_emai
 if [[ "${ADR46_HANDS_ON:-}" == "1" ]]; then
   say "Hands-on mode: the provisioned stack waits for the two-role browser/CLI test"
   note "dashboard (Alice's browser): $dashboard_url"
+  commands_file="$state_dir/hands-on-commands.md"
+  cat >"$commands_file" <<EOF
+# ADR-0046 hands-on commands — generated for this run (no blanks to fill)
+
+Full prose runbook: finite-brain/docs/runbooks/adr46-hands-on-test.md
+Dashboard (Alice's browser): $dashboard_url
+Alice's Personal Brain id: $brain_id
+Alice's agent container: $alice_container_id
+Brain DB (read-only provenance check at the end): $brain_db
+
+## Bob's terminal setup (once)
+
+    export FINITE_HOME="$bob_fbrain_home"
+    export FBRAIN_WORKING_TREE_ROOT="$bob_fbrain_tree_root"
+    export FINITE_BRAIN_SERVER_URL="$brain_url"
+    export FINITE_BRAIN_PUBLIC_BASE_URL="$dashboard_origin"
+    export FINITE_IDENTITY_AUTHORITY="$identity_url"
+    export PATH="$repo_root/target/debug:\$PATH"
+    fbrain signer public-key   # sanity: prints BobAgent's npub
+
+## Direction 1: Alice invites Bob
+
+Alice (browser): dashboard URL above -> machine page -> Brain tab ->
+Settings -> Invitations -> Invite by email -> bob@finite.vip -> Preview plan ->
+Send for approval -> Settings -> Access -> Approvals -> Approve.
+
+Bob (CLI) — self-serve: with no Working Tree, "invite brain list" reads the
+invitations addressed to Bob's principal (GET /v1/my-invitations), so the list
+contains only his own pending invitations:
+
+    fbrain invite brain list --json
+    # accept the invitation straight from that list (it is Bob's only pending one):
+    fbrain invite brain accept --id "\$(fbrain invite brain list --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{process.stdout.write(JSON.parse(d).invitations[0].id)})')" --json
+    fbrain brain list --json
+    fbrain open $brain_id --json
+
+Alice's agent grants the Folder key (run from any terminal):
+
+    docker exec $alice_container_id fbrain admin folder-access grant \
+      --brain $brain_id --folder shared-with-bob \
+      --target "\$(fbrain signer public-key)" --json
+
+Bob reads and replies:
+
+    cd "\$FBRAIN_WORKING_TREE_ROOT/$brain_id"
+    fbrain sync now --json          # repeat until alice-seed.md appears
+    cat shared-with-bob/alice-seed.md
+    printf '# Bob was here\n\nBob read Alices seed note.\n' > shared-with-bob/bob-reply.md
+    fbrain sync now --json
+
+Alice's side sees the reply:
+
+    docker exec -w /data/workspace/finitebrain/$brain_id $alice_container_id fbrain sync now --json
+    docker exec $alice_container_id cat /data/workspace/finitebrain/$brain_id/shared-with-bob/bob-reply.md
+
+## Direction 2: Bob invites Alice
+
+Bob (CLI) — bootstrap, seed, preflight, commit (helper function is in the
+runbook section 1; paste it first):
+
+    fbrain brain bootstrap-personal --json
+    export BOB_BRAIN="\$(fbrain brain list --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write((j.brains||j)[0].brainId||(j.brains||j)[0].id)})')"
+    fbrain folder create shared-with-alice --brain "\$BOB_BRAIN" --name "Shared with Alice" --path shared-with-alice --json
+    fbrain open "\$BOB_BRAIN" --json && cd "\$FBRAIN_WORKING_TREE_ROOT/\$BOB_BRAIN"
+    fbrain sync now --json
+    printf '# Bob seed\n\nThis page existed before Alice joined.\n' > shared-with-alice/bob-seed.md
+    fbrain sync now --json && cd -
+
+    bob_brain_curl POST "/v1/brains/\$BOB_BRAIN/invitations/preflight" '{"target":"devfinity@finite.computer"}' | tee /tmp/bob-preflight.json
+    BOB_PLAN_ID=\$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("/tmp/bob-preflight.json","utf8")).planId)')
+    BOB_PLAN_HASH=\$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("/tmp/bob-preflight.json","utf8")).planHash)')
+    bob_brain_curl POST "/v1/brains/\$BOB_BRAIN/invitations/commit" "{\"planId\":\"\$BOB_PLAN_ID\",\"planHash\":\"\$BOB_PLAN_HASH\"}"
+
+Copy Alice's Invite Code from the commit output (the invitation whose ref is
+devfinity@finite.computer). Alice (browser): Settings -> Invitations ->
+Join a Brain -> paste the code -> Join Brain.
+
+Alice's agent accepts + Bob grants the folder key:
+
+    docker exec $alice_container_id fbrain invite brain list --json
+    docker exec $alice_container_id fbrain invite brain accept --id <alice-agent-invitation-id> --json
+    ALICE_AGENT_NPUB=\$(docker exec $alice_container_id fbrain signer public-key)
+    fbrain admin folder-access grant --brain "\$BOB_BRAIN" --folder shared-with-alice --target "\$ALICE_AGENT_NPUB" --json
+    docker exec $alice_container_id fbrain open "\$BOB_BRAIN" --json
+    docker exec -w "/data/workspace/finitebrain/\$BOB_BRAIN" $alice_container_id fbrain sync now --json
+    docker exec $alice_container_id cat "/data/workspace/finitebrain/\$BOB_BRAIN/shared-with-alice/bob-seed.md"
+
+## Provenance check (read-only)
+
+    sqlite3 -readonly $brain_db \
+      "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members ORDER BY brain_id, user_id"
+
+Expect: Bob's principals origin_kind=approval (direction 1, the card);
+Alice's principals in Bob's brain origin_kind=invitation (direction 2).
+
+## Teardown
+
+Ctrl-C in the boot terminal.
+EOF
+  note "filled-in commands for this run: $commands_file"
+  cat <<EOF
+EOF
+  sleep infinity
+  exit 0
+fi
   note "Alice's Personal Brain: $brain_id (bootstrapped; shared-with-bob/alice-seed.md seeded)"
   note "Bob's roster is live: $BOB_EMAIL -> human + agent $bob_agent_email"
   note "Alice's agent container id: $alice_container_id"

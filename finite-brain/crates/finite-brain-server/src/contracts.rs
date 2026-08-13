@@ -839,6 +839,30 @@ pub struct BrainInvitationListResponse {
     pub invitations: Vec<BrainInvitationResponse>,
 }
 
+/// Invitee-scoped Brain Invitation summary: the pending, non-expired
+/// npub-targeted invitations addressed to the authenticated caller.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyInvitationResponse {
+    pub id: String,
+    pub invite_code: String,
+    pub brain_id: String,
+    pub brain_display_name: String,
+    pub inviter_display: String,
+    pub folder_scope: Vec<String>,
+    pub expires_at: String,
+    pub public_instructions_url: Option<String>,
+    pub origin_kind: String,
+    pub origin_ref: Option<String>,
+}
+
+/// Invitee-scoped Brain Invitation list response.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyInvitationListResponse {
+    pub invitations: Vec<MyInvitationResponse>,
+}
+
 /// Create Folder Invitation request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

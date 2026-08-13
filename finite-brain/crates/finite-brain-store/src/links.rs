@@ -279,6 +279,32 @@ impl BrainStore {
         Ok(invitations)
     }
 
+    /// List pending, non-expired npub-targeted Brain Invitations addressed to
+    /// one target, newest first, bounded by MAX_LINK_LIST_ROWS. Email Invite
+    /// Bootstraps are excluded: they bind to the caller only at claim time.
+    pub fn list_pending_brain_invitations_for_target(
+        &self,
+        user_id: &UserId,
+        now: &str,
+    ) -> Result<Vec<StoredBrainInvitation>, StoreError> {
+        let query = format!(
+            "{BRAIN_INVITATION_SELECT} WHERE user_id = ?1 AND target_kind = 'npub' AND status = 'pending' ORDER BY created_at DESC, id LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(
+            params![user_id.as_str(), MAX_LINK_LIST_ROWS],
+            brain_invitation_from_row,
+        )?;
+        let mut invitations = Vec::new();
+        for row in rows {
+            let invitation = row?;
+            if !timestamp_expired(&invitation.expires_at, now) {
+                invitations.push(invitation);
+            }
+        }
+        Ok(invitations)
+    }
+
     fn tombstone_email_bootstrap_ciphertext(
         &mut self,
         invitation_id: &str,

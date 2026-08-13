@@ -4587,6 +4587,94 @@ mod tests {
     }
 
     #[test]
+    fn list_pending_brain_invitations_for_target_filters_status_target_and_expiry() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let other = UserId::new("npub-other").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-pending",
+                &target,
+                "invite-pending",
+                "/v1/brain-invitation-links/invite-pending/accept",
+                std::slice::from_ref(&restricted),
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let other_brain = bootstrap_organization_brain("acme2", "Acme Two", "npub-admin").unwrap();
+        let other_grants = grants_for_required(&other_brain.required_key_grants, "npub-admin");
+        store
+            .create_brain_bootstrap(&other_brain, &other_grants)
+            .unwrap();
+        let other_brain_id = BrainId::new("acme2").unwrap();
+        store
+            .create_brain_invitation(
+                &other_brain_id,
+                "invitation-expired",
+                &target,
+                "invite-expired",
+                "/v1/brain-invitation-links/invite-expired/accept",
+                &[],
+                &admin,
+                "2026-06-20T00:00:00.000Z",
+                "2026-06-19T00:00:00.000Z",
+            )
+            .unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-other",
+                &other,
+                "invite-other",
+                "/v1/brain-invitation-links/invite-other/accept",
+                std::slice::from_ref(&restricted),
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+
+        let target_invitations = store
+            .list_pending_brain_invitations_for_target(&target, now)
+            .unwrap();
+        assert_eq!(target_invitations.len(), 1);
+        assert_eq!(target_invitations[0].id, "invitation-pending");
+
+        let other_invitations = store
+            .list_pending_brain_invitations_for_target(&other, now)
+            .unwrap();
+        assert_eq!(other_invitations.len(), 1);
+        assert_eq!(other_invitations[0].id, "invitation-other");
+
+        let stranger = UserId::new("npub-stranger").unwrap();
+        assert!(
+            store
+                .list_pending_brain_invitations_for_target(&stranger, now)
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .accept_brain_invitation_by_code("invite-pending", &target, now)
+            .unwrap();
+        assert!(
+            store
+                .list_pending_brain_invitations_for_target(&target, now)
+                .unwrap()
+                .is_empty(),
+            "accepted and expired invitations must not be listed"
+        );
+    }
+
+    #[test]
     fn email_brain_invitation_claims_membership_access_and_grants_atomically() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();

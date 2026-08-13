@@ -611,6 +611,7 @@ fn normal_signed_api_router() -> Router<ServerState> {
             get(list_brains_handler).post(create_brain_handler),
         )
         .route("/identities/resolve", post(resolve_identity_handler))
+        .route("/my-invitations", get(list_my_invitations_handler))
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
         .route(
@@ -5151,6 +5152,170 @@ mod tests {
         let accepted: BrainInvitationResponse = read_json(accept).await;
         assert_eq!(accepted.status, "accepted");
         assert!(accepted.duplicate_accept);
+    }
+
+    #[tokio::test]
+    async fn my_invitations_lists_only_the_callers_pending_invitations() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let outsider_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        let invite_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(invite_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invite).await;
+
+        // An expired npub invitation for the same target lives on a second
+        // Brain (pending npub invitations are singletons per Brain and target).
+        let expired_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme-expired", "organization"),
+            TEST_NOW + 2,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(expired_brain.status(), StatusCode::OK);
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme-expired").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(target_npub.clone()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let list = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/my-invitations",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: MyInvitationListResponse = read_json(list).await;
+        assert_eq!(list.invitations.len(), 1);
+        let mine = &list.invitations[0];
+        assert_eq!(mine.id, invitation.id);
+        assert_eq!(mine.invite_code, invitation.invite_code);
+        assert_eq!(mine.brain_id, "acme");
+        assert_eq!(mine.brain_display_name, "Acme");
+        assert_eq!(mine.inviter_display, npub(&admin_keys));
+        assert_eq!(mine.folder_scope, vec!["getting-started".to_owned()]);
+        assert_eq!(mine.expires_at, "2026-06-04T20:26:40Z");
+        assert!(
+            mine.public_instructions_url
+                .as_deref()
+                .unwrap()
+                .ends_with(&format!(
+                    "/v1/brain-invitation-links/{}/llms.txt",
+                    invitation.invite_code
+                ))
+        );
+        assert_eq!(mine.origin_kind, "invitation");
+        assert_eq!(mine.origin_ref, None);
+
+        // Identity-hiding: non-targets (including the inviting admin) see an
+        // empty list, not an error.
+        for keys in [&outsider_keys, &admin_keys] {
+            let other = authed_request(
+                router.clone(),
+                keys,
+                "GET",
+                "/v1/my-invitations",
+                None,
+                TEST_NOW + 4,
+            )
+            .await;
+            assert_eq!(other.status(), StatusCode::OK);
+            let other: MyInvitationListResponse = read_json(other).await;
+            assert!(other.invitations.is_empty());
+        }
+
+        // Accepting consumes the invitation; it drops out of the list.
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let after = authed_request(
+            router,
+            &target_keys,
+            "GET",
+            "/v1/my-invitations",
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(after.status(), StatusCode::OK);
+        let after: MyInvitationListResponse = read_json(after).await;
+        assert!(after.invitations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn my_invitations_requires_authentication() {
+        let router = test_router();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/my-invitations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
     }
 
     #[tokio::test]

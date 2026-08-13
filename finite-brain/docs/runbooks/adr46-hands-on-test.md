@@ -123,11 +123,14 @@ bob_brain_curl() {
 (Optional denial path: repeat steps 1–5 and click **Dismiss** instead; the
 card resolves without signing anything.)
 
-**Bob (CLI):**
+**Bob (CLI):** Bob has no Working Tree yet, so `invite brain list` reads the
+invitations addressed to his own principal (`GET /v1/my-invitations`) instead
+of the admin collection — the list contains only his pending invitations, so
+the id to accept comes straight from it:
 
 ```sh
-fbrain invite brain list --json
-fbrain invite brain accept --id <invitation-id for Bob's principal> --json
+fbrain invite brain list --json   # pending invitations addressed to Bob's principal
+fbrain invite brain accept --id <invitation-id from the list> --json
 fbrain brain list --json          # Alice's Brain is now visible
 fbrain open <alice-brain-id> --json
 ```

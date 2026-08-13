@@ -3686,10 +3686,23 @@ fn brain_invites<W: Write>(
             }
         }
         Some("list") => {
-            let brain_id = command_brain_id(args, env)?;
-            let route = format!("/v1/brains/{brain_id}/invitations");
-            let response = signed_json_request(env, args, "GET", &route, None)?;
-            write_command_response(output, json, &response)
+            let scoped_brain_id = match option_value(args, "--brain") {
+                Some(brain_id) => Some(brain_id),
+                None => current_brain_id(env)?,
+            };
+            match scoped_brain_id {
+                Some(brain_id) => {
+                    let route = format!("/v1/brains/{brain_id}/invitations");
+                    let response = signed_json_request(env, args, "GET", &route, None)?;
+                    write_command_response(output, json, &response)
+                }
+                None => {
+                    // No Working Tree: the caller is an invitee, not an admin.
+                    let response =
+                        signed_json_request(env, args, "GET", "/v1/my-invitations", None)?;
+                    write_my_invitations(output, json, &response)
+                }
+            }
         }
         Some("inspect") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
@@ -3712,6 +3725,46 @@ fn brain_invites<W: Write>(
         }
         Some(other) => Err(CliError::InvalidCommand(format!("invite brain {other}"))),
         None => Err(CliError::MissingArgument("invite brain command")),
+    }
+}
+
+fn write_my_invitations<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let invitations = value
+        .get("invitations")
+        .and_then(serde_json::Value::as_array);
+    match invitations {
+        Some(invitations) if !invitations.is_empty() => {
+            for invitation in invitations {
+                let field = |name: &str| {
+                    invitation
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                let id = field("id");
+                writeln!(output, "invitation {id}")?;
+                writeln!(
+                    output,
+                    "  brain {} ({})",
+                    field("brainDisplayName"),
+                    field("brainId")
+                )?;
+                writeln!(output, "  expires {}", field("expiresAt"))?;
+                writeln!(output, "  accept: fbrain invite brain accept --id {id}")?;
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no pending invitations")?;
+            Ok(())
+        }
     }
 }
 
@@ -12156,6 +12209,125 @@ mod tests {
 
         assert!(matches!(error, CliError::AgentStateMigration { .. }));
         assert!(output.is_empty());
+    }
+
+    fn start_fixed_response_server(
+        body: String,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn invite_brain_list_without_working_tree_uses_my_invitations() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [{
+                "id": "invitation-1",
+                "inviteCode": "invite-abc",
+                "brainId": "alice-brain",
+                "brainDisplayName": "Alice's Brain",
+                "inviterDisplay": "alice@finite.vip",
+                "folderScope": ["shared-with-bob"],
+                "expiresAt": "2026-06-30T00:00:00Z",
+                "publicInstructionsUrl": "https://brain.example/v1/brain-invitation-links/invite-abc/llms.txt",
+                "originKind": "invitation",
+                "originRef": null
+            }]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 2);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--json"],
+            env.clone(),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["invitations"][0]["id"], "invitation-1");
+        assert_eq!(json["invitations"][0]["brainId"], "alice-brain");
+        assert_eq!(json["invitations"][0]["expiresAt"], "2026-06-30T00:00:00Z");
+
+        let mut plain = Vec::new();
+        run_with_env(["invite", "brain", "list"], env, &mut plain).unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains("invitation invitation-1"));
+        assert!(plain.contains("Alice's Brain (alice-brain)"));
+        assert!(plain.contains("expires 2026-06-30T00:00:00Z"));
+        assert!(plain.contains("fbrain invite brain accept --id invitation-1"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                "GET /v1/my-invitations HTTP/1.1".to_owned(),
+                "GET /v1/my-invitations HTTP/1.1".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invite_brain_list_with_brain_flag_or_working_tree_keeps_admin_route() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = setup_incremental_tree(&tmp, 0);
+        let (server_url, server) =
+            start_fixed_response_server("{\"invitations\":[]}".to_owned(), 2);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut flagged = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--brain", "acme", "--json"],
+            env.clone(),
+            &mut flagged,
+        )
+        .unwrap();
+
+        env.cwd = tree;
+        let mut in_tree = Vec::new();
+        run_with_env(["invite", "brain", "list", "--json"], env, &mut in_tree).unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                "GET /v1/brains/acme/invitations HTTP/1.1".to_owned(),
+                "GET /v1/brains/brain/invitations HTTP/1.1".to_owned(),
+            ]
+        );
     }
 
     #[test]
