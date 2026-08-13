@@ -182,14 +182,14 @@ Common settings:
 - `SKILL_AB_MAX_OUTPUT_TOKENS=6000`
 - `SKILL_AB_TIMEOUT_MS=120000`
 - `SKILL_AB_MAX_CONCURRENCY`: forwarded to Promptfoo as `--max-concurrency`.
-  Devfinity runs default to `1`.
+  Devfinity runs default to `2`.
 - `SKILL_AB_REPAIR_HTML=0`: disables the automatic second pass that converts
   non-HTML model output into a reviewable HTML artifact
 
 Override them as environment variables:
 
 ```sh
-SKILL_AB_MODEL=glm-5-2 SKILL_AB_MAX_CONCURRENCY=1 pnpm run ab
+SKILL_AB_MODEL=glm-5-2 SKILL_AB_MAX_CONCURRENCY=2 pnpm run ab
 ```
 
 OpenAI is still available as an explicit fallback:

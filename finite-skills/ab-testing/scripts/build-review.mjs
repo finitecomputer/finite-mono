@@ -260,7 +260,7 @@ function renderReview(cases, screenshotByArtifact) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            maxConcurrency: Number(maxConcurrencyInput.value || 1),
+            maxConcurrency: Number(maxConcurrencyInput.value || 2),
             prompt: promptInput.value,
             skills,
           }),
@@ -285,7 +285,7 @@ function renderReview(cases, screenshotByArtifact) {
         const data = await response.json();
         skillCatalog = data.availableSkills || [];
         promptInput.value = data.prompt || "";
-        maxConcurrencyInput.value = data.maxConcurrency || 1;
+        maxConcurrencyInput.value = data.maxConcurrency || 2;
         for (const variant of data.variants || []) {
           const input = document.getElementById("skill-input-" + variant.variant);
           const source = document.getElementById("skill-source-" + variant.variant);

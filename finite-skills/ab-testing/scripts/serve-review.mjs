@@ -14,6 +14,7 @@ const editableStatePath = path.join(editableDir, "state.json");
 const host = process.env.SKILL_AB_HOST || "127.0.0.1";
 const port = Number(process.env.SKILL_AB_PORT || process.env.PORT || 8787);
 const maxBodyBytes = 4 * 1024 * 1024;
+const defaultMaxConcurrency = 2;
 
 const variants = [
   {
@@ -214,7 +215,8 @@ function readEditorState() {
 
   return {
     availableSkills: collectSkillCatalog(),
-    maxConcurrency: editableState.maxConcurrency || normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY || 1),
+    maxConcurrency:
+      editableState.maxConcurrency ?? normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY, defaultMaxConcurrency),
     prompt,
     runner: "devfinity",
     title,
@@ -392,10 +394,10 @@ function sanitize(value) {
     .slice(0, 80) || "custom-prompt";
 }
 
-function normalizeMaxConcurrency(value) {
+function normalizeMaxConcurrency(value, fallback = defaultMaxConcurrency) {
   const number = Number(value);
   if (!Number.isFinite(number)) {
-    return 1;
+    return fallback;
   }
   return Math.max(1, Math.min(8, Math.floor(number)));
 }
