@@ -2596,6 +2596,16 @@ fn lock_error<T>(_error: T) -> ApiError {
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "store lock poisoned")
 }
 
+async fn spawn_store<T, F>(state: ServerState, f: F) -> Result<T, ApiError>
+where
+    F: FnOnce(ServerState) -> Result<T, ApiError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || f(state))
+        .await
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "store worker failed"))?
+}
+
 fn grants_for_required(
     required: &[RequiredFolderKeyGrant],
     brain_id: &BrainId,

@@ -1369,18 +1369,23 @@ impl BrainStore {
     /// Open or create a SQLite store at `path` and apply migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, true)
     }
 
     /// Open an in-memory SQLite store. Useful for fast unit tests only.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, false)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self, StoreError> {
+    fn from_connection(conn: Connection, wal: bool) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        if wal {
+            // WAL is required for continuous replication (Litestream) and lets
+            // readers proceed while a write is in flight on the same file.
+            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        }
         let mut store = Self { conn };
         store.apply_migrations()?;
         Ok(store)
@@ -9547,6 +9552,44 @@ mod tests {
             assert_eq!(bootstrap.objects[0].revision, 1);
             assert!(!bootstrap.objects[0].deleted);
         }
+    }
+
+    #[test]
+    fn file_store_enables_wal_and_reopens_with_the_same_projection() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("brain.sqlite3");
+        let brain_id = BrainId::new("acme").unwrap();
+
+        {
+            let mut store = BrainStore::open(&db).unwrap();
+            let journal_mode: String = store
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+            bootstrap_org_and_strategy_folder(&mut store);
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record("event-wal-1", "obj_000000000001", 1, None, "wal"),
+                )
+                .unwrap();
+            let wal_sidecar = format!("{}-wal", db.display());
+            assert!(
+                std::path::Path::new(&wal_sidecar).exists(),
+                "file-backed BrainStore must create a WAL sidecar so Litestream can follow it"
+            );
+        }
+
+        let store = BrainStore::open(&db).unwrap();
+        let journal_mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert_eq!(bootstrap.object_count, 1);
+        assert_eq!(bootstrap.objects[0].payload_json, "{\"body\":\"wal\"}");
     }
 
     #[test]

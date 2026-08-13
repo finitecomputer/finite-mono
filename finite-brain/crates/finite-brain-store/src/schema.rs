@@ -2077,7 +2077,7 @@ mod tests {
         )
         .unwrap();
 
-        let store = BrainStore::from_connection(conn).unwrap();
+        let store = BrainStore::from_connection(conn, false).unwrap();
         let stored = store
             .load_brain(&BrainId::new("legacy-organization").unwrap())
             .unwrap();
