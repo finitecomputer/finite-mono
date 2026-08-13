@@ -94,7 +94,6 @@ CONTRACT: dict[str, Any] = {
         "finite-lat-1": {
             "mounts": ["/", "/data"],
             "storage": "single-disk",
-            "mdstat_path": "/proc/mdstat",
             "disks": [
                 "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F",
                 "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146",
@@ -472,17 +471,12 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
 
     raw["storage"] = {"mode": profile["storage"]}
     if profile["storage"] == "single-disk":
+        # lat1 disks retain stale MD metadata from a failed RAID attempt;
+        # leftover arrays in /proc/mdstat are not a single-disk health signal.
         raw["storage"]["disks"] = [
             {"path": path, "present": Path(path).exists()}
             for path in profile["disks"]
         ]
-        try:
-            mdstat = Path(profile["mdstat_path"]).read_text(encoding="utf-8")
-            raw["storage"]["md_arrays"] = re.findall(
-                r"^(md\S+)\s*:", mdstat, flags=re.MULTILINE
-            )
-        except OSError as error:
-            raw["storage"]["error"] = str(error)
 
     namespace = CONTRACT["runner"]["namespace"]
     raw["containers"] = {}
@@ -1020,7 +1014,7 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
         disks = storage.get("disks")
         if not disks:
             storage["status"] = "unknown"
-        elif storage.get("md_arrays") or not all(disk.get("present") for disk in disks):
+        elif not all(disk.get("present") for disk in disks):
             storage["status"] = "red"
         else:
             storage["status"] = "green"
@@ -1439,8 +1433,8 @@ def render_human(report: dict[str, Any]) -> str:
             disks = storage.get("disks", [])
             present = sum(bool(disk.get("present")) for disk in disks)
             lines.append(
-                f"  storage: single-disk; expected devices {present}/{len(disks)} present; "
-                f"MD arrays={len(storage.get('md_arrays', []))} {badge(storage['status'])}"
+                f"  storage: single-disk; expected devices {present}/{len(disks)} present "
+                f"{badge(storage['status'])}"
             )
         else:
             lines.append(

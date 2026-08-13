@@ -460,6 +460,99 @@ class FiniteStatusTests(unittest.TestCase):
         )
         self.assertIn("lifecycle 1/3 operable", output)
 
+    def test_single_disk_profile_does_not_imply_raid(self) -> None:
+        profile = finite_status.CONTRACT["hosts"]["finite-lat-1"]
+        self.assertEqual(profile["storage"], "single-disk")
+        self.assertNotIn("mdstat_path", profile)
+        self.assertEqual(len(profile["disks"]), 2)
+
+    def test_single_disk_storage_greens_despite_leftover_md_arrays(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["storage"] = {
+            "mode": "single-disk",
+            "md_arrays": ["md127", "md126"],
+            "disks": [
+                {
+                    "path": finite_status.CONTRACT["hosts"]["finite-lat-1"]["disks"][0],
+                    "present": True,
+                },
+                {
+                    "path": finite_status.CONTRACT["hosts"]["finite-lat-1"]["disks"][1],
+                    "present": True,
+                },
+            ],
+        }
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        storage = report["sections"]["host_health"]["storage"]
+        self.assertEqual(storage["status"], "green")
+        output = finite_status.render_human(report)
+        self.assertIn("storage: single-disk; expected devices 2/2 present [GREEN]", output)
+        self.assertNotIn("MD arrays=", output)
+
+    def test_single_disk_storage_is_red_when_listed_disk_missing(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["storage"]["disks"][1]["present"] = False
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        storage = report["sections"]["host_health"]["storage"]
+        self.assertEqual(storage["status"], "red")
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
+
+    def test_raid_storage_uses_storage_health_unit(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        unit = finite_status.CONTRACT["hosts"]["finite-lat-3"]["storage_health_unit"]
+        self.assertEqual(unit, "finite-storage-health.service")
+        raw["host_health"]["storage"] = {"mode": "raid"}
+        raw["host_health"]["units"][unit] = {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["host_health"]["storage"]["status"], "green")
+
+        raw["host_health"]["units"][unit] = {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "failed",
+            "ExecMainStatus": "1",
+        }
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["host_health"]["storage"]["status"], "red")
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
+
+    def test_collect_single_disk_does_not_read_mdstat(self) -> None:
+        stats = mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)
+        with (
+            mock.patch.object(
+                finite_status, "systemd_properties", return_value={"LoadState": "loaded"}
+            ),
+            mock.patch.object(finite_status, "collect_healthcheck_journal", return_value={}),
+            mock.patch.object(finite_status.os, "statvfs", return_value=stats),
+            mock.patch.object(finite_status.Path, "exists", return_value=True),
+            mock.patch.object(
+                finite_status.Path,
+                "read_text",
+                side_effect=AssertionError("single-disk collect must not read mdstat"),
+            ),
+            mock.patch.object(finite_status, "line_count", return_value=0),
+            mock.patch.object(finite_status, "read_environment_values", return_value={}),
+        ):
+            collected = finite_status.collect_host_health("finite-lat-1")
+        self.assertEqual(collected["storage"]["mode"], "single-disk")
+        self.assertNotIn("md_arrays", collected["storage"])
+        self.assertNotIn("error", collected["storage"])
+        self.assertEqual(len(collected["storage"]["disks"]), 2)
+        self.assertTrue(all(disk["present"] for disk in collected["storage"]["disks"]))
+
 
 if __name__ == "__main__":
     unittest.main()
