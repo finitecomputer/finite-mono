@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
-const DEFAULT_MODEL: &str = "glm-5-2";
+const DEFAULT_MODEL: &str = "deepseek-v4-flash-0731";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1392,7 +1392,7 @@ mod tests {
             .unwrap();
         assert_eq!(live.status(), StatusCode::OK);
         let live: Value = live.json().await.unwrap();
-        assert_eq!(live["config"]["defaultModel"], "glm-5-2");
+        assert_eq!(live["config"]["defaultModel"], "deepseek-v4-flash-0731");
         assert_eq!(live["config"]["upstreamHealthPath"], "/health");
         assert_eq!(
             live["config"]["requiredSecrets"]["finiteUsageApiServiceKeyPresent"],
@@ -1411,7 +1411,7 @@ mod tests {
         assert_eq!(ready.status(), StatusCode::OK);
         let ready: Value = ready.json().await.unwrap();
         assert_eq!(ready["ok"], true);
-        assert_eq!(ready["config"]["defaultModel"], "glm-5-2");
+        assert_eq!(ready["config"]["defaultModel"], "deepseek-v4-flash-0731");
         assert_eq!(ready["components"]["upstream"]["name"], "upstream");
         assert_eq!(ready["components"]["upstream"]["ok"], true);
         assert_eq!(

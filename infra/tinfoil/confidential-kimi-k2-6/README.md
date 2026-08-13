@@ -1,10 +1,33 @@
-# Finite Private next measured config
+# Finite Private serving candidates
 
-`tinfoil-config.candidate.yml` is the reviewed source for the next update to
-the public `finitecomputer/confidential-kimi-k2-6` satellite. It is staged in
-mono so the product, limiter, and enclave changes can be reviewed together.
-Tinfoil still requires the released `tinfoil-config.yml` at the satellite repo
-root.
+## DeepSeek V4 Flash 0731 production candidate
+
+`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml` preserves the
+best configuration measured on an isolated eight-H200 Tinfoil host on
+2026-08-07. It uses DP8+EP, FP8 KV cache, a 393,216-token service ceiling, and
+the measured scheduler winner of 128 sequences and 2,048 batched tokens.
+
+DeepSeek is the canonical model name. The served `glm-5-2` name remains only as
+a mixed-version compatibility alias. The current `kimi-k2-6` directory,
+container name, and generated hostname are historical infrastructure identities
+and must not be changed as part of the scheduler rollout.
+
+Exact performance, context, protocol, and soak evidence is recorded in
+[`2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md).
+The guarded production procedure is in
+[`finite-private-deepseek-production-update.md`](../../runbooks/finite-private-deepseek-production-update.md).
+
+The candidate retains the measured Tinfoil MPK and immutable runtime image
+digest. Passing its repository contract does not authorize a satellite
+release, Tinfoil relaunch, container replacement, or DNS change.
+
+## Archived GLM candidate (recovery evidence only)
+
+`tinfoil-config.candidate.yml` preserves the older reviewed GLM configuration
+for rollback analysis and historical comparison. It is not the next production
+candidate and must not be copied to the public
+`finitecomputer/confidential-kimi-k2-6` satellite or released. The DeepSeek
+candidate above is the only production-update source in this directory.
 
 The candidate follows upstream
 [`tinfoilsh/confidential-glm5-2` v0.0.17](https://github.com/tinfoilsh/confidential-glm5-2/releases/tag/v0.0.17),
@@ -39,6 +62,7 @@ The limiter is pinned to mono image `2026-07-21.1`, digest
 `sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b`,
 from source `cafe85246bce88201c23a46ec7b33c8e28cc25e4`. CI verified the OCI
 revision label, and an independent exact-digest pull passed `/live` with the
-expected Finite configuration. Do not copy the candidate to the satellite,
-create a measured release, or relaunch the enclave without explicit approval
-for the downtime operation.
+expected Finite configuration. This archived file is retained only as recovery
+evidence. Do not copy it to the satellite, create a release from it, or relaunch
+the enclave from it. Delete it once the stable Finite Private route is complete
+and the exact GLM rollback evidence is preserved outside this deploy directory.

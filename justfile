@@ -117,6 +117,17 @@ runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
     python3 -m unittest discover -s scripts/tests -p 'test_runtime_image_contract.py'
 
+# Measured eight-H200 DeepSeek serving identity and scheduler contract.
+finite-private-deepseek-contract:
+    python3 scripts/check_finite_private_deepseek_candidate.py
+    python3 -m unittest discover -s scripts/tests -p 'test_finite_private_deepseek_candidate.py'
+    python3 -m unittest discover -s scripts/tests -p 'test_finite_private_ops.py'
+    python3 -m unittest discover -s scripts/tests -p 'test_check_deepseek_v4_0731_quality.py'
+
+# Promotion-time form: the model image and MPK must already be immutable.
+finite-private-deepseek-release-contract:
+    python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
+
 # Static production contract: Dashboard and Core must enforce the same Price.
 stripe-price-contract:
     python3 scripts/check_stripe_price_contract.py

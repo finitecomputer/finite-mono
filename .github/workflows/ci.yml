@@ -306,6 +306,8 @@ jobs:
         run: nix develop --command just search check
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
+      - name: Finite Private DeepSeek production candidate contract
+        run: nix develop --command just finite-private-deepseek-contract
       - name: lat1 existing-Runtime rollout contract
         run: nix develop --command just lat1-rollout-contract
       - name: lat1 healthcheck activation contract
