@@ -140,15 +140,12 @@ pub(crate) async fn get_object_handler(
         store.load_brain(&brain_id)?
     };
     ensure_folder_visible(&stored, &folder_id, &actor)?;
-    let bootstrap = {
+    let object = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.sync_bootstrap(&brain_id)?
+        store
+            .load_current_object(&brain_id, &folder_id, &object_id)?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "object not found"))?
     };
-    let object = bootstrap
-        .objects
-        .into_iter()
-        .find(|object| object.folder_id == folder_id && object.object_id == object_id)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "object not found"))?;
     if object.deleted {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "object not found"));
     }
