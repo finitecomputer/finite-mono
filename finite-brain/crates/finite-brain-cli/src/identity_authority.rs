@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CliEnvironment, CliError, load_or_generate_identity, unix_timestamp,
-    environment::DEFAULT_FINITE_IDENTITY_AUTHORITY_URL,
+    CliEnvironment, CliError, environment::DEFAULT_FINITE_IDENTITY_AUTHORITY_URL,
+    load_or_generate_identity, unix_timestamp,
 };
 
 #[derive(Debug, Clone)]

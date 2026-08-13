@@ -3517,7 +3517,12 @@ fn admin_ensure_access<W: Write>(
     if json {
         return write_json(output, &receipt);
     }
-    let field = |name: &str| receipt.get(name).and_then(serde_json::Value::as_str).unwrap_or("?");
+    let field = |name: &str| {
+        receipt
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+    };
     writeln!(
         output,
         "ensure-access {} -> {}",
@@ -3525,10 +3530,7 @@ fn admin_ensure_access<W: Write>(
         field("targetNpub")
     )?;
     writeln!(output, "membership: {}", field("membership"))?;
-    if let Some(folders) = receipt
-        .get("folders")
-        .and_then(serde_json::Value::as_array)
-    {
+    if let Some(folders) = receipt.get("folders").and_then(serde_json::Value::as_array) {
         for folder in folders {
             let path = folder
                 .get("path")
@@ -3565,7 +3567,8 @@ fn collaborators<W: Write>(
     env: &CliEnvironment,
     json: bool,
     output: &mut W,
-) -> Result<(), CliError> {    match args.first().map(String::as_str) {
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
         Some("ensure-admin") => {
             let brain_id = command_brain_id(args, env)?;
             let target = required_option_or_positional(args, "--target", 1, "target-identity")?;
@@ -7666,7 +7669,8 @@ mod tests {
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
-        let export_grant = export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
         let (server_url, server) = start_ensure_access_server(target_npub.clone(), export_grant);
         let mut output = Vec::new();
         run_with_env(

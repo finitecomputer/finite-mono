@@ -4703,7 +4703,10 @@ mod tests {
             .unwrap();
         assert_eq!(revoked, vec!["invitation-expired".to_owned()]);
         assert_eq!(
-            store.load_brain_invitation("invitation-expired").unwrap().status,
+            store
+                .load_brain_invitation("invitation-expired")
+                .unwrap()
+                .status,
             LinkStatus::Revoked
         );
 
@@ -4727,7 +4730,10 @@ mod tests {
             .unwrap();
         assert!(revoked.is_empty());
         assert_eq!(
-            store.load_brain_invitation("invitation-live").unwrap().status,
+            store
+                .load_brain_invitation("invitation-live")
+                .unwrap()
+                .status,
             LinkStatus::Pending
         );
 

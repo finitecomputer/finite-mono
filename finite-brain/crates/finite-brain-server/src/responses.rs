@@ -299,8 +299,7 @@ pub(crate) fn brain_invitation_response(
 /// Mark a pending Invitation response as expired when its `expires_at` is at
 /// or before `now`. Computed at read; stored rows are never mutated.
 pub(crate) fn mark_invitation_expired(response: &mut BrainInvitationResponse, now: &str) {
-    response.expired =
-        response.status == "pending" && timestamp_expired(&response.expires_at, now);
+    response.expired = response.status == "pending" && timestamp_expired(&response.expires_at, now);
 }
 
 pub(crate) fn share_link_response(share_link: StoredShareLink) -> FolderInvitationResponse {
