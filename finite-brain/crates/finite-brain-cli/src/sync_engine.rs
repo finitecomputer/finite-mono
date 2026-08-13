@@ -2538,6 +2538,9 @@ fn scan_working_tree_changes(
             if is_generated_folder_file(&folder.path, &relative_path) {
                 continue;
             }
+            if is_ignored_os_metadata_file(&relative_path) {
+                continue;
+            }
             seen.insert(relative_path.clone());
             if is_markdown_path(&relative_path) {
                 let body = fs::read_to_string(root.join(&relative_path))?;
@@ -2673,6 +2676,16 @@ fn is_generated_folder_file(folder_path: &str, relative_path: &str) -> bool {
         || local == "inventory/.keep"
         || local == "datasets/.keep"
         || local == "output/.keep"
+}
+
+fn is_ignored_os_metadata_file(relative_path: &str) -> bool {
+    // macOS Finder drops .DS_Store files into every visited directory. They
+    // are never Brain content: silently ignore them instead of reporting a
+    // permanent non-Markdown sync conflict.
+    Path::new(relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(".DS_Store")
 }
 
 fn remove_stale_object_files(
@@ -3485,6 +3498,41 @@ mod tests {
             change,
             WorkingTreeChange::Delete { path } if path.as_str() == "General/deleted.md"
         )));
+    }
+
+    #[test]
+    fn scan_ignores_ds_store_files() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("General/wiki")).unwrap();
+        fs::write(root.join("General/existing.md"), "# Same\n").unwrap();
+        fs::write(root.join("General/.DS_Store"), b"finder-metadata").unwrap();
+        fs::write(root.join("General/wiki/.DS_Store"), b"finder-metadata").unwrap();
+        let state = BrainWorkingTreeStateManifest {
+            version: "finite-brain-working-tree-state-v1".to_owned(),
+            folder_roots: vec![WorkingTreeFolderRoot {
+                folder_id: "general".to_owned(),
+                source_brain_id: None,
+                path: "General".to_owned(),
+                can_read: true,
+                metadata_only: false,
+            }],
+            objects: vec![WorkingTreeObjectManifestEntry {
+                folder_id: "general".to_owned(),
+                source_brain_id: None,
+                path: "existing.md".to_owned(),
+                object_id: "obj_existing00000".to_owned(),
+                revision: 1,
+                key_version: 1,
+                content_type: "text/markdown".to_owned(),
+                content_hash: sha256_hex("# Same\n".as_bytes()),
+            }],
+            sync: WorkingTreeSyncState { latest_sequence: 1 },
+        };
+
+        let changes = scan_working_tree_changes(root, &state).unwrap();
+
+        assert!(changes.is_empty(), "unexpected changes: {changes:?}");
     }
 
     #[test]
