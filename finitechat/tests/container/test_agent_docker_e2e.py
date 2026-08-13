@@ -29,7 +29,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MONOREPO_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import (  # noqa: E402
+    image_build_args,
+    nix_system_for_platform,
+    stage_runtime_closure,
+)
 
 IMAGE = os.environ.get("FINITE_DOCKER_IMAGE", "finite-agent-docker-e2e")
 SKIP_IMAGE_BUILD = os.environ.get("FINITE_DOCKER_SKIP_IMAGE_BUILD", "").lower() in {
@@ -963,7 +967,8 @@ class AgentDockerE2ETest(unittest.TestCase):
                         "--platform",
                         HERMES_RUNTIME_PLATFORM,
                         *image_build_args(
-                            hermes_runtime, hermes_agent_version=HERMES_AGENT_VERSION
+                            hermes_runtime,
+                            hermes_agent_version=HERMES_AGENT_VERSION,
                         ),
                         "--tag",
                         IMAGE,

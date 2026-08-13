@@ -267,7 +267,8 @@ def build_image(
             "--tag",
             args.image_ref,
             *image_build_args(
-                hermes_runtime, hermes_agent_version=args.hermes_agent_version
+                hermes_runtime,
+                hermes_agent_version=args.hermes_agent_version,
             ),
             "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",

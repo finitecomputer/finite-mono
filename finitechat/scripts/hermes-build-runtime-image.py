@@ -17,7 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import (  # noqa: E402
+    image_build_args,
+    nix_system_for_platform,
+    stage_runtime_closure,
+)
 
 sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
@@ -90,7 +94,8 @@ def main() -> int:
                 "--platform",
                 args.platform,
                 *image_build_args(
-                    hermes_runtime, hermes_agent_version=args.hermes_agent_version
+                    hermes_runtime,
+                    hermes_agent_version=args.hermes_agent_version,
                 ),
                 "--tag",
                 image_ref,
