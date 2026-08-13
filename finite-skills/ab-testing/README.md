@@ -104,9 +104,10 @@ The review page stores winner picks and notes in browser local storage and can
 export them as JSON.
 
 When served through `pnpm run serve`, the review page also lets you edit the
-build prompt and both skill variants, then regenerate from the browser. Edited
-skills are saved under `runs/editable/`; the source `../skills/.../SKILL.md`
-files are not changed.
+build prompt, choose a different `SKILL.md` file for either variant, edit the
+loaded skill text, and regenerate from the browser. Edited skills are saved
+under `runs/editable/`; the source `../skills/.../SKILL.md` files are not
+changed.
 
 ## Changing The Skills
 

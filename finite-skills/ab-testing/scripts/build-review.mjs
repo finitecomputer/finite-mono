@@ -113,10 +113,12 @@ function renderReview(cases, screenshotByArtifact) {
     .editor-body { display: grid; gap: 14px; padding: 16px; }
     .field { display: grid; gap: 7px; }
     .field label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    .field textarea, .field input[type="number"] { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #fff; color: var(--ink); }
+    .field textarea, .field input, .field select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #fff; color: var(--ink); }
     .field textarea { min-height: 112px; resize: vertical; }
     .field.skill textarea { min-height: 260px; }
     .skill-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .skill-picker { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+    .secondary { border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; background: #fff; font-weight: 700; cursor: pointer; }
     .editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
     .editor-actions label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
     .editor-actions input[type="number"] { width: 74px; }
@@ -152,6 +154,7 @@ function renderReview(cases, screenshotByArtifact) {
     @media (max-width: 980px) {
       .variants { grid-template-columns: 1fr; }
       .skill-grid { grid-template-columns: 1fr; }
+      .skill-picker { grid-template-columns: 1fr; }
       .case-head, .header-inner { align-items: start; flex-direction: column; }
     }
   </style>
@@ -210,13 +213,22 @@ function renderReview(cases, screenshotByArtifact) {
     const regenerateButton = document.getElementById("regenerate-button");
     const editorStatus = document.getElementById("editor-status");
     const jobLog = document.getElementById("job-log");
+    let skillCatalog = [];
 
     loadEditorState();
 
     regenerateButton.addEventListener("click", async () => {
       const skills = {};
       for (const input of document.querySelectorAll("[data-skill-input]")) {
-        skills[input.getAttribute("data-skill-input")] = input.value;
+        const variant = input.getAttribute("data-skill-input");
+        const pathInput = document.querySelector("[data-skill-path='" + variant + "']");
+        const select = document.querySelector("[data-skill-select='" + variant + "']");
+        const selectedOption = select?.selectedOptions?.[0];
+        skills[variant] = {
+          label: selectedOption?.textContent || variant,
+          path: pathInput?.value || "",
+          text: input.value,
+        };
       }
       setEditorEnabled(false);
       setEditorStatus("Starting regeneration...");
@@ -251,15 +263,20 @@ function renderReview(cases, screenshotByArtifact) {
           throw new Error("API unavailable");
         }
         const data = await response.json();
+        skillCatalog = data.availableSkills || [];
         promptInput.value = data.prompt || "";
         mockInput.checked = Boolean(data.mock);
         maxConcurrencyInput.value = data.maxConcurrency || 1;
         for (const variant of data.variants || []) {
           const input = document.getElementById("skill-input-" + variant.variant);
           const source = document.getElementById("skill-source-" + variant.variant);
+          const pathInput = document.getElementById("skill-path-" + variant.variant);
+          populateSkillSelect(variant.variant, variant.selectedSkillPath || variant.sourcePath || "");
           if (input) input.value = variant.skillText || "";
+          if (pathInput) pathInput.value = variant.selectedSkillPath || variant.sourcePath || "";
           if (source) source.textContent = variant.sourcePath || "";
         }
+        wireSkillPickers();
         setEditorStatus("Ready");
       } catch {
         setEditorStatus("Start the local review server to edit and regenerate.");
@@ -296,13 +313,78 @@ function renderReview(cases, screenshotByArtifact) {
     }
 
     function setEditorEnabled(enabled) {
-      for (const control of editor.querySelectorAll("textarea, input, button")) {
+      for (const control of editor.querySelectorAll("textarea, input, select, button")) {
         control.disabled = !enabled;
       }
     }
 
     function setEditorStatus(value) {
       editorStatus.textContent = value;
+    }
+
+    function populateSkillSelect(variant, selectedPath) {
+      const select = document.getElementById("skill-select-" + variant);
+      if (!select) return;
+      select.replaceChildren();
+      const custom = document.createElement("option");
+      custom.value = "";
+      custom.textContent = "Custom path";
+      select.appendChild(custom);
+      for (const skill of skillCatalog) {
+        const option = document.createElement("option");
+        option.value = skill.path;
+        option.textContent = skill.label;
+        select.appendChild(option);
+      }
+      select.value = skillCatalog.some((skill) => skill.path === selectedPath) ? selectedPath : "";
+    }
+
+    function wireSkillPickers() {
+      for (const select of document.querySelectorAll("[data-skill-select]")) {
+        select.addEventListener("change", () => {
+          const variant = select.getAttribute("data-skill-select");
+          const pathInput = document.querySelector("[data-skill-path='" + variant + "']");
+          if (pathInput && select.value) {
+            pathInput.value = select.value;
+            loadSkillFile(variant, select.value);
+          }
+        });
+      }
+      for (const button of document.querySelectorAll("[data-skill-load]")) {
+        button.addEventListener("click", () => {
+          const variant = button.getAttribute("data-skill-load");
+          const pathInput = document.querySelector("[data-skill-path='" + variant + "']");
+          loadSkillFile(variant, pathInput?.value || "");
+        });
+      }
+    }
+
+    async function loadSkillFile(variant, skillPath) {
+      if (!skillPath) {
+        setEditorStatus("Choose a skill file path first.");
+        return;
+      }
+      try {
+        setEditorStatus("Loading " + variant + " skill...");
+        const response = await fetch("/api/skill?path=" + encodeURIComponent(skillPath));
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Could not load skill file");
+        }
+        const input = document.getElementById("skill-input-" + variant);
+        const source = document.getElementById("skill-source-" + variant);
+        const pathInput = document.getElementById("skill-path-" + variant);
+        if (input) input.value = data.skillText || "";
+        if (source) source.textContent = data.path || skillPath;
+        if (pathInput) pathInput.value = data.path || skillPath;
+        const select = document.getElementById("skill-select-" + variant);
+        if (select && skillCatalog.some((skill) => skill.path === data.path)) {
+          select.value = data.path;
+        }
+        setEditorStatus("Loaded " + variant + " skill");
+      } catch (error) {
+        setEditorStatus(error.message);
+      }
     }
   </script>
 </body>
@@ -327,11 +409,21 @@ function renderEditor() {
         <div class="field skill">
           <label for="skill-input-skill-a">skill-a</label>
           <div class="meta" id="skill-source-skill-a"></div>
+          <div class="skill-picker">
+            <select id="skill-select-skill-a" data-skill-select="skill-a"></select>
+            <input id="skill-path-skill-a" data-skill-path="skill-a" type="text" placeholder="Path to SKILL.md">
+            <button class="secondary" type="button" data-skill-load="skill-a">Load</button>
+          </div>
           <textarea id="skill-input-skill-a" data-skill-input="skill-a" spellcheck="false"></textarea>
         </div>
         <div class="field skill">
           <label for="skill-input-skill-b">skill-b</label>
           <div class="meta" id="skill-source-skill-b"></div>
+          <div class="skill-picker">
+            <select id="skill-select-skill-b" data-skill-select="skill-b"></select>
+            <input id="skill-path-skill-b" data-skill-path="skill-b" type="text" placeholder="Path to SKILL.md">
+            <button class="secondary" type="button" data-skill-load="skill-b">Load</button>
+          </div>
           <textarea id="skill-input-skill-b" data-skill-input="skill-b" spellcheck="false"></textarea>
         </div>
       </div>

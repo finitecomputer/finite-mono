@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const harnessRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(harnessRoot, "../..");
+const skillsRoot = path.resolve(harnessRoot, "../skills");
 const latestDir = path.join(harnessRoot, "runs/latest");
 const editableDir = path.join(harnessRoot, "runs/editable");
 const editableStatePath = path.join(editableDir, "state.json");
@@ -35,6 +37,9 @@ const server = createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     if (url.pathname === "/api/state" && request.method === "GET") {
       return sendJson(response, 200, readEditorState());
+    }
+    if (url.pathname === "/api/skill" && request.method === "GET") {
+      return sendJson(response, 200, readSkillFile(url.searchParams.get("path")));
     }
     if (url.pathname === "/api/regenerate" && request.method === "POST") {
       return handleRegenerate(request, response);
@@ -70,12 +75,19 @@ async function handleRegenerate(request, response) {
     return sendJson(response, 400, { error: "Prompt is required" });
   }
 
-  const skillTexts = payload.skills || {};
+  const skillInputs = payload.skills || {};
+  const selectedSkills = {};
   for (const variant of variants) {
-    const text = String(skillTexts[variant.variant] || "").trim();
+    const input = normalizeSkillInput(skillInputs[variant.variant]);
+    const text = input.text.trim();
     if (!text) {
       return sendJson(response, 400, { error: `${variant.variant} skill text is required` });
     }
+    const sourcePath = input.path ? resolveSkillFilePath(input.path) : resolveCurrentSourcePath(variant);
+    selectedSkills[variant.variant] = {
+      label: input.label || parseSkillName(text) || path.basename(path.dirname(sourcePath)),
+      sourcePath: displayPath(sourcePath),
+    };
   }
 
   const title = String(payload.title || titleFromBrief(prompt)).trim();
@@ -85,7 +97,7 @@ async function handleRegenerate(request, response) {
   for (const variant of variants) {
     const file = editableSkillPath(variant.variant);
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, `${String(skillTexts[variant.variant]).trim()}\n`, "utf8");
+    writeFileSync(file, `${normalizeSkillInput(skillInputs[variant.variant]).text.trim()}\n`, "utf8");
   }
   writeFileSync(
     editableStatePath,
@@ -95,6 +107,7 @@ async function handleRegenerate(request, response) {
         maxConcurrency,
         mock,
         prompt,
+        selectedSkills,
         title,
         updatedAt: new Date().toISOString(),
       },
@@ -178,21 +191,63 @@ function readEditorState() {
   const title = editableState.title || firstArtifact?.caseTitle || titleFromBrief(prompt);
 
   return {
+    availableSkills: collectSkillCatalog(),
     maxConcurrency: editableState.maxConcurrency || normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY || 1),
     mock: typeof editableState.mock === "boolean" ? editableState.mock : process.env.SKILL_AB_MOCK === "1",
     prompt,
     title,
     variants: variants.map((variant) => {
       const editablePath = editableSkillPath(variant.variant);
-      const skillPath = existsSync(editablePath) ? editablePath : variant.sourcePath;
+      const sourcePath = resolveCurrentSourcePath(variant, editableState);
+      const skillPath = existsSync(editablePath) ? editablePath : sourcePath;
+      const skillText = readFileSync(skillPath, "utf8");
       return {
-        label: variant.label,
-        skillText: readFileSync(skillPath, "utf8"),
-        sourcePath: displayPath(variant.sourcePath),
+        label: editableState.selectedSkills?.[variant.variant]?.label || parseSkillName(skillText) || variant.label,
+        selectedSkillPath: displayPath(sourcePath),
+        skillText,
+        sourcePath: displayPath(sourcePath),
         variant: variant.variant,
       };
     }),
   };
+}
+
+function readSkillFile(value) {
+  const file = resolveSkillFilePath(value);
+  const skillText = readFileSync(file, "utf8");
+  return {
+    label: parseSkillName(skillText) || path.basename(path.dirname(file)),
+    path: displayPath(file),
+    skillText,
+  };
+}
+
+function collectSkillCatalog() {
+  return findSkillFiles(skillsRoot)
+    .map((file) => {
+      const skillText = readFileSync(file, "utf8");
+      const name = parseSkillName(skillText) || path.basename(path.dirname(file));
+      const directory = path.relative(skillsRoot, path.dirname(file)).split(path.sep).join("/");
+      return {
+        label: `${name} (${directory})`,
+        name,
+        path: displayPath(file),
+      };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function findSkillFiles(root) {
+  const files = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const file = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...findSkillFiles(file));
+    } else if (entry.isFile() && entry.name === "SKILL.md") {
+      files.push(file);
+    }
+  }
+  return files;
 }
 
 function serveStatic(pathname, response) {
@@ -263,6 +318,41 @@ function readJson(file, fallback) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
+function normalizeSkillInput(input) {
+  if (typeof input === "string") {
+    return { label: "", path: "", text: input };
+  }
+  return {
+    label: String(input?.label || ""),
+    path: String(input?.path || ""),
+    text: String(input?.text || ""),
+  };
+}
+
+function resolveCurrentSourcePath(variant, editableState = readJson(editableStatePath, {})) {
+  const selectedPath = editableState.selectedSkills?.[variant.variant]?.sourcePath;
+  if (selectedPath) {
+    return resolveSkillFilePath(selectedPath);
+  }
+  return variant.sourcePath;
+}
+
+function resolveSkillFilePath(value) {
+  const requested = String(value || "").trim();
+  if (!requested) {
+    throw new Error("Skill path is required");
+  }
+  const candidates = path.isAbsolute(requested)
+    ? [requested]
+    : [path.resolve(repoRoot, requested), path.resolve(harnessRoot, requested)];
+  for (const candidate of candidates) {
+    if (existsSync(candidate) && statSync(candidate).isFile() && path.basename(candidate) === "SKILL.md") {
+      return candidate;
+    }
+  }
+  throw new Error(`Skill file not found: ${requested}`);
+}
+
 function editableSkillPath(variant) {
   return path.join(editableDir, "skills", variant, "SKILL.md");
 }
@@ -289,11 +379,20 @@ function normalizeMaxConcurrency(value) {
 }
 
 function displayPath(filePath) {
+  const repoRelative = path.relative(repoRoot, filePath);
+  if (repoRelative && !repoRelative.startsWith("..") && !path.isAbsolute(repoRelative)) {
+    return repoRelative.split(path.sep).join("/");
+  }
   const relative = path.relative(harnessRoot, filePath);
   if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
-    return relative;
+    return relative.split(path.sep).join("/");
   }
   return filePath;
+}
+
+function parseSkillName(skillText) {
+  const match = skillText.match(/^name:\s*"?([^"\n]+)"?\s*$/m);
+  return match?.[1]?.trim();
 }
 
 function defaultPrompt() {
