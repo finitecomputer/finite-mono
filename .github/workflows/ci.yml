@@ -780,9 +780,9 @@ jobs:
             local out_path
             local log_file
 
-            out_path="$(nix eval --raw "$attr.outPath")"
+            out_path="$(nix eval --accept-flake-config --raw "$attr.outPath")"
             log_file="$(mktemp)"
-            if nix build --no-link --print-out-paths --option max-jobs 0 --option builders '' "$out_path" >"$log_file" 2>&1; then
+            if nix build --accept-flake-config --no-link --print-out-paths --option max-jobs 0 --option builders '' "$out_path" >"$log_file" 2>&1; then
               cat "$log_file"
               if [[ ! -x "$out_path/$binary" ]]; then
                 echo "::error::$attr substituted, but $out_path/$binary is not executable"
@@ -804,8 +804,9 @@ jobs:
           fetch_cached_output .#packages.x86_64-linux.finitesitesd DEVFINITY_FINITESITESD_BIN bin/finitesitesd
           fetch_cached_output .#packages.x86_64-linux.finite-identity DEVFINITY_FINITE_IDENTITYD_BIN bin/finite-identityd
           fetch_cached_output .#packages.x86_64-linux.finite-brain DEVFINITY_FINITE_BRAIN_BIN bin/finite-brain
+          fetch_cached_output .#packages.x86_64-linux.fsite DEVFINITY_FSITE_BIN bin/fsite
 
-          nix build --no-link --print-build-logs --print-out-paths --option max-jobs 0 --option builders '' \
+          nix build --accept-flake-config --no-link --print-build-logs --print-out-paths --option max-jobs 0 --option builders '' \
             .#packages.x86_64-linux.hermes-agent-runtime \
             .#packages.x86_64-linux.hermes-agent-runtime-python
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
@@ -819,7 +820,7 @@ jobs:
             echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
             exit 1
           fi
-          nix develop --command just brain-product-matrix
+          nix develop --accept-flake-config --command just brain-product-matrix
       - name: Remove canceled matrix runtime
         if: always()
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
