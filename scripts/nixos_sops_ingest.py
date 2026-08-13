@@ -153,6 +153,29 @@ def validate_args(args: argparse.Namespace, rel_target: Path) -> str:
     return logical_name
 
 
+def verify_decryptable(
+    sops_bin: str, secrets_root: Path, rel_target: Path, encrypted: bytes
+) -> bool:
+    result = subprocess.run(
+        [
+            sops_bin,
+            "decrypt",
+            "--filename-override",
+            rel_target.as_posix(),
+            "--input-type",
+            "json",
+            "--output-type",
+            "binary",
+            "/dev/stdin",
+        ],
+        cwd=secrets_root,
+        input=encrypted,
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -215,6 +238,13 @@ def main() -> int:
         return 1
     if encrypted == b"":
         print("nixos-sops-ingest: sops produced no encrypted output", file=sys.stderr)
+        return 1
+    if not verify_decryptable(args.sops_bin, secrets_root, rel_target, encrypted):
+        print(
+            "nixos-sops-ingest: encrypted file is not decryptable by this operator; "
+            "add your public recipient to .sops.yaml and run updatekeys before ingesting",
+            file=sys.stderr,
+        )
         return 1
 
     destination.write_bytes(encrypted)

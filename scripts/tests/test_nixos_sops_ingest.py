@@ -32,6 +32,12 @@ class NixosSopsIngestTest(unittest.TestCase):
                     "import os",
                     "from pathlib import Path",
                     "import sys",
+                    "if sys.argv[1] == 'decrypt' and os.environ.get('FAKE_SOPS_DECRYPT_FAIL') == '1':",
+                    "    raise SystemExit(1)",
+                    "if sys.argv[1] == 'decrypt':",
+                    "    sys.stdin.buffer.read()",
+                    "    sys.stdout.buffer.write(b'synthetic-decrypted-value\\n')",
+                    "    raise SystemExit(0)",
                     "payload = sys.stdin.buffer.read()",
                     "Path(os.environ['FAKE_SOPS_CAPTURE']).write_bytes(payload)",
                     "sys.stdout.buffer.write(b'{\"data\":\"ENC[AES256_GCM,data:fake,type:str]\",\"sops\":{}}\\n')",
@@ -47,7 +53,10 @@ class NixosSopsIngestTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def run_ingest(
-        self, *args: str, secret: bytes = b"synthetic-secret-value\n"
+        self,
+        *args: str,
+        secret: bytes = b"synthetic-secret-value\n",
+        decrypt_fail: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             [
@@ -65,6 +74,7 @@ class NixosSopsIngestTest(unittest.TestCase):
             env={
                 **os.environ,
                 "FAKE_SOPS_CAPTURE": str(self.capture),
+                "FAKE_SOPS_DECRYPT_FAIL": "1" if decrypt_fail else "0",
             },
         )
 
@@ -101,6 +111,18 @@ class NixosSopsIngestTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(target.read_bytes(), b"existing encrypted data\n")
         combined = result.stdout + result.stderr
+        self.assertNotIn(b"synthetic-secret-value", combined)
+
+    def test_refuses_to_write_when_operator_cannot_decrypt_result(self) -> None:
+        result = self.run_ingest(
+            "shared",
+            "metrics-remote-write.env",
+            decrypt_fail=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        combined = result.stdout + result.stderr
+        self.assertIn(b"not decryptable by this operator", combined)
         self.assertNotIn(b"synthetic-secret-value", combined)
 
     def test_rejects_path_traversal(self) -> None:

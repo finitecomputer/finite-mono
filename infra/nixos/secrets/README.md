@@ -4,6 +4,9 @@ This directory is for encrypted SOPS source files only. Do not place plaintext
 secret values, generated private keys, decrypted files, hashes, fingerprints, or
 password-derived evidence here.
 
+The operator workflow is documented in
+[`docs/runs/nixos-sops-operator-flow.md`](../../../docs/runs/nixos-sops-operator-flow.md).
+
 The production host private age identities live only on the hosts:
 
 - `finite-lat-1`: `/var/lib/sops-nix/finite-lat-1.agekey`
