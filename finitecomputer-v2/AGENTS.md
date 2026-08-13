@@ -89,10 +89,12 @@ with a delete condition.
 - Build and promote one canonical Agent Runtime image through the mono-owned
   workflow. Local Docker, Kata, and Phala prove the same image digest; do not
   create provider- or feature-specific image lanes.
-- Keep Hermes pinned to 0.18.2 across image, smoke, and release defaults. The
-  production Finite Chat bridge is supervised by `finite-agentd` and is the
-  only process that holds the inbound Finite Chat sync stream. Hermes and
-  `finite-agentd` consume separate durable loopback inboxes; reconnect uses
+- Hermes Agent version is whatever the runtime image pin says:
+  `HERMES_AGENT_VERSION` in `deploy/finite-computer/images/runtime.Dockerfile`,
+  asserted by `.github/workflows/runtime-image.yml`. Do not restate a version
+  here. The production Finite Chat bridge is supervised by `finite-agentd` and
+  is the only process that holds the inbound Finite Chat sync stream. Hermes
+  and `finite-agentd` consume separate durable loopback inboxes; reconnect uses
   bounded backoff and never falls back to Python polling or CLI-per-message
   subprocesses.
 - A fresh agent receives the image's Finite Skills baseline once. Restarts and
