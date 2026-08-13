@@ -61,3 +61,24 @@ The command writes only the encrypted SOPS file, for example
 `infra/nixos/secrets/shared/metrics-remote-write.env`. It does not add the Nix
 contract entry for you; review the printed sketch and wire the relevant service
 module in a separate commit.
+
+## Updating Recipients
+
+After adding or removing public recipients in `.sops.yaml`, refresh existing
+encrypted files with:
+
+```sh
+just nixos-sops-updatekeys
+```
+
+The helper updates only SOPS JSON files under `infra/nixos/secrets`, skips
+`.sops.yaml` and this README, runs `sops updatekeys --yes --input-type json`,
+and prints only file paths. Use `--dry-run` to preview the file set:
+
+```sh
+just nixos-sops-updatekeys --dry-run
+```
+
+Removing a recipient and updating keys prevents that recipient from decrypting
+future file revisions. It does not revoke plaintext someone already decrypted;
+rotate the underlying secret when the trust boundary requires it.

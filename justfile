@@ -155,6 +155,7 @@ nixos-secrets-contract:
     python3 -m unittest scripts.tests.test_nixos_secrets_contract
     python3 -m unittest scripts.tests.test_nixos_sops_ingest
     python3 -m unittest scripts.tests.test_nixos_sops_operator_key
+    python3 -m unittest scripts.tests.test_nixos_sops_updatekeys
 
 # Create or inspect the local operator age key used by SOPS. Prints only the
 # public age recipient; the private key stays in SOPS_AGE_KEY_FILE or
@@ -174,6 +175,13 @@ nixos-sops-ingest *args:
     #!/usr/bin/env bash
     set -euo pipefail
     exec python3 scripts/nixos_sops_ingest.py "$@"
+
+# Update SOPS file recipient metadata after .sops.yaml recipient changes.
+[positional-arguments]
+nixos-sops-updatekeys *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_updatekeys.py "$@"
 
 # Synthetic deletion, watermark, active-job, and stale-lease safety contract
 # for finite-lat-2's operator-installed runner guardrails.
