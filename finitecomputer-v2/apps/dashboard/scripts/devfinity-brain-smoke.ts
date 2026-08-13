@@ -545,6 +545,7 @@ async function prepareOrganizationBrain(
   timeoutMs: number,
 ): Promise<Set<string>> {
   await openManageBrains(brain);
+  await ensureManageBrainsSignerConnected(brain);
   const existingIds = new Set(
     await brain
       .locator("#manageBrainsList .brain-switch-button")
@@ -576,6 +577,21 @@ async function prepareOrganizationBrain(
   return existingIds;
 }
 
+async function ensureManageBrainsSignerConnected(brain: FrameLocator) {
+  const connect = brain.locator("#manageBrainsConnectSignerButton");
+  await assertEventually(
+    async () => !(await connect.isVisible()) || (await connect.isEnabled()),
+    30_000,
+    async () => "Manage Brains signer connection action did not become ready",
+  );
+  if (await connect.isVisible()) await connect.click();
+  await assertEventually(
+    async () => !(await connect.isVisible()),
+    30_000,
+    async () => "Manage Brains signer connection did not complete",
+  );
+}
+
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
   await openManageBrains(brain);
   assert.equal(
@@ -584,10 +600,11 @@ async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
   );
   const selectedBrain = brain.locator("#manageBrainsList .brain-switch-button.selected");
   await selectedBrain.waitFor({ state: "visible", timeout: 30_000 });
-  assert.equal(
-    await selectedBrain.getAttribute("data-brain-id"),
-    brainId,
-    "Direct target did not select the requested stable Brain id",
+  await assertEventually(
+    async () => (await selectedBrain.getAttribute("data-brain-id")) === brainId,
+    30_000,
+    async () =>
+      `Direct target did not select the requested stable Brain id; selected ${await selectedBrain.getAttribute("data-brain-id")}`,
   );
   assert.match(
     (await selectedBrain.getAttribute("aria-label")) || "",

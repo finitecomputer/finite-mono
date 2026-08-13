@@ -214,9 +214,9 @@ and local loopback server by default.
 
 ## Layer 2: Remote Docker Runtime
 
-Purpose: prove the real Linux runtime shape before provider deployment. This
-should run on finite-lat-2 or another x86 Docker host, ideally through the
-self-hosted GitHub runner path so published packages are tied to the same proof.
+Purpose: prove the real Linux runtime shape before provider deployment. CI image
+proof now belongs to the mono Depot workflows. This layer remains a manual
+remote-Docker canary for a deliberately selected x86 Docker host.
 
 Required preflight:
 
@@ -237,11 +237,14 @@ scripts/hermes-sidecar-docker-smoke.sh
 Human-handoff remote Docker canary:
 
 ```sh
-scripts/hermes-remote-docker-canary.py --keep-running
+scripts/hermes-remote-docker-canary.py \
+  --docker-host "$FINITECHAT_REMOTE_DOCKER_HOST" \
+  --keep-running
 ```
 
-By default this uses `ssh://finite-lat-2`, builds the real runtime image on
-that remote Docker daemon, starts the container against
+The script no longer defaults to `finite-lat-2`; pass an explicit
+`--docker-host` or set `FINITECHAT_REMOTE_DOCKER_HOST`. It builds the runtime
+image on that remote Docker daemon, starts the container against
 `https://chat.finite.computer`, proves invite admission and a real Hermes
 model reply, stops the container so the entrypoint writes a restic backup,
 wipes the full `/data` recovery-root volume, restores into a fresh volume,
@@ -330,9 +333,9 @@ scripts/hermes-branch-publication-readiness.py \
 2. Make `scripts/hermes-real-gateway-demo.sh` fail closed or clearly label it
    as a manual local runner so it is not reused as the phone product gate.
 3. Add the runtime invite API to the local runner and Docker/provider runtime.
-4. Add a remote Docker wrapper that can run the real image on finite-lat-2,
-   fetch the invite after the admission probe, and write the same report
-   schema.
+4. Add a remote Docker wrapper that can run the real image on an explicit x86
+   Docker host, fetch the invite after the admission probe, and write the same
+   report schema.
 5. Teach the hardening audit to require the local-phone and remote-Docker
    reports before accepting a hosted provider canary handoff.
 6. Keep the app-side canary assertions in Rust/RMP as much as possible:

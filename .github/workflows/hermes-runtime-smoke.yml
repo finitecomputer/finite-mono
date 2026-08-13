@@ -5,7 +5,7 @@ name: Hermes runtime smoke
 # a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
 # sole publication path.
 #
-# Dispatch-only because it runs on the self-hosted lat2 Docker runner. Keep the
+# Dispatch-only while the production-image proof stays explicit. Keep the
 # production-image proof explicit until it has enough green history to become
 # a normal main-branch gate.
 
@@ -30,11 +30,12 @@ env:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   docker-runtime-smoke:
     name: Docker runtime smoke
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 75
     defaults:
       run:
@@ -42,6 +43,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,7 +64,15 @@ jobs:
           echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
 
       - name: Build canonical runtime image
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
+          FC_RUNTIME_IMAGE_ENGINE: depot
         run: |
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
+            exit 1
+          fi
           ../finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$RUNTIME_IMAGE_REF" \
             --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \

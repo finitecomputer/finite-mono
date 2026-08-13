@@ -40,10 +40,12 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
   `FINITE_BRAIN_SERVER_URL`, and `FINITE_BRAIN_PUBLIC_BASE_URL` values in
   `FC_CORE_RUNTIME_ENV_JSON` that previously lived only in Runner config.
   Runner's `FC_RUNNER_RUNTIME_ENV_JSON` is N-1 fallback only.
-- ssh access from the Mac to `ubuntu@finite-lat-2`, with agent forwarding for
-  root access from lat2 to `64.34.82.77`. Lat2 is the only production
-  build/driver host; never evaluate or build this closure on the Mac,
-  clawland, or lat1.
+- The `Lat1 NixOS Closure` workflow can run on a Depot-managed x86_64 Linux
+  runner, and the operator can download its artifact with `gh`. The deploy
+  machine needs Nix only to copy an already built binary cache to lat1; it must
+  not evaluate or build the production closure on the Mac, clawland, lat1, or
+  lat2.
+- ssh access from the deploy machine to `root@64.34.82.77`.
 - For a dashboard bump: the new image is CI-built and pushed to GHCR, and you
   have its `name@sha256:...` digest (from the Service Images workflow summary).
 - For a Core schema change: capture the pre-deploy Postgres backup named in
@@ -67,12 +69,12 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 
 ### STEPS
 
-> **Automated path:** `just deploy-lat1 <exact-40-hex-rev>` performs steps 1-2
-> end-to-end (lat2 prebuild, closure copy, switch, state verification) and is
-> the preferred way to run them. It stages the switch script on lat2 as a file
-> — running it over ssh stdin fails silently with exit 0 because the inner ssh
-> calls consume the remaining script. The manual steps below remain the
-> reference for what it does and for break-glass situations.
+> **Automated path:** build the closure with
+> `.github/workflows/lat1-nixos-closure.yml`, download the
+> `lat1-nixos-closure-REV` artifact, then run
+> `just deploy-lat1-closure <artifact-dir>`. That copies the prebuilt closure
+> from the artifact's file binary cache, switches lat1, and verifies the
+> running closure by state. There is no supported lat2 fallback path.
 
 To roll a reviewed, healthy existing Runtime cohort after the deployment has
 passed its normal verification, use the separate prepare/execute workflow with
@@ -93,8 +95,8 @@ Fleet scope requires both `--roll-all` and an explicit
 `--roll-canary-project-id`; that canary must already be healthy on the target.
 
 1. **Core (and any config/module change):** From the reviewed checkout, select
-   the full commit, prove it is on `origin/main`, and prebuild it on lat2. The
-   helper's stdout is the exact, GC-rooted system closure path:
+   the full commit, prove it is on `origin/main`, and dispatch the Depot-backed
+   closure build:
 
    ```sh
    set -euo pipefail
@@ -102,97 +104,41 @@ Fleet scope requires both `--roll-all` and an explicit
    REV="$(git rev-parse HEAD)"
    [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
    git merge-base --is-ancestor "$REV" origin/main
-   SYSTEM="$(just nixos-build-lat1 "$REV")"
-   printf 'REV=%s\nSYSTEM=%s\n' "$REV" "$SYSTEM"
+   gh workflow run lat1-nixos-closure.yml --ref main -f rev="$REV"
    ```
 
-   Record both values. `REV` must be exactly 40 lowercase hex characters; do
-   not hand off a tag, branch, abbreviation, or dirty working tree.
-
-2. SSH to lat2 and paste the recorded values exactly. Confirm the helper's
-   per-revision GC root, copy the closure, switch lat1 directly to that already
-   built closure, and assert the running closure is the path handed off:
+   `REV` must be exactly 40 lowercase hex characters; do not hand off a tag,
+   branch, abbreviation, or dirty working tree. Wait for the workflow to
+   complete successfully, then download and inspect the artifact:
 
    ```sh
-   ssh -A ubuntu@finite-lat-2
+   RUN_ID="$(
+     gh run list --workflow lat1-nixos-closure.yml --commit "$REV" \
+       --json databaseId,conclusion \
+       --jq '.[] | select(.conclusion == "success") | .databaseId' \
+       | head -1
+   )"
+   test -n "$RUN_ID"
+   ARTIFACT_DIR="target/lat1-nixos-closure-$REV"
+   rm -rf "$ARTIFACT_DIR"
+   gh run download "$RUN_ID" \
+     --name "lat1-nixos-closure-$REV" \
+     --dir "$ARTIFACT_DIR"
+   python3 -m json.tool "$ARTIFACT_DIR/manifest.json" >/dev/null
    ```
 
-   On lat2, run:
+2. Deploy only that artifact. The deploy script validates the manifest, proves
+   `REV` is on `origin/main`, takes the pre-deploy recovery snapshot, copies the
+   unsigned file binary cache to lat1 with `--no-check-sigs`, installs `SYSTEM`
+   as the boot profile, activates it in a transient systemd unit, and asserts
+   `/run/current-system` is exactly the artifact's `SYSTEM` path:
 
    ```sh
-   set -euo pipefail
-   REV='<exact-40-hex-rev-from-prebuild>'
-   SYSTEM='<exact-/nix/store-path-from-prebuild>'
-   [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
-   [[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-   ROOT="$HOME/.local/state/finite-mono/lat1-closures/$REV"
-   test -L "$ROOT"
-   test "$(readlink -f "$ROOT")" = "$SYSTEM"
-   nix path-info --option builders '' "$SYSTEM" >/dev/null
-   ssh -o BatchMode=yes root@64.34.82.77 true
-   # The exact lat2-built closure is unsigned; authenticated root SSH is the
-   # trust boundary for this reviewed handoff.
-   nix copy --no-check-sigs --option builders '' \
-     --to ssh-ng://root@64.34.82.77 "$SYSTEM"
-
-   UNIT="finite-nixos-activate-${REV}.service"
-   ssh -o BatchMode=yes root@64.34.82.77 \
-     bash -s -- "$REV" "$SYSTEM" "$UNIT" <<'LAT1'
-   set -euo pipefail
-   rev="$1"
-   system="$2"
-   unit="$3"
-   [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || exit 64
-   [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-   [[ "$unit" == "finite-nixos-activate-${rev}.service" ]] || exit 64
-   test "$(readlink -f "$system")" = "$system"
-   test -x "$system/bin/switch-to-configuration"
-   nix-store --check-validity "$system" >/dev/null
-   load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
-   [[ "$load_state" == not-found ]] || {
-     echo "refusing to replace existing transient unit $unit ($load_state)" >&2
-     exit 73
-   }
-   nix-env --option builders '' --profile /nix/var/nix/profiles/system \
-     --set "$system"
-   test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
-   systemd-run --quiet --unit="$unit" --property=Type=oneshot \
-     --property=RemainAfterExit=yes --no-block \
-     "$system/bin/switch-to-configuration" switch
-   LAT1
-
-   deadline=$((SECONDS + 600))
-   while true; do
-     if ! state="$(ssh -o BatchMode=yes -o ConnectTimeout=5 root@64.34.82.77 \
-       systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null)"; then
-       state=unreachable
-     fi
-     case "$state" in
-       active) break ;;
-       activating|inactive|unreachable) ;;
-       failed)
-         ssh -o BatchMode=yes root@64.34.82.77 \
-           journalctl --no-pager -n 100 -u "$UNIT" >&2 || true
-         exit 1
-         ;;
-       *) echo "unexpected activation state: $state" >&2; exit 1 ;;
-     esac
-     (( SECONDS < deadline )) || { echo "activation timed out" >&2; exit 1; }
-     sleep 2
-   done
-   PROFILE="$(ssh -o BatchMode=yes root@64.34.82.77 \
-     readlink -f /nix/var/nix/profiles/system)"
-   ACTUAL="$(ssh -o BatchMode=yes root@64.34.82.77 \
-     readlink -f /run/current-system)"
-   test "$PROFILE" = "$SYSTEM"
-   test "$ACTUAL" = "$SYSTEM"
-   ssh -o BatchMode=yes root@64.34.82.77 systemctl stop "$UNIT"
+   just deploy-lat1-closure "$ARTIFACT_DIR"
    ```
 
-   This first installs `SYSTEM` as the system profile generation, then runs
-   activation in a transient systemd unit that survives SSH loss. Every Nix
-   command has builders explicitly disabled, and the direct switch does not
-   build on lat1.
+   The script does not evaluate or build Nix derivations. Its local Nix use is
+   limited to copying the workflow-produced file binary cache to lat1.
 
 3. **Dashboard image bump:** edit `image = "...@sha256:..."` in
    `infra/nixos/modules/dashboard.nix`, commit to `main` — the committed
@@ -233,10 +179,10 @@ Fleet scope requires both `--roll-all` and an explicit
    the previous generation (both Core binary and dashboard digest revert
    together). Then reconcile git to match what is running within a day
    (break-glass rule).
-2. Deliberate path: prebuild the previous known-good full mono rev using the
-   same helper, then copy/switch/verify its exact `SYSTEM` path from lat2 (and,
-   for a dashboard-only regression, first revert the digest in
-   `modules/dashboard.nix`).
+2. Deliberate path: build/download the previous known-good full mono rev with
+   the same closure-artifact workflow, then copy/switch/verify its exact
+   `SYSTEM` path with `just deploy-lat1-closure` (and, for a dashboard-only
+   regression, first revert the digest in `modules/dashboard.nix`).
 3. Re-run VERIFY.
 
 After the epoch-aware Core has accepted traffic, the previous N-1 closure is

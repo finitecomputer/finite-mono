@@ -15,14 +15,18 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           path: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
 
       - name: Log in to GHCR
         env:
@@ -35,26 +39,30 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/deepseek-v4-vllm
           VERSION: ${{ inputs.version }}
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || secrets.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
         run: |
           version_ref="$IMAGE:$VERSION"
           sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
-          docker build \
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_DEEPSEEK_VLLM_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
+            exit 1
+          fi
+          depot build \
             --platform linux/amd64 \
             --build-arg "FINITE_MONO_REV=$GITHUB_SHA" \
             --file infra/images/deepseek-v4-vllm.Dockerfile \
             --tag "$version_ref" \
             --tag "$sha_ref" \
+            --metadata-file image-metadata.json \
+            --push \
             .
-          docker push "$sha_ref"
-          docker push "$version_ref"
-          docker pull "$version_ref" >/dev/null
-          digest="$(
-            docker image inspect "$version_ref" \
-              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              | sed -n "s#^$IMAGE@##p" \
-              | head -n 1
-          )"
-          test -n "$digest"
+          digest="$(jq -r '."containerimage.digest"' image-metadata.json)"
+          if [ -z "$digest" ] || [ "$digest" = "null" ]; then
+            echo "::error::depot build did not return an image digest"
+            cat image-metadata.json
+            exit 1
+          fi
           echo "pinned=$version_ref@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Verify the published image contract

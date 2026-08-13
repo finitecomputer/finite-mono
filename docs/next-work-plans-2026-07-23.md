@@ -343,7 +343,8 @@ rollback boundary.
    and writer/service inventory.
 2. Close the complete Recovery Set and perform the missing synthetic restore
    proofs.
-3. Reuse lat3's exact-size RAID and dual-ESP guards; build the closure on lat2.
+3. Reuse lat3's exact-size RAID and dual-ESP guards; build the closure through
+   the CI closure-artifact path.
 4. Fix `/data` root fallthrough and Runner/Core startup ordering before the
    window.
 5. Produce one go/no-go packet naming backup artifacts, hashes, restore steps,

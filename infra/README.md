@@ -32,13 +32,20 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   rev that tagged the binaries. The old *six distinct deploy mechanisms* — k3s
   `kubectl apply` + on-host `podman build` (lat1), systemd + Kata (lat2), Nix
   fleet `just host-deploy` (smoke/clawland), and the hand-run finitechat script
-  — are **resolved for the coupled cluster**: one `nixos-rebuild --flake
-  ...#finite-lat-1`. On-host `podman build` is gone; first-party images are
-  CI-built and digest-pinned (`infra/images/`).
+  — are **resolved for the coupled cluster**: one NixOS closure for
+  `finite-lat-1`, built by CI as a downloadable file binary cache and switched
+  by `scripts/deploy-lat1-closure-cache`. On-host `podman build` is gone;
+  first-party images are CI-built and digest-pinned (`infra/images/`).
 
-Still elsewhere: **the CI runners** live on lat2; **clawland** remains the
-legacy finite.vip fleet box; **Tinfoil** is unchanged. The old FiniteBrain
-smoke service remains a rollback source, not the production origin.
+Still elsewhere: lat2 is a decommission target. Historical captures that need
+to live in git are under `hosts/lat2/`; any remaining private host archive must
+be moved off the machine through `runbooks/decommission-lat2.md`, then the
+legacy runners and credentials are removed. It is no longer a Docker/image CI
+host, Nix build host, deploy driver, or archive authority. Docker/image CI and
+production closure builds run through Depot-backed CI.
+**clawland** remains the legacy finite.vip fleet box; **Tinfoil** is unchanged.
+The old FiniteBrain smoke service remains a rollback source, not the
+production origin.
 
 ## First-cohort production baseline (2026-07-15)
 
@@ -48,11 +55,11 @@ digest-pinned upgrades of existing healthy Kata Agents. The exact deployed
 checkpoint and future regression gates are recorded in
 [`docs/runs/production-baseline-2026-07-15.md`](../docs/runs/production-baseline-2026-07-15.md).
 
-`scripts/deploy-lat1 REV` switches infrastructure only. An Agent Runtime image
-rollout is a separate two-command prepare/execute operation: it names an exact
-promoted artifact and either explicit Project ids or `--roll-all` plus an
-already-target canary, then requires the prepared plan hash before mutation.
-Never infer a bot rollout from the word “deploy.”
+`scripts/deploy-lat1-closure-cache ARTIFACT_DIR` switches infrastructure only.
+An Agent Runtime image rollout is a separate two-command prepare/execute
+operation: it names an exact promoted artifact and either explicit Project ids
+or `--roll-all` plus an already-target canary, then requires the prepared plan
+hash before mutation. Never infer a bot rollout from the word “deploy.”
 
 Merged work not yet known to be released or deployed is tracked by surface in
 [`deployment-queue.md`](deployment-queue.md). The queue is a handoff, not
@@ -66,7 +73,7 @@ infra/
   nixos/       # finite-lat-1 AS CODE — the live definition of the app server
   hosts/
     lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)
-    lat2/      # finite-lat-2 (64.34.80.19) — mono CI + x86_64 Nix builder
+    lat2/      # finite-lat-2 (64.34.80.19) — historical captures; host pending decommission
     smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
@@ -79,8 +86,10 @@ infra/
 `infra/hosts/<name>/` directory is a dated capture or migration record unless
 its own banner explicitly says otherwise; it is not permission to deploy its
 old units. `hosts/lat1/` describes the wiped pre-cutover k3s control plane, and
-the Sites/Search/Runner material under `hosts/lat2/` is historical except for
-the live CI runner inventory in `hosts/lat2/runners.md`.
+the Sites/Search material under `hosts/lat2/` is historical. The runner
+inventory in `hosts/lat2/runners.md` is removal inventory for
+`runbooks/decommission-lat2.md`; mono Docker/image CI is no longer scheduled
+there.
 
 ## Hosts and services (observed topology, 2026-07-20)
 
@@ -91,8 +100,8 @@ capacity. The one accepted next candidate and its hard gates live in
 
 | Host | Role | Services |
 |---|---|---|
-| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
-| **finite-lat-2** (64.34.80.19) | **finite-mono CI + sole approved x86_64 Nix build host** (Ubuntu 26.04+nix). Healthy root and `/data` MD RAID1, one populated ESP, no swap at the 2026-07-18 inventory. | Builds production lat1 closures and runs `finite-lat-2-mono` plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). Do not use it for Agent capacity, recovery authority, or this storage experiment. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
+| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: CI-built `lat1-nixos-closure-REV` artifact copied and switched by `scripts/deploy-lat1-closure-cache`. |
+| **finite-lat-2** (64.34.80.19) | **Decommission target** (Ubuntu 26.04+nix at last inventory). Historical service captures are in `hosts/lat2/`; private legacy/archive data must be moved off-box through `runbooks/decommission-lat2.md` before repurpose or release. | No production service, CI, build, deploy, Agent capacity, recovery authority, or archive authority may run here. The installed GitHub runners are removal inventory only (`hosts/lat2/runners.md`). finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** and migrated to lat1. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 32.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | Merged PR #134 closure is active and the system profile. The private lat1 connection and unique credential are proven. The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=32`; repeated cycles return idle and containerd has zero containers. No Recovery Authority exists here. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |

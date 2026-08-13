@@ -1270,16 +1270,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("button", { name: "Send message" }).click();
       await page.getByRole("img", { name: "browser-proof.png" }).waitFor({ state: "visible" });
 
-      // Next dev compiles this API route on first access. Wait for successful
-      // delivery before checking browser decode instead of racing a short poll
-      // against compilation on a loaded runner.
       const agentAttachmentPath =
         "/hosted-device/attachments/room_browser_agent/message_4/attachment_4";
-      const agentAttachmentResponse = page.waitForResponse(
-        (response) =>
-          response.url().includes(agentAttachmentPath) && response.status() === 200,
-        { timeout: 30_000 }
-      );
       hostedDevice.state.app.messages.push(
         hostedImageMessage("Image returned by agent.", false, 4, "agent-proof.png")
       );
@@ -1287,12 +1279,34 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const agentImage = page.getByRole("img", { name: "agent-proof.png" });
       await agentImage.waitFor({ state: "visible" });
       await agentImage.evaluate((image) => image.scrollIntoView({ block: "center" }));
-      const attachmentResponse = await agentAttachmentResponse;
+      const agentAttachmentHref = await agentImage.getAttribute("src");
+      assert(
+        agentAttachmentHref && agentAttachmentHref.includes(agentAttachmentPath),
+        `agent attachment image did not use the authenticated route: ${agentAttachmentHref}`
+      );
+      // Verify the authenticated attachment route explicitly from the signed-in
+      // browser page instead of racing the image element's own request.
+      const attachmentResponse = await page.evaluate(async (href) => {
+        const response = await fetch(href, { cache: "no-store" });
+        const bytes = await response.arrayBuffer();
+        return {
+          status: response.status,
+          url: response.url,
+          contentType: response.headers.get("content-type") ?? "",
+          byteLength: bytes.byteLength,
+        };
+      }, agentAttachmentHref);
+      assert.equal(
+        attachmentResponse.status,
+        200,
+        `agent attachment route returned ${attachmentResponse.status}`
+      );
       assert.match(
-        attachmentResponse.headers()["content-type"] ?? "",
+        attachmentResponse.contentType,
         /^image\/png\b/u,
         "agent attachment route did not return PNG bytes"
       );
+      assert(attachmentResponse.byteLength > 0, "agent attachment route returned an empty body");
       await waitFor(
         () =>
           agentImage.evaluate(
@@ -1301,7 +1315,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           ),
         15_000,
         async () =>
-          `agent attachment returned 200 but did not decode\nURL: ${attachmentResponse.url()}\n${await pageText(page)}`
+          `agent attachment returned 200 but did not decode\nURL: ${attachmentResponse.url}\n${await pageText(page)}`
       );
       assert.equal(
         hostedDevice.state.authRequests.some((request) =>

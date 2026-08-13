@@ -34,8 +34,12 @@ Notes:
   script assembles its own staged build context and references that path.
 - `finitechat/containers/agent/Dockerfile` remains a component test fixture;
   it is not a second publishable product Runtime.
-- The self-hosted-runner workflows run on the `finite-lat-2-mono` runner
-  (registered 2026-07-09; lat2 is the CI runner box now).
+- Image workflows run on Depot-managed GitHub Actions runners and Depot remote
+  builders; lat2 is not required for Docker CI. Set `DEPOT_PROJECT_ID` as a
+  repository variable or secret, or override by lane with
+  `DEPOT_SERVICE_IMAGES_PROJECT_ID`, `DEPOT_RUNTIME_IMAGE_PROJECT_ID`, or
+  `DEPOT_DEEPSEEK_VLLM_PROJECT_ID`. The workflows authenticate via
+  `depot/setup-action` OIDC.
 - Version tags are date-based for images (`2026-07-08.1`); every push also
   gets a `sha-<git sha>` tag and the workflow summary prints the pinned
   `name:tag@digest` to use in manifests.

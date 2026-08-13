@@ -17,9 +17,10 @@ facts only and is not current rebuild/recovery authority.
 The migration from clawland is **DONE**: `finitechat-server` on clawland is
 `systemctl disable`d (single-writer doctrine below), and the SQLite was
 carried to lat1 per that discipline. Deploys now use a prebuilt immutable mono
-rev. Production evaluation/build happens only on `ubuntu@finite-lat-2` with
-builders disabled; lat2 copies the exact closure to lat1 and switches it
-directly. The flake builds `finitechat-server` from that pinned rev.
+rev. Production evaluation/build happens in the `Lat1 NixOS Closure` workflow
+on a Depot-managed x86_64 Linux runner; the deploy script copies that exact
+artifact to lat1 and switches it directly. The flake builds
+`finitechat-server` from that pinned rev.
 
 ## The contract gate (applies to EVERY server deploy)
 
@@ -34,115 +35,33 @@ must report `server_contract_version`, `server_version`, the Nix-derived
   `cargo test -p finitechat-server` suites pass.
 - You know the expected post-deploy `/health` payload (contract version,
   automatically derived Chat source fingerprint).
-- You can SSH from the Mac to `ubuntu@finite-lat-2` with agent forwarding for
-  root access from lat2 to `64.34.82.77`. Do not build on the Mac, clawland,
-  or lat1.
+- The reviewed revision has a successful `Lat1 NixOS Closure` workflow artifact
+  and the deploy operator can SSH to `root@64.34.82.77`. Do not evaluate or
+  build the production closure on the Mac, clawland, lat1, or lat2.
 
 ### STEPS
 
-1. From the reviewed checkout, prebuild the full pushed commit on lat2 and
-   record both immutable handoff values:
+1. Build and download the reviewed revision's `lat1-nixos-closure-REV`
+   artifact with the shared procedure in
+   [deploy-core.md](deploy-core.md#steps). `REV` must be the exact lowercase
+   40-hex commit on `origin/main`, not a tag, branch, short hash, or dirty
+   tree.
+
+2. Deploy that artifact with:
 
    ```sh
-   set -euo pipefail
-   git fetch origin --prune
-   REV="$(git rev-parse HEAD)"
-   [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
-   git merge-base --is-ancestor "$REV" origin/main
-   SYSTEM="$(just nixos-build-lat1 "$REV")"
-   printf 'REV=%s\nSYSTEM=%s\n' "$REV" "$SYSTEM"
-   ```
-
-   `REV` must be the exact lowercase 40-hex commit, not a tag, branch, short
-   hash, or dirty tree. The printed `/nix/store/...` path is GC-rooted on lat2.
-
-2. SSH to lat2, paste those exact values, and deploy only that prebuilt path:
-
-   ```sh
-   ssh -A ubuntu@finite-lat-2
-   ```
-
-   On lat2, run:
-
-   ```sh
-   set -euo pipefail
-   REV='<exact-40-hex-rev-from-prebuild>'
-   SYSTEM='<exact-/nix/store-path-from-prebuild>'
-   [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
-   [[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-   ROOT="$HOME/.local/state/finite-mono/lat1-closures/$REV"
-   test -L "$ROOT"
-   test "$(readlink -f "$ROOT")" = "$SYSTEM"
-   nix path-info --option builders '' "$SYSTEM" >/dev/null
-   ssh -o BatchMode=yes root@64.34.82.77 true
-   # The exact lat2-built closure is unsigned; authenticated root SSH is the
-   # trust boundary for this reviewed handoff.
-   nix copy --no-check-sigs --option builders '' \
-     --to ssh-ng://root@64.34.82.77 "$SYSTEM"
-
-   UNIT="finite-nixos-activate-${REV}.service"
-   ssh -o BatchMode=yes root@64.34.82.77 \
-     bash -s -- "$REV" "$SYSTEM" "$UNIT" <<'LAT1'
-   set -euo pipefail
-   rev="$1"
-   system="$2"
-   unit="$3"
-   [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || exit 64
-   [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
-   [[ "$unit" == "finite-nixos-activate-${rev}.service" ]] || exit 64
-   test "$(readlink -f "$system")" = "$system"
-   test -x "$system/bin/switch-to-configuration"
-   nix-store --check-validity "$system" >/dev/null
-   load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
-   [[ "$load_state" == not-found ]] || {
-     echo "refusing to replace existing transient unit $unit ($load_state)" >&2
-     exit 73
-   }
-   nix-env --option builders '' --profile /nix/var/nix/profiles/system \
-     --set "$system"
-   test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
-   systemd-run --quiet --unit="$unit" --property=Type=oneshot \
-     --property=RemainAfterExit=yes --no-block \
-     "$system/bin/switch-to-configuration" switch
-   LAT1
-
-   deadline=$((SECONDS + 600))
-   while true; do
-     if ! state="$(ssh -o BatchMode=yes -o ConnectTimeout=5 root@64.34.82.77 \
-       systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null)"; then
-       state=unreachable
-     fi
-     case "$state" in
-       active) break ;;
-       activating|inactive|unreachable) ;;
-       failed)
-         ssh -o BatchMode=yes root@64.34.82.77 \
-           journalctl --no-pager -n 100 -u "$UNIT" >&2 || true
-         exit 1
-         ;;
-       *) echo "unexpected activation state: $state" >&2; exit 1 ;;
-     esac
-     (( SECONDS < deadline )) || { echo "activation timed out" >&2; exit 1; }
-     sleep 2
-   done
-   PROFILE="$(ssh -o BatchMode=yes root@64.34.82.77 \
-     readlink -f /nix/var/nix/profiles/system)"
-   ACTUAL="$(ssh -o BatchMode=yes root@64.34.82.77 \
-     readlink -f /run/current-system)"
-   test "$PROFILE" = "$SYSTEM"
-   test "$ACTUAL" = "$SYSTEM"
-   ssh -o BatchMode=yes root@64.34.82.77 systemctl stop "$UNIT"
+   just deploy-lat1-closure "$ARTIFACT_DIR"
    ```
 
    This is a routine in-place server update, not a host move — no data
-   migration. A host MOVE follows the single-writer doctrine below. Empty
-   builders keep all evaluation/building local to lat2. Installing the system
-   profile first preserves boot/generation rollback, while transient-unit
-   activation survives SSH loss and cannot build on lat1.
+   migration. A host MOVE follows the single-writer doctrine below. The deploy
+   script validates the manifest, copies the prebuilt file binary cache to
+   lat1, activates it in a transient systemd unit, and proves
+   `/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
+   evaluate or build on lat1 or lat2.
 
-3. After the deploy, run the gate from a mono checkout at the release commit
-   on lat2. This evaluation reads package metadata and does not rebuild the
-   closure:
+3. After the deploy, run the gate from a mono checkout at the release commit.
+   This evaluation reads package metadata and does not rebuild the closure:
 
    ```sh
    set -euo pipefail
@@ -172,9 +91,10 @@ must report `server_contract_version`, `server_version`, the Nix-derived
 
 ### ROLLBACK
 
-`ssh root@64.34.82.77 nixos-rebuild switch --rollback` (or prebuild and
-deploy the previous known-good rev's exact closure from lat2), then verify
-`/run/current-system` against the selected rollback path and re-run the gate.
+`ssh root@64.34.82.77 nixos-rebuild switch --rollback` (or
+build/download/deploy the previous known-good rev's exact closure artifact),
+then verify `/run/current-system` against the selected rollback path and re-run
+the gate.
 Data rollback (SQLite) comes from the coordinated Hosted Web Chat recovery
 set. FLAG: the rsync.net repository has a verified first archive and its
 offsite-health jobs passed the 2026-07-18 live inventory, but the complete

@@ -7,12 +7,14 @@
 > [`docs/runs/finite-lat-capacity-and-redundancy.md`](runs/finite-lat-capacity-and-redundancy.md)
 > and [ADR 0005](adr/0005-finite-lat-host-roles-and-placement.md).
 >
-> The recommendation to keep `finite-lat-2` dedicated to CI/building remains
-> accepted. The “no new boxes” posture is superseded by the owner's
-> `finite-lat-3` decision. The claim that live Postgres and its dumps share one
-> disk is stale: the 2026-07-18 inventory observed Postgres on lat1 root and
-> dumps on its separate `/data` disk. Both remain single disks in one chassis,
-> and complete Agent recovery is still unproved.
+> The recommendation to keep `finite-lat-2` dedicated to CI/building is now
+> superseded: Docker/image CI and lat1 NixOS closure builds moved to
+> Depot-backed CI, and lat2 is a decommission target. The “no new boxes”
+> posture is superseded by the owner's `finite-lat-3` decision. The claim that
+> live Postgres and its dumps share one disk is stale: the 2026-07-18 inventory
+> observed Postgres on lat1 root and dumps on its separate `/data` disk. Both
+> remain single disks in one chassis, and complete Agent recovery is still
+> unproved.
 
 **For:** Paul. **From:** a full read of `docs/` (doctrine, ADRs, audits, runs,
 open questions, parking lot, slop audit), `infra/` (hosts, runbooks, nixos,
@@ -365,4 +367,4 @@ users from a known-bad platform to an unproven one. Hold the sequencing.
 | 7 | Zombie agents accumulate; no retirement path | `docs/runs/production-baseline-2026-07-15.md` | P0-6 |
 | 8 | Possibly-vacuous CI evidence on the agent boundary | `finite-agentd/README.md:106` | P1 CI hardening |
 | 9 | Secrets sprawl: runtime env stuffing, broad rsync.net cred, stale env backups | `infra/runbooks/hosted-web-chat-recovery.md:26-32` | P1 + §7 inventory |
-| 10 | lat2 is sole builder/CI/deploy path | `infra/hosts/lat2/README.md` | Accept for now; document rebuild procedure |
+| 10 | lat2 is sole builder/CI/deploy path | `infra/hosts/lat2/README.md` | Superseded 2026-08-12: Docker/image CI and Nix closure builds moved to Depot-backed CI; lat2 is a decommission target |

@@ -9,7 +9,8 @@ Opened: 2026-07-20
 Acceptance: `finite-lat-3` runs the pinned NixOS configuration on mirrored
 root and data storage with swap and is the only Runner accepting new Standard-
 Agent creation, with a hard limit of 32. `finite-lat-1` remains available for
-existing-Agent lifecycle work, and `finite-lat-2` remains CI/build-only.
+existing-Agent lifecycle work, and `finite-lat-2` remains outside Agent
+capacity, build/deploy paths, and long-term archive custody.
 
 ## Outcome and scope
 
@@ -41,8 +42,8 @@ admission-fence work and open lat3 directly with a 32-Agent hard limit.
 | Host | Current role and state | Next change |
 | --- | --- | --- |
 | `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. The PR #134 WireGuard peer, peer-scoped firewall rules, private Core socket proxy, credential keyring Core, and root-only key are active declarative configuration; no `/run` bridge override remains. Both current system and system profile resolve to the exact merged closure. Root and `/data` remain single-disk. | Keep existing Agents in place. The next destructive storage step requires the accepted backup/empty-target restore gate and a separate maintenance window. |
-| `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix finite-mono CI Runner and sole approved x86_64 production Nix builder. | No role or storage change. Build the reviewed closures here. |
-| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and lat2 CI/build-only. |
+| `finite-lat-2` (`64.34.80.19`) | Decommission target. Docker/image CI moved to Depot after this run opened, and the lat1 NixOS closure build path moved to Depot-backed CI artifacts. Historical captures live in git; any private legacy/archive data must be moved off-box before repurpose or release. | Execute `infra/runbooks/decommission-lat2.md`. Keep it out of Docker/image CI, production Nix builds, deploy driving, Agent capacity, recovery authority, and archive authority. |
+| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and keep lat2 out of Agent capacity. |
 
 The pinned lat3 nixpkgs revision is
 `fd1462031fdee08f65fd0b4c6b64e22239a77870`.
@@ -184,7 +185,8 @@ are not gates for the Runner slice.
 
 - lat1 remains the control/app plane and lifecycle Runner for existing Agents.
 - lat3 becomes the only initial creator for new Standard Agents.
-- lat2 remains CI/build-only.
+- lat2 remains outside Agent capacity and is a decommission target; Docker/image
+  CI and production Nix builds are no longer scheduled there.
 - Existing Runtimes keep their persisted source host and source machine. There
   is no automatic failover or migration.
 - Exactly one Standard Runner is undrained for creation during this rollout.
@@ -250,7 +252,8 @@ remove that directory.
 Before any live switch:
 
 1. merge and test the reviewed branch;
-2. build exact lat1 and lat3 closures on lat2 with remote builders disabled;
+2. build exact lat1 and lat3 closures with remote builders disabled on the
+   reviewed x86_64 Linux CI builder/artifact path;
 3. compare lat1's current and candidate closures;
 4. stop if Dashboard, Chat, Hosted Device, Sites, Brain, Search, Postgres,
    Caddy, or any existing Runtime would restart unexpectedly; and
@@ -438,7 +441,8 @@ snapshot or use SQLite's supported online backup mechanism while preserving
 its WAL relationship. Copying a live database file alone is not accepted.
 That restore work does not expand the lat3 Runner canary.
 
-`finite-lat-2` remains untouched throughout.
+`finite-lat-2` remains outside this storage work except for its separate
+archive/offload and decommission runbook.
 
 ## Execution record
 

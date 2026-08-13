@@ -47,9 +47,11 @@ validate_local_inputs() {
   [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
   validate_id "admin WorkOS user id" "$ROLLOUT_ADMIN_WORKOS_USER_ID" || return
   local project_id
-  for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
-    validate_id "project id" "$project_id" || return
-  done
+  if [[ ${#ROLLOUT_PROJECT_IDS[@]} -gt 0 ]]; then
+    for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+      validate_id "project id" "$project_id" || return
+    done
+  fi
   if [[ -n $ROLLOUT_CANARY_PROJECT_ID ]]; then
     validate_id "canary project id" "$ROLLOUT_CANARY_PROJECT_ID" || return
   fi
@@ -216,9 +218,11 @@ build_plan_cli_args() {
   if [[ $ROLLOUT_ALL == true ]]; then
     PLAN_CLI_ARGS+=(--all --canary-project-id "$ROLLOUT_CANARY_PROJECT_ID")
   else
-    for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
-      PLAN_CLI_ARGS+=(--project-id "$project_id")
-    done
+    if [[ ${#ROLLOUT_PROJECT_IDS[@]} -gt 0 ]]; then
+      for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+        PLAN_CLI_ARGS+=(--project-id "$project_id")
+      done
+    fi
   fi
 }
 
@@ -805,9 +809,11 @@ copy_paste_execute_command() {
   if [[ $ROLLOUT_ALL == true ]]; then
     command+=(--roll-all --roll-canary-project-id "$ROLLOUT_CANARY_PROJECT_ID")
   else
-    for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
-      command+=(--roll-project-id "$project_id")
-    done
+    if [[ ${#ROLLOUT_PROJECT_IDS[@]} -gt 0 ]]; then
+      for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+        command+=(--roll-project-id "$project_id")
+      done
+    fi
   fi
   printf '  '
   printf '%q ' "${command[@]}"
