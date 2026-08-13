@@ -552,6 +552,57 @@ pub struct EnsureOrganizationAdminResponse {
     pub retryable: bool,
 }
 
+/// Ensure-access request (ADR-0046 onboarding repair): ensure the target's
+/// Brain Membership and report their entitled Folder Key Grant state so the
+/// caller can fill any gaps with wrapped grants.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAccessRequest {
+    pub target_npub: String,
+    /// Signed AddMember proof. Required only when the Membership is missing;
+    /// ignored when the target already holds Membership.
+    #[serde(default)]
+    pub access_change_event: Option<serde_json::Value>,
+}
+
+/// Stable machine-readable Folder grant state in an ensure-access receipt.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnsureAccessGrantState {
+    Present,
+    Missing,
+}
+
+/// One entitled Folder's current grant state for the ensure-access target.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAccessFolderStatus {
+    pub folder_id: String,
+    pub path: String,
+    pub key_version: u32,
+    pub grant: EnsureAccessGrantState,
+}
+
+/// Ensure-access receipt. Membership is completed server-side; missing Folder
+/// Key Grants are left to the caller, who holds the Folder Keys.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAccessResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    /// `added` when this call created the Membership, `alreadyMember` when it
+    /// already existed (including owner and admin principals).
+    pub membership: String,
+    /// The target's Brain Role after this call: `owner`, `admin`, or `member`.
+    pub brain_role: String,
+    /// One entry per Folder the target is entitled to read.
+    pub folders: Vec<EnsureAccessFolderStatus>,
+    pub missing_count: usize,
+    /// `complete` when every entitled Folder has a current grant;
+    /// `grantsMissing` when the caller still has wraps to deliver.
+    pub state: String,
+}
+
 /// Stable machine-readable outcome for a Folder access grant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

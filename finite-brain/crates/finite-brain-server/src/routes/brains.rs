@@ -386,6 +386,120 @@ pub(crate) async fn add_member_handler(
     Ok(Json(response))
 }
 
+/// One-step repair for a half-onboarded member: idempotently ensure the
+/// target's Brain Membership server-side, then report every Folder the target
+/// is entitled to read and whether a current Folder Key Grant exists for
+/// them. Missing grants are left to the caller, who holds the Folder Keys.
+pub(crate) async fn ensure_access_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<EnsureAccessResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: EnsureAccessRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let target_identity = resolve_and_record_identity(&state, &request.target_npub).await?;
+    let target = UserId::new(target_identity.npub.clone())?;
+
+    let membership = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let already_present = stored.brain.owner_user_id.as_ref() == Some(&target)
+            || stored.brain.admins.contains(&target)
+            || store.member_exists(&brain_id, &target)?;
+        if already_present {
+            "alreadyMember"
+        } else {
+            let Some(event_value) = request.access_change_event.clone() else {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "accessChangeEvent is required to add the missing Brain Membership",
+                ));
+            };
+            let (event, payload) = validate_admin_access_change_value(
+                event_value,
+                &brain_id,
+                &actor,
+                AdminAccessAction::AddMember,
+                None,
+                Some(target.as_str()),
+                None,
+            )?;
+            let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
+            store.add_member_with_control_records(&brain_id, &target, &control_records)?;
+            "added"
+        }
+    };
+    if membership == "added" {
+        state.publish_access_update_for(&brain_id, target.as_str());
+    }
+
+    // Re-load after the membership mutation so the receipt is authoritative.
+    let stored = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.load_brain(&brain_id)?
+    };
+    let is_owner = stored.brain.owner_user_id.as_ref() == Some(&target);
+    let is_admin = stored.brain.admins.contains(&target);
+    let brain_role = if is_owner {
+        "owner"
+    } else if is_admin {
+        "admin"
+    } else {
+        "member"
+    };
+    let full_access = is_owner || is_admin;
+    let mut folders = Vec::new();
+    for folder in &stored.brain.folders {
+        let entitled = full_access
+            || folder.access == FolderAccessMode::AllMembers
+            || stored
+                .folder_access
+                .get(&folder.id)
+                .is_some_and(|users| users.contains(&target));
+        if !entitled {
+            continue;
+        }
+        let present = stored.grants.iter().any(|grant| {
+            grant.folder_id == folder.id
+                && grant.key_version == folder.current_key_version
+                && grant.recipient_npub == target
+        });
+        folders.push(EnsureAccessFolderStatus {
+            folder_id: folder.id.to_string(),
+            path: folder.path.to_string(),
+            key_version: folder.current_key_version,
+            grant: if present {
+                EnsureAccessGrantState::Present
+            } else {
+                EnsureAccessGrantState::Missing
+            },
+        });
+    }
+    let missing_count = folders
+        .iter()
+        .filter(|folder| folder.grant == EnsureAccessGrantState::Missing)
+        .count();
+    Ok(Json(EnsureAccessResponse {
+        brain_id: brain_id.to_string(),
+        target_npub: target.to_string(),
+        membership: membership.to_owned(),
+        brain_role: brain_role.to_owned(),
+        state: if missing_count == 0 {
+            "complete".to_owned()
+        } else {
+            "grantsMissing".to_owned()
+        },
+        folders,
+        missing_count,
+    }))
+}
+
 pub(crate) async fn remove_member_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

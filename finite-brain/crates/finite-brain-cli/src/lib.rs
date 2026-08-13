@@ -154,7 +154,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
     )?;
     Ok(())
 }
@@ -3463,6 +3463,9 @@ fn admin<W: Write>(
         .first()
         .map(String::as_str)
         .ok_or(CliError::MissingArgument("admin namespace"))?;
+    if namespace == "ensure-access" {
+        return admin_ensure_access(&args[1..], env, json, output);
+    }
     let action = args
         .get(1)
         .map(String::as_str)
@@ -3497,13 +3500,67 @@ fn admin<W: Write>(
     admin_operation(namespace, action, operation_args, env, json, output)
 }
 
-fn collaborators<W: Write>(
+fn admin_ensure_access<W: Write>(
     args: &[String],
     env: &CliEnvironment,
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    match args.first().map(String::as_str) {
+    let brain_id = command_brain_id(args, env)?;
+    let target = required_option_or_positional(args, "--target", 0, "target-identity")?;
+    let receipt = ensure_brain_access(env, args, &brain_id, &target)?;
+    if json {
+        return write_json(output, &receipt);
+    }
+    let field = |name: &str| receipt.get(name).and_then(serde_json::Value::as_str).unwrap_or("?");
+    writeln!(
+        output,
+        "ensure-access {} -> {}",
+        field("brainId"),
+        field("targetNpub")
+    )?;
+    writeln!(output, "membership: {}", field("membership"))?;
+    if let Some(folders) = receipt
+        .get("folders")
+        .and_then(serde_json::Value::as_array)
+    {
+        for folder in folders {
+            let path = folder
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let grant = folder
+                .get("grant")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            match folder.get("repair").and_then(serde_json::Value::as_str) {
+                Some("needsKeyHolder") => writeln!(
+                    output,
+                    "- {path}: grant missing; no usable Folder Key in this Finite Home; re-run from a current key holder"
+                )?,
+                Some("failed") => writeln!(
+                    output,
+                    "- {path}: grant failed: {}",
+                    folder
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                )?,
+                Some(repair) => writeln!(output, "- {path}: grant {repair}")?,
+                None => writeln!(output, "- {path}: grant {grant}")?,
+            }
+        }
+    }
+    writeln!(output, "state: {}", field("state"))?;
+    Ok(())
+}
+
+fn collaborators<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {    match args.first().map(String::as_str) {
         Some("ensure-admin") => {
             let brain_id = command_brain_id(args, env)?;
             let target = required_option_or_positional(args, "--target", 1, "target-identity")?;
@@ -7515,6 +7572,131 @@ mod tests {
         );
         let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
         assert!(!durable_state.contains(&folder_key.to_base64()));
+    }
+
+    fn start_ensure_access_server(
+        target_npub: String,
+        export_grant: Value,
+    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/ensure-access") {
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "targetNpub": target_npub,
+                        "membership": "added",
+                        "brainRole": "member",
+                        "folders": [{
+                            "folderId": "general",
+                            "path": "general",
+                            "keyVersion": 1,
+                            "grant": "missing"
+                        }],
+                        "missingCount": 1,
+                        "state": "grantsMissing"
+                    })
+                    .to_string()
+                } else if request_line.contains("/export") {
+                    serde_json::json!({
+                        "brain": {
+                            "id": "acme",
+                            "kind": "organization",
+                            "name": "Acme",
+                            "ownerUserId": null
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "general",
+                            "access": "all_members",
+                            "currentKeyVersion": 1,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
+                        "accessState": {
+                            "members": [],
+                            "admins": []
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "outcome": "granted",
+                    })
+                    .to_string()
+                };
+                requests.push((request_line, body));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn admin_ensure_access_fills_missing_folder_grants() {
+        let tmp = TempDir::new().unwrap();
+        let target_secret = "0000000000000000000000000000000000000000000000000000000000000002";
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let admin_npub = npub_for_secret(TEST_SECRET_HEX);
+        let target_npub = npub_for_secret(target_secret);
+        let folder_key = FolderKey::from_bytes([9; 32]);
+        let tree = tmp.path().join("org");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let export_grant = export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) = start_ensure_access_server(target_npub.clone(), export_grant);
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "admin",
+                "ensure-access",
+                "--brain",
+                "acme",
+                "--target",
+                &target_npub,
+                "--server",
+                &server_url,
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap();
+        let plain = String::from_utf8(output).unwrap();
+        assert!(plain.contains("membership: added"));
+        assert!(plain.contains("- general: grant granted"));
+        assert!(plain.contains("state: complete"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0, "POST /v1/brains/acme/ensure-access HTTP/1.1");
+        assert_eq!(requests[1].0, "GET /v1/brains/acme/export HTTP/1.1");
+        assert_eq!(
+            requests[2].0,
+            format!("PUT /v1/admin/brains/acme/folders/general/access/{target_npub} HTTP/1.1")
+        );
+        let body: Value = serde_json::from_str(&requests[2].1).unwrap();
+        assert_eq!(
+            grant_plaintext_folder_key(&body, target_secret, &target_npub),
+            folder_key.to_base64()
+        );
     }
 
     #[test]

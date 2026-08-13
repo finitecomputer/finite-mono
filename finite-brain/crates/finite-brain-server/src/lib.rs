@@ -637,6 +637,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
                 .layer(DefaultBodyLimit::max(MAX_COLLABORATION_REQUEST_BODY_BYTES)),
         )
         .route(
+            "/brains/{brain_id}/ensure-access",
+            post(ensure_access_handler),
+        )
+        .route(
             "/brains/{brain_id}/invitations",
             get(list_brain_invitations_handler).post(create_brain_invitation_handler),
         )
@@ -3193,6 +3197,125 @@ mod tests {
             .await
             .expect("v1 response");
         assert_error(rejected, StatusCode::FORBIDDEN, "Nostr auth URL mismatch").await;
+    }
+
+    #[tokio::test]
+    async fn ensure_access_repairs_membership_and_reports_grant_gaps() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let admin_npub = npub(&admin_keys);
+        let router = test_router();
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Membership is missing: the signed AddMember proof is required.
+        let missing_event = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(missing_event.status(), StatusCode::BAD_REQUEST);
+
+        let ensured = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(
+                serde_json::json!({
+                    "targetNpub": member_npub,
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        "ensure-access-add-member",
+                        AdminAccessAction::AddMember,
+                        None,
+                        Some(member_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(ensured.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(ensured).await;
+        assert_eq!(receipt.membership, "added");
+        assert_eq!(receipt.brain_role, "member");
+        assert_eq!(receipt.state, "grantsMissing");
+        assert_eq!(receipt.missing_count, 1);
+        assert_eq!(receipt.folders.len(), 1);
+        assert_eq!(receipt.folders[0].folder_id, "getting-started");
+        assert_eq!(receipt.folders[0].grant, EnsureAccessGrantState::Missing);
+
+        // Re-running is safe: the Membership reports as already in place.
+        let again = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(again.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(again).await;
+        assert_eq!(receipt.membership, "alreadyMember");
+        assert_eq!(receipt.state, "grantsMissing");
+
+        // A fully set-up admin is entitled to every Folder and reports
+        // complete: both Folders have a current grant for them.
+        let admin_receipt = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": admin_npub }).to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(admin_receipt.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(admin_receipt).await;
+        assert_eq!(receipt.membership, "alreadyMember");
+        assert_eq!(receipt.brain_role, "admin");
+        assert_eq!(receipt.state, "complete");
+        assert_eq!(receipt.missing_count, 0);
+        assert_eq!(receipt.folders.len(), 2);
+        assert!(
+            receipt
+                .folders
+                .iter()
+                .all(|folder| folder.grant == EnsureAccessGrantState::Present)
+        );
+
+        // Non-admin callers are rejected.
+        let outsider = Keys::generate();
+        let forbidden = authed_request(
+            router,
+            &outsider,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
