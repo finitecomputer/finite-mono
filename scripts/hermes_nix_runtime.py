@@ -73,11 +73,18 @@ def package_attr(system: str) -> str:
 
 
 def build_attr(repo_root: Path, attr: str, *, timeout: int = 7200) -> str:
-    result = run(
-        ["nix", "build", "--no-link", "--print-out-paths", attr],
-        cwd=repo_root,
-        timeout=timeout,
-    )
+    try:
+        result = run(
+            ["nix", "build", "--no-link", "--print-out-paths", attr],
+            cwd=repo_root,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"Nix build failed for {attr} with exit code {exc.returncode}\n"
+            f"stdout:\n{exc.stdout or ''}\n"
+            f"stderr:\n{exc.stderr or ''}"
+        ) from exc
     paths = [line.strip() for line in result.stdout.splitlines() if line.startswith("/nix/store/")]
     if not paths:
         raise SystemExit(f"Nix did not print a store path for {attr}")

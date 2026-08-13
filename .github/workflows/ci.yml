@@ -393,6 +393,7 @@ jobs:
 
           {
             echo "path=$hermes_agent_runtime"
+            echo "python_path=$hermes_agent_python"
             echo "python=$hermes_agent_python/bin/python3"
           } >> "$GITHUB_OUTPUT"
 
@@ -401,12 +402,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           HERMES_AGENT_RUNTIME_PATH: ${{ steps.hermes_agent_runtime.outputs.path }}
+          HERMES_AGENT_PYTHON_PATH: ${{ steps.hermes_agent_runtime.outputs.python_path }}
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
 
           closure_paths="$RUNNER_TEMP/hermes-agent-runtime-closure"
-          nix path-info --recursive "$HERMES_AGENT_RUNTIME_PATH" > "$closure_paths"
+          nix path-info --recursive "$HERMES_AGENT_RUNTIME_PATH" "$HERMES_AGENT_PYTHON_PATH" > "$closure_paths"
           closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
           echo "Pushing $closure_count Hermes Agent runtime closure paths to $CACHIX_CACHE_NAME"
           xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
@@ -556,6 +558,7 @@ jobs:
 
           packages=(
             ".#packages.x86_64-linux.finite-saas-core"
+            ".#packages.x86_64-linux.finite-saas-local"
             ".#packages.x86_64-linux.finite-saas-runner"
             ".#packages.x86_64-linux.finitechat-server"
             ".#packages.x86_64-linux.finitechat-hosted-device"
@@ -694,6 +697,7 @@ jobs:
           }
 
           fetch_cached_output .#packages.x86_64-linux.finite-saas-core DEVFINITY_FINITE_SAAS_CORE_BIN bin/finite-saas-core
+          fetch_cached_output .#packages.x86_64-linux.finite-saas-local DEVFINITY_FINITE_SAAS_LOCAL_BIN bin/finite-saas-local
           fetch_cached_output .#packages.x86_64-linux.finitechat-server DEVFINITY_FINITECHAT_SERVER_BIN bin/finitechat-server
           fetch_cached_output .#packages.x86_64-linux.finitechat-hosted-device DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN bin/finitechat-hosted-device
           fetch_cached_output .#packages.x86_64-linux.finitesitesd DEVFINITY_FINITESITESD_BIN bin/finitesitesd
@@ -748,7 +752,10 @@ jobs:
 
   brain-product-matrix:
     name: Brain full-product matrix
-    needs: changes
+    needs:
+      - changes
+      - hermes-bridge
+      - nix-service-packages
     if: needs.changes.outputs.run_brain_product_matrix == 'true'
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
@@ -769,6 +776,51 @@ jobs:
         with:
           use-gha-cache: true
           use-flakehub: false
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Fetch cached Brain matrix package outputs
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          fetch_cached_output() {
+            local attr="$1"
+            local env_name="$2"
+            local binary="$3"
+            local out_path
+            local log_file
+
+            out_path="$(nix eval --raw "$attr.outPath")"
+            log_file="$(mktemp)"
+            if nix build --no-link --print-out-paths --option max-jobs 0 --option builders '' "$out_path" >"$log_file" 2>&1; then
+              cat "$log_file"
+              if [[ ! -x "$out_path/$binary" ]]; then
+                echo "::error::$attr substituted, but $out_path/$binary is not executable"
+                exit 1
+              fi
+              echo "$env_name=$out_path/$binary" >> "$GITHUB_ENV"
+            else
+              echo "::notice::$attr was not available from configured binary caches; Brain matrix will use its Cargo fallback"
+              cat "$log_file"
+            fi
+            rm -f "$log_file"
+          }
+
+          fetch_cached_output .#packages.x86_64-linux.finite-saas-core DEVFINITY_FINITE_SAAS_CORE_BIN bin/finite-saas-core
+          fetch_cached_output .#packages.x86_64-linux.finite-saas-local DEVFINITY_FINITE_SAAS_LOCAL_BIN bin/finite-saas-local
+          fetch_cached_output .#packages.x86_64-linux.finite-saas-runner DEVFINITY_FINITE_SAAS_RUNNER_BIN bin/finite-saas-runner
+          fetch_cached_output .#packages.x86_64-linux.finitechat-server DEVFINITY_FINITECHAT_SERVER_BIN bin/finitechat-server
+          fetch_cached_output .#packages.x86_64-linux.finitechat-hosted-device DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN bin/finitechat-hosted-device
+          fetch_cached_output .#packages.x86_64-linux.finitesitesd DEVFINITY_FINITESITESD_BIN bin/finitesitesd
+          fetch_cached_output .#packages.x86_64-linux.finite-identity DEVFINITY_FINITE_IDENTITYD_BIN bin/finite-identityd
+          fetch_cached_output .#packages.x86_64-linux.finite-brain DEVFINITY_FINITE_BRAIN_BIN bin/finite-brain
+
+          nix build --no-link --print-build-logs --print-out-paths --option max-jobs 0 --option builders '' \
+            .#packages.x86_64-linux.hermes-agent-runtime \
+            .#packages.x86_64-linux.hermes-agent-runtime-python
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         env:
