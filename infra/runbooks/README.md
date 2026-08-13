@@ -33,7 +33,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
 | [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 native Postgres — highest-priority runbook in this tree |
 | [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md) | Coordinated Hosted Web Device + Finite Chat + SaaS Core snapshot and empty-target drill |
-| [litestream-chat-replication.md](litestream-chat-replication.md) | Continuous chat SQLite replication to Latitude object storage + restore drill (DR-only) |
+| [litestream-chat-replication.md](litestream-chat-replication.md) | Continuous chat + Brain SQLite replication to Latitude object storage + restore drill (DR-only) |
 | [chats-appear-missing.md](chats-appear-missing.md) | Read-only-first continuity incident diagnosis; never creates replacement state |
 | [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |

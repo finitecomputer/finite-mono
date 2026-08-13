@@ -65,6 +65,11 @@ in
         path = "/var/lib/private/finite-chat/data/server.sqlite3";
         owningService = "finitechat-server.service";
       }
+      {
+        name = "finite-brain";
+        path = "/var/lib/private/finitebrain/finite-brain.sqlite3";
+        owningService = "finite-brain-app.service";
+      }
     ];
   };
 
