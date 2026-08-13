@@ -12511,6 +12511,11 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
+    const renderManageBrainsOnPersonalAgentEmail = () => {
+      renderManageBrainsModal();
+    };
+    $("managePersonalAgentEmailInput")?.addEventListener("input", renderManageBrainsOnPersonalAgentEmail);
+    $("managePersonalAgentEmailInput")?.addEventListener("change", renderManageBrainsOnPersonalAgentEmail);
     $("manageCreateOrganizationBrainButton")?.addEventListener("click", () => {
       createOrganizationBrainFromInput("manageOrganizationBrainNameInput").catch((error) => {
         reportClientActionFailure(error);
