@@ -108,20 +108,22 @@ bob_brain_curl() {
 3. Observe the resolved plan: the account owner `bob@finite.vip`, his managed
    agent (`bob-sidekick-...@finite.vip`), and any exclusions with their
    reasons. No npubs appear anywhere in the copy.
-4. Click **Send for approval**. Observe the "Sent for approval" result.
-5. Open **Settings → Access**. Under **Approvals**, observe the pending card
-   "Approve brain invitations" with provenance copy (requested-by, plan,
-   expiry).
-6. Click **Approve**. Observe "Approval applied" — the hosted identity signs
-   the approval artifact and the server commits one invitation per principal
-   (Bob + his agent).
-7. Back in **Settings → Invitations**, observe two pending invitations. Each
+4. Click **Invite bob@finite.vip and 1 agent**. Inviting is member
+   administration (ADR-0046 Tier 2), so the browser signer commits the plan
+   directly — the click is the approval, no Approval Card is created. Observe
+   "Invitation sent — Invited bob@finite.vip and 1 agent". If the roster had
+   drifted since the preview, the client re-previews and shows the fresh plan
+   instead of committing the stale one.
+5. Still in **Settings → Invitations**, observe two pending invitations. Each
    pending invitation's `publicInstructionsUrl` (`…/llms.txt`) now resolves
    without auth for npub invitations too — it prints the target npub, the
    invitation id, and the exact accept command.
 
-(Optional denial path: repeat steps 1–5 and click **Dismiss** instead; the
-card resolves without signing anything.)
+(The Approval Card round trip remains for agent-initiated requests — an agent
+files an invite-commit Approval request and a human signs the card; the
+Access-panel **Approvals** list stays as the pending/history view. A browser
+signer without Brain admin standing gets a **Request approval from an admin**
+fallback on the same previewed plan instead of the direct-invite button.)
 
 **Bob (CLI):** Bob has no Working Tree yet, so `invite brain list` reads the
 invitations addressed to his own principal (`GET /v1/my-invitations`) instead
@@ -242,9 +244,9 @@ sqlite3 -readonly <state-dir>/finite-brain/finite-brain.sqlite3 \
   "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members ORDER BY brain_id, user_id"
 ```
 
-- Direction 1 (browser approval card): Bob's principals show
-  `origin_kind=approval`, `origin_ref=<Alice's approval event id>`,
-  delegated by Alice's hosted signer.
+- Direction 1 (browser direct commit): Bob's principals show
+  `origin_kind=invitation`, `origin_ref=<Alice's invitation plan id>`,
+  delegated by Alice's browser signer (her hosted identity).
 - Direction 2 (CLI direct commit): Alice's principals in Bob's Brain show
   `origin_kind=invitation`, `origin_ref=<Bob's plan id>`, delegated by Bob's
   CLI principal.

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ADR-0046 principal-grants slice: Alice invites Bob's account to her Personal
-# Brain from the Brain UI (invite-by-email plan preview -> approval card ->
-# signed approval -> commit), Bob's principals accept, and content flows with
-# provenance. Then the reverse: Bob bootstraps his own Brain from the CLI,
-# preflights and directly commits the plan for Alice's account, Alice accepts
-# in the browser, and Alice's agent reads Bob's seeded note.
+# Brain from the Brain UI (invite-by-email plan preview -> direct commit by the
+# browser signer, Tier 2 — the click is the approval), Bob's principals accept,
+# and content flows with provenance. Then the reverse: Bob bootstraps his own
+# Brain from the CLI, preflights and directly commits the plan for Alice's
+# account, Alice accepts in the browser, and Alice's agent reads Bob's seeded
+# note. The Approval Card path (agent-initiated requests) is covered by the
+# server tests.
 #
 # Run it through the devfinity stack wrapper:
 #   scripts/with-dev-env scripts/devfinity-adr46-slice-up
@@ -334,6 +336,26 @@ brain_browser_smoke() {
   )
 }
 
+# Bound a single act so a wedged browser run fails loudly instead of sitting
+# forever (macOS has no `timeout` coreutil).
+run_bounded() {
+  local limit_seconds="$1"
+  shift
+  "$@" &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= limit_seconds )); then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  wait "$pid"
+}
+
 say "ADR-0046 slice: waiting for the devfinity stack"
 me_json="$scratch/me-alice.json"
 stack_started="$(date +%s)"
@@ -456,7 +478,7 @@ note "Alice's agent runtime is live: project=$project_id agent=$agent_email"
 note "AliceAgent npub: $alice_agent_npub"
 
 say "Act 1: Alice bootstraps her Personal Brain (browser path)"
-bootstrap_output="$(brain_browser_smoke bootstrap)"
+bootstrap_output="$(run_bounded 900 brain_browser_smoke bootstrap)"
 printf '%s\n' "$bootstrap_output" >&2
 brain_id="$(sed -n 's/^BRAIN_ID=//p' <<<"$bootstrap_output" | tail -1)"
 [[ -n "$brain_id" ]] || fail "browser bootstrap did not return a Brain id"
@@ -645,7 +667,8 @@ Brain DB (read-only provenance check at the end): $brain_db
 
 Alice (browser): dashboard URL above -> machine page -> Brain tab ->
 Settings -> Invitations -> Invite by email -> bob@finite.vip -> Preview plan ->
-Send for approval -> Settings -> Access -> Approvals -> Approve.
+"Invite bob@finite.vip and 1 agent" (the browser signer commits directly —
+no approval card for an admin's own invite).
 
 Bob (CLI) — self-serve: with no Working Tree, "invite brain list" reads the
 invitations addressed to Bob's principal (GET /v1/my-invitations), so the list
@@ -713,19 +736,15 @@ Alice's agent accepts + Bob grants the folder key:
     sqlite3 -readonly $brain_db \
       "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members ORDER BY brain_id, user_id"
 
-Expect: Bob's principals origin_kind=approval (direction 1, the card);
-Alice's principals in Bob's brain origin_kind=invitation (direction 2).
+Expect: every invited principal origin_kind=invitation, origin_ref=the
+invitation plan id (both directions commit directly — Alice from the browser,
+Bob from the CLI).
 
 ## Teardown
 
 Ctrl-C in the boot terminal.
 EOF
   note "filled-in commands for this run: $commands_file"
-  cat <<EOF
-EOF
-  sleep infinity
-  exit 0
-fi
   note "Alice's Personal Brain: $brain_id (bootstrapped; shared-with-bob/alice-seed.md seeded)"
   note "Bob's roster is live: $BOB_EMAIL -> human + agent $bob_agent_email"
   note "Alice's agent container id: $alice_container_id"
@@ -748,37 +767,42 @@ EOF
   exit 0
 fi
 
-say "Act 3: Alice invites Bob from the Brain UI (plan preview -> approval card -> commit)"
+say "Act 3: Alice invites Bob from the Brain UI (plan preview -> direct commit)"
 invite_browser_output="$(
   DEVFINITY_BRAIN_INVITE_EMAIL="$BOB_EMAIL" \
   DEVFINITY_BRAIN_INVITE_AGENT_EMAIL="$bob_agent_email" \
-  brain_browser_smoke invite-by-email "" "$brain_id"
+  run_bounded 900 brain_browser_smoke invite-by-email "" "$brain_id"
 )"
 printf '%s\n' "$invite_browser_output" >&2
-note "Alice previewed the resolved plan, sent it for approval, and approved the card in the browser"
+note "Alice previewed the resolved plan and committed it directly from the browser (Tier 2: the click is the approval)"
 
 say "Act 4: browser-driven commit landed with provenance (Brain DB)"
-approval_event_id="$(sqlite3 -readonly "$brain_db" \
-  "SELECT approval_event_id FROM brain_approval_requests WHERE brain_id = '$brain_id' AND action = 'invite-commit' AND status = 'approved' ORDER BY created_at DESC LIMIT 1")"
-[[ -n "$approval_event_id" ]] || fail "no approved invite-commit Approval request in the Brain DB"
-note "the browser-approved card resolved to approval event $approval_event_id"
+approval_request_count="$(sqlite3 -readonly "$brain_db" \
+  "SELECT COUNT(*) FROM brain_approval_requests WHERE brain_id = '$brain_id' AND action = 'invite-commit'")"
+[[ "$approval_request_count" == "0" ]] || fail "the browser invite wrongly filed an invite-commit Approval request"
+note "no Approval request was created — the browser signer committed directly"
+
+alice_plan_id="$(sqlite3 -readonly "$brain_db" \
+  "SELECT id FROM brain_invitation_plans WHERE brain_id = '$brain_id' AND human_email = '$BOB_EMAIL' AND status = 'committed' ORDER BY created_at DESC LIMIT 1")"
+[[ -n "$alice_plan_id" ]] || fail "no committed invitation plan for Bob in the Brain DB"
+note "the direct commit resolved to invitation plan $alice_plan_id"
 
 sqlite3 -readonly "$brain_db" \
   "SELECT user_id, origin_kind, origin_ref, roster_revision, status, invite_code, id FROM brain_invitations WHERE brain_id = '$brain_id' ORDER BY user_id" \
   >"$scratch/invitation-provenance.txt"
 cat "$scratch/invitation-provenance.txt"
-node - "$scratch/invitation-provenance.txt" "$bob_npub" "$bob_agent_npub" "$approval_event_id" <<'JS' || fail "invitation provenance is wrong"
+node - "$scratch/invitation-provenance.txt" "$bob_npub" "$bob_agent_npub" "$alice_plan_id" <<'JS' || fail "invitation provenance is wrong"
 const fs = require("node:fs");
 const rows = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").filter(Boolean)
   .map((line) => line.split("|"));
-const [bobNpub, bobAgentNpub, approvalEventId] = process.argv.slice(3);
+const [bobNpub, bobAgentNpub, planId] = process.argv.slice(3);
 const principals = rows.map((row) => row[0]).sort();
 if (JSON.stringify(principals) !== JSON.stringify([bobNpub, bobAgentNpub].sort())) {
   throw new Error(`principals: ${JSON.stringify(rows)}`);
 }
 for (const row of rows) {
-  if (row[1] !== "approval") throw new Error(`origin_kind: ${row}`);
-  if (row[2] !== approvalEventId) throw new Error(`origin_ref: ${row}`);
+  if (row[1] !== "invitation") throw new Error(`origin_kind: ${row}`);
+  if (row[2] !== planId) throw new Error(`origin_ref: ${row}`);
   if (Number(row[3]) < 1) throw new Error(`roster_revision: ${row}`);
   if (row[4] !== "pending") throw new Error(`status: ${row}`);
   if (!row[5].startsWith("invite-") || !row[6].startsWith("invitation-")) {
@@ -786,7 +810,7 @@ for (const row of rows) {
   }
 }
 JS
-note "both invitations carry origin_kind=approval, origin_ref=$approval_event_id, roster_revision=1"
+note "both invitations carry origin_kind=invitation, origin_ref=$alice_plan_id, roster_revision=1"
 
 bob_human_invite_code="$(node - "$scratch/invitation-provenance.txt" "$bob_npub" <<'JS'
 const fs = require("node:fs");
@@ -864,7 +888,7 @@ grep -Fq "this page existed before Bob joined" "$bob_tree/shared-with-bob/alice-
   || fail "BobAgent decrypted the wrong seed content"
 note "BobAgent decrypted alice-seed.md from before it joined"
 
-bob_note="Bob was here $(date +%s)-$$: written through BobAgent's own key after accepting the approval-granted invitation."
+bob_note="Bob was here $(date +%s)-$$: written through BobAgent's own key after accepting the plan-committed invitation."
 printf '# Bob was here\n\n%s\n' "$bob_note" >"$bob_tree/shared-with-bob/bob-reply.md"
 (
   cd "$bob_tree"
@@ -899,10 +923,10 @@ sqlite3 -readonly "$brain_db" \
 node - \
   "$scratch/member-provenance.txt" \
   "$scratch/grant-provenance.txt" \
-  "$bob_npub" "$bob_agent_npub" "$alice_npub" "$alice_agent_npub" "$approval_event_id" <<'JS' \
+  "$bob_npub" "$bob_agent_npub" "$alice_npub" "$alice_agent_npub" "$alice_plan_id" <<'JS' \
   || fail "member/grant provenance is wrong"
 const fs = require("node:fs");
-const [membersPath, grantsPath, bobNpub, bobAgentNpub, aliceNpub, aliceAgentNpub, approvalEventId] =
+const [membersPath, grantsPath, bobNpub, bobAgentNpub, aliceNpub, aliceAgentNpub, planId] =
   process.argv.slice(2);
 const memberRows = fs.readFileSync(membersPath, "utf8").trim().split("\n").filter(Boolean)
   .map((line) => line.split("|"));
@@ -910,8 +934,8 @@ for (const principal of [bobNpub, bobAgentNpub]) {
   const row = memberRows.find((candidate) => candidate[0] === principal);
   if (!row) throw new Error(`no brain_members row for ${principal}`);
   if (row[1] !== aliceNpub) throw new Error(`delegated_by for ${principal}: ${row}`);
-  if (row[2] !== "approval") throw new Error(`origin_kind for ${principal}: ${row}`);
-  if (row[3] !== approvalEventId) throw new Error(`origin_ref for ${principal}: ${row}`);
+  if (row[2] !== "invitation") throw new Error(`origin_kind for ${principal}: ${row}`);
+  if (row[3] !== planId) throw new Error(`origin_ref for ${principal}: ${row}`);
 }
 const grantRows = fs.readFileSync(grantsPath, "utf8").trim().split("\n").filter(Boolean)
   .map((line) => line.split("|"));
@@ -922,7 +946,7 @@ if (grant[1] !== aliceAgentNpub) throw new Error(`grant issuer_npub: ${grant}`);
 if (grant[2] !== "") throw new Error(`grant delegated_by should be empty: ${grant}`);
 if (grant[3] !== "direct") throw new Error(`grant origin_kind: ${grant}`);
 JS
-note "members: delegated_by=Alice's approval signer, origin_kind=approval, origin_ref=approval event"
+note "members: delegated_by=Alice's browser signer, origin_kind=invitation, origin_ref=invitation plan"
 note "folder_key_grants: issuer=AliceAgent, origin_kind=direct"
 
 say "Act 10: Bob bootstraps his own Brain from the CLI and seeds a note"
@@ -1018,7 +1042,7 @@ note "Alice's inviteCode: $alice_human_invite_code; AliceAgent's invitation id: 
 say "Act 12: Alice accepts Bob's invitation in the browser"
 accept_browser_output="$(
   DEVFINITY_BRAIN_INVITE_CODE="$alice_human_invite_code" \
-  brain_browser_smoke accept-invite "" "$bob_brain_id"
+  run_bounded 600 brain_browser_smoke accept-invite "" "$bob_brain_id"
 )"
 printf '%s\n' "$accept_browser_output" >&2
 note "Alice pasted the Invite Code in the Brain UI and joined Bob's Brain"
@@ -1098,7 +1122,7 @@ say "ADR-0046 slice PASSED"
 echo "brain_id=$brain_id"
 echo "bob_brain_id=$bob_brain_id"
 echo "bob_plan_id=$bob_plan_id"
-echo "approval_event_id=$approval_event_id"
+echo "alice_plan_id=$alice_plan_id"
 echo "alice_npub=$alice_npub"
 echo "alice_agent_npub=$alice_agent_npub"
 echo "bob_npub=$bob_npub"
