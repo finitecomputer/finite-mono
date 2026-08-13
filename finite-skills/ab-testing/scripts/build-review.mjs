@@ -107,6 +107,23 @@ function renderReview(cases, screenshotByArtifact) {
     h1 { margin: 0; font-size: 22px; line-height: 1.1; }
     .meta { color: var(--muted); font-size: 13px; }
     main { max-width: 1480px; margin: 0 auto; padding: 24px; }
+    .editor { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
+    .editor-head { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .editor-title { font-weight: 760; }
+    .editor-body { display: grid; gap: 14px; padding: 16px; }
+    .field { display: grid; gap: 7px; }
+    .field label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .field textarea, .field input[type="number"] { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #fff; color: var(--ink); }
+    .field textarea { min-height: 112px; resize: vertical; }
+    .field.skill textarea { min-height: 260px; }
+    .skill-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+    .editor-actions label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+    .editor-actions input[type="number"] { width: 74px; }
+    .primary { border: 1px solid var(--accent); border-radius: 6px; padding: 9px 12px; color: white; background: var(--accent); font-weight: 750; cursor: pointer; }
+    .primary:disabled { opacity: .55; cursor: wait; }
+    .status-line { color: var(--muted); font-size: 13px; }
+    .job-log { max-height: 220px; overflow: auto; margin: 0; border-top: 1px solid var(--line); padding: 12px 16px; background: #191815; color: #eee9dd; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
     .case { border-top: 1px solid var(--line); padding: 26px 0 34px; }
     .case:first-child { border-top: 0; }
     .case-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
@@ -134,6 +151,7 @@ function renderReview(cases, screenshotByArtifact) {
     .console-errors { margin: 10px 14px 14px; color: var(--danger); font-size: 12px; }
     @media (max-width: 980px) {
       .variants { grid-template-columns: 1fr; }
+      .skill-grid { grid-template-columns: 1fr; }
       .case-head, .header-inner { align-items: start; flex-direction: column; }
     }
   </style>
@@ -149,6 +167,7 @@ function renderReview(cases, screenshotByArtifact) {
     </div>
   </header>
   <main>
+    ${renderEditor()}
     ${
       cases.length
         ? cases.map((item) => renderCase(item, screenshotByArtifact)).join("\n")
@@ -183,9 +202,147 @@ function renderReview(cases, screenshotByArtifact) {
       a.click();
       URL.revokeObjectURL(url);
     });
+
+    const editor = document.getElementById("input-editor");
+    const promptInput = document.getElementById("prompt-input");
+    const mockInput = document.getElementById("mock-input");
+    const maxConcurrencyInput = document.getElementById("max-concurrency-input");
+    const regenerateButton = document.getElementById("regenerate-button");
+    const editorStatus = document.getElementById("editor-status");
+    const jobLog = document.getElementById("job-log");
+
+    loadEditorState();
+
+    regenerateButton.addEventListener("click", async () => {
+      const skills = {};
+      for (const input of document.querySelectorAll("[data-skill-input]")) {
+        skills[input.getAttribute("data-skill-input")] = input.value;
+      }
+      setEditorEnabled(false);
+      setEditorStatus("Starting regeneration...");
+      jobLog.hidden = false;
+      jobLog.textContent = "";
+      try {
+        const response = await fetch("/api/regenerate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            maxConcurrency: Number(maxConcurrencyInput.value || 1),
+            mock: mockInput.checked,
+            prompt: promptInput.value,
+            skills,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || "Regeneration failed to start");
+        }
+        pollJob(payload.job.id);
+      } catch (error) {
+        setEditorStatus(error.message);
+        setEditorEnabled(true);
+      }
+    });
+
+    async function loadEditorState() {
+      try {
+        const response = await fetch("/api/state");
+        if (!response.ok) {
+          throw new Error("API unavailable");
+        }
+        const data = await response.json();
+        promptInput.value = data.prompt || "";
+        mockInput.checked = Boolean(data.mock);
+        maxConcurrencyInput.value = data.maxConcurrency || 1;
+        for (const variant of data.variants || []) {
+          const input = document.getElementById("skill-input-" + variant.variant);
+          const source = document.getElementById("skill-source-" + variant.variant);
+          if (input) input.value = variant.skillText || "";
+          if (source) source.textContent = variant.sourcePath || "";
+        }
+        setEditorStatus("Ready");
+      } catch {
+        setEditorStatus("Start the local review server to edit and regenerate.");
+        setEditorEnabled(false);
+      }
+    }
+
+    async function pollJob(jobId) {
+      try {
+        const response = await fetch("/api/jobs/" + encodeURIComponent(jobId));
+        const job = await response.json();
+        if (!response.ok) {
+          throw new Error(job.error || "Could not read job status");
+        }
+        jobLog.hidden = false;
+        jobLog.textContent = job.logs || "";
+        jobLog.scrollTop = jobLog.scrollHeight;
+        if (job.status === "complete") {
+          setEditorStatus("Regenerated. Reloading...");
+          window.location.href = "/review/index.html?t=" + Date.now();
+          return;
+        }
+        if (job.status === "failed") {
+          setEditorStatus("Regeneration failed");
+          setEditorEnabled(true);
+          return;
+        }
+        setEditorStatus("Regenerating...");
+        setTimeout(() => pollJob(jobId), 1200);
+      } catch (error) {
+        setEditorStatus(error.message);
+        setEditorEnabled(true);
+      }
+    }
+
+    function setEditorEnabled(enabled) {
+      for (const control of editor.querySelectorAll("textarea, input, button")) {
+        control.disabled = !enabled;
+      }
+    }
+
+    function setEditorStatus(value) {
+      editorStatus.textContent = value;
+    }
   </script>
 </body>
 </html>`;
+}
+
+function renderEditor() {
+  return `<section class="editor" id="input-editor">
+    <div class="editor-head">
+      <div>
+        <div class="editor-title">Run Inputs</div>
+        <div class="meta">Edit the build prompt and the skill text used for the next generation.</div>
+      </div>
+      <span class="status-line" id="editor-status">Loading...</span>
+    </div>
+    <div class="editor-body">
+      <div class="field">
+        <label for="prompt-input">Build Prompt</label>
+        <textarea id="prompt-input" spellcheck="false"></textarea>
+      </div>
+      <div class="skill-grid">
+        <div class="field skill">
+          <label for="skill-input-skill-a">skill-a</label>
+          <div class="meta" id="skill-source-skill-a"></div>
+          <textarea id="skill-input-skill-a" data-skill-input="skill-a" spellcheck="false"></textarea>
+        </div>
+        <div class="field skill">
+          <label for="skill-input-skill-b">skill-b</label>
+          <div class="meta" id="skill-source-skill-b"></div>
+          <textarea id="skill-input-skill-b" data-skill-input="skill-b" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <div class="editor-actions">
+        <button class="primary" type="button" id="regenerate-button">Regenerate</button>
+        <label><input id="mock-input" type="checkbox"> Mock</label>
+        <label>Concurrency <input id="max-concurrency-input" type="number" min="1" max="8" step="1"></label>
+      </div>
+    </div>
+    <pre class="job-log" id="job-log" hidden></pre>
+  </section>`;
 }
 
 function renderCase(item, screenshotByArtifact) {

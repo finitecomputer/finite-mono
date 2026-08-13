@@ -20,6 +20,10 @@ ab-test:
 ab-test-mock:
     cd ab-testing && pnpm run ab:mock
 
+# Serves the review UI with prompt/skill editing and regeneration APIs
+ab-serve:
+    cd ab-testing && pnpm run serve
+
 # Runs the skill A/B harness for one custom build prompt
 ab-test-prompt prompt:
     cd ab-testing && pnpm run ab:prompt -- {{ quote(prompt) }}

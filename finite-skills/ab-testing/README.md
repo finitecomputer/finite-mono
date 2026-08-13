@@ -63,7 +63,22 @@ The review page is written to:
 runs/latest/review/index.html
 ```
 
-Open it directly, or run:
+Serve it with the local edit/regenerate API:
+
+```sh
+just skills ab-serve
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8787/review/index.html
+```
+
+You can also open the static file directly, but prompt/skill editing and
+regeneration require the local server.
+
+To open the static file:
 
 ```sh
 cd finite-skills/ab-testing
@@ -87,6 +102,11 @@ The review page is for judging rendered output. The skill text is saved only in
 
 The review page stores winner picks and notes in browser local storage and can
 export them as JSON.
+
+When served through `pnpm run serve`, the review page also lets you edit the
+build prompt and both skill variants, then regenerate from the browser. Edited
+skills are saved under `runs/editable/`; the source `../skills/.../SKILL.md`
+files are not changed.
 
 ## Changing The Skills
 

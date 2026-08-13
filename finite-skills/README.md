@@ -44,8 +44,10 @@ just skills ab-test-mock
 Run `just dev inference-key` once if the local Finite Private upstream key has
 not been cached yet, then run `just skills ab-test` for real model-generated
 artifacts. Use `just skills ab-test-prompt 'Build ...'` to compare both skill
-variants on one custom build prompt. The root `just` path enters the pinned dev
-shell, which provides a Node version compatible with current Promptfoo. Use
+variants on one custom build prompt. Run `just skills ab-serve` to edit the
+prompt and both skill variants from the browser and regenerate locally. The
+root `just` path enters the pinned dev shell, which provides a Node version
+compatible with current Promptfoo. Use
 `SKILL_AB_PROVIDER=openai OPENAI_API_KEY=...` only when intentionally testing
 against OpenAI instead of Finite Private.
 

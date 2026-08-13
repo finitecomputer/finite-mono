@@ -14,7 +14,8 @@
     "browsers": "playwright install chromium",
     "eval": "node scripts/eval.mjs",
     "open": "node scripts/open-review.mjs",
-    "review": "playwright test -c playwright.config.mjs && node scripts/build-review.mjs"
+    "review": "playwright test -c playwright.config.mjs && node scripts/build-review.mjs",
+    "serve": "node scripts/serve-review.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
