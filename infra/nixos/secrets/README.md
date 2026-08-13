@@ -44,8 +44,9 @@ share the private key file.
 
 Use `just nixos-sops-ingest` to encrypt plaintext from stdin into this
 directory. The helper refuses interactive input, refuses path traversal, refuses
-to overwrite by default, and prints only the encrypted target path plus a
-values-free Nix contract sketch.
+to overwrite by default, verifies local decrypt access, checks that the new
+file's recipients match existing files in the same scope, and prints only the
+encrypted target path plus a values-free Nix contract sketch.
 
 Example for the metrics pilot:
 
@@ -64,6 +65,11 @@ The command writes only the encrypted SOPS file, for example
 `infra/nixos/secrets/shared/metrics-remote-write.env`. It does not add the Nix
 contract entry for you; review the printed sketch and wire the relevant service
 module in a separate commit.
+
+If the helper says the current operator cannot decrypt existing files, add the
+operator's public recipient to `.sops.yaml` and ask an existing operator to run
+`just nixos-sops-updatekeys`. If it says recipient sets differ, review the
+`.sops.yaml` change and run `just nixos-sops-updatekeys` before retrying.
 
 ## Updating Recipients
 

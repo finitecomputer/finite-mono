@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import stat
@@ -29,6 +30,7 @@ class NixosSopsIngestTest(unittest.TestCase):
             "\n".join(
                 [
                     "#!/usr/bin/env python3",
+                    "import json",
                     "import os",
                     "from pathlib import Path",
                     "import sys",
@@ -40,7 +42,9 @@ class NixosSopsIngestTest(unittest.TestCase):
                     "    raise SystemExit(0)",
                     "payload = sys.stdin.buffer.read()",
                     "Path(os.environ['FAKE_SOPS_CAPTURE']).write_bytes(payload)",
-                    "sys.stdout.buffer.write(b'{\"data\":\"ENC[AES256_GCM,data:fake,type:str]\",\"sops\":{}}\\n')",
+                    "recipients = [r for r in os.environ['FAKE_SOPS_RECIPIENTS'].split(',') if r]",
+                    "age = [{'recipient': recipient} for recipient in recipients]",
+                    "sys.stdout.write(json.dumps({'data':'ENC[AES256_GCM,data:fake,type:str]','sops':{'age':age}}) + '\\n')",
                 ]
             ),
             encoding="utf-8",
@@ -57,6 +61,7 @@ class NixosSopsIngestTest(unittest.TestCase):
         *args: str,
         secret: bytes = b"synthetic-secret-value\n",
         decrypt_fail: bool = False,
+        recipients: str = "age1canonical",
     ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             [
@@ -75,8 +80,30 @@ class NixosSopsIngestTest(unittest.TestCase):
                 **os.environ,
                 "FAKE_SOPS_CAPTURE": str(self.capture),
                 "FAKE_SOPS_DECRYPT_FAIL": "1" if decrypt_fail else "0",
+                "FAKE_SOPS_RECIPIENTS": recipients,
             },
         )
+
+    def write_existing_sops_file(
+        self, relative: str, recipients: list[str] | None = None
+    ) -> Path:
+        path = self.secrets_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "data": "ENC[AES256_GCM,data:existing,type:str]",
+                    "sops": {
+                        "age": [
+                            {"recipient": recipient}
+                            for recipient in (recipients or ["age1canonical"])
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
 
     def test_ingests_stdin_without_printing_plaintext(self) -> None:
         result = self.run_ingest(
@@ -124,6 +151,43 @@ class NixosSopsIngestTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertIn(b"not decryptable by this operator", combined)
         self.assertNotIn(b"synthetic-secret-value", combined)
+
+    def test_refuses_when_operator_cannot_decrypt_existing_sops_file(self) -> None:
+        self.write_existing_sops_file("shared/existing.env")
+        result = self.run_ingest(
+            "shared",
+            "metrics-remote-write.env",
+            decrypt_fail=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn(b"cannot decrypt existing SOPS file", combined)
+        self.assertIn(b"just nixos-sops-updatekeys", combined)
+        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        self.assertNotIn(b"synthetic-secret-value", combined)
+
+    def test_refuses_when_same_scope_recipients_are_stale(self) -> None:
+        self.write_existing_sops_file("shared/existing.env", ["age1old"])
+        result = self.run_ingest(
+            "shared",
+            "metrics-remote-write.env",
+            recipients="age1new",
+        )
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn(b"recipient set differs", combined)
+        self.assertIn(b"just nixos-sops-updatekeys", combined)
+        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        self.assertNotIn(b"synthetic-secret-value", combined)
+
+    def test_allows_different_recipients_in_different_scope(self) -> None:
+        self.write_existing_sops_file("finite-lat-1/existing.env", ["age1lat1"])
+        result = self.run_ingest(
+            "shared",
+            "metrics-remote-write.env",
+            recipients="age1shared",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_rejects_path_traversal(self) -> None:
         result = self.run_ingest("shared", "../bad.env")

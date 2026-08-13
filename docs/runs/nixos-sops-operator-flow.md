@@ -86,14 +86,21 @@ The helper:
 - refuses interactive input;
 - refuses path traversal;
 - refuses to overwrite unless `--force` is passed;
+- refuses to proceed if the current operator cannot decrypt an existing SOPS
+  file;
 - encrypts from stdin without writing plaintext to a temp file;
+- verifies the new file has the same recipient set as existing SOPS files in
+  the same top-level scope;
 - verifies the encrypted result is decryptable by the current operator before
   writing it;
 - prints only the encrypted target path and a values-free Nix contract sketch.
 
-If the decrypt verification fails, the operator is not a current usable
-recipient for the file. Add their public recipient to `.sops.yaml`, have an
-existing operator run `just nixos-sops-updatekeys`, then retry.
+If either decrypt verification fails, the operator is not a current usable
+recipient for the SOPS set. Add their public recipient to `.sops.yaml`, have an
+existing operator run `just nixos-sops-updatekeys`, then retry. If the recipient
+set check fails, `.sops.yaml` and the encrypted files disagree; run
+`just nixos-sops-updatekeys` after reviewing the `.sops.yaml` change, then retry
+the ingest.
 
 ## Update Recipients
 
@@ -118,9 +125,10 @@ review:
 
 - They do not know who is allowed to be a Finite operator. Code review of
   `.sops.yaml` is the canonical membership approval.
-- `nixos-sops-ingest` proves only that the current operator can decrypt the
-  newly encrypted file. It does not prove every teammate or host recipient can
-  decrypt it.
+- `nixos-sops-ingest` proves that the current operator can decrypt existing
+  files and the newly encrypted file, and that the new file's recipient metadata
+  matches existing files in the same scope. It cannot prove every teammate has
+  their private key installed until they run a decrypt themselves.
 - `nixos-sops-updatekeys` can add or remove future decrypt access, but it
   cannot revoke plaintext someone already decrypted. Rotate underlying secrets
   when offboarding or trust boundaries require it.

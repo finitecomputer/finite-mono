@@ -8,6 +8,7 @@ printed, logged, or written to an intermediate file by this helper.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,10 @@ DEFAULT_SECRETS_ROOT = ROOT / "infra/nixos/secrets"
 ALLOWED_SCOPES = {"shared", "finite-lat-1", "finite-lat-3"}
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SAFE_LOGICAL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+SKIPPED_NAMES = {
+    ".sops.yaml",
+    "README.md",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -153,6 +158,91 @@ def validate_args(args: argparse.Namespace, rel_target: Path) -> str:
     return logical_name
 
 
+def is_sops_json_file(path: Path) -> bool:
+    if not path.is_file() or path.name in SKIPPED_NAMES:
+        return False
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(loaded, dict) and isinstance(loaded.get("sops"), dict)
+
+
+def discover_sops_files(secrets_root: Path) -> list[Path]:
+    return sorted(
+        path for path in secrets_root.rglob("*") if is_sops_json_file(path)
+    )
+
+
+def can_decrypt_file(sops_bin: str, secrets_root: Path, path: Path) -> bool:
+    result = subprocess.run(
+        [
+            sops_bin,
+            "decrypt",
+            "--input-type",
+            "json",
+            "--output-type",
+            "binary",
+            str(path),
+        ],
+        cwd=secrets_root,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def verify_existing_access(sops_bin: str, secrets_root: Path) -> Path | None:
+    for path in discover_sops_files(secrets_root):
+        if not can_decrypt_file(sops_bin, secrets_root, path):
+            return path
+    return None
+
+
+def age_recipients_from_bytes(payload: bytes) -> set[str]:
+    loaded = json.loads(payload.decode("utf-8"))
+    sops_metadata = loaded.get("sops")
+    if not isinstance(sops_metadata, dict):
+        raise ValueError("encrypted payload is missing SOPS metadata")
+    age_entries = sops_metadata.get("age")
+    if not isinstance(age_entries, list):
+        raise ValueError("encrypted payload is missing age recipients")
+    recipients = {
+        entry["recipient"]
+        for entry in age_entries
+        if isinstance(entry, dict) and isinstance(entry.get("recipient"), str)
+    }
+    if not recipients:
+        raise ValueError("encrypted payload has no age recipients")
+    return recipients
+
+
+def age_recipients_from_file(path: Path) -> set[str]:
+    return age_recipients_from_bytes(path.read_bytes())
+
+
+def same_scope_sops_files(
+    secrets_root: Path, rel_target: Path, destination: Path
+) -> list[Path]:
+    target_scope = rel_target.parts[0]
+    return [
+        path
+        for path in discover_sops_files(secrets_root)
+        if path != destination
+        and path.relative_to(secrets_root).parts[0] == target_scope
+    ]
+
+
+def mismatched_recipient_file(
+    secrets_root: Path, rel_target: Path, destination: Path, new_recipients: set[str]
+) -> Path | None:
+    for path in same_scope_sops_files(secrets_root, rel_target, destination):
+        if age_recipients_from_file(path) != new_recipients:
+            return path
+    return None
+
+
 def verify_decryptable(
     sops_bin: str, secrets_root: Path, rel_target: Path, encrypted: bytes
 ) -> bool:
@@ -202,6 +292,17 @@ def main() -> int:
         )
         return 1
 
+    inaccessible = verify_existing_access(args.sops_bin, secrets_root)
+    if inaccessible is not None:
+        print(
+            "nixos-sops-ingest: this operator cannot decrypt existing SOPS file "
+            f"{display_path(inaccessible)}; add your public recipient to .sops.yaml "
+            "and ask an existing operator to run `just nixos-sops-updatekeys` before "
+            "adding or seeding secrets",
+            file=sys.stderr,
+        )
+        return 1
+
     if sys.stdin.buffer.isatty():
         print(
             "nixos-sops-ingest: refusing to read secret from an interactive tty",
@@ -239,10 +340,30 @@ def main() -> int:
     if encrypted == b"":
         print("nixos-sops-ingest: sops produced no encrypted output", file=sys.stderr)
         return 1
+    try:
+        new_recipients = age_recipients_from_bytes(encrypted)
+        mismatch = mismatched_recipient_file(
+            secrets_root, rel_target, destination, new_recipients
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        print(
+            f"nixos-sops-ingest: invalid SOPS recipient metadata: {error}",
+            file=sys.stderr,
+        )
+        return 1
+    if mismatch is not None:
+        print(
+            "nixos-sops-ingest: new recipient set differs from existing SOPS file "
+            f"{display_path(mismatch)} in the same scope; run "
+            "`just nixos-sops-updatekeys` after .sops.yaml changes, then retry",
+            file=sys.stderr,
+        )
+        return 1
     if not verify_decryptable(args.sops_bin, secrets_root, rel_target, encrypted):
         print(
             "nixos-sops-ingest: encrypted file is not decryptable by this operator; "
-            "add your public recipient to .sops.yaml and run updatekeys before ingesting",
+            "add your public recipient to .sops.yaml and ask an existing operator to "
+            "run `just nixos-sops-updatekeys` before ingesting",
             file=sys.stderr,
         )
         return 1
