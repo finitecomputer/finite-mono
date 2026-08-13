@@ -150,6 +150,7 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         '--ref "$SATELLITE_BRANCH"',
         "control.inf12.tinfoil.sh",
         "one active eight-H200 cluster",
+        "b6018f87da91d19d0ab4cf979885689b469cdd41",
         "mixed-version-canary",
         "compat/matrix.toml",
     ):

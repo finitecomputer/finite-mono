@@ -133,15 +133,18 @@ the separately approved relaunch window.
    ```bash
    export MONO_SHA="$(git rev-parse HEAD)"
    export STATUS_DIR="/root/finite-status-$MONO_SHA"
+   export NIXPKGS_REV='b6018f87da91d19d0ab4cf979885689b469cdd41'
    ssh root@64.34.82.77 "install -d -m 0700 '$STATUS_DIR'"
    scp scripts/finite-status scripts/finite_status.py \
      "root@64.34.82.77:$STATUS_DIR/"
-   ssh root@64.34.82.77 "chmod 0500 '$STATUS_DIR/finite-status' && cd '$STATUS_DIR' && ./finite-status --json"
+   ssh root@64.34.82.77 "chmod 0500 '$STATUS_DIR/finite-status' && cd '$STATUS_DIR' && nix shell 'github:NixOS/nixpkgs/$NIXPKGS_REV#python3' --command python3 ./finite-status --json"
    ```
 
    This installs only the canonical read-only collector files and does not
-   restart or deploy a service. Retain the exact directory and output for the
-   matching post-rollout observation.
+   restart or deploy a service. The production host does not otherwise include
+   Python, so the command uses the exact Nixpkgs revision pinned by this mono
+   checkout rather than an unpinned interpreter. Retain the exact directory and
+   output for the matching post-rollout observation.
 2. Confirm Tinfoil reports the production container ready on the fixed host at
    the exact rollback tag above, with eight H200s and the expected three secret
    names. Never print secret values.
