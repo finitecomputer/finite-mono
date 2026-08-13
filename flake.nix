@@ -3,6 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    # Hermes Agent's PyPI channel was retired in v0.20.0. Keep the CI adapter
+    # tests on the upstream Nix package instead of downloading GitHub archives.
+    hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
+    hermes-agent.url = "github:NousResearch/hermes-agent/v2026.8.3";
+    hermes-agent.inputs.nixpkgs.follows = "hermes-nixpkgs";
     # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
     # the same pin for its platform-only upgrade while retaining its existing
     # disk layout and stateVersion.
@@ -35,6 +40,8 @@
     {
       self,
       nixpkgs,
+      hermes-nixpkgs,
+      hermes-agent,
       nixpkgs-lat3,
       nixpkgs-kata,
       flake-utils,
@@ -151,34 +158,54 @@
           ]);
       in
       {
-        devShells.default = pkgs.mkShell {
-          packages =
-            rustBasePackages
-            ++ [
-              gcxCli
-              litestreamCli
-            ]
-            ++ (with pkgs; [
-              nodejs_24
-              pnpm
-              rsync
-              sqlite
-              xxd
-              rustToolchain
-            ])
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
+        devShells =
+          {
+            default = pkgs.mkShell {
+              packages =
+                rustBasePackages
+                ++ [
+                  gcxCli
+                  litestreamCli
+                ]
+                ++ (with pkgs; [
+                  nodejs_24
+                  pnpm
+                  rsync
+                  sqlite
+                  xxd
+                  rustToolchain
+                ])
+                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
-          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-        };
+              RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+            };
 
-        devShells.rust-ci = pkgs.mkShell {
-          packages = rustCiPackages;
-        };
+            rust-ci = pkgs.mkShell {
+              packages = rustCiPackages;
+            };
 
-        devShells.devfinity-ci = pkgs.mkShell {
-          packages = devfinityCiPackages;
-        };
+            devfinity-ci = pkgs.mkShell {
+              packages = devfinityCiPackages;
+            };
+          }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+            let
+              hermesAgentPython = hermes-agent.packages.${system}.minimal.hermesVenv;
+              hermesBridgePkgs = import hermes-nixpkgs { inherit system; };
+            in
+            {
+              hermes-bridge-ci = pkgs.mkShell {
+                packages = [
+                  hermesAgentPython
+                  hermesBridgePkgs.basedpyright
+                  hermesBridgePkgs.ruff
+                ];
+
+                HERMES_AGENT_PYTHON = "${hermesAgentPython}/bin/python3";
+              };
+            }
+          );
 
         formatter = pkgs.nixfmt-rfc-style;
       }
@@ -187,6 +214,8 @@
       # Server binaries + CLIs built by nix from this workspace (built by CI /
       # the lat2 runner; eval-only on darwin). See infra/nixos/packages.nix.
       packages.x86_64-linux = finitePackagesLinux // {
+        hermes-agent-minimal = hermes-agent.packages.x86_64-linux.minimal;
+        hermes-agent-python = hermes-agent.packages.x86_64-linux.minimal.hermesVenv;
         finite-lat-3-system = lat3.config.system.build.toplevel;
         finite-lat-3-disko = lat3.config.system.build.diskoScript;
         finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;

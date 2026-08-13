@@ -271,10 +271,11 @@ jobs:
         working-directory: finitechat
     env:
       FINITE_HERMES_AGENT_VERSION: "0.20.0"
-      # PyPI channel was retired upstream in v0.20.0; install from the pinned
-      # source tarball instead (same dist as the runtime image build).
-      FINITE_HERMES_AGENT_DIST_URL: "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.8.3.tar.gz"
-      FINITE_HERMES_AGENT_DIST_SHA256: "370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be"
+      # PyPI channel was retired upstream in v0.20.0; use the pinned upstream
+      # Nix package instead of downloading GitHub archives during CI.
+      HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-python"
+      NIX_CONFIG: |
+        access-tokens = github.com=${{ github.token }}
       # The hermes scripts resolve reports and built binaries relative to the
       # finitechat/ working directory (target/...); point cargo there too so
       # the two agree, exactly like the pre-mono repo layout.
@@ -294,29 +295,139 @@ jobs:
         with:
           python-version: "3.13"
 
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+
+      - name: Select Cachix push mode
+        id: cachix
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          push_enabled=false
+          case "$GITHUB_EVENT_NAME" in
+            push|merge_group)
+              push_enabled=true
+              ;;
+            pull_request)
+              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+                push_enabled=true
+              fi
+              ;;
+          esac
+
+          echo "push_enabled=$push_enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Cachix read-only cache
+        if: steps.cachix.outputs.push_enabled != 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Require Cachix token for trusted cache push
+        if: steps.cachix.outputs.push_enabled == 'true'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+
+      - name: Configure Cachix trusted cache
+        if: steps.cachix.outputs.push_enabled == 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
       - name: Hermes sidecar smoke
         run: scripts/hermes-sidecar-smoke.sh
 
-      - name: Install Python tooling
+      - name: Build Hermes Agent Python environment
+        id: hermes_agent_python
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_PLAN: ${{ runner.temp }}/hermes-agent-python-build-plan
+          HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-python-output
         run: |
-          curl -fsSLo /tmp/hermes-agent.tar.gz "$FINITE_HERMES_AGENT_DIST_URL"
-          echo "$FINITE_HERMES_AGENT_DIST_SHA256  /tmp/hermes-agent.tar.gz" | sha256sum --check -
-          HERMES_NIX_BUILD=1 python3 -m pip install basedpyright==1.39.8 "hermes-agent @ file:///tmp/hermes-agent.tar.gz" ruff==0.15.17
+          set -euo pipefail
+
+          nix build --dry-run --option builders '' "$HERMES_AGENT_NIX_ATTR" 2>&1 | tee "$BUILD_PLAN"
+          if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
+            echo "built_paths=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "built_paths=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
+            "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
+
+          hermes_agent_python="$(grep -E '^/nix/store/' "$HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
+          if [[ -z "$hermes_agent_python" || ! -x "$hermes_agent_python/bin/python3" ]]; then
+            echo "::error::Hermes Agent Nix environment did not produce an executable python3"
+            exit 1
+          fi
+
+          "$hermes_agent_python/bin/python3" - <<'PY'
+          import gateway.config
+          import hermes_cli.plugins
+          PY
+
+          {
+            echo "path=$hermes_agent_python"
+            echo "python=$hermes_agent_python/bin/python3"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push Hermes Agent Python runtime closure
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_python.outputs.built_paths == 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          HERMES_AGENT_PYTHON_PATH: ${{ steps.hermes_agent_python.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          closure_paths="$RUNNER_TEMP/hermes-agent-python-runtime-closure"
+          nix path-info --recursive "$HERMES_AGENT_PYTHON_PATH" > "$closure_paths"
+          closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
+          echo "Pushing $closure_count Hermes Agent Python closure paths to $CACHIX_CACHE_NAME"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
+
+      - name: Skip Cachix push for fully substituted Hermes Agent Python
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_python.outputs.built_paths != 'true'
+        run: echo "Nix dry-run found no Hermes Agent Python derivations to build; skipping Cachix push."
 
       - name: Ruff format
-        run: ruff format --check .
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check .
 
       - name: Ruff check
-        run: ruff check .
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check .
 
       - name: BasedPyright
-        run: basedpyright
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
 
       - name: Hermes adapter regression report
-        run: scripts/hermes-adapter-regression-report.py --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+        run: |
+          "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
+            --python "$HERMES_AGENT_PYTHON" \
+            --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
 
       - name: Hermes platform adapter tests
-        run: python3 -m unittest discover -s tests -p '*test*.py'
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+        run: |
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
 
   nix-checks:
     name: Skills + search static checks (nix shell)
