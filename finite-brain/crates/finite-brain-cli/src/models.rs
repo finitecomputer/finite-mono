@@ -266,6 +266,17 @@ pub(crate) struct SyncOnceReport {
     pub(crate) remote_changes: Vec<SyncChangeReport>,
     pub(crate) unsupported_objects: Vec<SyncChangeReport>,
     pub(crate) conflicts: Vec<SyncChangeReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) completed_wraps: Vec<CompletedWrapReport>,
+}
+
+/// One pending grant wrap this Finite Home completed during sync: the current
+/// Folder Key wrapped for a waiting recipient.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompletedWrapReport {
+    pub(crate) folder_id: String,
+    pub(crate) recipient_npub: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -296,6 +307,10 @@ pub(crate) struct StatusReport {
     pub(crate) sync: SyncStatus,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) blocked: Vec<String>,
+    /// Pending grant wraps waiting on a key-holding client. Populated only
+    /// when the server reports the admin-only field for this identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_wraps: Option<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]

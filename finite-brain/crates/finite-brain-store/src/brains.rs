@@ -336,12 +336,34 @@ impl BrainStore {
         user_id: &UserId,
         control_records: &[SyncRecordInput],
     ) -> Result<(), StoreError> {
-        self.load_core_brain(brain_id)?;
+        let brain = self.load_core_brain(brain_id)?;
+        let all_members_folders = brain
+            .folders
+            .iter()
+            .filter(|folder| folder.access == FolderAccessMode::AllMembers)
+            .map(|folder| (folder.id.clone(), folder.current_key_version))
+            .collect::<Vec<_>>();
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
             params![brain_id.as_str(), user_id.as_str()],
         )?;
+        // Membership entitles the new Member to every All-Members Folder but
+        // delivers no wrapped grants; the ensure-access caller fills the gaps
+        // from its own keyring, and any other key holder can complete them on
+        // sync once the markers are visible.
+        let now = current_timestamp();
+        for (folder_id, key_version) in all_members_folders {
+            pending_wraps::mark_pending_grant_wrap(
+                &tx,
+                brain_id,
+                &folder_id,
+                user_id,
+                key_version,
+                PendingGrantWrapReason::EnsureAccess,
+                &now,
+            )?;
+        }
         sync_records::append_sync_records(&tx, brain_id, control_records)?;
         tx.commit()?;
         Ok(())

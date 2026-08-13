@@ -155,6 +155,18 @@ with another Brain. Cancellation applies only while pending; acceptance consumes
 the invitation and later Folder Access Revocation is a separate administrative
 operation. _Avoid_: Share Link, Folder Share.
 
+### Pending Grant Wrap
+
+A server-side marker recording that a Principal gained Folder entitlement
+without receiving a wrapped Folder Key Grant — at Brain Invitation commit, at
+invitation acceptance, or when an ensure-access repair writes Membership. Any
+client that holds the current Folder Key discovers the markers on sync (the
+sync surfaces show them only to admin-standing identities), wraps the key for
+the waiting recipients, and the server clears the markers when the grants
+validate. A marker is a delivery hint, never a gate: sync proceeds without
+completing wraps, and a marker for a Folder the client cannot open is
+skipped. _Avoid_: Key Request, Access Ticket.
+
 ### Mount Offer
 
 A pending, single-use offer to connect one source Folder to one named

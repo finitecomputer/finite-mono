@@ -3901,3 +3901,266 @@ fn built_fbrain_access_loss_crash_restarts_fail_closed_and_retries() {
     assert_eq!(state["folderRoots"][0]["metadataOnly"], true);
     assert!(!general_index_directory.exists());
 }
+
+#[test]
+fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
+    let scratch = TempDir::new().unwrap();
+    let home_a = scratch.path().join("home-a");
+    let home_b = scratch.path().join("home-b");
+    fs::create_dir_all(&home_a).unwrap();
+    fs::create_dir_all(&home_b).unwrap();
+    for (home, secret, suffix) in [(&home_a, "secret-a", "0001"), (&home_b, "secret-b", "0002")] {
+        let secret_path = scratch.path().join(secret);
+        fs::write(
+            &secret_path,
+            format!("000000000000000000000000000000000000000000000000000000000000{suffix}\n"),
+        )
+        .unwrap();
+        assert!(
+            run(
+                home,
+                home,
+                &[
+                    "auth",
+                    "import",
+                    "--file",
+                    secret_path.to_str().unwrap(),
+                    "--json"
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let npub_of = |home: &Path| {
+        let signer = run(home, home, &["signer", "public-key", "--json"]);
+        assert!(
+            signer.status.success(),
+            "{}",
+            String::from_utf8_lossy(&signer.stderr)
+        );
+        let signer: Value = serde_json::from_slice(&signer.stdout).unwrap();
+        signer["npub"].as_str().unwrap().to_owned()
+    };
+    let owner_npub = npub_of(&home_a);
+    let target_npub = npub_of(&home_b);
+    let personal_agent_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000003")
+            .unwrap();
+    let personal_agent_npub = NostrPublicKey::from_protocol(personal_agent_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let requester_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000004")
+            .unwrap();
+    let requester_npub = NostrPublicKey::from_protocol(requester_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server(
+        &target_npub,
+        &personal_agent_npub,
+        &owner_npub,
+        &requester_npub,
+    );
+    let run = |home: &Path, cwd: &Path, args: &[&str]| {
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        command(home, cwd)
+            .env("FBRAIN_NOW", now)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // The owner opens their Personal Brain, creates a restricted Folder, and
+    // publishes content into it.
+    let tree_a = home_a.join("personal-a-tree");
+    let opened = run(
+        &home_a,
+        &home_a,
+        &["open", "personal-a", tree_a.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let created = run(
+        &home_a,
+        &tree_a,
+        &[
+            "folder",
+            "create",
+            "team-vault",
+            "--access",
+            "restricted",
+            "--name",
+            "Team Vault",
+            "--path",
+            "Team Vault",
+            "--json",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let synced = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        synced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    fs::write(
+        tree_a.join("Team Vault/notes.md"),
+        "# Team Vault\n\nShared with the invited member.\n",
+    )
+    .unwrap();
+    let pushed = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        pushed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+
+    // Invite the second home; the invitee accepts and opens the Brain. The
+    // historical failure: entitlement without a wrapped Folder Key, so the
+    // Folder stays locked until someone wraps for them.
+    let invitation = run(
+        &home_a,
+        &tree_a,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "--target",
+            &target_npub,
+            "--folder",
+            "team-vault",
+            "--json",
+        ],
+    );
+    assert!(
+        invitation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invitation.stderr)
+    );
+    let invitation: Value = serde_json::from_slice(&invitation.stdout).unwrap();
+    let accepted = run(
+        &home_b,
+        &home_b,
+        &[
+            "invite",
+            "brain",
+            "accept",
+            invitation["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let member_tree = home_b.join("personal-a-member-tree");
+    let opened_member = run(
+        &home_b,
+        &home_b,
+        &[
+            "open",
+            "personal-a",
+            member_tree.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        opened_member.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened_member.stderr)
+    );
+    let first_sync = run(&home_b, &member_tree, &["sync", "now", "--json"]);
+    assert!(
+        first_sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_sync.stderr)
+    );
+    assert!(
+        !member_tree.join("Team Vault/notes.md").exists(),
+        "before any key holder syncs, the invited Folder must still be locked"
+    );
+
+    // The owner's metadata surfaces the pending wraps.
+    let metadata = run(
+        &home_a,
+        &tree_a,
+        &["brain", "metadata", "--brain", "personal-a", "--json"],
+    );
+    assert!(
+        metadata.status.success(),
+        "{}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata: Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    assert!(
+        metadata["pendingWraps"].as_array().map_or(0, Vec::len) >= 1,
+        "owner metadata must carry pendingWraps: {metadata}"
+    );
+
+    // The owner's status surfaces the pending wraps.
+    let status = run(&home_a, &tree_a, &["status", "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(
+        status["pendingWraps"].as_u64().unwrap_or(0) >= 1,
+        "owner status must surface the pending wraps: {status}"
+    );
+
+    // The owner's next sync completes the pending wraps opportunistically and
+    // notes each one in --summary output.
+    let owner_sync = run(&home_a, &tree_a, &["sync", "now", "--summary"]);
+    assert!(
+        owner_sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&owner_sync.stderr)
+    );
+    let owner_summary = String::from_utf8_lossy(&owner_sync.stdout);
+    assert!(
+        owner_summary.contains("wrapped grants:"),
+        "owner sync summary must note the completed wraps: {owner_summary}"
+    );
+    assert!(
+        owner_summary.contains(&format!("wrapped team-vault key for {target_npub}")),
+        "owner sync summary must name the wrapped Folder and recipient: {owner_summary}"
+    );
+
+    // The invitee's next sync opens the delivered grant and materializes the
+    // previously locked content: the original onboarding failure is dead.
+    let second_sync = run(&home_b, &member_tree, &["sync", "now", "--json"]);
+    assert!(
+        second_sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second_sync.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Team Vault/notes.md")).unwrap(),
+        "# Team Vault\n\nShared with the invited member.\n"
+    );
+
+    // The markers are gone; owner status no longer carries the field.
+    let status = run(&home_a, &tree_a, &["status", "--json"]);
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(
+        status.get("pendingWraps").is_none(),
+        "completed wraps must clear the admin signal: {status}"
+    );
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}

@@ -63,6 +63,24 @@ pub struct BrainMetadataResponse {
     /// metadata requester holds Brain admin standing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<ApprovalRequestResponse>,
+    /// Folder Key wraps still owed to waiting recipients. Populated only
+    /// when the metadata requester holds Brain admin standing, since those
+    /// are the clients that can open the current Folder Keys and complete
+    /// the wraps. Older clients ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_wraps: Vec<PendingGrantWrapResponse>,
+}
+
+/// One Folder Key wrap a key-holding client can complete for a waiting
+/// recipient. Metadata only; no key material.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingGrantWrapResponse {
+    pub folder_id: String,
+    pub recipient_npub: String,
+    pub key_version: u32,
+    pub reason: String,
+    pub created_at: String,
 }
 
 /// Brain role and authoritative current Folder Key Grant coverage for one
@@ -223,6 +241,11 @@ pub struct EncryptedBrainExportResponse {
     pub objects: Vec<EncryptedExportObjectResponse>,
     pub key_grants: Vec<FolderKeyGrantResponse>,
     pub access_state: EncryptedExportAccessStateResponse,
+    /// Folder Key wraps still owed to waiting recipients. Populated only
+    /// when the export requester holds Brain admin standing; older clients
+    /// ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_wraps: Vec<PendingGrantWrapResponse>,
 }
 
 /// Brain summary in an encrypted export.
@@ -301,6 +324,30 @@ pub struct SyncBootstrapResponse {
     pub object_count: usize,
     pub control_records: Vec<SyncRecordResponse>,
     pub current_state_kind: String,
+    /// Folder Key wraps still owed to waiting recipients. Populated only
+    /// when the sync requester holds Brain admin standing; older clients
+    /// ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_wraps: Vec<PendingGrantWrapResponse>,
+}
+
+/// Batch completion request for pending grant wraps: one opaque NIP-59 grant
+/// per marked recipient, each carrying its recipient npub.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletePendingWrapsRequest {
+    pub grants: Vec<FolderKeyGrantRequest>,
+}
+
+/// Receipt for a pending grant wrap completion.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletePendingWrapsResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub outcome: String,
+    pub completed_count: usize,
+    pub completed_recipients: Vec<String>,
 }
 
 /// Incremental sync record response.

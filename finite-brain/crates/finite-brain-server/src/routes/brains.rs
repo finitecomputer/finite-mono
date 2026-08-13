@@ -309,6 +309,7 @@ pub(crate) async fn brain_metadata_handler(
         enrich_metadata_identities(&store, &mut response)?;
         if actor_is_admin {
             attach_pending_approvals(&store, &mut response, &brain_id)?;
+            attach_pending_wraps(&store, &mut response, &brain_id)?;
         }
     }
     Ok(Json(response))
@@ -324,13 +325,29 @@ pub(crate) async fn encrypted_brain_export_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor_id = UserId::new(actor.clone())?;
     let brain_id = BrainId::new(brain_id)?;
-    let export = {
+    let (export, pending_wraps) = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_metadata_visible(&stored, &actor)?;
-        store.encrypted_brain_export(&brain_id, &actor_id)?
+        let export = store.encrypted_brain_export(&brain_id, &actor_id)?;
+        // Pending grant wraps ride the export only for key-holding clients
+        // (Brain admin standing); everyone else gets the export exactly as
+        // before and older clients ignore the field.
+        let pending_wraps = if ensure_brain_admin(&stored, &actor).is_ok() {
+            store
+                .pending_grant_wraps(&brain_id)?
+                .into_iter()
+                .map(pending_grant_wrap_response)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        (export, pending_wraps)
     };
-    Ok(Json(encrypted_brain_export_response(export)))
+    Ok(Json(encrypted_brain_export_response_with_wraps(
+        export,
+        pending_wraps,
+    )))
 }
 
 pub(crate) async fn brain_search_handler(

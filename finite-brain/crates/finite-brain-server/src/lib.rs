@@ -33,10 +33,11 @@ use finite_brain_store::{
     DeparturePrincipalKind, EmailInviteBootstrapScopeFolder, EncryptedBrainExport,
     FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
     GrantFolderAccessOutcome, IdentityAlias, LinkStatus, MountedFolderProjection,
-    MountedFolderState, PersonalAgentFolderRotation, SharedFolderConnectionStatus,
-    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredShareLink,
-    StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput,
-    SyncRecordType, VisibleBrain, VisibleBrainRole, timestamp_expired,
+    MountedFolderState, PendingGrantWrap, PersonalAgentFolderRotation,
+    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
+    StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
+    VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -773,6 +774,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
             axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
+            axum::routing::post(complete_pending_wraps_handler),
         )
 }
 
@@ -2143,6 +2148,7 @@ where
         let mut response = metadata_response(stored);
         enrich_metadata_identities(&store, &mut response)?;
         attach_pending_approvals(&store, &mut response, &brain_id)?;
+        attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
     };
     Ok(response)
@@ -13758,5 +13764,291 @@ mod tests {
         )
         .await;
         assert_error(wrong_signer, StatusCode::FORBIDDEN, "admin standing").await;
+    }
+
+    async fn admin_metadata(
+        router: &Router,
+        keys: &Keys,
+        brain_id: &str,
+        now: u64,
+    ) -> serde_json::Value {
+        let response = authed_request(
+            router.clone(),
+            keys,
+            "GET",
+            &format!("/v1/brains/{brain_id}/metadata"),
+            None,
+            now,
+        )
+        .await;
+        let status = response.status();
+        let body = read_text(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_wraps_are_admin_gated_and_complete_through_the_grant_batch() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Invitation commit records the pending wraps: the All-Members Folder
+        // plus the invited Restricted Folder.
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": target_npub,
+                    "initialFolderAccess": ["restricted"],
+                    "expiresAt": "2026-06-04T20:26:40Z",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invite).await;
+
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 20).await;
+        let wraps = metadata["pendingWraps"].as_array().unwrap();
+        assert_eq!(wraps.len(), 2, "{metadata}");
+        assert!(wraps.iter().all(|wrap| wrap["recipientNpub"] == target_npub
+            && wrap["reason"] == "invitation"
+            && wrap["keyVersion"] == 1));
+        let marked_folders = wraps
+            .iter()
+            .map(|wrap| wrap["folderId"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            marked_folders,
+            std::collections::BTreeSet::from([
+                "getting-started".to_owned(),
+                "restricted".to_owned()
+            ])
+        );
+
+        // Accept keeps the markers; the acceptant's own metadata stays clean
+        // of the admin-only field.
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let member_metadata = admin_metadata(&router, &target_keys, "acme", TEST_NOW + 21).await;
+        assert!(
+            member_metadata.get("pendingWraps").is_none(),
+            "non-admin metadata must not carry pendingWraps: {member_metadata}"
+        );
+
+        // The sync bootstrap shows the wraps to the admin but not the member.
+        let admin_bootstrap = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/sync/bootstrap",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(admin_bootstrap.status(), StatusCode::OK);
+        let admin_bootstrap: serde_json::Value = read_json(admin_bootstrap).await;
+        assert_eq!(
+            admin_bootstrap["pendingWraps"].as_array().unwrap().len(),
+            2,
+            "{admin_bootstrap}"
+        );
+        let member_bootstrap = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/sync/bootstrap",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(member_bootstrap.status(), StatusCode::OK);
+        let member_bootstrap: serde_json::Value = read_json(member_bootstrap).await;
+        assert!(
+            member_bootstrap.get("pendingWraps").is_none(),
+            "non-admin bootstrap must not carry pendingWraps: {member_bootstrap}"
+        );
+
+        // The encrypted export rides the same admin gate.
+        let admin_export = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 24,
+        )
+        .await;
+        assert_eq!(admin_export.status(), StatusCode::OK);
+        let admin_export: serde_json::Value = read_json(admin_export).await;
+        assert_eq!(
+            admin_export["pendingWraps"].as_array().unwrap().len(),
+            2,
+            "{admin_export}"
+        );
+        let member_export = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 25,
+        )
+        .await;
+        assert_eq!(member_export.status(), StatusCode::OK);
+        let member_export: serde_json::Value = read_json(member_export).await;
+        assert!(
+            member_export.get("pendingWraps").is_none(),
+            "non-admin export must not carry pendingWraps: {member_export}"
+        );
+
+        // The member cannot complete wraps.
+        let forbidden = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(serde_json::json!({ "grants": [] }).to_string()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        // A grant for an unmarked recipient fails closed and leaves the
+        // markers untouched.
+        let stranger_npub = npub(&Keys::generate());
+        let wrong_recipient = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-stranger",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &stranger_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(wrong_recipient.status(), StatusCode::BAD_REQUEST);
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 22).await;
+        assert_eq!(metadata["pendingWraps"].as_array().unwrap().len(), 2);
+
+        // The marked recipient's wrap completes and clears the marker.
+        let complete = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-target",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &target_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(complete.status(), StatusCode::OK);
+        let receipt: CompletePendingWrapsResponse = read_json(complete).await;
+        assert_eq!(receipt.outcome, "completed");
+        assert_eq!(receipt.completed_count, 1);
+        assert_eq!(receipt.completed_recipients, vec![target_npub.clone()]);
+
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 23).await;
+        let wraps = metadata["pendingWraps"].as_array().unwrap();
+        assert_eq!(wraps.len(), 1, "{metadata}");
+        assert_eq!(wraps[0]["folderId"], "getting-started");
+
+        // The recipient can now open the grant from the export.
+        let export = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(export.status(), StatusCode::OK);
+        let export: EncryptedBrainExportResponse = read_json(export).await;
+        let folder_key = folder_key_from_export_grant(&target_keys, &export, "restricted");
+        assert_eq!(folder_key, "d3JhcC1rZXk");
+
+        // Replay is a no-op.
+        let replay = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-target",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &target_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: CompletePendingWrapsResponse = read_json(replay).await;
+        assert_eq!(replay.outcome, "noPendingWraps");
+        assert_eq!(replay.completed_count, 0);
     }
 }

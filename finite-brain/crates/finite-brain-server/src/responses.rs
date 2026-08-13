@@ -138,6 +138,7 @@ pub(crate) fn metadata_response_with_mounts(
         grant_count: stored.grants.len(),
         collaborator_readiness: Vec::new(),
         pending_approvals: Vec::new(),
+        pending_wraps: Vec::new(),
     }
 }
 
@@ -399,8 +400,9 @@ pub(crate) fn mounted_folder_responses(
         .collect()
 }
 
-pub(crate) fn encrypted_brain_export_response(
+pub(crate) fn encrypted_brain_export_response_with_wraps(
     export: EncryptedBrainExport,
+    pending_wraps: Vec<PendingGrantWrapResponse>,
 ) -> EncryptedBrainExportResponse {
     EncryptedBrainExportResponse {
         version: export.version,
@@ -466,6 +468,7 @@ pub(crate) fn encrypted_brain_export_response(
                 })
                 .collect(),
         },
+        pending_wraps,
     }
 }
 
@@ -480,6 +483,16 @@ pub(crate) fn folder_key_grant_response(grant: FolderKeyGrantMetadata) -> Folder
         wrapped_event_json: grant.wrapped_event_json,
         access_change_event_json: grant.access_change_event_json,
         created_at: grant.created_at,
+    }
+}
+
+pub(crate) fn pending_grant_wrap_response(wrap: PendingGrantWrap) -> PendingGrantWrapResponse {
+    PendingGrantWrapResponse {
+        folder_id: wrap.folder_id.to_string(),
+        recipient_npub: wrap.recipient_npub.to_string(),
+        key_version: wrap.key_version,
+        reason: wrap.reason.as_str().to_owned(),
+        created_at: wrap.created_at,
     }
 }
 

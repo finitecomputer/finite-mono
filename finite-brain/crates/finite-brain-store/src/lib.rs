@@ -25,6 +25,7 @@ mod folder_access;
 mod folder_deletion;
 mod links;
 mod loading;
+mod pending_wraps;
 mod personal_agents;
 mod schema;
 mod shared_folders;
@@ -628,6 +629,65 @@ pub struct DeparturePendingRotation {
     pub marked_at_revision: i64,
     /// Folder Key version that was current when marked; rotation must leave it.
     pub key_version: u32,
+}
+
+/// Why a Principal gained Folder entitlement without a wrapped Folder Key.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PendingGrantWrapReason {
+    /// An npub-bound Brain Invitation was committed naming this recipient.
+    Invitation,
+    /// The recipient accepted a Brain Invitation, gaining entitlement.
+    Accept,
+    /// An ensure-access repair wrote or confirmed the Membership.
+    EnsureAccess,
+    /// Reserved for bootstrap flows that defer wrapping.
+    Bootstrap,
+}
+
+impl PendingGrantWrapReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Invitation => "invitation",
+            Self::Accept => "accept",
+            Self::EnsureAccess => "ensure-access",
+            Self::Bootstrap => "bootstrap",
+        }
+    }
+}
+
+impl TryFrom<&str> for PendingGrantWrapReason {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "invitation" => Ok(Self::Invitation),
+            "accept" => Ok(Self::Accept),
+            "ensure-access" => Ok(Self::EnsureAccess),
+            "bootstrap" => Ok(Self::Bootstrap),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown pending grant wrap reason {value}"),
+            }),
+        }
+    }
+}
+
+/// One Folder Key wrap a key-holding client still owes a waiting recipient.
+/// A delivery hint only: nothing blocks on it, and it clears once any path
+/// commits a current-version grant for the recipient.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PendingGrantWrap {
+    /// Brain holding the Folder.
+    pub brain_id: BrainId,
+    /// Folder id.
+    pub folder_id: FolderId,
+    /// Principal waiting for the wrapped Folder Key.
+    pub recipient_npub: UserId,
+    /// Folder Key version that was current when marked.
+    pub key_version: u32,
+    /// Why the marker was recorded.
+    pub reason: PendingGrantWrapReason,
+    /// Mark timestamp.
+    pub created_at: String,
 }
 
 /// Result of atomically deleting one Folder subtree.
@@ -3492,6 +3552,9 @@ fn insert_grant_with_provenance(
         ],
     )
     .map_err(map_insert_error("folder_key_grant_id", &grant.id))?;
+    // Any committed grant at or past a marked version satisfies the pending
+    // wrap for that recipient, whichever path wrote the grant.
+    pending_wraps::clear_pending_grant_wraps_for_grant(tx, brain_id, grant)?;
     Ok(())
 }
 
@@ -10571,5 +10634,339 @@ mod tests {
             payload_json: "{\"body\":\"delete\"}".to_owned(),
             record_event_kind: APP_SPECIFIC_KIND,
         })
+    }
+
+    fn invite_member_with_private_project(
+        store: &mut BrainStore,
+        id: &str,
+    ) -> StoredBrainInvitation {
+        store
+            .create_brain_invitation(
+                &BrainId::new("acme").unwrap(),
+                id,
+                &UserId::new("npub-member").unwrap(),
+                &format!("code-{id}"),
+                "/accept",
+                &[FolderId::new("private-project").unwrap()],
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00Z",
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap()
+    }
+
+    fn pending_wrap_folders(
+        store: &BrainStore,
+        brain_id: &BrainId,
+        recipient: &UserId,
+    ) -> BTreeSet<(String, PendingGrantWrapReason)> {
+        store
+            .pending_grant_wraps(brain_id)
+            .unwrap()
+            .iter()
+            .filter(|wrap| wrap.recipient_npub == *recipient)
+            .map(|wrap| (wrap.folder_id.as_str().to_owned(), wrap.reason))
+            .collect()
+    }
+
+    #[test]
+    fn invitation_commit_marks_pending_wraps_for_entitled_folders() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        // Membership-adjacent All-Members Folder plus the invited Restricted
+        // Folder; the uninvited Restricted child Folder is not marked.
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([
+                ("team-notes".to_owned(), PendingGrantWrapReason::Invitation),
+                (
+                    "private-project".to_owned(),
+                    PendingGrantWrapReason::Invitation
+                ),
+            ])
+        );
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert!(wraps.iter().all(|wrap| wrap.key_version == 1));
+    }
+
+    #[test]
+    fn invitation_revoke_clears_commit_time_pending_wraps() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .revoke_brain_invitation(
+                &brain_id,
+                &invitation.id,
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        assert!(pending_wrap_folders(&store, &brain_id, &member).is_empty());
+    }
+
+    #[test]
+    fn accept_marks_pending_wraps_without_duplicating_commit_markers() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .accept_brain_invitation_by_code(
+                &invitation.invite_code,
+                &member,
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        // Commit already marked both Folders at the same key version, so
+        // accept adds nothing new.
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert_eq!(wraps.len(), 2);
+
+        // A pre-markers invitation (simulated by clearing) is marked at
+        // accept time with the accept reason.
+        store
+            .conn
+            .execute("DELETE FROM brain_pending_grant_wraps", [])
+            .unwrap();
+        let second = store
+            .create_brain_invitation(
+                &brain_id,
+                "invite-2",
+                &UserId::new("npub-second").unwrap(),
+                "code-invite-2",
+                "/accept",
+                &[],
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00Z",
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM brain_pending_grant_wraps", [])
+            .unwrap();
+        store
+            .accept_brain_invitation_by_code(
+                &second.invite_code,
+                &UserId::new("npub-second").unwrap(),
+                "2026-06-25T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &UserId::new("npub-second").unwrap()),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Accept)])
+        );
+    }
+
+    #[test]
+    fn add_member_marks_all_members_folders_for_ensure_access() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+
+        store.add_member(&brain_id, &member).unwrap();
+
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([(
+                "team-notes".to_owned(),
+                PendingGrantWrapReason::EnsureAccess
+            )])
+        );
+    }
+
+    fn complete_wraps_for_test(
+        store: &mut BrainStore,
+        folder_id: &str,
+        recipients: &[&str],
+        grants: &[FolderKeyGrantMetadata],
+    ) -> Result<usize, StoreError> {
+        let control_records = mount_control_records(grants);
+        store.complete_pending_grant_wraps(
+            &BrainId::new("acme").unwrap(),
+            &FolderId::new(folder_id).unwrap(),
+            &recipients
+                .iter()
+                .map(|recipient| UserId::new(*recipient).unwrap())
+                .collect::<Vec<_>>(),
+            grants,
+            &control_records,
+        )
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_delivers_grants_and_clears_markers() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+        store
+            .accept_brain_invitation_by_code(
+                &invitation.invite_code,
+                &member,
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        let completed = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-member"],
+            &[grant(
+                "grant-private-project-member",
+                "private-project",
+                1,
+                "npub-admin",
+                "npub-member",
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(completed, 1);
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.grants.iter().any(|existing| {
+            existing.folder_id.as_str() == "private-project"
+                && existing.recipient_npub == member
+                && existing.key_version == 1
+        }));
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_rejects_wrong_recipient_set_closed() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        let result = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-intruder"],
+            &[grant(
+                "grant-private-project-intruder",
+                "private-project",
+                1,
+                "npub-admin",
+                "npub-intruder",
+            )],
+        );
+
+        assert!(matches!(result, Err(StoreError::BrokenInvariant { .. })));
+        // Nothing committed: the marker survives and no grant landed.
+        assert!(pending_wrap_folders(&store, &brain_id, &member).contains(&(
+            "private-project".to_owned(),
+            PendingGrantWrapReason::Invitation
+        )));
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            !stored
+                .grants
+                .iter()
+                .any(|grant| grant.recipient_npub.as_str() == "npub-intruder")
+        );
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_fails_closed_on_key_version_drift() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+        // Simulate a rotation that happened underneath the pending wrap
+        // without covering the marked recipient.
+        store
+            .conn
+            .execute(
+                "UPDATE folders SET current_key_version = 2 WHERE brain_id = 'acme' AND id = 'private-project'",
+                [],
+            )
+            .unwrap();
+
+        let result = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-member"],
+            &[grant(
+                "grant-private-project-member",
+                "private-project",
+                2,
+                "npub-admin",
+                "npub-member",
+            )],
+        );
+
+        assert!(matches!(result, Err(StoreError::BrokenInvariant { .. })));
+        assert!(pending_wrap_folders(&store, &brain_id, &member).contains(&(
+            "private-project".to_owned(),
+            PendingGrantWrapReason::Invitation
+        )));
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_double_complete_is_a_noop() {
+        let mut store = store_with_strategy_folder();
+        invite_member_with_private_project(&mut store, "invite-1");
+        let grants = [grant(
+            "grant-private-project-member",
+            "private-project",
+            1,
+            "npub-admin",
+            "npub-member",
+        )];
+
+        assert_eq!(
+            complete_wraps_for_test(&mut store, "private-project", &["npub-member"], &grants)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            complete_wraps_for_test(&mut store, "private-project", &["npub-member"], &grants)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn committed_grant_clears_the_matching_pending_wrap_marker() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .grant_folder_access(
+                &brain_id,
+                &FolderId::new("private-project").unwrap(),
+                &member,
+                &grant(
+                    "grant-private-project-member",
+                    "private-project",
+                    1,
+                    "npub-admin",
+                    "npub-member",
+                ),
+            )
+            .unwrap();
+
+        // The manual grant path satisfies the marker; the untouched
+        // team-notes marker remains.
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
+        );
     }
 }

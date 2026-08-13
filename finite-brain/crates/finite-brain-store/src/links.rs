@@ -82,9 +82,11 @@ impl BrainStore {
         }
         let initial_folder_access_json = folder_id_vec_json(initial_folder_access)?;
 
-        self.conn
-            .execute(
-                r#"
+        let pending_wrap_folders =
+            invitation_pending_wrap_folders(&stored.brain, initial_folder_access);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
                 INSERT INTO brain_invitations (
                     id, brain_id, user_id, target_kind, status, invite_code, accept_path,
                     initial_folder_access_json, created_by_npub, expires_at,
@@ -93,22 +95,37 @@ impl BrainStore {
                 )
                 VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]', ?10, ?11, ?12)
                 "#,
-                params![
-                    id,
-                    brain_id.as_str(),
-                    user_id.as_str(),
-                    invite_code,
-                    accept_path,
-                    initial_folder_access_json,
-                    created_by_npub.as_str(),
-                    expires_at,
-                    created_at,
-                    origin_ref,
-                    roster_revision,
-                    origin_kind.as_str(),
-                ],
-            )
-            .map_err(map_insert_error("brain_invitation_id", id))?;
+            params![
+                id,
+                brain_id.as_str(),
+                user_id.as_str(),
+                invite_code,
+                accept_path,
+                initial_folder_access_json,
+                created_by_npub.as_str(),
+                expires_at,
+                created_at,
+                origin_ref,
+                roster_revision,
+                origin_kind.as_str(),
+            ],
+        )
+        .map_err(map_insert_error("brain_invitation_id", id))?;
+        // The invitee gains entitlement on accept but receives no wrapped
+        // grants at commit; mark every Folder they will be entitled to read so
+        // a key-holding client can deliver the wraps ahead of or after accept.
+        for folder in pending_wrap_folders {
+            pending_wraps::mark_pending_grant_wrap(
+                &tx,
+                brain_id,
+                &folder.id,
+                user_id,
+                folder.current_key_version,
+                PendingGrantWrapReason::Invitation,
+                created_at,
+            )?;
+        }
+        tx.commit()?;
 
         self.load_brain_invitation(id)
     }
@@ -367,7 +384,8 @@ impl BrainStore {
                 kind: "brain invitation",
             });
         }
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             r#"
             UPDATE brain_invitations
             SET status = 'revoked',
@@ -380,6 +398,17 @@ impl BrainStore {
             "#,
             params![brain_id.as_str(), invitation_id, updated_at],
         )?;
+        // A revoked pending invitation never matures into entitlement, so its
+        // commit-time wrap markers are no longer deliverable.
+        if let Some(user_id) = &invitation.user_id {
+            pending_wraps::clear_pending_grant_wraps_for_reason(
+                &tx,
+                brain_id,
+                user_id,
+                PendingGrantWrapReason::Invitation,
+            )?;
+        }
+        tx.commit()?;
         self.load_brain_invitation(invitation_id)
     }
 
@@ -406,22 +435,36 @@ impl BrainStore {
         let query = format!(
             "{BRAIN_INVITATION_SELECT} WHERE brain_id = ?1 AND user_id = ?2 AND target_kind = 'npub' AND status = 'pending'"
         );
-        let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map(
-            params![brain_id.as_str(), user_id.as_str()],
-            brain_invitation_from_row,
-        )?;
-        let mut revoked = Vec::new();
-        for row in rows {
-            let invitation = row?;
-            if !timestamp_expired(&invitation.expires_at, now) {
-                continue;
-            }
-            self.conn.execute(
-                "UPDATE brain_invitations SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
-                params![invitation.id, now],
+        let expired_ids = {
+            let mut stmt = self.conn.prepare(&query)?;
+            let rows = stmt.query_map(
+                params![brain_id.as_str(), user_id.as_str()],
+                brain_invitation_from_row,
             )?;
-            revoked.push(invitation.id);
+            let mut expired = Vec::new();
+            for row in rows {
+                let invitation = row?;
+                if timestamp_expired(&invitation.expires_at, now) {
+                    expired.push(invitation.id);
+                }
+            }
+            expired
+        };
+        let mut revoked = Vec::new();
+        for invitation_id in expired_ids {
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "UPDATE brain_invitations SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![invitation_id, now],
+            )?;
+            pending_wraps::clear_pending_grant_wraps_for_reason(
+                &tx,
+                brain_id,
+                user_id,
+                PendingGrantWrapReason::Invitation,
+            )?;
+            tx.commit()?;
+            revoked.push(invitation_id);
         }
         Ok(revoked)
     }
@@ -470,6 +513,11 @@ impl BrainStore {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let pending_wrap_folders =
+            invitation_pending_wrap_folders(&brain, &invitation.initial_folder_access)
+                .into_iter()
+                .map(|folder| (folder.id.clone(), folder.current_key_version))
+                .collect::<Vec<_>>();
 
         let tx = self.conn.transaction()?;
         insert_member_with_provenance_if_missing(
@@ -487,6 +535,19 @@ impl BrainStore {
                 user_id,
                 "invitation",
                 &invitation.id,
+                now,
+            )?;
+        }
+        // Accept grants entitlement without delivering wrapped grants; mark
+        // every readable Folder so any key-holding client completes the wraps.
+        for (folder_id, key_version) in pending_wrap_folders {
+            pending_wraps::mark_pending_grant_wrap(
+                &tx,
+                &invitation.brain_id,
+                &folder_id,
+                user_id,
+                key_version,
+                PendingGrantWrapReason::Accept,
                 now,
             )?;
         }
@@ -949,6 +1010,24 @@ fn invitation_grant_provenance(invitation: &StoredBrainInvitation) -> GrantProve
         }
         _ => GrantProvenance::invitation(delegated_by, origin_ref, invitation.roster_revision),
     }
+}
+
+/// Folders an invited Principal becomes entitled to read on accept: every
+/// All-Members Folder through Membership, plus the invited Restricted
+/// Folders. Owner and Admin-Only Folders never follow from an invitation.
+fn invitation_pending_wrap_folders<'a>(
+    brain: &'a Brain,
+    initial_folder_access: &[FolderId],
+) -> Vec<&'a Folder> {
+    brain
+        .folders
+        .iter()
+        .filter(|folder| {
+            folder.access == FolderAccessMode::AllMembers
+                || (folder.access == FolderAccessMode::Restricted
+                    && initial_folder_access.contains(&folder.id))
+        })
+        .collect()
 }
 
 impl BrainStore {

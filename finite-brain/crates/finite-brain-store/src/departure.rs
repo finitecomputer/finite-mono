@@ -108,6 +108,12 @@ impl BrainStore {
                             target.as_str()
                         ],
                     )?;
+                    pending_wraps::clear_pending_grant_wraps_for_folder_recipient(
+                        &tx,
+                        &mount.source_brain_id,
+                        &mount.source_folder_id,
+                        target,
+                    )?;
                 }
                 if let Some(key_version) = mount.source_pending_key_version {
                     mark_departure_pending_rotation(
@@ -194,6 +200,14 @@ impl BrainStore {
                         .expect("plans only exist for resolved principals")
                         .as_str()
                 ],
+            )?;
+            pending_wraps::clear_pending_grant_wraps_for_recipient(
+                &tx,
+                &plan.brain_id,
+                application
+                    .departed_npub
+                    .as_ref()
+                    .expect("plans only exist for resolved principals"),
             )?;
         }
         tx.execute(

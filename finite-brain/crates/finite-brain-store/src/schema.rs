@@ -58,6 +58,16 @@ impl BrainStore {
                 params![24, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V25 is additive only (one new marker table), so it runs inside the
+        // same ordinary migration transaction.
+        if !migration_applied(&tx, 25)? {
+            tx.execute_batch(SCHEMA_V25)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![25, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -268,6 +278,32 @@ impl BrainStore {
         Ok(())
     }
 }
+
+const SCHEMA_V25: &str = r#"
+-- Pending Grant Wraps: the JOIN side of the departure pending-rotation
+-- pattern. When a Principal gains Folder entitlement without receiving a
+-- wrapped Folder Key Grant (invitation commit, invitation accept, or an
+-- ensure-access membership repair), the server records one marker per
+-- (Brain, Folder, recipient, key version). Key-holding clients discover the
+-- markers on sync, wrap the current Folder Key for the waiting recipients,
+-- and the markers clear when the grants validate. A marker never blocks
+-- anything: it is a delivery hint, not a gate.
+CREATE TABLE brain_pending_grant_wraps (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    reason TEXT NOT NULL
+        CHECK (reason IN ('invitation', 'accept', 'ensure-access', 'bootstrap')),
+    created_at TEXT NOT NULL,
+    UNIQUE (brain_id, folder_id, recipient_npub, key_version),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX brain_pending_grant_wraps_by_brain
+    ON brain_pending_grant_wraps(brain_id, folder_id);
+"#;
 
 const SCHEMA_V24: &str = r#"
 -- ADR-0046 Approval artifacts: npub-bound invitations remember whether they
@@ -1841,6 +1877,73 @@ mod tests {
     }
 
     #[test]
+    fn migration_v25_adds_pending_grant_wraps_table() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'brain_pending_grant_wraps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing V25 table brain_pending_grant_wraps");
+
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('wraps-check', 'organization', 'Wraps Check', NULL, '2026-06-23T00:00:00Z');
+                INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id, parent_folder_key,
+                    path, current_key_version, shared_folder_source, setup_incomplete, created_at
+                ) VALUES (
+                    'wraps-check', 'ops', 'Ops', 'vault_ops', 'admin_only', NULL, '',
+                    'ops', 1, 0, 0, '2026-06-23T00:00:00Z'
+                );
+                INSERT INTO brain_pending_grant_wraps (
+                    brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                ) VALUES (
+                    'wraps-check', 'ops', 'npub-member', 1, 'invitation', '2026-06-23T00:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+        // Duplicate (brain, folder, recipient, key version) markers are ignored
+        // by the marker write path and rejected by the table itself.
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_pending_grant_wraps (
+                        brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                     ) VALUES (
+                        'wraps-check', 'ops', 'npub-member', 1, 'accept', '2026-06-24T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the UNIQUE constraint must reject duplicate markers"
+        );
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_pending_grant_wraps (
+                        brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                     ) VALUES (
+                        'wraps-check', 'ops', 'npub-member', 2, 'bogus', '2026-06-24T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the reason CHECK must reject unknown kinds"
+        );
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -1983,7 +2086,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 24);
+        assert_eq!(latest_version, 25);
 
         let old_table_count: i64 = store
             .conn

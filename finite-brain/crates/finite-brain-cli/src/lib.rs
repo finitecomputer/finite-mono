@@ -1890,6 +1890,16 @@ fn sync<W: Write>(
                     .any(|arg| arg == "--summary" || arg == "--verbose" || arg == "-v")
                 {
                     write_sync_change_rows(output, &report)?;
+                    if !report.completed_wraps.is_empty() {
+                        writeln!(output, "wrapped grants:")?;
+                        for wrap in &report.completed_wraps {
+                            writeln!(
+                                output,
+                                "- wrapped {} key for {}",
+                                wrap.folder_id, wrap.recipient_npub
+                            )?;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -2170,7 +2180,13 @@ fn path_entry_exists(path: &Path) -> Result<bool, CliError> {
 }
 
 fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<(), CliError> {
-    let report = status_report(env)?;
+    let mut report = status_report(env)?;
+    // Best-effort admin signal: the server only includes pendingWraps for
+    // key-holding identities, so its presence already implies admin standing.
+    // Any failure (offline, non-admin, older server) leaves the field unset.
+    if report.brain_id.is_some() && report.auth.state == "authenticated" {
+        report.pending_wraps = fetch_pending_wrap_count(env, report.brain_id.as_deref());
+    }
     if json {
         write_json(output, &report)
     } else {
@@ -2192,8 +2208,23 @@ fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<
             report.sync.mode, report.sync.status
         )?;
         writeln!(output, "Conflicts: {}", report.conflicts.len())?;
+        if let Some(pending_wraps) = report.pending_wraps
+            && pending_wraps > 0
+        {
+            writeln!(output, "PendingWraps: {pending_wraps}")?;
+        }
         Ok(())
     }
+}
+
+fn fetch_pending_wrap_count(env: &CliEnvironment, brain_id: Option<&str>) -> Option<usize> {
+    let brain_id = brain_id?;
+    let route = format!("/v1/brains/{brain_id}/metadata");
+    let metadata = signed_json_request(env, &[], "GET", &route, None).ok()?;
+    metadata
+        .get("pendingWraps")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
 }
 
 fn unlock<W: Write>(
@@ -7951,6 +7982,8 @@ mod tests {
                 members: vec![],
                 admins: vec![],
             },
+
+            pending_wraps: Vec::new(),
         };
         let opened = opened_export_folder_key_grants_tolerant(&auth, &export);
         assert_eq!(opened.len(), 1);
@@ -11055,6 +11088,7 @@ mod tests {
             remote_changes: Vec::new(),
             unsupported_objects: Vec::new(),
             conflicts: Vec::new(),
+            completed_wraps: Vec::new(),
         };
 
         assert_eq!(reconcile_search_changes(&tree, &report).unwrap(), 1);
