@@ -84,7 +84,7 @@ in
       description = ''
         Operator-placed env file carrying LITESTREAM_ACCESS_KEY_ID and
         LITESTREAM_SECRET_ACCESS_KEY. If absent the replicator unit is
-        condition-skipped (chat is unaffected) and finite-litestream-health
+        condition-skipped (chat and Brain keep serving) and finite-litestream-health
         fails loudly every five minutes until it exists.
       '';
     };
@@ -188,7 +188,7 @@ in
           # finite-healthcheck curl loop, so a missing secret cannot fail
           # deploy-time aggregate health.
           finite-litestream-health = {
-            description = "Fail if chat replication to object storage is missing, erroring, or stale";
+            description = "Fail if enrolled SQLite replication to object storage is missing, erroring, or stale";
             path = [
               pkgs.coreutils
               pkgs.curl

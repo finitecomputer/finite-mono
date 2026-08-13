@@ -11,7 +11,10 @@ WorkOS cookie is added to the Brain subdomain.
 
 The SQLite database is `/var/lib/private/finitebrain/finite-brain.sqlite3`.
 Compute deployment and data migration are separate operations. Never replace
-the database without a byte-for-byte rollback copy.
+the database without a byte-for-byte rollback copy. Continuous WAL replication
+to Latitude object storage is enrolled next to chat
+(`infra/runbooks/litestream-chat-replication.md`); that lane is DR-only and
+does not replace the stop-the-world Recovery Snapshot.
 
 ## Preconditions
 
@@ -99,6 +102,7 @@ then revoke both disposable invitations after verification.
 3. Keep or restore the smoke service as the temporary endpoint while deciding
    how to reconcile post-cutover writes.
 
-A NixOS rollback is not a data rollback. Offsite Recovery Snapshot and
-empty-target restore remain TODO; do not claim them until a restore drill has
-passed.
+A NixOS rollback is not a data rollback. Continuous Litestream replication is
+the between-deploy restore lane (see
+`litestream-chat-replication.md`); empty-target restore still requires an
+explicit drill before claiming it.
