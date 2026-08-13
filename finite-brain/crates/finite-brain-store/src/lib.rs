@@ -4587,7 +4587,7 @@ mod tests {
     }
 
     #[test]
-    fn list_pending_brain_invitations_for_target_filters_status_target_and_expiry() {
+    fn list_pending_brain_invitations_for_target_filters_status_and_target() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();
         let restricted = FolderId::new("private-project").unwrap();
@@ -4642,14 +4642,18 @@ mod tests {
             )
             .unwrap();
 
+        // Expired rows are included; callers compute the expired marker at
+        // read time.
         let target_invitations = store
-            .list_pending_brain_invitations_for_target(&target, now)
+            .list_pending_brain_invitations_for_target(&target)
             .unwrap();
-        assert_eq!(target_invitations.len(), 1);
+        assert_eq!(target_invitations.len(), 2);
         assert_eq!(target_invitations[0].id, "invitation-pending");
+        assert_eq!(target_invitations[1].id, "invitation-expired");
+        assert!(timestamp_expired(&target_invitations[1].expires_at, now));
 
         let other_invitations = store
-            .list_pending_brain_invitations_for_target(&other, now)
+            .list_pending_brain_invitations_for_target(&other)
             .unwrap();
         assert_eq!(other_invitations.len(), 1);
         assert_eq!(other_invitations[0].id, "invitation-other");
@@ -4657,7 +4661,7 @@ mod tests {
         let stranger = UserId::new("npub-stranger").unwrap();
         assert!(
             store
-                .list_pending_brain_invitations_for_target(&stranger, now)
+                .list_pending_brain_invitations_for_target(&stranger)
                 .unwrap()
                 .is_empty()
         );
@@ -4665,13 +4669,11 @@ mod tests {
         store
             .accept_brain_invitation_by_code("invite-pending", &target, now)
             .unwrap();
-        assert!(
-            store
-                .list_pending_brain_invitations_for_target(&target, now)
-                .unwrap()
-                .is_empty(),
-            "accepted and expired invitations must not be listed"
-        );
+        let remaining = store
+            .list_pending_brain_invitations_for_target(&target)
+            .unwrap();
+        assert_eq!(remaining.len(), 1, "accepted invitations drop out");
+        assert_eq!(remaining[0].id, "invitation-expired");
     }
 
     #[test]

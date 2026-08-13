@@ -3694,7 +3694,7 @@ fn brain_invites<W: Write>(
                 Some(brain_id) => {
                     let route = format!("/v1/brains/{brain_id}/invitations");
                     let response = signed_json_request(env, args, "GET", &route, None)?;
-                    write_command_response(output, json, &response)
+                    write_brain_invitations(output, json, &response)
                 }
                 None => {
                     // No Working Tree: the caller is an invitee, not an admin.
@@ -3748,6 +3748,10 @@ fn write_my_invitations<W: Write>(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                 };
+                let expired = invitation
+                    .get("expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let id = field("id");
                 writeln!(output, "invitation {id}")?;
                 writeln!(
@@ -3757,12 +3761,72 @@ fn write_my_invitations<W: Write>(
                     field("brainId")
                 )?;
                 writeln!(output, "  expires {}", field("expiresAt"))?;
-                writeln!(output, "  accept: fbrain invite brain accept --id {id}")?;
+                if expired {
+                    writeln!(
+                        output,
+                        "  status expired; ask the inviting admin to re-invite you"
+                    )?;
+                } else {
+                    writeln!(output, "  accept: fbrain invite brain accept --id {id}")?;
+                }
             }
             Ok(())
         }
         _ => {
             writeln!(output, "no pending invitations")?;
+            Ok(())
+        }
+    }
+}
+
+fn write_brain_invitations<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let invitations = value
+        .get("invitations")
+        .and_then(serde_json::Value::as_array);
+    match invitations {
+        Some(invitations) if !invitations.is_empty() => {
+            for invitation in invitations {
+                let field = |name: &str| {
+                    invitation
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                let expired = invitation
+                    .get("expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let target = {
+                    let user_id = field("userId");
+                    if user_id.is_empty() {
+                        field("invitedEmail")
+                    } else {
+                        user_id
+                    }
+                };
+                let status = if expired && field("status") == "pending" {
+                    "pending (expired)".to_owned()
+                } else {
+                    field("status").to_owned()
+                };
+                writeln!(
+                    output,
+                    "invitation {} -> {target} status={status} expires={}",
+                    field("id"),
+                    field("expiresAt")
+                )?;
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no invitations")?;
             Ok(())
         }
     }
@@ -12327,6 +12391,102 @@ mod tests {
                 "GET /v1/brains/acme/invitations HTTP/1.1".to_owned(),
                 "GET /v1/brains/brain/invitations HTTP/1.1".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn invite_brain_list_marks_expired_invitations_for_the_invitee() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [
+                {
+                    "id": "invitation-live",
+                    "inviteCode": "invite-live",
+                    "brainId": "alice-brain",
+                    "brainDisplayName": "Alice's Brain",
+                    "inviterDisplay": "alice@finite.vip",
+                    "folderScope": [],
+                    "expiresAt": "2026-06-30T00:00:00Z",
+                    "expired": false,
+                    "publicInstructionsUrl": null,
+                    "originKind": "invitation",
+                    "originRef": null
+                },
+                {
+                    "id": "invitation-expired",
+                    "inviteCode": "invite-expired",
+                    "brainId": "bob-brain",
+                    "brainDisplayName": "Bob's Brain",
+                    "inviterDisplay": "bob@finite.vip",
+                    "folderScope": [],
+                    "expiresAt": "2026-05-02T00:00:00Z",
+                    "expired": true,
+                    "publicInstructionsUrl": null,
+                    "originKind": "invitation",
+                    "originRef": null
+                }
+            ]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 1);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut plain = Vec::new();
+        run_with_env(["invite", "brain", "list"], env, &mut plain).unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains("invitation invitation-live"));
+        assert!(plain.contains("accept: fbrain invite brain accept --id invitation-live"));
+        assert!(plain.contains("invitation invitation-expired"));
+        assert!(plain.contains("status expired; ask the inviting admin to re-invite you"));
+        assert!(!plain.contains("accept --id invitation-expired"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests, vec!["GET /v1/my-invitations HTTP/1.1".to_owned()]);
+    }
+
+    #[test]
+    fn invite_brain_list_marks_expired_invitations_for_the_admin() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [{
+                "id": "invitation-expired",
+                "brainId": "acme",
+                "userId": "npub1target",
+                "status": "pending",
+                "expiresAt": "2026-05-02T00:00:00Z",
+                "expired": true
+            }]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 1);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut plain = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--brain", "acme"],
+            env,
+            &mut plain,
+        )
+        .unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains(
+            "invitation invitation-expired -> npub1target status=pending (expired) expires=2026-05-02T00:00:00Z"
+        ));
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec!["GET /v1/brains/acme/invitations HTTP/1.1".to_owned()]
         );
     }
 

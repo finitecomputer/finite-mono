@@ -646,6 +646,11 @@ pub struct BrainInvitationResponse {
     pub updated_at: String,
     pub accepted_at: Option<String>,
     pub duplicate_accept: bool,
+    /// Computed at read time: true when a pending Invitation's `expiresAt`
+    /// is at or before the server's current time. Stored rows are never
+    /// mutated to derive it.
+    #[serde(default)]
+    pub expired: bool,
     /// Set when a plan-linked acceptance observed roster narrowing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrowed: Option<NarrowedAcceptanceResponse>,
@@ -839,8 +844,10 @@ pub struct BrainInvitationListResponse {
     pub invitations: Vec<BrainInvitationResponse>,
 }
 
-/// Invitee-scoped Brain Invitation summary: the pending, non-expired
-/// npub-targeted invitations addressed to the authenticated caller.
+/// Invitee-scoped Brain Invitation summary: the pending npub-targeted
+/// invitations addressed to the authenticated caller. Expired invitations
+/// remain visible with `expired: true` so the invitee can ask for a re-invite
+/// instead of seeing a silent disappearance.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MyInvitationResponse {
@@ -851,6 +858,10 @@ pub struct MyInvitationResponse {
     pub inviter_display: String,
     pub folder_scope: Vec<String>,
     pub expires_at: String,
+    /// Computed at read time: true when `expiresAt` is at or before the
+    /// server's current time.
+    #[serde(default)]
+    pub expired: bool,
     pub public_instructions_url: Option<String>,
     pub origin_kind: String,
     pub origin_ref: Option<String>,

@@ -5235,7 +5235,7 @@ mod tests {
         .await;
         assert_eq!(list.status(), StatusCode::OK);
         let list: MyInvitationListResponse = read_json(list).await;
-        assert_eq!(list.invitations.len(), 1);
+        assert_eq!(list.invitations.len(), 2);
         let mine = &list.invitations[0];
         assert_eq!(mine.id, invitation.id);
         assert_eq!(mine.invite_code, invitation.invite_code);
@@ -5244,6 +5244,7 @@ mod tests {
         assert_eq!(mine.inviter_display, npub(&admin_keys));
         assert_eq!(mine.folder_scope, vec!["getting-started".to_owned()]);
         assert_eq!(mine.expires_at, "2026-06-04T20:26:40Z");
+        assert!(!mine.expired);
         assert!(
             mine.public_instructions_url
                 .as_deref()
@@ -5255,6 +5256,13 @@ mod tests {
         );
         assert_eq!(mine.origin_kind, "invitation");
         assert_eq!(mine.origin_ref, None);
+
+        // Expired invitations stay visible with an explicit marker instead of
+        // silently disappearing or masquerading as pending.
+        let expired = &list.invitations[1];
+        assert_eq!(expired.id, "invitation-expired");
+        assert_eq!(expired.brain_id, "acme-expired");
+        assert!(expired.expired);
 
         // Identity-hiding: non-targets (including the inviting admin) see an
         // empty list, not an error.
@@ -5273,7 +5281,8 @@ mod tests {
             assert!(other.invitations.is_empty());
         }
 
-        // Accepting consumes the invitation; it drops out of the list.
+        // Accepting consumes the invitation; it drops out of the list while
+        // the expired one remains visible with its marker.
         let accept = authed_request(
             router.clone(),
             &target_keys,
@@ -5298,7 +5307,9 @@ mod tests {
         .await;
         assert_eq!(after.status(), StatusCode::OK);
         let after: MyInvitationListResponse = read_json(after).await;
-        assert!(after.invitations.is_empty());
+        assert_eq!(after.invitations.len(), 1);
+        assert_eq!(after.invitations[0].id, "invitation-expired");
+        assert!(after.invitations[0].expired);
     }
 
     #[tokio::test]
@@ -5317,6 +5328,90 @@ mod tests {
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ));
+    }
+
+    #[tokio::test]
+    async fn brain_invitation_list_marks_expired_pending_invitations() {
+        let admin_keys = Keys::generate();
+        let live_keys = Keys::generate();
+        let expired_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&live_keys),
+                    "expiresAt": "2026-06-04T20:26:40Z",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let live: BrainInvitationResponse = read_json(invite).await;
+        assert!(!live.expired);
+
+        // A pending invitation whose expiry has already passed.
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(npub(&expired_keys)).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let list = authed_request(
+            router,
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/invitations",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: BrainInvitationListResponse = read_json(list).await;
+        assert_eq!(list.invitations.len(), 2);
+        let by_id = list
+            .invitations
+            .iter()
+            .map(|invitation| (invitation.id.as_str(), invitation))
+            .collect::<BTreeMap<_, _>>();
+        let live_row = by_id.get(live.id.as_str()).unwrap();
+        assert!(!live_row.expired);
+        let expired_row = by_id.get("invitation-expired").unwrap();
+        assert!(expired_row.expired);
+        assert_eq!(
+            expired_row.status, "pending",
+            "expired is computed at read; the stored status is never mutated"
+        );
     }
 
     #[tokio::test]

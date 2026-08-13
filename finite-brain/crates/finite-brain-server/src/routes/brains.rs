@@ -588,6 +588,7 @@ pub(crate) async fn list_brain_invitations_handler(
 ) -> Result<Json<BrainInvitationListResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let brain_id = BrainId::new(brain_id)?;
+    let now = server_timestamp(&state);
     let invitations = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
@@ -599,6 +600,7 @@ pub(crate) async fn list_brain_invitations_handler(
             .map(brain_invitation_response)
             .collect::<Vec<_>>();
         for response in &mut responses {
+            mark_invitation_expired(response, &now);
             enrich_brain_invitation_identities(&store, response)?;
             attach_invitation_public_url(&state, response);
         }
@@ -607,10 +609,12 @@ pub(crate) async fn list_brain_invitations_handler(
     Ok(Json(BrainInvitationListResponse { invitations }))
 }
 
-/// List the caller's own pending, non-expired npub-targeted Brain
-/// Invitations. Identity-hiding: the exact target sees their invitations,
-/// everyone else sees an empty list. Email Invite Bootstraps are not bound
-/// to an npub until claim, so they are excluded.
+/// List the caller's own pending npub-targeted Brain Invitations, including
+/// expired ones marked with `expired: true` so an expired Invite surfaces as
+/// expired instead of silently disappearing. Identity-hiding: the exact
+/// target sees their invitations, everyone else sees an empty list. Email
+/// Invite Bootstraps are not bound to an npub until claim, so they are
+/// excluded.
 pub(crate) async fn list_my_invitations_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -623,7 +627,8 @@ pub(crate) async fn list_my_invitations_handler(
     let mut invitations = Vec::new();
     {
         let store = state.store.lock().map_err(lock_error)?;
-        for invitation in store.list_pending_brain_invitations_for_target(&actor, &now)? {
+        for invitation in store.list_pending_brain_invitations_for_target(&actor)? {
+            let expired = timestamp_expired(&invitation.expires_at, &now);
             let brain_display_name = store.load_brain(&invitation.brain_id)?.brain.name;
             let inviter_display =
                 known_identity_responses(&store, [invitation.created_by_npub.to_string()])?
@@ -647,6 +652,7 @@ pub(crate) async fn list_my_invitations_handler(
                     .map(ToString::to_string)
                     .collect(),
                 expires_at: invitation.expires_at,
+                expired,
                 public_instructions_url,
                 origin_kind: invitation.origin_kind.as_str().to_owned(),
                 origin_ref: invitation.origin_ref,
