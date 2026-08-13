@@ -99,6 +99,48 @@ async fn sqlite_blob_upload_download_survives_restart_over_http() {
 }
 
 #[tokio::test]
+async fn sqlite_blob_meta_backfills_for_databases_written_before_the_meta_table() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let ciphertext = b"pre-meta-table attachment ciphertext";
+
+    let descriptor = {
+        let app = persistent_app(&db_path);
+        let response = put_blob(app, ciphertext).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let descriptor: BlobDescriptor = read_json(response).await;
+        descriptor
+    };
+
+    // Reduce the database to its pre-http_blob_meta shape: payload rows only,
+    // exactly what a production store written before this table looked like.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        conn.execute("DELETE FROM http_blob_meta", [])
+            .expect("drop meta rows");
+    }
+
+    let app = persistent_app(&db_path);
+    let response = get_blob(app.clone(), &descriptor.sha256).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(read_body(response).await.as_ref(), ciphertext);
+
+    // The backfilled meta row is durable, not a read-through side effect.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        let (size_bytes, backend): (u64, String) = conn
+            .query_row(
+                "SELECT size_bytes, backend FROM http_blob_meta WHERE sha256 = ?1",
+                rusqlite::params![descriptor.sha256],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("backfilled meta row");
+        assert_eq!(size_bytes, ciphertext.len() as u64);
+        assert_eq!(backend, "sqlite");
+    }
+}
+
+#[tokio::test]
 async fn blob_descriptor_uses_configured_public_url_for_internal_uploads() {
     let temp = TempDir::new().expect("tempdir");
     let state = persistent_state(&temp.path().join("delivery.sqlite3"))
