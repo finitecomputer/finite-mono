@@ -3992,13 +3992,13 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         &[
             "folder",
             "create",
-            "team-vault",
+            "team-folder",
             "--access",
             "restricted",
             "--name",
-            "Team Vault",
+            "Team Folder",
             "--path",
-            "Team Vault",
+            "Team Folder",
             "--json",
         ],
     );
@@ -4014,8 +4014,8 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         String::from_utf8_lossy(&synced.stderr)
     );
     fs::write(
-        tree_a.join("Team Vault/notes.md"),
-        "# Team Vault\n\nShared with the invited member.\n",
+        tree_a.join("Team Folder/notes.md"),
+        "# Team Folder\n\nShared with the invited member.\n",
     )
     .unwrap();
     let pushed = run(&home_a, &tree_a, &["sync", "now", "--json"]);
@@ -4038,7 +4038,7 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
             "--target",
             &target_npub,
             "--folder",
-            "team-vault",
+            "team-folder",
             "--json",
         ],
     );
@@ -4087,7 +4087,7 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         String::from_utf8_lossy(&first_sync.stderr)
     );
     assert!(
-        !member_tree.join("Team Vault/notes.md").exists(),
+        !member_tree.join("Team Folder/notes.md").exists(),
         "before any key holder syncs, the invited Folder must still be locked"
     );
 
@@ -4135,7 +4135,7 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         "owner sync summary must note the completed wraps: {owner_summary}"
     );
     assert!(
-        owner_summary.contains(&format!("wrapped team-vault key for {target_npub}")),
+        owner_summary.contains(&format!("wrapped team-folder key for {target_npub}")),
         "owner sync summary must name the wrapped Folder and recipient: {owner_summary}"
     );
 
@@ -4148,8 +4148,8 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         String::from_utf8_lossy(&second_sync.stderr)
     );
     assert_eq!(
-        fs::read_to_string(member_tree.join("Team Vault/notes.md")).unwrap(),
-        "# Team Vault\n\nShared with the invited member.\n"
+        fs::read_to_string(member_tree.join("Team Folder/notes.md")).unwrap(),
+        "# Team Folder\n\nShared with the invited member.\n"
     );
 
     // The markers are gone; owner status no longer carries the field.
