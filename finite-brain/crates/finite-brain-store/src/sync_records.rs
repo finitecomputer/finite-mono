@@ -306,19 +306,28 @@ pub(super) fn load_sync_records_tx(
     Ok(records)
 }
 
-pub(super) fn load_sync_records(
+pub(super) fn load_control_records(
     conn: &Connection,
     brain_id: &BrainId,
 ) -> Result<Vec<StoredSyncRecord>, StoreError> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT sequence, record_event_id, record_type, folder_id, object_id, revision,
-               actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
-        FROM brain_record_index
-        WHERE brain_id = ?1
-        ORDER BY sequence
-        "#,
-    )?;
+    load_sync_records_matching(
+        conn,
+        brain_id,
+        "SELECT sequence, record_event_id, record_type, folder_id, object_id, revision,
+                actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
+         FROM brain_record_index
+         WHERE brain_id = ?1
+           AND record_type IN ('folder_key_grant', 'vault_admin_access_change')
+         ORDER BY sequence",
+    )
+}
+
+fn load_sync_records_matching(
+    conn: &Connection,
+    brain_id: &BrainId,
+    sql: &str,
+) -> Result<Vec<StoredSyncRecord>, StoreError> {
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![brain_id.as_str()], stored_sync_record_from_row)?;
 
     let mut records = Vec::new();

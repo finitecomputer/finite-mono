@@ -1525,15 +1525,7 @@ impl BrainStore {
     pub fn sync_bootstrap(&self, brain_id: &BrainId) -> Result<SyncBootstrap, StoreError> {
         self.require_brain_exists(brain_id)?;
         let objects = self.load_current_objects(brain_id)?;
-        let control_records = sync_records::load_sync_records(&self.conn, brain_id)?
-            .into_iter()
-            .filter(|record| {
-                matches!(
-                    record.record_type,
-                    SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange
-                )
-            })
-            .collect::<Vec<_>>();
+        let control_records = sync_records::load_control_records(&self.conn, brain_id)?;
         Ok(SyncBootstrap {
             brain_id: brain_id.clone(),
             latest_sequence: self.latest_sequence(brain_id)?,
@@ -9273,6 +9265,67 @@ mod tests {
         assert_eq!(bootstrap.objects[0].revision, 3);
         assert!(bootstrap.objects[0].deleted);
         assert_eq!(bootstrap.objects[0].payload_json, "{\"body\":\"delete\"}");
+    }
+
+    #[test]
+    fn load_current_object_returns_one_row_and_bootstrap_omits_object_revisions_from_controls() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+
+        for index in 1..=8 {
+            let object_id = format!("obj_{index:012}");
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record(
+                        &format!("event-create-{index}"),
+                        &object_id,
+                        1,
+                        None,
+                        &format!("body-{index}"),
+                    ),
+                )
+                .unwrap();
+        }
+
+        let target = ObjectId::new("obj_000000000004").unwrap();
+        let found = store
+            .load_current_object(&brain_id, &folder_id, &target)
+            .unwrap()
+            .expect("point lookup should find the requested object");
+        assert_eq!(found.object_id, target);
+        assert_eq!(found.payload_json, "{\"body\":\"body-4\"}");
+        assert!(!found.deleted);
+
+        assert!(
+            store
+                .load_current_object(
+                    &brain_id,
+                    &folder_id,
+                    &ObjectId::new("obj_000000000099").unwrap()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store.latest_sequence(&BrainId::new("missing-brain").unwrap()),
+            Err(StoreError::MissingBrain { .. })
+        ));
+
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert_eq!(bootstrap.object_count, 8);
+        assert_eq!(bootstrap.latest_sequence, 8);
+        assert!(
+            bootstrap.control_records.is_empty(),
+            "object revisions must not be loaded as bootstrap control records"
+        );
+        assert!(bootstrap.control_records.iter().all(|record| {
+            matches!(
+                record.record_type,
+                SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange
+            )
+        }));
     }
 
     #[test]
