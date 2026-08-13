@@ -93,7 +93,14 @@ rm -rf "$out"
 For point-in-time recovery add `-timestamp 2026-08-12T00:00:00Z` (retention:
 snapshots every 24 h, 168 h kept).
 
-TODO: exercised-on-prod evidence (date, output) goes here after activation.
+**EXERCISED 2026-08-13** (post-#490-deploy verification): full restore from
+the chi bucket to `/data/tmp` in **35 s**, `PRAGMA integrity_check` = ok,
+`MAX(seq)` in `http_delivery_ops` identical to the live database at drill
+time (147575 == 147575), blob counts identical (764 == 764). Replicator had
+been running since 2026-08-12 22:25 UTC with `txid.replica == txid.db`
+throughout. One defect found and fixed in the same pass: the health unit's
+freshness bound false-alarmed on a quiet database (write recency ≠
+replication lag) — corrected to a txid-convergence check in this branch.
 
 ## REAL DR RESTORE (lat1 lost)
 
