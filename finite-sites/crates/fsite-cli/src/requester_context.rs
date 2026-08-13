@@ -378,7 +378,7 @@ mod tests {
             )
             .unwrap(),
             Some(ALICE.to_string()),
-            "Hermes 0.18.2 exposes the Finite plugin as LOCAL"
+            "Pinned Hermes exposes the Finite plugin as LOCAL"
         );
         assert_eq!(
             resolve_at(

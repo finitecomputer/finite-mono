@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,8 +14,13 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MONOREPO_ROOT = REPO_ROOT.parent
+sys.path.insert(0, str(MONOREPO_ROOT))
+
+from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+
 sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_HERMES_AGENT_VERSION = "0.18.2"
+DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 
 
 def run(args: list[str], *, timeout: int = 3600) -> subprocess.CompletedProcess[str]:
@@ -45,7 +51,12 @@ def main() -> int:
     parser.add_argument(
         "--hermes-agent-version",
         default=DEFAULT_HERMES_AGENT_VERSION,
-        help="hermes-agent package version to install in the runtime image",
+        help="Nix-built hermes-agent version expected in the runtime image",
+    )
+    parser.add_argument(
+        "--platform",
+        default=os.environ.get("FINITE_HERMES_RUNTIME_PLATFORM", "linux/amd64"),
+        help="image platform, e.g. linux/amd64",
     )
     parser.add_argument("--report", help="Optional build report JSON path")
     args = parser.parse_args()
@@ -61,13 +72,29 @@ def main() -> int:
         context = Path(tmp_value) / "ctx"
         context.mkdir()
         stage_context(context)
+        hermes_runtime = stage_runtime_closure(
+            MONOREPO_ROOT,
+            context,
+            system=nix_system_for_platform(args.platform),
+        )
+        if hermes_runtime.version != args.hermes_agent_version:
+            raise SystemExit(
+                "Hermes Nix runtime version mismatch: "
+                f"expected {args.hermes_agent_version}, got {hermes_runtime.version}"
+            )
         dockerfile = context / "finitechat" / "containers" / "agent" / "Dockerfile"
         run(
             [
                 "docker",
                 "build",
+                "--platform",
+                args.platform,
                 "--build-arg",
                 f"HERMES_AGENT_VERSION={args.hermes_agent_version}",
+                "--build-arg",
+                f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
+                "--build-arg",
+                f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
                 "--tag",
                 image_ref,
                 "--file",
@@ -83,6 +110,14 @@ def main() -> int:
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "image": image_ref,
         "hermes_agent_version": args.hermes_agent_version,
+        "hermes_nix_runtime": {
+            "attr": hermes_runtime.attr,
+            "python_attr": hermes_runtime.python_attr,
+            "nix_system": hermes_runtime.nix_system,
+            "store_path": hermes_runtime.store_path,
+            "python_store_path": hermes_runtime.python_store_path,
+            "closure_count": hermes_runtime.closure_count,
+        },
         "image_metadata": docker_image_metadata(image_ref),
     }
     if args.report:

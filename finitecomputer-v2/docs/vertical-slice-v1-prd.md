@@ -128,7 +128,7 @@ Implemented in the current first-pass slice:
   `AppState`/`AppAction`, with a server-side proxy and SSE update path.
 - [x] Devfinity wiring and production Nix service/package definitions for the
   Hosted Web Device.
-- [x] Runtime image lockstep checks, Hermes `0.18.2`, and strict resident-stream
+- [x] Runtime image lockstep checks, flake-pinned Nix Hermes, and strict resident-stream
   inbound behavior with reconnect instead of polling or CLI fallback.
 - [x] A real server + agent + Hosted Web Device restart integration test for
   chat continuity at the service boundary.

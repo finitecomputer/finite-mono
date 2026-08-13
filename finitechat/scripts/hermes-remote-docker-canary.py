@@ -26,8 +26,13 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MONOREPO_ROOT = REPO_ROOT.parent
+sys.path.insert(0, str(MONOREPO_ROOT))
+
+from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
-DEFAULT_HERMES_VERSION = "0.18.2"
+DEFAULT_HERMES_VERSION = "0.20.0"
 RECOVERY_SCOPE = {
     "snapshot_root": "/data",
     "workspace_path": "/data/workspace",
@@ -102,6 +107,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hermes-agent-version",
         default=os.environ.get("FINITE_HERMES_AGENT_VERSION", DEFAULT_HERMES_VERSION),
+    )
+    parser.add_argument(
+        "--platform",
+        default=os.environ.get("FINITECHAT_REMOTE_DOCKER_PLATFORM", "linux/amd64"),
+        help="remote Docker image platform, e.g. linux/amd64",
     )
     parser.add_argument(
         "--room-name",
@@ -903,12 +913,37 @@ def main() -> int:
             with tempfile.TemporaryDirectory(dir=state_root) as tmpdir:
                 ctx = stage_build_context(Path(tmpdir) / "ctx")
                 step("docker.context_staged")
+                hermes_runtime = stage_runtime_closure(
+                    MONOREPO_ROOT,
+                    ctx,
+                    system=nix_system_for_platform(opts.platform),
+                )
+                if hermes_runtime.version != opts.hermes_agent_version:
+                    raise CanaryFailure(
+                        "Hermes Nix runtime version mismatch: "
+                        f"expected {opts.hermes_agent_version}, got {hermes_runtime.version}"
+                    )
+                step(
+                    "docker.hermes_nix_runtime_staged",
+                    attr=hermes_runtime.attr,
+                    python_attr=hermes_runtime.python_attr,
+                    nix_system=hermes_runtime.nix_system,
+                    store_path=hermes_runtime.store_path,
+                    python_store_path=hermes_runtime.python_store_path,
+                    closure_count=hermes_runtime.closure_count,
+                )
                 docker(
                     opts,
                     [
                         "build",
+                        "--platform",
+                        opts.platform,
                         "--build-arg",
                         f"HERMES_AGENT_VERSION={opts.hermes_agent_version}",
+                        "--build-arg",
+                        f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
+                        "--build-arg",
+                        f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
                         "--tag",
                         image,
                         "--file",

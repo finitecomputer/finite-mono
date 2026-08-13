@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MONOREPO_ROOT = REPO_ROOT.parent
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
-DEFAULT_HERMES_PACKAGE = "hermes-agent==0.18.2"
+DEFAULT_HERMES_NIX_SHELL = f"{MONOREPO_ROOT}#hermes-bridge-ci"
 DEFAULT_BUNDLE_ID = "computer.finite.finitechat"
 DEFAULT_TEAM = ""
 MODEL_ENV_NAMES = (
@@ -64,8 +65,9 @@ def parse_args() -> argparse.Namespace:
         help="JSON report path. Defaults to <state-root>/report.json.",
     )
     parser.add_argument(
-        "--hermes-package",
-        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", DEFAULT_HERMES_PACKAGE),
+        "--hermes-nix-shell",
+        default=os.environ.get("FINITECHAT_HERMES_NIX_SHELL", DEFAULT_HERMES_NIX_SHELL),
+        help="Nix dev shell that provides the pinned Hermes Agent runtime.",
     )
     parser.add_argument(
         "--agent-device-id",
@@ -627,9 +629,8 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     finitechat_bin = REPO_ROOT / "target/debug/finitechat"
-    uvx_bin = shutil.which("uvx")
-    if uvx_bin is None:
-        raise CanaryFailure("uvx is required to run hermes-agent")
+    if shutil.which("nix") is None:
+        raise CanaryFailure("nix is required to run the pinned Hermes Agent runtime")
 
     env, env_files_loaded = load_canary_env(args)
     env.update(
@@ -652,7 +653,7 @@ def main() -> int:
         "source": source,
         "runtime": {
             "finitechat_bin": str(finitechat_bin),
-            "hermes_agent_version_expected": args.hermes_package,
+            "hermes_nix_shell": args.hermes_nix_shell,
             "plugin_name": "finitechat",
             "plugin_hash": sha256_tree(plugin_dir),
             "image_ref": None,
@@ -868,10 +869,10 @@ def main() -> int:
         gateway_log = logs_dir / "hermes-gateway.log"
         gateway = subprocess.Popen(
             [
-                uvx_bin,
-                "--no-config",
-                "--from",
-                args.hermes_package,
+                "nix",
+                "develop",
+                args.hermes_nix_shell,
+                "--command",
                 "hermes",
                 "gateway",
                 "run",

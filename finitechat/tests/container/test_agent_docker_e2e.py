@@ -26,6 +26,11 @@ from urllib.parse import urlsplit, urlunsplit
 from tests.container.test_agent_container_e2e import run, stage_build_context
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MONOREPO_ROOT = REPO_ROOT.parent
+sys.path.insert(0, str(MONOREPO_ROOT))
+
+from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+
 IMAGE = os.environ.get("FINITE_DOCKER_IMAGE", "finite-agent-docker-e2e")
 SKIP_IMAGE_BUILD = os.environ.get("FINITE_DOCKER_SKIP_IMAGE_BUILD", "").lower() in {
     "1",
@@ -37,6 +42,7 @@ CONTAINER = os.environ.get("FINITE_DOCKER_CONTAINER", "finite-agent-docker-e2e-r
 SERVER_PORT = int(os.environ.get("FINITE_DOCKER_SERVER_PORT", "18789"))
 DOCKER_HOST = os.environ.get("FINITE_DOCKER_HOST", "host.docker.internal")
 HERMES_AGENT_VERSION = os.environ.get("FINITE_HERMES_AGENT_VERSION", "0.20.0")
+HERMES_RUNTIME_PLATFORM = os.environ.get("FINITE_HERMES_RUNTIME_PLATFORM", "linux/amd64")
 RESTIC_BACKEND = os.environ.get("FINITE_DOCKER_RESTIC_BACKEND", "local").strip().lower()
 RESTIC_REPOSITORY = os.environ.get("FINITE_DOCKER_RESTIC_REPOSITORY", "").strip()
 RESTIC_SNAPSHOT_TAG = os.environ.get("FINITE_DOCKER_RESTIC_SNAPSHOT_TAG", "finite-agent-state")
@@ -146,7 +152,7 @@ class SmokeReport:
                     "steps": self.steps,
                     "proof_layers": [
                         "docker image build",
-                        "hermes-agent 0.18.2 runtime",
+                        "hermes-agent 0.20.0 Nix runtime",
                         "finitechat binary in image",
                         "finitechat plugin in image",
                         "finitechat-server on host",
@@ -928,14 +934,37 @@ class AgentDockerE2ETest(unittest.TestCase):
             ctx = tmp / "ctx"
             ctx.mkdir()
             report.time("stage_docker_context", lambda: stage_build_context(ctx))
+            hermes_runtime = stage_runtime_closure(
+                MONOREPO_ROOT,
+                ctx,
+                system=nix_system_for_platform(HERMES_RUNTIME_PLATFORM),
+            )
+            self.assertEqual(hermes_runtime.version, HERMES_AGENT_VERSION)
+            report.fact(
+                "hermes_nix_runtime",
+                {
+                    "attr": hermes_runtime.attr,
+                    "python_attr": hermes_runtime.python_attr,
+                    "nix_system": hermes_runtime.nix_system,
+                    "store_path": hermes_runtime.store_path,
+                    "python_store_path": hermes_runtime.python_store_path,
+                    "closure_count": hermes_runtime.closure_count,
+                },
+            )
             report.time(
                 "docker_image_build",
                 lambda: run(
                     [
                         "docker",
                         "build",
+                        "--platform",
+                        HERMES_RUNTIME_PLATFORM,
                         "--build-arg",
                         f"HERMES_AGENT_VERSION={HERMES_AGENT_VERSION}",
+                        "--build-arg",
+                        f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
+                        "--build-arg",
+                        f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
                         "--tag",
                         IMAGE,
                         "--file",

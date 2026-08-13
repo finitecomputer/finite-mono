@@ -274,10 +274,11 @@ cargo test -p finitechat-server --test http_conformance
 cargo run -p finitechat-rmp -- doctor
 cargo run -p finitechat-rmp -- bindings swift
 cargo run -p finitechat-rmp -- test ios-simulator
-uvx --no-config ruff format --check .
-uvx --no-config ruff check .
-uvx --no-config --with hermes-agent basedpyright
-python3 -m unittest discover -s tests -p '*test*.py'
+nix develop ..#hermes-bridge-ci --command ruff format --check .
+nix develop ..#hermes-bridge-ci --command ruff check .
+nix develop ..#hermes-bridge-ci --command basedpyright --pythonpath "$HERMES_AGENT_RUNTIME_PYTHON"
+nix develop ..#hermes-bridge-ci --command bash -lc \
+  'exec "$HERMES_AGENT_RUNTIME_PYTHON" -m unittest discover -s tests -p "*test*.py"'
 ```
 
 Friction:

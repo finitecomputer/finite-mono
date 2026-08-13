@@ -11105,7 +11105,9 @@ mod tests {
                     version_label: "v2".to_string(),
                     source_git_sha: Some("git-v2".to_string()),
                     finitec_version: None,
-                    hermes_source_ref: Some("0.18.2".to_string()),
+                    hermes_source_ref: Some(
+                        "nix:packages.x86_64-linux.hermes-agent-runtime".to_string(),
+                    ),
                     finite_platform_plugin_ref: Some("plugin-v2".to_string()),
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,

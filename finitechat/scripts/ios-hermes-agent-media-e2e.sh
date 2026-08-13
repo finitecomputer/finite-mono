@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Real iOS Simulator + real pip hermes-agent package + finitechat plugin.
+# Real iOS Simulator + real Nix-built Hermes Agent runtime + finitechat plugin.
 # The app joins the agent invite, sends an image attachment with a caption,
 # then receives agent text and image replies.
 # This test installs an echo set_message_handler callback. It proves adapter
@@ -20,5 +20,5 @@ env \
     FINITECHAT_BIN="$REPO_ROOT/target/debug/finitechat" \
     FINITECHAT_SERVER_BIN="$REPO_ROOT/target/debug/finitechat-server" \
     FINITECHAT_RMP_BIN="$REPO_ROOT/target/debug/finitechat-rmp" \
-    uvx --no-config --with hermes-agent python -m unittest \
-    tests.hermes.test_live_ios_simulator_hermes_media_e2e -v
+    nix develop "$REPO_ROOT/..#hermes-bridge-ci" --command bash -lc \
+    'exec "$HERMES_AGENT_RUNTIME_PYTHON" -m unittest tests.hermes.test_live_ios_simulator_hermes_media_e2e -v'

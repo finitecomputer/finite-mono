@@ -1910,7 +1910,7 @@ wait "$postgres_pid"
                 "--reference \"$reference\" ",
                 "--version-label devfinity-worktree ",
                 "--state-schema-version runtime-state-v1 ",
-                "--hermes-source-ref hermes-agent==0.20.0 ",
+                "--hermes-source-ref nix:packages.x86_64-linux.hermes-agent-runtime ",
                 "--promoted"
             ),
             self.finite_saas_core_command()

@@ -38,7 +38,7 @@ def ready_handoff() -> dict:
             "digest": IMAGE_DIGEST,
         },
         "runtime": {
-            "hermes_agent_version": "0.18.2",
+            "hermes_agent_version": "0.20.0",
             "restic_version": "restic 0.18.0 compiled with go1.24.4 on linux/arm64",
             "finitechat_hermes_inbound_stream": "1",
             "finite_agent_restore_on_start": "1",

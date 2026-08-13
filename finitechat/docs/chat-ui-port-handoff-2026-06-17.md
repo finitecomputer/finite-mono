@@ -395,7 +395,7 @@ cargo run -p finitechat-rmp -- doctor
 cargo run -p finitechat-rmp -- bindings swift
 uvx --no-config ruff format --check .
 uvx --no-config ruff check .
-uvx --no-config --with hermes-agent basedpyright
+nix develop ..#hermes-bridge-ci --command basedpyright
 python3 -m unittest discover -s tests -p '*test*.py'
 ```
 

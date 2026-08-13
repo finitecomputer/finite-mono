@@ -26,7 +26,10 @@ on:
         default: true
 
 env:
+  CACHIX_CACHE_NAME: finite
   FINITE_HERMES_AGENT_VERSION: "0.20.0"
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 permissions:
   contents: read
@@ -46,6 +49,28 @@ jobs:
       - uses: depot/setup-action@v1
         with:
           oidc: true
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+
+      - name: Require Cachix token
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

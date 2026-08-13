@@ -18,9 +18,10 @@ Every rung must exercise the same product shape:
   Electron Device added to the same account and Room for multi-device proof;
 - no PIN flow;
 - the same Finite Chat Hermes plugin and CLI are packaged into the runtime;
-- the Product Release pins Hermes 0.18.2, the CLI/service versions, the one
-  canonical Runtime image digest, and the Finite Skills baseline bundled for
-  fresh agents; no test lane supplies an independent default;
+- the Product Release pins the flake-pinned Nix Hermes runtime, the CLI/service
+  versions, the one canonical Runtime image digest, and the Finite Skills
+  baseline bundled for fresh agents; no test lane supplies an independent
+  default;
 - `.github/workflows/runtime-image.yml` and
   `scripts/build_runtime_image.py` are the single image build path; every
   provider rung consumes the resulting digest rather than rebuilding a variant;
@@ -134,8 +135,8 @@ Shape:
 - `finitechat-server` may run locally for automated branch validation;
 - a headless Device drives deterministic protocol state; Hosted Web Device and
   Electron adapters consume the same Rust AppState/actions contract;
-- Hermes 0.18.2 runs as a local process with the finitechat-owned plugin and
-  strict resident stream mode enabled;
+- the flake-pinned Nix Hermes runtime runs as a local process with the
+  finitechat-owned plugin and strict resident stream mode enabled;
 - model provider keys come from local operator env only.
 
 This rung belongs mostly to `finitechat`. It proves the plugin/app/protocol
@@ -170,7 +171,7 @@ just dev up
 
 On a fresh checkout, `just dev saas-smoke` is both the Launch Code bootstrap and
 credential-gated acceptance; skip it on later interactive runs with a persisted
-agent. Devfinity builds the one Hermes 0.18.2 image, registers it as a promoted
+agent. Devfinity builds the one Nix Hermes runtime image, registers it as a promoted
 local artifact, runs Core and the generic Runner, launches an Apple VM with a
 durable `/data` bind mount, and opens the same Hosted Web Device used by the
 dashboard. The preferred chained-limiter path gives each runtime a Core-issued
