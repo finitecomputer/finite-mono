@@ -1,7 +1,7 @@
 # finitechat-hosted-device — one durable, isolated Finite Chat Device per
 # verified SaaS account. This service owns chat client state only; it does not
 # provision, restart, inspect, or otherwise control Agent Runtimes.
-{ finitePackages, ... }:
+{ config, finitePackages, ... }:
 {
   systemd.services.finitechat-hosted-device = {
     description = "Finite Chat Hosted Web Devices";
@@ -15,6 +15,11 @@
       "finitechat-server.service"
       "finite-identity.service"
     ];
+    # Aug 11 fence left hosted-device down: Requires= already stopped it with
+    # finitechat-server, but starting the server did not pull it back. Mirror
+    # finite-litestream.nix: PartOf= the owner so stop/restart of chat-server
+    # takes this unit with it. Do not PartOf identity.
+    partOf = [ "finitechat-server.service" ];
     wantedBy = [ "multi-user.target" ];
 
     environment = {
@@ -55,4 +60,20 @@
       RestrictSUIDSGID = true;
     };
   };
+
+  # Loading this module creates the reverse want so finitechat-server can
+  # exist without hosted-device. Start/restart of the owner then pulls
+  # hosted-device back — same pairing as finite-litestream.nix.
+  systemd.services.finitechat-server.wants = [ "finitechat-hosted-device.service" ];
+
+  assertions = [
+    {
+      assertion = builtins.elem "finitechat-server.service" config.systemd.services.finitechat-hosted-device.partOf;
+      message = "hosted-device must be PartOf finitechat-server so a chat-server stop takes it down";
+    }
+    {
+      assertion = builtins.elem "finitechat-hosted-device.service" config.systemd.services.finitechat-server.wants;
+      message = "finitechat-server must Wants hosted-device so a chat-server start pulls it back";
+    }
+  ];
 }

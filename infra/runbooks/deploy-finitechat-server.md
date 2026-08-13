@@ -168,6 +168,7 @@ must report `server_contract_version`, `server_version`, the Nix-derived
    ```
 
 3. No app/TestFlight build ships while the gate fails — that is the point.
+4. systemd now restarts hosted-device with the server; still curl both `http://127.0.0.1:8788/health` and `http://127.0.0.1:38918/healthz`.
 
 ### ROLLBACK
 
