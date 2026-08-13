@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,32 +32,52 @@ export default class WebDesignSkillProvider {
     const artifactDir = path.resolve(harnessRoot, this.config.outputDir ?? "./runs/latest/artifacts", caseId, sanitize(this.variant));
     mkdirSync(artifactDir, { recursive: true });
 
-    const agentPrompt = buildAgentPrompt({
+    const directProviderPrompt = buildAgentPrompt({
       brief: prompt,
       caseTitle: vars.title ?? vars.caseId ?? caseId,
       skillName,
       skillPath,
       skillText,
     });
+    const codexAgentPrompt = buildCodexAgentPrompt({
+      brief: prompt,
+      caseTitle: vars.title ?? vars.caseId ?? caseId,
+    });
 
     const startedAt = new Date().toISOString();
     let output;
     let modelProvider;
     let model;
+    let promptTranscript = directProviderPrompt.transcript;
+    let runner = resolveRunner(this.config);
     let tokenUsage;
 
     if (isMockMode(this.config)) {
       model = "mock";
       modelProvider = { name: "mock", baseUrl: null, keySource: null };
+      runner = "mock";
       output = mockHtml({ caseId, caseTitle: vars.title ?? caseId, skillName, variant: this.variant });
+      promptTranscript = codexAgentPrompt;
       tokenUsage = { total: 0, prompt: 0, completion: 0 };
+    } else if (runner === "agent") {
+      model = process.env.SKILL_AB_AGENT_MODEL || "codex-default";
+      modelProvider = { name: "codex-agent", baseUrl: null, keySource: null, label: "Codex isolated agent" };
+      const response = await callCodexAgent({
+        artifactDir,
+        prompt: codexAgentPrompt,
+        skillPath,
+        timeoutMs: Number(process.env.SKILL_AB_AGENT_TIMEOUT_MS || process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 600000),
+      });
+      output = response.output;
+      promptTranscript = response.prompt;
+      tokenUsage = {};
     } else {
       modelProvider = resolveModelProvider(this.config);
       model = modelProvider.model;
       const response = await callResponsesApi({
         apiKey: modelProvider.apiKey,
         baseUrl: modelProvider.baseUrl,
-        messages: agentPrompt.messages,
+        messages: directProviderPrompt.messages,
         model,
         maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
         timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
@@ -67,7 +89,7 @@ export default class WebDesignSkillProvider {
 
     let extraction = extractHtml(output);
     let outputKind = extraction.found ? "html" : "non-html";
-    if (!isMockMode(this.config) && !extraction.found && shouldRepairHtml(this.config)) {
+    if (runner === "provider" && !extraction.found && shouldRepairHtml(this.config)) {
       const repair = await callResponsesApi({
         apiKey: modelProvider.apiKey,
         baseUrl: modelProvider.baseUrl,
@@ -89,7 +111,7 @@ export default class WebDesignSkillProvider {
     const html = extraction.html;
     writeFileSync(path.join(artifactDir, "index.html"), html, "utf8");
     writeFileSync(path.join(artifactDir, "output.raw.md"), output, "utf8");
-    writeFileSync(path.join(artifactDir, "prompt.txt"), agentPrompt.transcript, "utf8");
+    writeFileSync(path.join(artifactDir, "prompt.txt"), promptTranscript, "utf8");
     writeFileSync(
       path.join(artifactDir, "metadata.json"),
       JSON.stringify(
@@ -102,6 +124,7 @@ export default class WebDesignSkillProvider {
           baseUrl: modelProvider.baseUrl,
           keySource: modelProvider.keySource,
           outputKind,
+          runner,
           skillName,
           skillPath: path.relative(harnessRoot, skillPath),
           startedAt,
@@ -116,7 +139,7 @@ export default class WebDesignSkillProvider {
 
     return {
       output: html,
-      prompt: agentPrompt.transcript,
+      prompt: promptTranscript,
       tokenUsage,
       metadata: {
         artifactPath: path.relative(harnessRoot, path.join(artifactDir, "index.html")),
@@ -261,6 +284,14 @@ function normalizeProviderName(value) {
   return String(value ?? "auto").trim().toLowerCase();
 }
 
+function resolveRunner(config = {}) {
+  const runner = String(process.env.SKILL_AB_RUNNER || config.runner || "agent").trim().toLowerCase();
+  if (runner === "agent" || runner === "provider") {
+    return runner;
+  }
+  throw new Error(`Unsupported SKILL_AB_RUNNER "${runner}". Use "agent" or "provider".`);
+}
+
 function trimTrailingSlash(value) {
   return String(value).replace(/\/+$/g, "");
 }
@@ -325,6 +356,146 @@ ${user}
 </user>
 `,
   };
+}
+
+function buildCodexAgentPrompt({ brief, caseTitle }) {
+  return `Use your configured local skill as your operating guidance for this task.
+Do not ask clarifying questions.
+
+Build this web artifact:
+
+${brief}
+
+Write the result to output/index.html in this workspace.
+
+Hard requirements:
+- Create a complete single-file HTML document at output/index.html.
+- Inline all CSS and JavaScript.
+- Do not fetch external fonts, images, scripts, or stylesheets.
+- Use realistic copy, data, controls, and visual states.
+- Make the first viewport useful for judging the design.
+- Keep the artifact safe to open from a local file URL.
+
+Case title: ${caseTitle}
+
+When finished, reply with a short confirmation only.`;
+}
+
+async function callCodexAgent({ artifactDir, prompt, skillPath, timeoutMs }) {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), "skill-ab-agent-"));
+  const outputDir = path.join(workspaceDir, "output");
+  const finalResponsePath = path.join(workspaceDir, "final-response.md");
+  const agentPromptPath = path.join(workspaceDir, "agent-prompt.txt");
+  const agentLogPath = path.join(artifactDir, "codex-agent.log");
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(agentPromptPath, prompt, "utf8");
+  writeFileSync(path.join(artifactDir, "agent-workspace-path.txt"), `${workspaceDir}\n`, "utf8");
+
+  const args = [
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--sandbox",
+    "workspace-write",
+    "-C",
+    workspaceDir,
+    "-c",
+    'approval_policy="never"',
+    "-c",
+    `skills.config=[{path=${tomlString(skillPath)},enabled=true}]`,
+    "-o",
+    finalResponsePath,
+  ];
+  if (process.env.SKILL_AB_AGENT_MODEL) {
+    args.push("-m", process.env.SKILL_AB_AGENT_MODEL);
+  }
+  args.push(prompt);
+
+  const result = await runCommand(process.env.SKILL_AB_CODEX_BIN || process.env.CODEX_CLI_PATH || "codex", args, {
+    timeoutMs,
+  });
+  writeFileSync(agentLogPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
+
+  const htmlPath = path.join(outputDir, "index.html");
+  if (existsSync(htmlPath)) {
+    return {
+      output: readFileSync(htmlPath, "utf8"),
+      prompt,
+    };
+  }
+
+  const fallback = existsSync(finalResponsePath) ? readFileSync(finalResponsePath, "utf8") : result.stdout;
+  return {
+    output: fallback,
+    prompt,
+  };
+}
+
+async function runCommand(command, args, { timeoutMs }) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: harnessRoot,
+      env: codexAgentEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timeout);
+      const result = {
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
+      if (code === 0) {
+        resolve(result);
+        return;
+      }
+      const tail = `${result.stdout}\n${result.stderr}`.slice(-4000).trim();
+      reject(new Error(`${path.basename(command)} exited with ${signal ?? code}${tail ? `\n${tail}` : ""}`));
+    });
+  });
+}
+
+function codexAgentEnv() {
+  const passThrough = [
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "SSH_AUTH_SOCK",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+  ];
+  const env = {};
+  for (const name of passThrough) {
+    if (process.env[name]) {
+      env[name] = process.env[name];
+    }
+  }
+  return env;
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value));
 }
 
 function buildHtmlRepairMessages({ agentOutput, brief, caseTitle }) {

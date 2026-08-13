@@ -93,6 +93,7 @@ async function handleRegenerate(request, response) {
   const title = String(payload.title || titleFromBrief(prompt)).trim();
   const maxConcurrency = normalizeMaxConcurrency(payload.maxConcurrency);
   const mock = Boolean(payload.mock);
+  const runner = normalizeRunner(payload.runner);
 
   for (const variant of variants) {
     const file = editableSkillPath(variant.variant);
@@ -107,6 +108,7 @@ async function handleRegenerate(request, response) {
         maxConcurrency,
         mock,
         prompt,
+        runner,
         selectedSkills,
         title,
         updatedAt: new Date().toISOString(),
@@ -117,11 +119,11 @@ async function handleRegenerate(request, response) {
     "utf8",
   );
 
-  currentJob = startRegenerateJob({ maxConcurrency, mock, prompt, title });
+  currentJob = startRegenerateJob({ maxConcurrency, mock, prompt, runner, title });
   return sendJson(response, 202, { job: publicJob(currentJob) });
 }
 
-function startRegenerateJob({ maxConcurrency, mock, prompt, title }) {
+function startRegenerateJob({ maxConcurrency, mock, prompt, runner, title }) {
   const job = {
     exitCode: null,
     finishedAt: null,
@@ -134,6 +136,7 @@ function startRegenerateJob({ maxConcurrency, mock, prompt, title }) {
     ...process.env,
     SKILL_AB_CASE_TITLE: title,
     SKILL_AB_MAX_CONCURRENCY: String(maxConcurrency),
+    SKILL_AB_RUNNER: runner,
     SKILL_AB_SKILL_A_PATH: editableSkillPath("skill-a"),
     SKILL_AB_SKILL_B_PATH: editableSkillPath("skill-b"),
   };
@@ -195,6 +198,7 @@ function readEditorState() {
     maxConcurrency: editableState.maxConcurrency || normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY || 1),
     mock: typeof editableState.mock === "boolean" ? editableState.mock : process.env.SKILL_AB_MOCK === "1",
     prompt,
+    runner: normalizeRunner(editableState.runner || process.env.SKILL_AB_RUNNER || "agent"),
     title,
     variants: variants.map((variant) => {
       const editablePath = editableSkillPath(variant.variant);
@@ -376,6 +380,14 @@ function normalizeMaxConcurrency(value) {
     return 1;
   }
   return Math.max(1, Math.min(8, Math.floor(number)));
+}
+
+function normalizeRunner(value) {
+  const runner = String(value || "agent").trim().toLowerCase();
+  if (runner === "agent" || runner === "provider") {
+    return runner;
+  }
+  return "agent";
 }
 
 function displayPath(filePath) {

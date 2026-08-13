@@ -210,6 +210,7 @@ function renderReview(cases, screenshotByArtifact) {
     const promptInput = document.getElementById("prompt-input");
     const mockInput = document.getElementById("mock-input");
     const maxConcurrencyInput = document.getElementById("max-concurrency-input");
+    const runnerInput = document.getElementById("runner-input");
     const regenerateButton = document.getElementById("regenerate-button");
     const editorStatus = document.getElementById("editor-status");
     const jobLog = document.getElementById("job-log");
@@ -242,6 +243,7 @@ function renderReview(cases, screenshotByArtifact) {
             maxConcurrency: Number(maxConcurrencyInput.value || 1),
             mock: mockInput.checked,
             prompt: promptInput.value,
+            runner: runnerInput.value,
             skills,
           }),
         });
@@ -267,6 +269,7 @@ function renderReview(cases, screenshotByArtifact) {
         promptInput.value = data.prompt || "";
         mockInput.checked = Boolean(data.mock);
         maxConcurrencyInput.value = data.maxConcurrency || 1;
+        runnerInput.value = data.runner || "agent";
         for (const variant of data.variants || []) {
           const input = document.getElementById("skill-input-" + variant.variant);
           const source = document.getElementById("skill-source-" + variant.variant);
@@ -429,6 +432,7 @@ function renderEditor() {
       </div>
       <div class="editor-actions">
         <button class="primary" type="button" id="regenerate-button">Regenerate</button>
+        <label>Runner <select id="runner-input"><option value="agent">Isolated Codex agents</option><option value="provider">Direct model provider</option></select></label>
         <label><input id="mock-input" type="checkbox"> Mock</label>
         <label>Concurrency <input id="max-concurrency-input" type="number" min="1" max="8" step="1"></label>
       </div>
