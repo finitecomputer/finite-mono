@@ -1,7 +1,8 @@
 //! Outbound mail. Two implementations behind one trait:
 //!
-//! - `DevMailer` (default): writes each magic-link email to a file under
-//!   `DATA/outbox/` and logs the link. Local development only.
+//! - `DevMailer`: writes each magic-link email to a file under `DATA/outbox/`
+//!   and logs the link. Selected with `--mailer dev`. Local development only;
+//!   omitting `--mailer` is an error, not an implicit DevMailer.
 //! - `HttpMailer`: sends through Resend or Postmark via their JSON APIs.
 //!   Selected with `--mailer resend|postmark`; the API key comes from the
 //!   RESEND_API_KEY / POSTMARK_SERVER_TOKEN environment variable so secrets

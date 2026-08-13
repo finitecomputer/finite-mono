@@ -63,8 +63,10 @@ pub struct ServeOptions {
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
     pub site_url_port: Option<u16>,
-    /// `None` = dev mailer (outbox files). The API key for an HTTP provider
-    /// comes from its environment variable, never from argv.
+    /// `None` = DevMailer (outbox files), selected with `--mailer dev`.
+    /// Omitting `--mailer` is an error; there is no implicit default.
+    /// The API key for an HTTP provider comes from its environment variable,
+    /// never from argv.
     pub mail_provider: Option<mailer::MailProvider>,
     pub mail_from: Option<String>,
     /// How tier-2 apps are isolated and run.
@@ -119,7 +121,7 @@ fn usage() -> String {
      [--identity-authority-url http://127.0.0.1:8790] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
-     [--mailer dev|resend|postmark] [--mail-from ADDR] \
+     --mailer dev|resend|postmark [--mail-from ADDR] \
      [--app-runner none|systemd|kata] [--app-idle-timeout SECONDS]\n  \
      finitesitesd allow --data DIR PUBKEY_OR_NPUB [--note TEXT]\n  \
      finitesitesd disallow --data DIR PUBKEY_OR_NPUB\n  \
@@ -181,6 +183,20 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         return Err(format!("unexpected argument `{}`", positionals[0]));
     }
     let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
+    let mail_provider = match flag_value(&flags, "mailer") {
+        None => {
+            return Err("--mailer is required (dev|resend|postmark)".to_string());
+        }
+        Some("dev") => None,
+        Some(raw) => Some(
+            mailer::MailProvider::parse(raw)
+                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend|postmark)"))?,
+        ),
+    };
+    let mail_from = flag_value(&flags, "mail-from").map(str::to_string);
+    if mail_provider.is_some() && mail_from.is_none() {
+        return Err("--mailer resend|postmark requires --mail-from".to_string());
+    }
     let listen: SocketAddr = flag_value(&flags, "listen")
         .unwrap_or("127.0.0.1:8787")
         .parse()
@@ -266,17 +282,6 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
             ));
         }
     };
-    let mail_provider = match flag_value(&flags, "mailer") {
-        None | Some("dev") => None,
-        Some(raw) => Some(
-            mailer::MailProvider::parse(raw)
-                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend|postmark)"))?,
-        ),
-    };
-    let mail_from = flag_value(&flags, "mail-from").map(str::to_string);
-    if mail_provider.is_some() && mail_from.is_none() {
-        return Err("--mailer resend|postmark requires --mail-from".to_string());
-    }
     let app_runner_kind = match flag_value(&flags, "app-runner") {
         None | Some("none") => AppRunnerKind::Disabled,
         Some("systemd") => AppRunnerKind::Systemd,
@@ -984,5 +989,61 @@ mod tests {
             validate_identity_sites_notification_token(None, Some("short")).unwrap_err(),
             "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN must be exactly 64 lowercase hex characters"
         );
+    }
+
+    #[test]
+    fn serve_requires_explicit_mailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().display().to_string();
+
+        let omitted = match parse_serve_options(&["--data".to_string(), data.clone()]) {
+            Ok(_) => panic!("expected omitted --mailer to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            omitted.contains("--mailer"),
+            "omitted --mailer should name the flag, got {omitted}"
+        );
+
+        let resend_without_from = match parse_serve_options(&[
+            "--data".to_string(),
+            data.clone(),
+            "--mailer".to_string(),
+            "resend".to_string(),
+        ]) {
+            Ok(_) => panic!("expected --mailer resend without --mail-from to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            resend_without_from.contains("--mail-from"),
+            "resend without --mail-from should name the flag, got {resend_without_from}"
+        );
+
+        // Identity defaults to a configured Authority, which requires the
+        // notification token. Isolate from ambient process env so this parse
+        // only proves the mailer mapping.
+        let token = "ab".repeat(32);
+        let hook = dir.path().join("git-hook-helper").display().to_string();
+        // SAFETY: this unit test is the only parse_serve_options caller in the
+        // crate binary; it pins the identity notification token and clears a
+        // viewer token that would otherwise fail closed.
+        unsafe {
+            std::env::set_var(IDENTITY_SITES_NOTIFICATION_TOKEN_ENV, &token);
+            std::env::remove_var(VIEWER_SESSION_SERVICE_TOKEN_ENV);
+        }
+        let options = match parse_serve_options(&[
+            "--data".to_string(),
+            data,
+            "--mailer".to_string(),
+            "dev".to_string(),
+            "--git-hook-helper".to_string(),
+            hook,
+            "--identity-authority-url".to_string(),
+            "http://127.0.0.1:8790".to_string(),
+        ]) {
+            Ok(options) => options,
+            Err(error) => panic!("--mailer dev should select DevMailer, got {error}"),
+        };
+        assert!(options.mail_provider.is_none());
     }
 }

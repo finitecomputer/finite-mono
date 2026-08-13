@@ -62,7 +62,7 @@ Manual local quickstart:
 
 ```sh
 # Terminal 1: run the server.
-cargo run -p finitesitesd -- serve --data .dev-data
+cargo run -p finitesitesd -- serve --data .dev-data --mailer dev
 
 # Terminal 2: use the CLI against the local server.
 export FINITE_SITES_API=http://127.0.0.1:8787

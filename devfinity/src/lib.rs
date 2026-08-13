@@ -1459,6 +1459,7 @@ wait "$postgres_pid"
                 "--document-base-domain docs.sites.localhost ",
                 "--git-url {} ",
                 "--site-port {} ",
+                "--mailer dev ",
                 "--app-runner none"
             ),
             shell_quote(&data.display().to_string()),
@@ -4419,6 +4420,8 @@ mod tests {
             .unwrap();
         assert!(sites.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
         assert!(sites.contains("finite-identity:\n        condition: process_healthy"));
+        assert!(sites.contains("--mailer dev"));
+        assert!(sites.contains("--app-runner none"));
         assert!(!sites.contains("identity-authority.sh"));
         assert!(!sites.contains("FINITE_IDENTITY_OPERATOR_TOKEN"));
         assert!(yaml.contains("dashboard-deps:"));

@@ -60,6 +60,7 @@
       User = "finite-sites";
       Group = "finite-sites";
       # Same flags as lat2 except --app-runner (see KATA ISOLATION TODO).
+      # `--mailer` is required; omitting it is an error, not an implicit DevMailer.
       ExecStart = ''
         ${finitePackages.finitesitesd}/bin/finitesitesd serve \
           --data /var/lib/finite-sites \
