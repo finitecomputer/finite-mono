@@ -6520,6 +6520,139 @@ mod tests {
     }
 
     #[test]
+    fn capacity_counters_track_writes_and_fail_closed_at_the_envelope() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+
+        assert_eq!(capacity_count(&store, "folders"), 3);
+        assert_eq!(capacity_count(&store, "members"), 1);
+        assert_eq!(capacity_count(&store, "folder_key_grants"), 3);
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 0);
+
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 1);
+        assert_eq!(capacity_count(&store, "current_objects"), 1);
+
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-update-1", "obj_000000000001", 2, Some(1), "update"),
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 2);
+        assert_eq!(capacity_count(&store, "current_objects"), 1);
+
+        let now = "2026-06-23T00:00:00.000Z";
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-pending-counter",
+                &UserId::new("npub-invited-member").unwrap(),
+                "invite-pending-counter0123456789abcd",
+                "/v1/brain-invitation-links/invite-pending-counter0123456789abcd/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "pending_invitations"), 1);
+        store
+            .accept_brain_invitation_by_code(
+                "invite-pending-counter0123456789abcd",
+                &UserId::new("npub-invited-member").unwrap(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "pending_invitations"), 0);
+
+        let max_folders = BRAIN_CAPACITY_ENVELOPE.folders;
+        store
+            .conn
+            .execute(
+                "UPDATE brain_capacity_counts SET folders = ?1 WHERE brain_id = 'acme'",
+                params![max_folders as i64],
+            )
+            .unwrap();
+        let blocked = Folder {
+            id: FolderId::new("blocked").unwrap(),
+            name: DisplayName::new("folder_name", "Blocked").unwrap(),
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Blocked").unwrap(),
+            ..strategy_folder()
+        };
+        assert_eq!(
+            store
+                .create_folder(
+                    &brain_id,
+                    &blocked,
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-blocked-admin",
+                        "blocked",
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: max_folders,
+                current: max_folders + 1,
+            }
+        );
+        assert!(!store.folder_exists(&brain_id, &blocked.id).unwrap());
+
+        let ordinary_max = BRAIN_CAPACITY_ENVELOPE.sync_records - BRAIN_CAPACITY_ENVELOPE.folders;
+        store
+            .conn
+            .execute(
+                "UPDATE brain_capacity_counts SET ordinary_sync_records = ?1 WHERE brain_id = 'acme'",
+                params![ordinary_max as i64],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record("event-over-cap", "obj_000000000002", 1, None, "over"),
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "sync_records".to_owned(),
+                max: ordinary_max,
+                current: ordinary_max + 1,
+            }
+        );
+        assert!(
+            store
+                .pull_sync_records(&brain_id, 0, 100)
+                .unwrap()
+                .records
+                .iter()
+                .all(|record| record.record_event_id != "event-over-cap")
+        );
+    }
+
+    fn capacity_count(store: &BrainStore, column: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                &format!("SELECT {column} FROM brain_capacity_counts WHERE brain_id = 'acme'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
     fn folder_depth_accepts_exact_boundary_and_rejects_one_over_without_mutation() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
