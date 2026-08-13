@@ -2,9 +2,11 @@ pub mod api;
 pub mod auth;
 pub mod launch_codes;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
@@ -41,106 +43,151 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0015_runner_capacity_fences.sql"),
     "\n",
-    include_str!("../migrations/0016_runtime_cold_relocation.sql")
+    include_str!("../migrations/0016_runtime_cold_relocation.sql"),
+    "\n",
+    include_str!("../migrations/0017_rfc3339_reads.sql"),
+    "\n",
+    include_str!("../migrations/0018_finite_private_5x_profile.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
+pub const FINITE_PRIVATE_5X_LIMIT_PROFILE: &str = "finite-private-generous-5x-v1";
 const DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS: i64 = 5 * 60 * 60;
 const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 100_000_000;
+const FINITE_PRIVATE_5X_BURST_LIMIT_UNITS: i64 = 500_000_000;
 const DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS: Option<i64> = None;
 const FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingClass {
-    Grandfathered,
-    Sponsored,
-    Standard,
+/// Declare an enum together with the one wire string for each variant.
+///
+/// The string is written once and drives serde, `as_str`, and the `parse_*`
+/// function, so a new variant cannot encode one way in the JSON API and another
+/// in its database column. Those three used to be separate hand-written
+/// surfaces with nothing forcing them to agree.
+macro_rules! wire_enum {
+    (
+        $(#[doc = $doc:literal])*
+        $name:ident { $($variant:ident => $wire:literal),+ $(,)? }
+        parse: $parse:ident
+    ) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+
+        pub fn $parse(value: &str) -> Option<$name> {
+            match value {
+                $($wire => Some($name::$variant),)+
+                _ => None,
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingSubscriptionStatus {
-    Incomplete,
-    IncompleteExpired,
-    Trialing,
-    Active,
-    PastDue,
-    Canceled,
-    Unpaid,
-    Paused,
+wire_enum! {
+    BillingClass {
+    Grandfathered => "grandfathered",
+    Sponsored => "sponsored",
+    Standard => "standard",
+    }
+    parse: parse_billing_class
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportCandidateStatus {
-    Pending,
-    Claimed,
-    AdminReview,
+wire_enum! {
+    BillingSubscriptionStatus {
+    Incomplete => "incomplete",
+    IncompleteExpired => "incomplete_expired",
+    Trialing => "trialing",
+    Active => "active",
+    PastDue => "past_due",
+    Canceled => "canceled",
+    Unpaid => "unpaid",
+    Paused => "paused",
+    }
+    parse: parse_billing_subscription_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UserLinkStatus {
-    Pending,
-    Linked,
+wire_enum! {
+    UserLinkStatus {
+    Pending => "pending",
+    Linked => "linked",
+    }
+    parse: parse_user_link_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectMembershipRole {
-    Owner,
-    Admin,
-    Member,
+wire_enum! {
+    ProjectMembershipRole {
+    Owner => "owner",
+    Admin => "admin",
+    Member => "member",
+    }
+    parse: parse_project_membership_role
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeSummaryStatus {
-    Online,
-    Offline,
-    Stale,
-    Unknown,
+wire_enum! {
+    RuntimeSummaryStatus {
+    Online => "online",
+    Offline => "offline",
+    Stale => "stale",
+    Unknown => "unknown",
+    }
+    parse: parse_runtime_summary_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeArtifactKind {
-    OciImage,
+wire_enum! {
+    RuntimeArtifactKind {
+    OciImage => "oci_image",
+    }
+    parse: parse_runtime_artifact_kind
 }
 
+wire_enum! {
 /// Customer-facing hosting promise. Provider placement remains a separate,
 /// Core-owned fact and is never inferred from BillingClass.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HostingTier {
-    Standard,
-    Confidential,
+    HostingTier {
+    Standard => "standard",
+    Confidential => "confidential",
+    }
+    parse: parse_hosting_tier
 }
 
+wire_enum! {
 /// Provider-neutral minimum compute shape. Runner adapters translate this
 /// closed value to a provider-specific size and verify the returned capacity.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeResourceClass {
-    Vcpu4Memory8Gib,
-    Vcpu2Memory4Gib,
+    RuntimeResourceClass {
+    Vcpu4Memory8Gib => "vcpu4_memory8_gib",
+    Vcpu2Memory4Gib => "vcpu2_memory4_gib",
+    }
+    parse: parse_runtime_resource_class
 }
 
+wire_enum! {
 /// Product placement choice stored with an agent creation request. Provider
 /// vocabulary stops at the runner adapter; feature behavior does not branch on
 /// this value.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerClass {
-    LocalDocker,
-    AppleContainer,
-    Kata,
-    Phala,
-    Enclavia,
+    RunnerClass {
+    LocalDocker => "local_docker",
+    AppleContainer => "apple_container",
+    Kata => "kata",
+    Phala => "phala",
+    Enclavia => "enclavia",
+    }
+    parse: parse_runner_class
 }
 
 /// Immutable placement resolved by Core. Replacement and recovery copy this
@@ -373,33 +420,36 @@ impl RuntimeCapabilitiesEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeControlKind {
-    Restart,
-    RecoverKnownGoodChatRuntime,
-    Upgrade,
-    Stop,
-    Destroy,
+wire_enum! {
+    RuntimeControlKind {
+    Restart => "restart",
+    RecoverKnownGoodChatRuntime => "recover_known_good_chat_runtime",
+    Upgrade => "upgrade",
+    Stop => "stop",
+    Destroy => "destroy",
+    }
+    parse: parse_runtime_control_kind
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeControlRequestStatus {
-    Requested,
-    Running,
-    Succeeded,
-    Failed,
+wire_enum! {
+    RuntimeControlRequestStatus {
+    Requested => "requested",
+    Running => "running",
+    Succeeded => "succeeded",
+    Failed => "failed",
+    }
+    parse: parse_runtime_control_request_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentCreationRequestStatus {
-    Requested,
-    Launching,
-    Running,
-    Failed,
-    Cancelled,
+wire_enum! {
+    AgentCreationRequestStatus {
+    Requested => "requested",
+    Launching => "launching",
+    Running => "running",
+    Failed => "failed",
+    Cancelled => "cancelled",
+    }
+    parse: parse_agent_creation_request_status
 }
 
 /// Structured detail captured from a failed store operation. The full detail
@@ -435,10 +485,6 @@ pub enum CoreError {
     MissingSourceHostId,
     #[error("source host id must contain only lowercase letters, digits, and hyphens")]
     InvalidSourceHostId,
-    #[error("source host relay url must be http or https")]
-    InvalidSourceHostRelayUrl,
-    #[error("source host relay admin token is required")]
-    MissingSourceHostRelayAdminToken,
     #[error("agent display name is required")]
     MissingAgentDisplayName,
     #[error("agent creation idempotency key is required")]
@@ -509,14 +555,6 @@ pub enum CoreError {
     AgentCreationRequestNotCancellable,
     #[error("source machine id is required")]
     MissingSourceMachineId,
-    #[error("runtime relay token hash is required")]
-    MissingRuntimeRelayTokenHash,
-    #[error("runtime relay token is required")]
-    MissingRuntimeRelayToken,
-    #[error("runtime relay token is invalid")]
-    InvalidRuntimeRelayToken,
-    #[error("runtime heartbeat was not found")]
-    RuntimeHeartbeatNotFound,
     #[error("runtime artifact id is required")]
     MissingRuntimeArtifactId,
     #[error("runtime artifact reference is required")]
@@ -624,30 +662,6 @@ pub enum CoreError {
 pub type CoreResult<T> = Result<T, CoreError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExistingHostProjectImport {
-    pub source_host_id: String,
-    pub source_machine_id: String,
-    pub owner_email: Option<String>,
-    pub display_name: String,
-    pub hostname: Option<String>,
-    pub runtime_host: Option<String>,
-    pub runtime_status: RuntimeSummaryStatus,
-    pub active_inference_profile: Option<String>,
-    pub hermes_available: Option<bool>,
-    pub published_app_urls: Vec<String>,
-    pub known_external_channel_participants: Vec<KnownExternalChannelParticipant>,
-    pub admin_visible_to_emails: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KnownExternalChannelParticipant {
-    pub channel: String,
-    pub external_user_id: Option<String>,
-    pub username: Option<String>,
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreUser {
     pub id: String,
     pub email: String,
@@ -697,26 +711,6 @@ pub struct BillingOverview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectImportCandidate {
-    pub id: String,
-    pub source_host_id: String,
-    pub source_machine_id: String,
-    pub source_import_key: String,
-    pub owner_email: String,
-    pub latest_host_owner_email: Option<String>,
-    pub pending_user_id: String,
-    pub customer_org_id: String,
-    pub status: ImportCandidateStatus,
-    pub project_id: Option<String>,
-    pub agent_runtime_id: Option<String>,
-    pub claimed_by_user_id: Option<String>,
-    pub host_facts: HostOwnedRuntimeFacts,
-    pub known_external_channel_participants: Vec<KnownExternalChannelParticipant>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostOwnedRuntimeFacts {
     pub display_name: String,
     pub hostname: Option<String>,
@@ -737,6 +731,13 @@ pub struct Project {
     /// Authorization continues to use the principal key resolved from it.
     #[serde(default)]
     pub agent_email: Option<String>,
+    /// LEGACY ROWS ONLY. Set on projects created by the abandoned 2026-07
+    /// existing-host import bridge (deleted; see git history for the
+    /// reconcile/claim machinery). Production may still hold such rows from
+    /// its near-ship test run. Nothing writes this anymore; a `Some` value
+    /// means "hide from user-facing project lists" (`public_visible_projects`
+    /// in api.rs). A future importer should define its own linkage rather
+    /// than resurrecting this field's semantics.
     pub import_candidate_id: Option<String>,
     #[serde(default)]
     pub hosting_tier: Option<HostingTier>,
@@ -780,6 +781,10 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// Fail-closed capability gate for restart/stop/upgrade/etc. Note this is
+    /// also what keeps legacy rows inert: runtimes imported by the abandoned
+    /// 2026-07 import bridge (and any other row without a capabilities
+    /// envelope) have `runtime_capabilities: NULL` and refuse every control.
     pub fn supports_runtime_control(&self, kind: RuntimeControlKind) -> bool {
         self.runtime_capabilities
             .as_ref()
@@ -804,41 +809,6 @@ pub struct RuntimeArtifact {
     pub created_at: String,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeRelayCredential {
-    pub agent_runtime_id: String,
-    pub token_hash: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeStatusSnapshot {
-    pub agent_runtime_id: String,
-    pub status: RuntimeSummaryStatus,
-    pub last_heartbeat_at: Option<String>,
-    pub runtime_host: String,
-    pub active_inference_profile: Option<String>,
-    pub hermes_available: Option<bool>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayHeartbeat {
-    pub ok: bool,
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    #[serde(rename = "lastSeenAt")]
-    pub last_seen_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayEventsOutput {
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -867,15 +837,6 @@ pub struct ProjectRoomMembership {
     pub role: ProjectMembershipRole,
     pub created_at: String,
     pub archived_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchiveImportedProjectInput {
-    pub verified_email: String,
-    pub workos_user_id: String,
-    pub project_id: String,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -967,6 +928,14 @@ pub struct RuntimeRelocationV1 {
     pub target_source_host_id: String,
     pub expected_agent_npub: String,
     pub durable_state_manifest_sha256: String,
+    /// Operator-attested recovery variant: the source compute no longer
+    /// exists (container/task absent at the provider), so there is no stop
+    /// receipt to present and the runtime reads `stale`, not `offline`.
+    /// Absence is a stronger single-writer guarantee than a stop receipt —
+    /// the runbook's bounded absence probe is the attestation's basis.
+    /// Additive within runtime_relocation.v1; absent means false.
+    #[serde(default)]
+    pub source_compute_absent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1057,24 +1026,6 @@ pub struct RuntimeRetirementSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceHostRelayEndpoint {
-    pub source_host_id: String,
-    pub url: String,
-    pub admin_token: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct UpsertSourceHostRelayEndpointInput {
-    pub source_host_id: String,
-    pub url: String,
-    pub admin_token: String,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertRuntimeArtifactInput {
     pub id: String,
@@ -1093,18 +1044,20 @@ pub struct UpsertRuntimeArtifactInput {
     pub now: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateGrantStatus {
-    Active,
-    Revoked,
+wire_enum! {
+    FinitePrivateGrantStatus {
+    Active => "active",
+    Revoked => "revoked",
+    }
+    parse: parse_finite_private_grant_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateApiKeyStatus {
-    Active,
-    Revoked,
+wire_enum! {
+    FinitePrivateApiKeyStatus {
+    Active => "active",
+    Revoked => "revoked",
+    }
+    parse: parse_finite_private_api_key_status
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1115,11 +1068,12 @@ pub enum FinitePrivateReservationStatus {
     Denied,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateSettlementKind {
-    Actual,
-    Estimate,
+wire_enum! {
+    FinitePrivateSettlementKind {
+    Actual => "actual",
+    Estimate => "estimate",
+    }
+    parse: parse_finite_private_settlement_kind
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1173,7 +1127,31 @@ pub struct FinitePrivateAdminAuditEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct FinitePrivateAdminProject {
+    pub id: String,
+    pub display_name: String,
+    pub agent_runtime_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateAdminAccount {
+    pub user_id: String,
+    pub email: String,
+    pub grant: FinitePrivateGrant,
+    pub api_keys: Vec<FinitePrivateApiKey>,
+    pub projects: Vec<FinitePrivateAdminProject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct FinitePrivateAdminState {
+    /// Account-centric operator view. The legacy flat arrays remain during the
+    /// additive dashboard/Core rollout so mixed versions fail gracefully.
+    #[serde(default)]
+    pub accounts: Vec<FinitePrivateAdminAccount>,
+    #[serde(default)]
+    pub profiles: Vec<FinitePrivateLimitProfile>,
     pub grants: Vec<FinitePrivateGrant>,
     pub api_keys: Vec<FinitePrivateApiKey>,
     pub admin_audit_events: Vec<FinitePrivateAdminAuditEvent>,
@@ -1272,6 +1250,32 @@ pub struct IssueFinitePrivateApiKeyInput {
     pub now: Option<String>,
 }
 
+/// Approve a grant and issue its first API key as one unit.
+///
+/// The two steps must share a transaction: a caller that approves and then
+/// issues separately can leave a grant with no key behind when the second step
+/// fails, and cannot be previewed by `--dry-run` at all because the rolled-back
+/// grant is invisible to the key issue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueFinitePrivateFriendKeyInput {
+    pub verified_email: String,
+    pub workos_user_id: Option<String>,
+    pub limit_profile_id: Option<String>,
+    /// Raw key material generated by the caller; only its hash is stored.
+    pub raw_key: String,
+    pub project_id: Option<String>,
+    pub agent_runtime_id: Option<String>,
+    pub now: Option<String>,
+}
+
+/// Grant and key created together by [`IssueFinitePrivateFriendKeyInput`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssuedFinitePrivateFriendKey {
+    pub grant: FinitePrivateGrant,
+    pub api_key: FinitePrivateApiKey,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionFinitePrivateRuntimeKeyInput {
@@ -1354,88 +1358,6 @@ pub struct SettleFinitePrivateReservationInput {
 pub struct SettleFinitePrivateReservationResult {
     pub settled: bool,
     pub reservation_id: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BridgeCoreState {
-    pub users: BTreeMap<String, CoreUser>,
-    pub customer_orgs: BTreeMap<String, CustomerOrganization>,
-    pub project_import_candidates: BTreeMap<String, ProjectImportCandidate>,
-    pub projects: BTreeMap<String, Project>,
-    pub runtime_artifacts: BTreeMap<String, RuntimeArtifact>,
-    pub agent_runtimes: BTreeMap<String, AgentRuntime>,
-    pub runtime_relay_credentials: BTreeMap<String, RuntimeRelayCredential>,
-    pub runtime_status_snapshots: BTreeMap<String, RuntimeStatusSnapshot>,
-    pub project_runtime_links: BTreeMap<String, ProjectRuntimeLink>,
-    pub chat_identities: BTreeMap<String, ChatIdentity>,
-    pub project_room_memberships: BTreeMap<String, ProjectRoomMembership>,
-    pub agent_creation_entitlements: BTreeMap<String, AgentCreationEntitlement>,
-    pub agent_creation_requests: BTreeMap<String, AgentCreationRequest>,
-    #[serde(skip)]
-    pub(crate) provider_operations: BTreeMap<String, ProviderOperationEnvelope>,
-    pub launch_code_batches: BTreeMap<String, launch_codes::LaunchCodeBatch>,
-    #[serde(skip)]
-    pub(crate) launch_codes: BTreeMap<String, launch_codes::LaunchCodeRecord>,
-    pub runtime_control_requests: BTreeMap<String, RuntimeControlRequest>,
-    #[serde(default)]
-    pub runtime_retirement_snapshots: BTreeMap<String, RuntimeRetirementSnapshot>,
-    pub source_host_relays: BTreeMap<String, SourceHostRelayEndpoint>,
-    pub finite_private_limit_profiles: BTreeMap<String, FinitePrivateLimitProfile>,
-    pub finite_private_grants: BTreeMap<String, FinitePrivateGrant>,
-    pub finite_private_api_keys: BTreeMap<String, FinitePrivateApiKey>,
-    pub finite_private_admin_audit_events: BTreeMap<String, FinitePrivateAdminAuditEvent>,
-    pub finite_private_reservations: BTreeMap<String, FinitePrivateReservation>,
-    #[serde(default)]
-    pub finite_private_daily_resets: BTreeSet<String>,
-    #[serde(default)]
-    pub finite_private_notice_claims: BTreeSet<String>,
-    pub customer_billing_accounts: BTreeMap<String, CustomerBillingAccount>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconcileExistingHostImportsOptions {
-    pub allowlisted_owner_emails: Vec<String>,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconcileExistingHostImportsReport {
-    pub created_candidates: Vec<String>,
-    pub updated_candidates: Vec<String>,
-    pub skipped_records: Vec<SkippedImportRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SkippedImportRecord {
-    pub source_import_key: String,
-    pub reason: SkippedImportReason,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SkippedImportReason {
-    MissingOwnerEmail,
-    OwnerNotAllowlisted,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimProjectImportsInput {
-    pub verified_email: String,
-    pub workos_user_id: String,
-    pub selected_candidate_ids: Vec<String>,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaimProjectImportsResult {
-    pub claimed_project_ids: Vec<String>,
-    pub already_claimed_project_ids: Vec<String>,
-    pub denied_candidate_ids: Vec<String>,
-    pub missing_candidate_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1556,6 +1478,15 @@ pub struct AdminRuntimeRelocateExactInput {
     pub target_source_host_id: String,
     pub expected_agent_npub: String,
     pub durable_state_manifest_sha256: String,
+    /// Recovery variant (same attestation pattern as
+    /// `AdminArchiveUnrecoverableRuntimeInput`): the operator has verified
+    /// via the runbook's bounded probe that no container or task exists for
+    /// the source machine. Relaxes exactly two gates — `stale` is accepted
+    /// alongside `offline`, and the succeeded-stop-receipt requirement is
+    /// waived (stopping absent compute fails by definition). Every other
+    /// exact-match check still applies.
+    #[serde(default)]
+    pub operator_observed_compute_absent: bool,
     pub now: Option<String>,
 }
 
@@ -1651,6 +1582,15 @@ pub struct AdminRevokeFinitePrivateApiKeyInput {
 pub struct AdminResetFinitePrivateUsageWindowInput {
     pub admin_verified_email: String,
     pub grant_id: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminAssignFinitePrivateLimitProfileInput {
+    pub admin_verified_email: String,
+    pub grant_id: String,
+    pub limit_profile_id: String,
     pub now: Option<String>,
 }
 
@@ -1983,7 +1923,6 @@ pub struct RegisterAgentCreationRuntimeInput {
     pub contact_endpoint: Option<String>,
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -2012,4586 +1951,7 @@ pub struct CancelAgentCreationRequestInput {
     pub now: Option<String>,
 }
 
-impl BridgeCoreState {
-    pub fn reconcile_existing_host_imports(
-        &mut self,
-        records: &[ExistingHostProjectImport],
-        options: ReconcileExistingHostImportsOptions,
-    ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        let now = options.now.unwrap_or(current_time_iso()?);
-        let allowlist = options
-            .allowlisted_owner_emails
-            .into_iter()
-            .filter_map(|email| normalize_owner_email(Some(&email)))
-            .collect::<BTreeSet<_>>();
-        let mut report = ReconcileExistingHostImportsReport {
-            created_candidates: Vec::new(),
-            updated_candidates: Vec::new(),
-            skipped_records: Vec::new(),
-        };
-
-        for record in records {
-            let source_key = source_import_key(&record.source_host_id, &record.source_machine_id);
-            let candidate_id = candidate_id_for(&source_key);
-            let owner_email = match normalize_owner_email(record.owner_email.as_deref()) {
-                Some(email) => email,
-                None => {
-                    report.skipped_records.push(SkippedImportRecord {
-                        source_import_key: source_key,
-                        reason: SkippedImportReason::MissingOwnerEmail,
-                    });
-                    continue;
-                }
-            };
-
-            if self.project_import_candidates.contains_key(&candidate_id) {
-                self.update_existing_candidate(&candidate_id, &owner_email, record, &now);
-                report.updated_candidates.push(candidate_id);
-                continue;
-            }
-
-            if !allowlist.contains(&owner_email) {
-                report.skipped_records.push(SkippedImportRecord {
-                    source_import_key: source_key,
-                    reason: SkippedImportReason::OwnerNotAllowlisted,
-                });
-                continue;
-            }
-
-            let user = self.ensure_pending_user(&owner_email, &now)?;
-            let org = self.ensure_personal_org(&user, BillingClass::Grandfathered, &now)?;
-            self.project_import_candidates.insert(
-                candidate_id.clone(),
-                ProjectImportCandidate {
-                    id: candidate_id.clone(),
-                    source_host_id: normalize_id_part(&record.source_host_id),
-                    source_machine_id: normalize_id_part(&record.source_machine_id),
-                    source_import_key: source_key,
-                    owner_email,
-                    latest_host_owner_email: record
-                        .owner_email
-                        .as_deref()
-                        .and_then(|email| normalize_owner_email(Some(email))),
-                    pending_user_id: user.id,
-                    customer_org_id: org.id,
-                    status: ImportCandidateStatus::Pending,
-                    project_id: None,
-                    agent_runtime_id: None,
-                    claimed_by_user_id: None,
-                    host_facts: host_facts_from_record(record),
-                    known_external_channel_participants: record
-                        .known_external_channel_participants
-                        .clone(),
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                },
-            );
-            report.created_candidates.push(candidate_id);
-        }
-
-        Ok(report)
-    }
-
-    pub fn claim_project_imports(
-        &mut self,
-        input: ClaimProjectImportsInput,
-    ) -> CoreResult<ClaimProjectImportsResult> {
-        let now = input.now.clone().unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-
-        let user = self.ensure_linked_user(&verified_email, &workos_user_id, &now)?;
-        let mut result = ClaimProjectImportsResult::default();
-        let selected_candidate_ids = input
-            .selected_candidate_ids
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-
-        for candidate_id in selected_candidate_ids {
-            let Some(candidate) = self.project_import_candidates.get(&candidate_id).cloned() else {
-                result.missing_candidate_ids.push(candidate_id);
-                continue;
-            };
-
-            if candidate.owner_email != verified_email || candidate.pending_user_id != user.id {
-                result.denied_candidate_ids.push(candidate.id);
-                continue;
-            }
-
-            if candidate.status == ImportCandidateStatus::Claimed {
-                if let Some(project_id) = candidate.project_id {
-                    self.ensure_hosted_web_membership(&user, &project_id, &now);
-                    result.already_claimed_project_ids.push(project_id);
-                }
-                continue;
-            }
-
-            let project_id = project_id_for(&candidate.id);
-            let runtime_id = agent_runtime_id_for(&candidate.id);
-            let project = Project {
-                id: project_id.clone(),
-                customer_org_id: candidate.customer_org_id.clone(),
-                owner_user_id: user.id.clone(),
-                display_name: candidate.host_facts.display_name.clone(),
-                agent_email: None,
-                import_candidate_id: Some(candidate.id.clone()),
-                hosting_tier: Some(HostingTier::Standard),
-                placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            let runtime = AgentRuntime {
-                id: runtime_id.clone(),
-                project_id: project_id.clone(),
-                source_host_id: candidate.source_host_id.clone(),
-                source_machine_id: candidate.source_machine_id.clone(),
-                source_import_key: candidate.source_import_key.clone(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                placement: project.placement,
-                provider_runtime_handle: None,
-                provider_runtime_handle_history: Vec::new(),
-                contact_endpoint: None,
-                runtime_capabilities: None,
-                host_facts: candidate.host_facts.clone(),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            let link = ProjectRuntimeLink {
-                id: project_runtime_link_id_for(&project_id, &runtime_id),
-                project_id: project_id.clone(),
-                agent_runtime_id: runtime_id.clone(),
-                active: true,
-                created_at: now.clone(),
-            };
-
-            self.projects.insert(project_id.clone(), project);
-            self.agent_runtimes.insert(runtime_id.clone(), runtime);
-            self.project_runtime_links.insert(link.id.clone(), link);
-            self.project_import_candidates.insert(
-                candidate.id.clone(),
-                ProjectImportCandidate {
-                    status: ImportCandidateStatus::Claimed,
-                    project_id: Some(project_id.clone()),
-                    agent_runtime_id: Some(runtime_id),
-                    claimed_by_user_id: Some(user.id.clone()),
-                    updated_at: now.clone(),
-                    ..candidate
-                },
-            );
-            self.ensure_hosted_web_membership(&user, &project_id, &now);
-            result.claimed_project_ids.push(project_id);
-        }
-
-        Ok(result)
-    }
-
-    pub fn request_agent_creation(
-        &mut self,
-        input: RequestAgentCreationInput,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
-    }
-
-    pub fn request_agent_creation_configured(
-        &mut self,
-        input: RequestAgentCreationInput,
-        configuration: AgentCreationConfiguration,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let display_name =
-            trim_to_option(Some(&input.display_name)).ok_or(CoreError::MissingAgentDisplayName)?;
-        let idempotency_key = normalize_idempotency_key(&input.idempotency_key)
-            .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
-        let profile_picture_url =
-            normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
-        let launch_code = trim_to_option(Some(&input.launch_code));
-        let billing_class = if launch_code.is_some() {
-            BillingClass::Sponsored
-        } else {
-            BillingClass::Standard
-        };
-        // Resolve the existing org (if any) by natural key so we can gate on
-        // billing/launch BEFORE minting any surrogate rows — a failed gate must
-        // not leave a stray user/org behind (Postgres rolls back; here we simply
-        // don't create until the gate passes).
-        let existing_org_id = self
-            .find_user_by_email(&verified_email)
-            .and_then(|user| self.find_personal_org_by_owner(&user.id))
-            .map(|org| org.id);
-        let selected_launch_code = if let Some(code) = launch_code.as_deref() {
-            let code_hash = launch_codes::hash_launch_code(code)?;
-            let selected = self
-                .launch_codes
-                .values()
-                .find(|record| record.code_hash == code_hash)
-                .cloned()
-                .ok_or(CoreError::InvalidLaunchCode)?;
-            let batch = self
-                .launch_code_batches
-                .get(&selected.batch_id)
-                .ok_or(CoreError::InvalidLaunchCode)?;
-            if selected.redeemed_customer_org_id.is_none()
-                && (batch.revoked_at.is_some()
-                    || parse_time(&now)? >= parse_time(&batch.expires_at)?)
-            {
-                return Err(CoreError::InvalidLaunchCode);
-            }
-            match (
-                selected.redeemed_customer_org_id.as_deref(),
-                selected.redemption_idempotency_key.as_deref(),
-            ) {
-                (None, None) => {}
-                (Some(redeemed_org_id), Some(redeemed_key))
-                    if existing_org_id.as_deref() == Some(redeemed_org_id)
-                        && idempotency_key == redeemed_key => {}
-                _ => return Err(CoreError::InvalidLaunchCode),
-            }
-            Some(selected)
-        } else if !existing_org_id
-            .as_deref()
-            .is_some_and(|org_id| self.customer_org_has_active_billing(org_id))
-        {
-            return Err(CoreError::BillingRequired);
-        } else {
-            None
-        };
-        let hosting_tier = if let Some(selected) = selected_launch_code.as_ref() {
-            self.launch_code_batches
-                .get(&selected.batch_id)
-                .and_then(|batch| batch.hosting_tier)
-                .unwrap_or(HostingTier::Standard)
-        } else {
-            let org_id = existing_org_id
-                .as_deref()
-                .ok_or(CoreError::MissingHostingTier)?;
-            self.customer_billing_accounts
-                .get(org_id)
-                .and_then(|account| account.hosting_tier)
-                .ok_or(CoreError::MissingHostingTier)?
-        };
-        if configuration
-            .requested_hosting_tier
-            .is_some_and(|requested| requested != hosting_tier)
-        {
-            return Err(CoreError::HostingTierNotAuthorized);
-        }
-        let placement = configuration
-            .placement
-            .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
-
-        let user = self.ensure_linked_user_with_billing_class(
-            &verified_email,
-            &workos_user_id,
-            billing_class,
-            &now,
-        )?;
-        let org = self.ensure_personal_org(&user, billing_class, &now)?;
-        // Idempotency is enforced by the natural key (owner_user_id,
-        // idempotency_key) — matching the UNIQUE the DB carries — NOT by deriving
-        // the request id from those inputs. Look up an existing request; if
-        // present, return it as reused.
-        if let Some(existing_request) =
-            self.find_agent_creation_request_by_idempotency(&user.id, &idempotency_key)
-        {
-            if let Some(selected) = selected_launch_code.as_ref()
-                && (selected.redeemed_customer_org_id.as_deref() != Some(org.id.as_str())
-                    || selected.redemption_idempotency_key.as_deref()
-                        != Some(idempotency_key.as_str())
-                    || existing_request.requested_launch_code.as_deref()
-                        != Some(selected.id.as_str()))
-            {
-                return Err(CoreError::InvalidLaunchCode);
-            }
-            let Some(project) = self.projects.get(&existing_request.project_id).cloned() else {
-                return Err(CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    existing_request.id, existing_request.project_id
-                )));
-            };
-            self.ensure_hosted_web_membership(&user, &project.id, &now);
-            return Ok(RequestAgentCreationResult {
-                project,
-                request: existing_request,
-                reused: true,
-            });
-        }
-
-        let current_allowed_new_agent_runtimes = self
-            .agent_creation_entitlements
-            .values()
-            .find(|entitlement| entitlement.customer_org_id == org.id)
-            .map(|entitlement| entitlement.allowed_new_agent_runtimes)
-            .unwrap_or(0);
-        let allowed_new_agent_runtimes = if selected_launch_code
-            .as_ref()
-            .is_some_and(|record| record.redeemed_customer_org_id.is_none())
-        {
-            current_allowed_new_agent_runtimes.saturating_add(1)
-        } else if selected_launch_code.is_some() {
-            current_allowed_new_agent_runtimes
-        } else {
-            current_allowed_new_agent_runtimes.max(1)
-        };
-        let active_request_count = self.active_agent_creation_entitlement_count(&org.id);
-        if active_request_count >= allowed_new_agent_runtimes {
-            return Err(CoreError::AgentCreationEntitlementExhausted);
-        }
-        // Generate every fallible identifier before mutating the entitlement
-        // or redemption records so the in-memory store preserves the same
-        // all-or-nothing Launch Code behavior as the Postgres transaction.
-        let request_id = new_agent_creation_request_id()?;
-        let project_id = new_self_service_project_id()?;
-        if let Some(selected) = selected_launch_code.as_ref() {
-            if selected.redeemed_customer_org_id.is_none() {
-                self.grant_launch_code_agent_creation_entitlement(
-                    &org.id,
-                    &selected.id,
-                    hosting_tier,
-                    &now,
-                );
-            }
-        } else {
-            self.ensure_agent_creation_entitlement(&org.id, None, hosting_tier, &now)?;
-        }
-        if let Some(selected) = selected_launch_code.as_ref()
-            && selected.redeemed_customer_org_id.is_none()
-        {
-            let record = self
-                .launch_codes
-                .get_mut(&selected.id)
-                .ok_or(CoreError::InvalidLaunchCode)?;
-            record.redeemed_customer_org_id = Some(org.id.clone());
-            record.redemption_idempotency_key = Some(idempotency_key.clone());
-            record.redeemed_at = Some(now.clone());
-        }
-
-        // Fresh surrogate ids for the new request and its project.
-        let project = Project {
-            id: project_id.clone(),
-            customer_org_id: org.id.clone(),
-            owner_user_id: user.id.clone(),
-            display_name: display_name.clone(),
-            agent_email: Some(canonical_agent_email(&display_name, &project_id)),
-            import_candidate_id: None,
-            hosting_tier: Some(hosting_tier),
-            placement: Some(placement),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        let request = AgentCreationRequest {
-            id: request_id,
-            customer_org_id: org.id,
-            owner_user_id: user.id.clone(),
-            project_id: project_id.clone(),
-            idempotency_key,
-            display_name,
-            runner_class: placement.runner_class,
-            hosting_tier: Some(hosting_tier),
-            placement: Some(placement),
-            desired_runtime_artifact_id: None,
-            runtime_spec: None,
-            target_source_host_id: None,
-            relocation: None,
-            profile_picture_url,
-            status: AgentCreationRequestStatus::Requested,
-            requested_launch_code: selected_launch_code.map(|record| record.id),
-            agent_runtime_id: None,
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            failure_message: None,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-
-        self.projects.insert(project.id.clone(), project.clone());
-        self.agent_creation_requests
-            .insert(request.id.clone(), request.clone());
-        self.ensure_hosted_web_membership(&user, &project_id, &request.created_at);
-
-        Ok(RequestAgentCreationResult {
-            project,
-            request,
-            reused: false,
-        })
-    }
-
-    pub fn link_verified_user(&mut self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-
-        self.ensure_linked_user_with_billing_class(
-            &verified_email,
-            &workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )
-    }
-
-    pub fn billing_overview(
-        &mut self,
-        input: LinkVerifiedUserInput,
-    ) -> CoreResult<BillingOverview> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let user = self.ensure_linked_user_with_billing_class(
-            &verified_email,
-            &workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )?;
-        let org = self.ensure_personal_org(&user, BillingClass::Standard, &now)?;
-        Ok(self.billing_overview_for_org(&org))
-    }
-
-    pub fn link_stripe_customer(
-        &mut self,
-        input: LinkStripeCustomerInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let stripe_customer_id = trim_to_option(Some(&input.stripe_customer_id))
-            .ok_or(CoreError::MissingStripeCustomerId)?;
-        let user = self.ensure_linked_user_with_billing_class(
-            &verified_email,
-            &workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )?;
-        let org = self.ensure_personal_org(&user, BillingClass::Standard, &now)?;
-        self.link_stripe_customer_to_org(&org.id, &stripe_customer_id, &now)
-    }
-
-    pub fn sync_stripe_subscription(
-        &mut self,
-        input: SyncStripeSubscriptionInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let stripe_customer_id = trim_to_option(Some(&input.stripe_customer_id))
-            .ok_or(CoreError::MissingStripeCustomerId)?;
-        let stripe_subscription_id = trim_to_option(Some(&input.stripe_subscription_id))
-            .ok_or(CoreError::MissingStripeSubscriptionId)?;
-        let stripe_price_id = trim_to_option(input.stripe_price_id.as_deref());
-        let customer_org_id = match trim_to_option(input.customer_org_id.as_deref()) {
-            Some(org_id) => org_id,
-            None => self
-                .customer_billing_accounts
-                .values()
-                .find(|account| account.stripe_customer_id.as_deref() == Some(&stripe_customer_id))
-                .map(|account| account.customer_org_id.clone())
-                .ok_or(CoreError::BillingAccountNotFound)?,
-        };
-        if !self.customer_orgs.contains_key(&customer_org_id) {
-            return Err(CoreError::BillingAccountNotFound);
-        }
-        // Event-ordering guard: for the SAME subscription, ignore a webhook whose
-        // Stripe `event.created` predates the last one we applied. Without this a
-        // stale `active` delivered after `canceled` resurrects billing.
-        if let Some(existing_account) = self.customer_billing_accounts.get(&customer_org_id)
-            && existing_account.stripe_subscription_id.as_deref()
-                == Some(stripe_subscription_id.as_str())
-            && let (Some(last_created), Some(incoming_created)) = (
-                existing_account.last_stripe_event_created,
-                input.stripe_event_created,
-            )
-            && incoming_created < last_created
-        {
-            return Ok(existing_account.clone());
-        }
-        if let Some(existing_account) = self.customer_billing_accounts.get(&customer_org_id)
-            && let Some(existing_subscription_id) =
-                existing_account.stripe_subscription_id.as_deref()
-            && existing_subscription_id != stripe_subscription_id
-            && !should_replace_stripe_subscription(
-                existing_account.subscription_status,
-                input.subscription_status,
-            )
-        {
-            return Ok(existing_account.clone());
-        }
-        let mut account =
-            self.link_stripe_customer_to_org(&customer_org_id, &stripe_customer_id, &now)?;
-        if input.subscription_status.can_create_agent() {
-            let expected_price_id = trim_to_option(input.expected_stripe_price_id.as_deref())
-                .ok_or(CoreError::MissingStripeStandardPriceId)?;
-            if stripe_price_id.as_deref() != Some(expected_price_id.as_str()) {
-                return Err(CoreError::StripeSubscriptionPriceMismatch);
-            }
-        }
-        account.stripe_subscription_id = Some(stripe_subscription_id);
-        account.stripe_price_id = stripe_price_id;
-        account.subscription_status = Some(input.subscription_status);
-        account.current_period_end = input.current_period_end;
-        account.cancel_at_period_end = input.cancel_at_period_end;
-        account.last_stripe_event_id = trim_to_option(input.stripe_event_id.as_deref());
-        account.last_stripe_event_created = input
-            .stripe_event_created
-            .or(account.last_stripe_event_created);
-        account.updated_at = now.clone();
-        self.customer_billing_accounts
-            .insert(customer_org_id.clone(), account.clone());
-
-        if input.subscription_status.can_create_agent() {
-            self.ensure_billing_agent_creation_entitlement(
-                &customer_org_id,
-                HostingTier::Standard,
-                &now,
-            );
-            if let Some(org) = self.customer_orgs.get_mut(&customer_org_id) {
-                org.billing_class = BillingClass::Standard;
-                org.updated_at = now;
-            }
-        } else if let Some(entitlement) = self
-            .agent_creation_entitlements
-            .values_mut()
-            .find(|entitlement| entitlement.customer_org_id == customer_org_id)
-            .filter(|entitlement| entitlement.launch_code.is_none())
-        {
-            entitlement.allowed_new_agent_runtimes = 0;
-            entitlement.updated_at = now;
-        }
-
-        Ok(account)
-    }
-
-    pub fn request_runtime_restart(
-        &mut self,
-        input: RequestRuntimeRestartInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Restart, None)
-    }
-
-    pub fn request_runtime_recover_known_good_chat(
-        &mut self,
-        input: RequestRuntimeRecoverKnownGoodChatInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::RecoverKnownGoodChatRuntime, None)
-    }
-
-    pub fn request_runtime_stop(
-        &mut self,
-        input: RequestRuntimeStopInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Stop, None)
-    }
-
-    pub fn request_runtime_destroy(
-        &mut self,
-        input: RequestRuntimeDestroyInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Destroy, None)
-    }
-
-    fn request_runtime_control(
-        &mut self,
-        input: RequestRuntimeRestartInput,
-        kind: RuntimeControlKind,
-        target_runtime_artifact_id: Option<String>,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let workos_user_id = input.workos_user_id.trim().to_string();
-        if workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let user = self.ensure_linked_user(&verified_email, &workos_user_id, &now)?;
-        let project = self
-            .projects
-            .get(&input.project_id)
-            .cloned()
-            .ok_or(CoreError::ProjectNotFound)?;
-        if project.owner_user_id != user.id {
-            return Err(CoreError::ProjectNotFound);
-        }
-        self.enqueue_runtime_control_request(
-            &project,
-            &user.id,
-            kind,
-            target_runtime_artifact_id,
-            now,
-        )
-    }
-
-    pub fn admin_request_runtime_restart(
-        &mut self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control(input, RuntimeControlKind::Restart, None)
-    }
-
-    pub fn admin_request_runtime_recover_known_good_chat(
-        &mut self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control(
-            input,
-            RuntimeControlKind::RecoverKnownGoodChatRuntime,
-            None,
-        )
-    }
-
-    pub fn admin_request_runtime_upgrade(
-        &mut self,
-        input: AdminRuntimeUpgradeInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control(
-            AdminRuntimeControlInput {
-                admin_verified_email: input.admin_verified_email,
-                admin_workos_user_id: input.admin_workos_user_id,
-                project_id: input.project_id,
-                now: input.now,
-            },
-            RuntimeControlKind::Upgrade,
-            Some(input.target_runtime_artifact_id),
-        )
-    }
-
-    pub fn admin_request_runtime_upgrade_exact(
-        &mut self,
-        input: AdminRuntimeUpgradeExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let expected = RuntimeControlExpectedBinding {
-            agent_runtime_id: input.expected_agent_runtime_id,
-            source_host_id: input.expected_source_host_id,
-            source_machine_id: input.expected_source_machine_id,
-        };
-        self.admin_request_runtime_control_bound(
-            AdminRuntimeControlInput {
-                admin_verified_email: input.admin_verified_email,
-                admin_workos_user_id: input.admin_workos_user_id,
-                project_id: input.project_id,
-                now: input.now,
-            },
-            RuntimeControlKind::Upgrade,
-            Some(input.target_runtime_artifact_id),
-            Some(&expected),
-        )
-    }
-
-    pub fn admin_request_runtime_retire_exact(
-        &mut self,
-        input: AdminRuntimeRetireExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let expected = RuntimeControlExpectedBinding {
-            agent_runtime_id: input.expected_agent_runtime_id,
-            source_host_id: input.expected_source_host_id,
-            source_machine_id: input.expected_source_machine_id,
-        };
-        self.admin_request_runtime_control_bound(
-            AdminRuntimeControlInput {
-                admin_verified_email: input.admin_verified_email,
-                admin_workos_user_id: input.admin_workos_user_id,
-                project_id: input.project_id,
-                now: input.now,
-            },
-            RuntimeControlKind::Destroy,
-            None,
-            Some(&expected),
-        )
-    }
-
-    pub fn admin_request_runtime_relocate_exact(
-        &mut self,
-        input: AdminRuntimeRelocateExactInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
-        if admin_workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let admin_user = self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
-        let project = self
-            .projects
-            .get(&input.project_id)
-            .cloned()
-            .ok_or(CoreError::ProjectNotFound)?;
-        let runtime = self
-            .active_runtime_for_project(&project.id)
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        if runtime.id != input.expected_agent_runtime_id
-            || runtime.source_host_id != input.expected_source_host_id
-            || runtime.source_machine_id != input.expected_source_machine_id
-        {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-        if placement.runner_class != RunnerClass::Kata
-            || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Offline
-        {
-            return Err(CoreError::RuntimeControlUnsupported);
-        }
-        let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
-        if target_source_host_id == runtime.source_host_id {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        let expected_agent_npub = input.expected_agent_npub.trim().to_string();
-        let manifest = input
-            .durable_state_manifest_sha256
-            .trim()
-            .to_ascii_lowercase();
-        if !valid_agent_npub(&expected_agent_npub) || !valid_sha256_hex(&manifest) {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        if self.runtime_control_requests.values().any(|request| {
-            request.agent_runtime_id == runtime.id
-                && matches!(
-                    request.status,
-                    RuntimeControlRequestStatus::Requested | RuntimeControlRequestStatus::Running
-                )
-        }) {
-            return Err(CoreError::RuntimeControlOperationConflict);
-        }
-        let stopped = self.runtime_control_requests.values().any(|request| {
-            request.agent_runtime_id == runtime.id
-                && request.source_host_id == runtime.source_host_id
-                && request.source_machine_id == runtime.source_machine_id
-                && request.kind == RuntimeControlKind::Stop
-                && request.status == RuntimeControlRequestStatus::Succeeded
-        });
-        if !stopped {
-            return Err(CoreError::RuntimeControlOperationConflict);
-        }
-        if self
-            .runtime_retirement_snapshots
-            .values()
-            .any(|snapshot| snapshot.receipt.agent_runtime_id == runtime.id)
-        {
-            return Err(CoreError::RuntimeRetirementSnapshotConflict);
-        }
-        let relocation = RuntimeRelocationEnvelope::V1(RuntimeRelocationV1 {
-            source_host_id: runtime.source_host_id.clone(),
-            source_machine_id: runtime.source_machine_id.clone(),
-            target_source_host_id: target_source_host_id.clone(),
-            expected_agent_npub,
-            durable_state_manifest_sha256: manifest,
-        });
-        if let Some(existing) = self
-            .agent_creation_requests
-            .values()
-            .find(|request| {
-                request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                    && matches!(
-                        request.status,
-                        AgentCreationRequestStatus::Requested
-                            | AgentCreationRequestStatus::Launching
-                    )
-                    && request.relocation.is_some()
-            })
-            .cloned()
-        {
-            if existing.relocation.as_ref() == Some(&relocation)
-                && existing.target_source_host_id.as_deref() == Some(target_source_host_id.as_str())
-            {
-                return Ok(existing);
-            }
-            return Err(CoreError::RuntimeControlOperationConflict);
-        }
-        let current_creation = self
-            .agent_creation_requests
-            .values()
-            .filter(|request| {
-                request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                    && request.status == AgentCreationRequestStatus::Running
-                    && request.runtime_spec.is_some()
-            })
-            .max_by_key(|request| (request.created_at.clone(), request.id.clone()))
-            .cloned()
-            .ok_or(CoreError::RuntimeSpecMismatch)?;
-        let artifact_id = runtime
-            .runtime_artifact_id
-            .as_deref()
-            .ok_or(CoreError::MissingRuntimeArtifactId)?;
-        let artifact = self
-            .runtime_artifacts
-            .get(artifact_id)
-            .cloned()
-            .ok_or(CoreError::RuntimeArtifactNotFound)?;
-        let request_id = new_agent_creation_request_id()?;
-        let runtime_spec = runtime_operation_spec_v1(
-            current_creation
-                .runtime_spec
-                .as_ref()
-                .ok_or(CoreError::RuntimeSpecMismatch)?,
-            RuntimeSpecIdentity {
-                operation_id: &request_id,
-                project_id: &project.id,
-                agent_runtime_id: &runtime.id,
-                placement,
-            },
-            &artifact,
-            &artifact,
-            RuntimeBootIntent::Normal,
-            None,
-            None,
-        )?;
-        let idempotency_key = format!(
-            "cold-relocate:{}:{}:{}",
-            runtime.id, target_source_host_id, request_id
-        );
-        let request = AgentCreationRequest {
-            id: request_id,
-            customer_org_id: project.customer_org_id.clone(),
-            owner_user_id: project.owner_user_id.clone(),
-            project_id: project.id.clone(),
-            idempotency_key,
-            display_name: project.display_name.clone(),
-            runner_class: placement.runner_class,
-            hosting_tier: project.hosting_tier,
-            placement: Some(placement),
-            desired_runtime_artifact_id: Some(artifact.id),
-            runtime_spec: Some(runtime_spec),
-            target_source_host_id: Some(target_source_host_id),
-            relocation: Some(relocation),
-            profile_picture_url: current_creation.profile_picture_url,
-            status: AgentCreationRequestStatus::Requested,
-            requested_launch_code: None,
-            agent_runtime_id: Some(runtime.id.clone()),
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            failure_message: None,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        self.agent_creation_requests
-            .insert(request.id.clone(), request.clone());
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "runtime.admin_cold_relocate",
-            target_type: "agent_runtime",
-            target_id: &runtime.id,
-            grant_id: None,
-            api_key_id: None,
-            actor: Some(&admin_email),
-            metadata: json!({
-                "projectId": project.id,
-                "agentCreationRequestId": request.id,
-                "sourceHostId": runtime.source_host_id,
-                "sourceMachineId": runtime.source_machine_id,
-                "targetSourceHostId": request.target_source_host_id,
-            }),
-            created_at: &now,
-        });
-        let _ = admin_user;
-        Ok(request)
-    }
-
-    pub fn admin_archive_unrecoverable_runtime(
-        &mut self,
-        input: AdminArchiveUnrecoverableRuntimeInput,
-    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
-        if !input.operator_observed_compute_absent
-            || !input.operator_observed_durable_state_absent
-            || !input.owner_acknowledged_unrecoverable
-        {
-            return Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired);
-        }
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
-        if admin_workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let project = self
-            .projects
-            .get(&input.project_id)
-            .cloned()
-            .ok_or(CoreError::ProjectNotFound)?;
-        let owner_email = self
-            .users
-            .get(&project.owner_user_id)
-            .map(|user| user.email.clone())
-            .ok_or(CoreError::ProjectNotFound)?;
-        if owner_email != expected_owner_email {
-            return Err(CoreError::UnrecoverableRuntimeArchiveOwnerMismatch);
-        }
-        let runtime = self
-            .active_runtime_for_project(&project.id)
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        if runtime.id != input.expected_agent_runtime_id
-            || runtime.source_host_id != input.expected_source_host_id
-            || runtime.source_machine_id != input.expected_source_machine_id
-        {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        if runtime.provider_runtime_handle.is_some()
-            || !runtime.provider_runtime_handle_history.is_empty()
-            || runtime.contact_endpoint.is_some()
-        {
-            return Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent);
-        }
-        if self.runtime_control_requests.values().any(|request| {
-            request.agent_runtime_id == runtime.id
-                && matches!(
-                    request.status,
-                    RuntimeControlRequestStatus::Requested | RuntimeControlRequestStatus::Running
-                )
-        }) {
-            return Err(CoreError::RuntimeControlOperationConflict);
-        }
-        if self
-            .runtime_retirement_snapshots
-            .values()
-            .any(|snapshot| snapshot.receipt.agent_runtime_id == runtime.id)
-        {
-            return Err(CoreError::RuntimeRetirementSnapshotConflict);
-        }
-
-        self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
-        let revoked_api_key_ids = self.offboard_runtime(
-            &project.id,
-            &runtime.id,
-            &now,
-            "finite_private.runtime.archive_unrecoverable_revoke_keys",
-            Some(&admin_email),
-        );
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "runtime.admin_archive_unrecoverable",
-            target_type: "agent_runtime",
-            target_id: &runtime.id,
-            grant_id: None,
-            api_key_id: None,
-            actor: Some(&admin_email),
-            metadata: json!({
-                "projectId": project.id,
-                "ownerEmail": owner_email,
-                "sourceHostId": runtime.source_host_id,
-                "sourceMachineId": runtime.source_machine_id,
-                "operatorObservedComputeAbsent": true,
-                "operatorObservedDurableStateAbsent": true,
-                "ownerAcknowledgedUnrecoverable": true,
-                "revokedApiKeyIds": revoked_api_key_ids,
-            }),
-            created_at: &now,
-        });
-        Ok(UnrecoverableRuntimeArchiveReceipt {
-            project_id: project.id,
-            agent_runtime_id: runtime.id,
-            source_host_id: runtime.source_host_id,
-            source_machine_id: runtime.source_machine_id,
-            owner_email,
-            archived_at: now,
-            revoked_finite_private_key_count: revoked_api_key_ids.len(),
-        })
-    }
-
-    /// Admin variant of `request_runtime_control`: the acting user does not
-    /// have to own the project, and the action is written to the admin audit
-    /// log with the admin's verified email as actor. The API layer requires
-    /// the validated WorkOS operator organization before this is reachable.
-    fn admin_request_runtime_control(
-        &mut self,
-        input: AdminRuntimeControlInput,
-        kind: RuntimeControlKind,
-        target_runtime_artifact_id: Option<String>,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control_bound(input, kind, target_runtime_artifact_id, None)
-    }
-
-    fn admin_request_runtime_control_bound(
-        &mut self,
-        input: AdminRuntimeControlInput,
-        kind: RuntimeControlKind,
-        target_runtime_artifact_id: Option<String>,
-        expected: Option<&RuntimeControlExpectedBinding>,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
-        if admin_workos_user_id.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let admin_user = self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
-        let project = self
-            .projects
-            .get(&input.project_id)
-            .cloned()
-            .ok_or(CoreError::ProjectNotFound)?;
-        let request = self.enqueue_runtime_control_request_bound(
-            &project,
-            &admin_user.id,
-            kind,
-            target_runtime_artifact_id,
-            now.clone(),
-            expected,
-        )?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: match kind {
-                RuntimeControlKind::Restart => "runtime.admin_restart",
-                RuntimeControlKind::RecoverKnownGoodChatRuntime => {
-                    "runtime.admin_recover_known_good_chat"
-                }
-                RuntimeControlKind::Upgrade => "runtime.admin_upgrade",
-                RuntimeControlKind::Stop => "runtime.admin_stop",
-                RuntimeControlKind::Destroy => "runtime.admin_destroy",
-            },
-            target_type: "agent_runtime",
-            target_id: &request.agent_runtime_id,
-            grant_id: None,
-            api_key_id: None,
-            actor: Some(&admin_email),
-            metadata: json!({
-                "projectId": request.project_id.clone(),
-                "runtimeControlRequestId": request.id.clone(),
-                "kind": kind.as_str(),
-                "targetRuntimeArtifactId": request.target_runtime_artifact_id.clone(),
-            }),
-            created_at: &now,
-        });
-        Ok(request)
-    }
-
-    fn enqueue_runtime_control_request(
-        &mut self,
-        project: &Project,
-        requested_by_user_id: &str,
-        kind: RuntimeControlKind,
-        target_runtime_artifact_id: Option<String>,
-        now: String,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.enqueue_runtime_control_request_bound(
-            project,
-            requested_by_user_id,
-            kind,
-            target_runtime_artifact_id,
-            now,
-            None,
-        )
-    }
-
-    fn enqueue_runtime_control_request_bound(
-        &mut self,
-        project: &Project,
-        requested_by_user_id: &str,
-        kind: RuntimeControlKind,
-        target_runtime_artifact_id: Option<String>,
-        now: String,
-        expected: Option<&RuntimeControlExpectedBinding>,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let runtime = self
-            .active_runtime_for_project(&project.id)
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        if expected.is_some_and(|expected| {
-            runtime.id != expected.agent_runtime_id
-                || runtime.source_host_id != expected.source_host_id
-                || runtime.source_machine_id != expected.source_machine_id
-        }) {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        if !runtime.supports_runtime_control(kind) {
-            return Err(CoreError::RuntimeControlUnsupported);
-        }
-        let artifact_id = runtime
-            .runtime_artifact_id
-            .as_deref()
-            .ok_or(CoreError::RuntimeRestartUnsupported)?;
-        self.runtime_artifacts
-            .get(artifact_id)
-            .ok_or(CoreError::RuntimeArtifactNotFound)?;
-
-        let target_runtime_artifact_id = match kind {
-            RuntimeControlKind::Upgrade => {
-                let target_id = trim_to_option(target_runtime_artifact_id.as_deref())
-                    .ok_or(CoreError::MissingRuntimeArtifactId)?;
-                let target = self.launchable_runtime_artifact(&target_id)?;
-                if target.kind != RuntimeArtifactKind::OciImage {
-                    return Err(CoreError::RuntimeUpgradeUnsupported);
-                }
-                if !runtime_artifact_reference_is_immutable_oci(&target.reference) {
-                    return Err(CoreError::RuntimeUpgradeUnsupported);
-                }
-                if runtime.state_schema_version.as_deref()
-                    != Some(target.state_schema_version.as_str())
-                {
-                    return Err(CoreError::RuntimeUpgradeStateSchemaIncompatible);
-                }
-                Some(target.id)
-            }
-            _ => None,
-        };
-
-        if let Some(existing) = self
-            .runtime_control_requests
-            .values()
-            .filter(|request| {
-                request.agent_runtime_id == runtime.id
-                    && matches!(
-                        request.status,
-                        RuntimeControlRequestStatus::Requested
-                            | RuntimeControlRequestStatus::Running
-                    )
-            })
-            .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
-            .cloned()
-        {
-            if existing.kind != kind {
-                return Err(CoreError::RuntimeControlOperationConflict);
-            }
-            if kind == RuntimeControlKind::Upgrade
-                && existing.target_runtime_artifact_id != target_runtime_artifact_id
-            {
-                return Err(CoreError::RuntimeUpgradeTargetConflict);
-            }
-            return Ok(existing);
-        }
-
-        let request = RuntimeControlRequest {
-            id: runtime_control_request_id_for(&runtime.id, kind, &now),
-            project_id: project.id.clone(),
-            agent_runtime_id: runtime.id,
-            source_host_id: runtime.source_host_id,
-            source_machine_id: runtime.source_machine_id,
-            requested_by_user_id: requested_by_user_id.to_string(),
-            kind,
-            target_runtime_artifact_id,
-            status: RuntimeControlRequestStatus::Requested,
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            failure_message: None,
-            created_at: now.clone(),
-            updated_at: now,
-            completed_at: None,
-        };
-        self.runtime_control_requests
-            .insert(request.id.clone(), request.clone());
-        Ok(request)
-    }
-
-    pub fn lease_agent_creation_request(
-        &mut self,
-        input: LeaseAgentCreationRequestInput,
-    ) -> CoreResult<Option<AgentCreationLease>> {
-        self.lease_agent_creation_request_with_runtime_environment(input, &BTreeMap::new())
-    }
-
-    pub(crate) fn lease_agent_creation_request_with_runtime_environment(
-        &mut self,
-        input: LeaseAgentCreationRequestInput,
-        runtime_environment: &BTreeMap<String, String>,
-    ) -> CoreResult<Option<AgentCreationLease>> {
-        self.lease_agent_creation_request_with_runtime_configuration(
-            input,
-            runtime_environment,
-            &[],
-        )
-    }
-
-    pub(crate) fn lease_agent_creation_request_with_runtime_configuration(
-        &mut self,
-        input: LeaseAgentCreationRequestInput,
-        runtime_environment: &BTreeMap<String, String>,
-        runtime_secret_references: &[String],
-    ) -> CoreResult<Option<AgentCreationLease>> {
-        validate_runtime_spec_environment(runtime_environment)?;
-        let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let runner_id = trim_to_option(Some(&input.runner_id))
-            .ok_or(CoreError::MissingAgentCreationRunnerId)?;
-        let lease_token = trim_to_option(Some(&input.lease_token))
-            .ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-        let lease_seconds = input
-            .lease_seconds
-            .unwrap_or(DEFAULT_AGENT_CREATION_LEASE_SECONDS);
-        if !(1..=MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
-            return Err(CoreError::InvalidAgentCreationLeaseDuration);
-        }
-        if input
-            .runner_capacity
-            .as_ref()
-            .is_some_and(|capacity| !capacity.accepts_agent_creation())
-        {
-            return Ok(None);
-        }
-        let in_flight_capacity = input
-            .runner_capacity
-            .as_ref()
-            .map(in_flight_capacity_bounds)
-            .transpose()?
-            .flatten();
-        let core_in_flight_before = in_flight_capacity.map_or(0, |capacity| {
-            self.agent_creation_requests
-                .values()
-                .filter(|request| {
-                    request.runner_class == capacity.runner_class
-                        && request.status == AgentCreationRequestStatus::Launching
-                })
-                .count()
-                .try_into()
-                .unwrap_or(u32::MAX)
-        });
-        let may_reserve_new = in_flight_capacity.is_none_or(|capacity| {
-            capacity
-                .provider_inventory_count
-                .saturating_add(core_in_flight_before)
-                < capacity.max_sandbox_count
-        });
-        let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
-
-        let request_id = self
-            .agent_creation_requests
-            .values()
-            .filter(|request| self.agent_creation_request_is_leasable(request, now_time))
-            .filter(|request| {
-                if request.relocation.is_some() {
-                    input.source_host_id.is_some()
-                        && request.target_source_host_id.as_deref()
-                            == input.source_host_id.as_deref()
-                } else {
-                    request.target_source_host_id.is_none()
-                        || input.source_host_id.is_none()
-                        || request.target_source_host_id.as_deref()
-                            == input.source_host_id.as_deref()
-                }
-            })
-            .filter(|request| {
-                in_flight_capacity.is_none()
-                    || request.status == AgentCreationRequestStatus::Launching
-                    || may_reserve_new
-            })
-            .filter(|request| {
-                input
-                    .runner_capacity
-                    .as_ref()
-                    .is_none_or(|capacity| capacity.supports_runner_class(request.runner_class))
-            })
-            .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
-            .map(|request| request.id.clone());
-
-        let Some(request_id) = request_id else {
-            return Ok(None);
-        };
-        let candidate = self
-            .agent_creation_requests
-            .get(&request_id)
-            .cloned()
-            .ok_or(CoreError::AgentCreationRequestUnavailable)?;
-        let project = self
-            .projects
-            .get(&candidate.project_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    candidate.id, candidate.project_id
-                ))
-            })?;
-        let placement = candidate
-            .placement
-            .or(project.placement)
-            .or_else(|| RuntimePlacement::from_legacy_runner_class(candidate.runner_class));
-        if placement.is_some_and(|placement| placement.runner_class != candidate.runner_class) {
-            return Err(CoreError::RuntimeSpecMismatch);
-        }
-        let prepared = if let Some(existing_spec) = candidate.runtime_spec.as_ref() {
-            let spec = runtime_spec_v1(existing_spec);
-            let runtime_id = candidate
-                .agent_runtime_id
-                .as_deref()
-                .unwrap_or(spec.agent_runtime_id.as_str());
-            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-            let artifact_id = candidate
-                .desired_runtime_artifact_id
-                .as_deref()
-                .unwrap_or(spec.runtime_artifact_id.as_str());
-            let artifact = self.launchable_runtime_artifact(artifact_id)?;
-            validate_runtime_spec_binding(
-                existing_spec,
-                Some(&candidate.id),
-                &candidate.project_id,
-                runtime_id,
-                placement,
-                &artifact,
-            )?;
-            Some((runtime_id.to_string(), artifact.id, existing_spec.clone()))
-        } else if let Some(placement) = placement {
-            let runtime_id = candidate
-                .agent_runtime_id
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(new_agent_runtime_id)?;
-            let artifact = match candidate.desired_runtime_artifact_id.as_deref() {
-                Some(artifact_id) => self.launchable_runtime_artifact(artifact_id)?,
-                None => self.latest_launchable_runtime_artifact()?,
-            };
-            let runtime_spec = build_runtime_spec_v1(
-                RuntimeSpecIdentity {
-                    operation_id: &candidate.id,
-                    project_id: &candidate.project_id,
-                    agent_runtime_id: &runtime_id,
-                    placement,
-                },
-                &artifact,
-                &runtime_id,
-                runtime_environment.clone(),
-                runtime_secret_references,
-                RuntimeBootIntent::Normal,
-            )?;
-            Some((runtime_id, artifact.id, runtime_spec))
-        } else {
-            // Expand-generation compatibility for experimental N-1 rows that
-            // predate provider-neutral placement. They remain controllable by
-            // the legacy Runner but cannot silently invent a RuntimeSpec.
-            None
-        };
-        let request = {
-            let Some(request) = self.agent_creation_requests.get_mut(&request_id) else {
-                return Err(CoreError::AgentCreationRequestUnavailable);
-            };
-
-            if let Some((runtime_id, artifact_id, runtime_spec)) = prepared {
-                request.agent_runtime_id = Some(runtime_id);
-                request.desired_runtime_artifact_id = Some(artifact_id);
-                request.runtime_spec = Some(runtime_spec);
-            }
-
-            request.status = AgentCreationRequestStatus::Launching;
-            request.runner_id = Some(runner_id);
-            request.lease_token = Some(lease_token);
-            request.lease_expires_at = Some(lease_expires_at);
-            request.failure_message = None;
-            request.updated_at = now;
-            request.clone()
-        };
-        let provider_operation = self.provider_operations.get(&request.id).cloned();
-        let in_flight_capacity_reservation = in_flight_capacity
-            .map(|capacity| {
-                let core_in_flight_count = self
-                    .agent_creation_requests
-                    .values()
-                    .filter(|candidate| {
-                        candidate.runner_class == capacity.runner_class
-                            && candidate.status == AgentCreationRequestStatus::Launching
-                    })
-                    .count()
-                    .try_into()
-                    .unwrap_or(u32::MAX);
-                in_flight_capacity_reservation(&request, placement, capacity, core_in_flight_count)
-            })
-            .transpose()?;
-        Ok(Some(AgentCreationLease {
-            project,
-            request,
-            provider_operation,
-            in_flight_capacity_reservation,
-        }))
-    }
-
-    pub fn record_provider_operation_transition(
-        &mut self,
-        input: RecordProviderOperationTransitionInput,
-    ) -> CoreResult<ProviderOperationEnvelope> {
-        if matches!(
-            input.transition,
-            ProviderOperationTransition::ProviderHandleRecorded { .. }
-                | ProviderOperationTransition::Ready
-        ) {
-            return Err(CoreError::ProviderOperationBoundaryNotReached);
-        }
-        let now = current_time_iso()?;
-        let request = self.verified_active_launching_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-            &now,
-        )?;
-        let project = self
-            .projects
-            .get(&request.project_id)
-            .ok_or_else(|| CoreError::Store(format!("request {} has no project", request.id)))?;
-        let placement = request
-            .placement
-            .or(project.placement)
-            .or_else(|| RuntimePlacement::from_legacy_runner_class(request.runner_class))
-            .ok_or(CoreError::ProviderOperationIdentityMismatch)?;
-        if placement != input.placement {
-            return Err(CoreError::ProviderOperationIdentityMismatch);
-        }
-        let updated = append_provider_operation_transition(
-            self.provider_operations.get(&input.request_id),
-            &input.request_id,
-            &input.correlation_id,
-            input.placement,
-            input.transition,
-            &now,
-        )?;
-        self.provider_operations
-            .insert(input.request_id, updated.clone());
-        Ok(updated)
-    }
-
-    pub fn lease_runtime_control_request(
-        &mut self,
-        input: LeaseRuntimeControlRequestInput,
-    ) -> CoreResult<Option<RuntimeControlLease>> {
-        self.lease_runtime_control_request_with_runtime_configuration(input, &BTreeMap::new(), &[])
-    }
-
-    pub(crate) fn lease_runtime_control_request_with_runtime_configuration(
-        &mut self,
-        input: LeaseRuntimeControlRequestInput,
-        runtime_environment: &BTreeMap<String, String>,
-        runtime_secret_references: &[String],
-    ) -> CoreResult<Option<RuntimeControlLease>> {
-        validate_runtime_spec_environment(runtime_environment)?;
-        runtime_spec_secret_references(runtime_secret_references)?;
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let runner_id = trim_to_option(Some(&input.runner_id))
-            .ok_or(CoreError::MissingAgentCreationRunnerId)?;
-        let lease_token = trim_to_option(Some(&input.lease_token))
-            .ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-        let lease_seconds = input
-            .lease_seconds
-            .unwrap_or(DEFAULT_AGENT_CREATION_LEASE_SECONDS);
-        if !(1..=MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
-            return Err(CoreError::InvalidAgentCreationLeaseDuration);
-        }
-        if let Some(capacity) = input.runner_capacity.as_ref() {
-            capacity.validate_runtime_capability_policy()?;
-        }
-        if input
-            .runner_capacity
-            .as_ref()
-            .is_none_or(|capacity| !capacity.accepts_runtime_control())
-        {
-            return Ok(None);
-        }
-        let source_host_id = input
-            .source_host_id
-            .as_deref()
-            .map(normalize_source_host_id)
-            .transpose()?;
-        let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
-
-        loop {
-            let request_id = self
-                .runtime_control_requests
-                .values()
-                .filter(|request| {
-                    self.runtime_control_request_is_leasable(request, now_time)
-                        && source_host_id
-                            .as_deref()
-                            .is_none_or(|host_id| request.source_host_id == host_id)
-                        && input.runner_capacity.as_ref().is_some_and(|capacity| {
-                            self.agent_runtimes
-                                .get(&request.agent_runtime_id)
-                                .is_some_and(|runtime| {
-                                    runtime.placement.is_some_and(|placement| {
-                                        capacity.supports_runner_class(placement.runner_class)
-                                    }) && runtime.supports_runtime_control(request.kind)
-                                        && capacity.supports_runtime_control(request.kind)
-                                })
-                        })
-                })
-                .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
-                .map(|request| request.id.clone());
-
-            let Some(request_id) = request_id else {
-                return Ok(None);
-            };
-            // Validate the current target before mutating the lease row.
-            // Promotion or retirement may have changed after the admin queued
-            // the request. A permanently invalid target is terminal queue work,
-            // not an error that may poison the oldest-row scan forever.
-            let pending = self
-                .runtime_control_requests
-                .get(&request_id)
-                .cloned()
-                .ok_or(CoreError::RuntimeControlRequestNotFound)?;
-            let runtime = self
-                .agent_runtimes
-                .get(&pending.agent_runtime_id)
-                .cloned()
-                .ok_or(CoreError::ProjectRuntimeNotFound)?;
-            let target_result = if pending.kind == RuntimeControlKind::Upgrade {
-                pending
-                    .target_runtime_artifact_id
-                    .as_deref()
-                    .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)
-                    .and_then(|target_id| {
-                        self.compatible_runtime_upgrade_artifact(&runtime, target_id)
-                    })
-                    .map(Some)
-            } else {
-                Ok(None)
-            };
-            let target_runtime_artifact = match target_result {
-                Ok(target) => target,
-                Err(error) if runtime_upgrade_prelease_rejection_is_terminal(&error) => {
-                    let request = self
-                        .runtime_control_requests
-                        .get_mut(&request_id)
-                        .ok_or(CoreError::RuntimeControlRequestNotFound)?;
-                    request.status = RuntimeControlRequestStatus::Failed;
-                    request.runner_id = None;
-                    request.lease_token = None;
-                    request.lease_expires_at = None;
-                    request.failure_message = Some(format!(
-                        "runtime upgrade target rejected before lease: {error}"
-                    ));
-                    request.updated_at = now.clone();
-                    request.completed_at = Some(now.clone());
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let creation = self
-                .agent_creation_requests
-                .values()
-                .find(|request| {
-                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                        && request.project_id == runtime.project_id
-                        && request.status == AgentCreationRequestStatus::Running
-                })
-                .cloned();
-            let mut current_spec = creation
-                .as_ref()
-                .and_then(|request| request.runtime_spec.clone());
-            if current_spec.is_none()
-                && let Some(creation) = creation.as_ref()
-            {
-                let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-                let project = self
-                    .projects
-                    .get(&runtime.project_id)
-                    .ok_or(CoreError::ProjectNotFound)?;
-                if placement.runner_class != RunnerClass::Kata
-                    || project.placement != Some(placement)
-                    || creation.runner_class != RunnerClass::Kata
-                {
-                    return Err(CoreError::RuntimeSpecMismatch);
-                }
-                let current_artifact_id = runtime
-                    .runtime_artifact_id
-                    .as_deref()
-                    .ok_or(CoreError::RuntimeSpecMismatch)?;
-                let current_artifact = self
-                    .runtime_artifacts
-                    .get(current_artifact_id)
-                    .ok_or(CoreError::RuntimeArtifactNotFound)?;
-                if current_artifact.promoted_at.is_none()
-                    || runtime.state_schema_version.as_deref()
-                        != Some(current_artifact.state_schema_version.as_str())
-                {
-                    return Err(CoreError::RuntimeSpecMismatch);
-                }
-                let synthesized = build_runtime_spec_v1(
-                    RuntimeSpecIdentity {
-                        operation_id: &creation.id,
-                        project_id: &runtime.project_id,
-                        agent_runtime_id: &runtime.id,
-                        placement,
-                    },
-                    current_artifact,
-                    // Runtimes created before RuntimeSpec used the canonical
-                    // Kata source-machine name as the durable-state directory.
-                    // The Core Runtime id is a different random surrogate and
-                    // would point controls at an empty/mismatched /data bind.
-                    &runtime.source_machine_id,
-                    runtime_environment.clone(),
-                    vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
-                    RuntimeBootIntent::Normal,
-                )?;
-                let stored = self
-                    .agent_creation_requests
-                    .get_mut(&creation.id)
-                    .ok_or(CoreError::AgentCreationRequestNotFound)?;
-                stored.desired_runtime_artifact_id = Some(current_artifact.id.clone());
-                stored.runtime_spec = Some(synthesized.clone());
-                stored.updated_at = now.clone();
-                current_spec = Some(synthesized);
-            }
-            let runtime_spec = current_spec
-                .as_ref()
-                .map(|current_spec| {
-                    let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-                    let current_artifact_id = runtime
-                        .runtime_artifact_id
-                        .as_deref()
-                        .ok_or(CoreError::RuntimeSpecMismatch)?;
-                    let current_artifact = self
-                        .runtime_artifacts
-                        .get(current_artifact_id)
-                        .ok_or(CoreError::RuntimeArtifactNotFound)?;
-                    let desired_artifact =
-                        target_runtime_artifact.as_ref().unwrap_or(current_artifact);
-                    let boot_intent = match pending.kind {
-                        RuntimeControlKind::RecoverKnownGoodChatRuntime => {
-                            RuntimeBootIntent::RecoverKnownGood
-                        }
-                        RuntimeControlKind::Restart
-                        | RuntimeControlKind::Upgrade
-                        | RuntimeControlKind::Stop
-                        | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
-                    };
-                    runtime_operation_spec_v1(
-                        current_spec,
-                        RuntimeSpecIdentity {
-                            operation_id: &pending.id,
-                            project_id: &runtime.project_id,
-                            agent_runtime_id: &runtime.id,
-                            placement,
-                        },
-                        current_artifact,
-                        desired_artifact,
-                        boot_intent,
-                        (pending.kind == RuntimeControlKind::Upgrade)
-                            .then_some(runtime_environment),
-                        (pending.kind == RuntimeControlKind::Upgrade)
-                            .then_some(runtime_secret_references),
-                    )
-                })
-                .transpose()?;
-            let request = {
-                let Some(request) = self.runtime_control_requests.get_mut(&request_id) else {
-                    return Err(CoreError::RuntimeControlRequestNotFound);
-                };
-                request.status = RuntimeControlRequestStatus::Running;
-                request.runner_id = Some(runner_id.clone());
-                request.lease_token = Some(lease_token.clone());
-                request.lease_expires_at = Some(lease_expires_at.clone());
-                if request.kind != RuntimeControlKind::Destroy {
-                    request.failure_message = None;
-                }
-                request.updated_at = now.clone();
-                request.clone()
-            };
-            return Ok(Some(RuntimeControlLease {
-                request,
-                runtime,
-                runtime_spec,
-                target_runtime_artifact,
-            }));
-        }
-    }
-
-    pub fn complete_runtime_control_request(
-        &mut self,
-        input: CompleteRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        self.complete_runtime_control_request_with_runtime_configuration(input, None, &[])
-    }
-
-    pub(crate) fn complete_runtime_control_request_with_runtime_configuration(
-        &mut self,
-        input: CompleteRuntimeControlRequestInput,
-        runtime_environment: Option<&BTreeMap<String, String>>,
-        runtime_secret_references: &[String],
-    ) -> CoreResult<RuntimeControlRequest> {
-        if let Some(runtime_environment) = runtime_environment {
-            validate_runtime_spec_environment(runtime_environment)?;
-        }
-        runtime_spec_secret_references(runtime_secret_references)?;
-        let now = input.now.clone().unwrap_or(current_time_iso()?);
-        if let Some(completed) = self.runtime_control_requests.get(&input.request_id)
-            && completed.status == RuntimeControlRequestStatus::Succeeded
-        {
-            let stored = self.runtime_retirement_snapshots.get(&input.request_id);
-            if completed.kind == RuntimeControlKind::Destroy
-                && stored.map(|snapshot| &snapshot.receipt) == input.retirement_snapshot.as_ref()
-                && runtime_control_completion_has_no_upgrade_facts(&input)
-            {
-                return Ok(completed.clone());
-            }
-            return Err(CoreError::RuntimeRetirementSnapshotConflict);
-        }
-        let verified = self.verified_runtime_control_request_at(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-            &now,
-        )?;
-        let retirement_snapshot = if verified.kind == RuntimeControlKind::Destroy {
-            let receipt = input
-                .retirement_snapshot
-                .clone()
-                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-            let runtime = self
-                .agent_runtimes
-                .get(&verified.agent_runtime_id)
-                .ok_or(CoreError::ProjectRuntimeNotFound)?;
-            let runtime_spec = self
-                .agent_creation_requests
-                .values()
-                .filter(|request| {
-                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                        && request.runtime_spec.is_some()
-                })
-                .max_by_key(|request| (request.created_at.clone(), request.id.clone()))
-                .and_then(|request| request.runtime_spec.as_ref())
-                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-            validate_runtime_retirement_snapshot_receipt(
-                &receipt,
-                &verified,
-                runtime,
-                runtime_spec,
-                &now,
-            )?;
-            Some(RuntimeRetirementSnapshot {
-                receipt,
-                stored_at: now.clone(),
-            })
-        } else {
-            if input.retirement_snapshot.is_some() {
-                return Err(CoreError::RuntimeRetirementSnapshotMismatch);
-            }
-            None
-        };
-        let upgrade_facts = if verified.kind == RuntimeControlKind::Upgrade {
-            let target_id = verified
-                .target_runtime_artifact_id
-                .as_deref()
-                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-            let reported_id = trim_to_option(input.runtime_artifact_id.as_deref())
-                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-            let runtime = self
-                .agent_runtimes
-                .get(&verified.agent_runtime_id)
-                .ok_or(CoreError::ProjectRuntimeNotFound)?;
-            let target = self
-                .runtime_artifacts
-                .get(target_id)
-                .cloned()
-                .ok_or(CoreError::RuntimeArtifactNotFound)?;
-            validate_runtime_capabilities_artifact_policy(
-                input.runtime_capabilities.as_ref(),
-                runtime.placement,
-                &target,
-            )?;
-            // Retirement after lease must not strand Core behind a target the
-            // runner has already atomically swapped into place. Material is
-            // immutable, so completion verifies exact identity/schema but does
-            // not reapply request-time lifecycle policy.
-            self.ensure_runtime_upgrade_artifact_material(runtime, &target)?;
-            let reported_schema = trim_to_option(input.state_schema_version.as_deref())
-                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-            let runtime_host = trim_to_option(input.runtime_host.as_deref())
-                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-            let published_app_urls = input
-                .published_app_urls
-                .clone()
-                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
-            if reported_id != target.id || reported_schema != target.state_schema_version {
-                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
-            }
-            let upgraded_spec = self
-                .agent_creation_requests
-                .values()
-                .find(|request| {
-                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                        && request.runtime_spec.is_some()
-                })
-                .and_then(|request| request.runtime_spec.as_ref())
-                .map(|current_spec| {
-                    let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-                    let current_artifact_id = runtime
-                        .runtime_artifact_id
-                        .as_deref()
-                        .ok_or(CoreError::RuntimeSpecMismatch)?;
-                    let current_artifact = self
-                        .runtime_artifacts
-                        .get(current_artifact_id)
-                        .ok_or(CoreError::RuntimeArtifactNotFound)?;
-                    runtime_operation_spec_v1(
-                        current_spec,
-                        RuntimeSpecIdentity {
-                            operation_id: &verified.id,
-                            project_id: &runtime.project_id,
-                            agent_runtime_id: &runtime.id,
-                            placement,
-                        },
-                        current_artifact,
-                        &target,
-                        RuntimeBootIntent::Normal,
-                        runtime_environment,
-                        Some(runtime_secret_references),
-                    )
-                })
-                .transpose()?;
-            Some((
-                reported_id,
-                reported_schema,
-                runtime_host,
-                published_app_urls,
-                contact_endpoint,
-                upgraded_spec,
-                input.runtime_capabilities.clone(),
-            ))
-        } else {
-            if input.runtime_artifact_id.is_some()
-                || input.state_schema_version.is_some()
-                || input.runtime_host.is_some()
-                || input.published_app_urls.is_some()
-                || input.runtime_capabilities.is_some()
-            {
-                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
-            }
-            None
-        };
-        if retirement_snapshot.is_some()
-            && self
-                .runtime_retirement_snapshots
-                .contains_key(&input.request_id)
-        {
-            return Err(CoreError::RuntimeRetirementSnapshotConflict);
-        }
-        if let Some(snapshot) = retirement_snapshot {
-            self.runtime_retirement_snapshots
-                .insert(input.request_id.clone(), snapshot);
-        }
-        let request = {
-            let Some(request) = self.runtime_control_requests.get_mut(&input.request_id) else {
-                return Err(CoreError::RuntimeControlRequestNotFound);
-            };
-            request.status = RuntimeControlRequestStatus::Succeeded;
-            request.lease_token = None;
-            request.lease_expires_at = None;
-            request.failure_message = None;
-            request.updated_at = now.clone();
-            request.completed_at = Some(now.clone());
-            request.clone()
-        };
-        let completed_status = match request.kind {
-            RuntimeControlKind::Restart
-            | RuntimeControlKind::RecoverKnownGoodChatRuntime
-            | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
-            RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
-        };
-        if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
-            runtime.host_facts.runtime_status = completed_status;
-            if let Some((
-                artifact_id,
-                schema,
-                runtime_host,
-                published_app_urls,
-                contact_endpoint,
-                _,
-                capabilities,
-            )) = upgrade_facts.as_ref()
-            {
-                runtime.runtime_artifact_id = Some(artifact_id.clone());
-                runtime.state_schema_version = Some(schema.clone());
-                runtime.contact_endpoint = Some(contact_endpoint.clone());
-                runtime.host_facts.runtime_host = runtime_host.clone();
-                runtime.host_facts.published_app_urls = published_app_urls.clone();
-                runtime.host_facts.hermes_available = Some(true);
-                if let Some(capabilities) = capabilities {
-                    runtime.runtime_capabilities = Some(capabilities.clone());
-                }
-            }
-            if request.kind == RuntimeControlKind::Destroy {
-                runtime.host_facts.hermes_available = Some(false);
-                runtime.host_facts.published_app_urls.clear();
-            }
-            runtime.updated_at = now.clone();
-        }
-        if let Some(snapshot) = self
-            .runtime_status_snapshots
-            .get_mut(&request.agent_runtime_id)
-        {
-            snapshot.status = completed_status;
-            if let Some((_, _, runtime_host, _, _, _, _)) = upgrade_facts.as_ref() {
-                snapshot.runtime_host = runtime_host.clone();
-                snapshot.hermes_available = Some(true);
-            }
-            if request.kind == RuntimeControlKind::Destroy {
-                snapshot.hermes_available = Some(false);
-            }
-            snapshot.updated_at = now.clone();
-        }
-        if let Some((artifact_id, _, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
-            && let Some(creation) = self.agent_creation_requests.values_mut().find(|creation| {
-                creation.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
-            })
-        {
-            creation.desired_runtime_artifact_id = Some(artifact_id.clone());
-            creation.runtime_spec = Some(runtime_spec.clone());
-            creation.updated_at = now.clone();
-        }
-        if request.kind == RuntimeControlKind::Destroy {
-            self.offboard_destroyed_runtime(&request);
-        }
-        Ok(request)
-    }
-
-    pub fn fail_runtime_control_request(
-        &mut self,
-        input: FailRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let failure_message = trim_to_option(Some(&input.failure_message))
-            .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
-        self.verified_runtime_control_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-        )?;
-        let Some(request) = self.runtime_control_requests.get_mut(&input.request_id) else {
-            return Err(CoreError::RuntimeControlRequestNotFound);
-        };
-        request.status = RuntimeControlRequestStatus::Failed;
-        request.lease_token = None;
-        request.lease_expires_at = None;
-        request.failure_message = Some(failure_message);
-        request.updated_at = now.clone();
-        request.completed_at = Some(now.clone());
-        if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
-            runtime.host_facts.runtime_status = RuntimeSummaryStatus::Stale;
-            runtime.updated_at = now.clone();
-        }
-        if let Some(snapshot) = self
-            .runtime_status_snapshots
-            .get_mut(&request.agent_runtime_id)
-        {
-            snapshot.status = RuntimeSummaryStatus::Stale;
-            snapshot.updated_at = now;
-        }
-        Ok(request.clone())
-    }
-
-    pub fn renew_runtime_control_request(
-        &mut self,
-        input: RenewRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let lease_seconds = input
-            .lease_seconds
-            .unwrap_or(DEFAULT_AGENT_CREATION_LEASE_SECONDS);
-        if !(1..=MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
-            return Err(CoreError::InvalidAgentCreationLeaseDuration);
-        }
-        self.verified_runtime_control_request_at(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-            &now,
-        )?;
-        let request = self
-            .runtime_control_requests
-            .get_mut(&input.request_id)
-            .ok_or(CoreError::RuntimeControlRequestNotFound)?;
-        request.lease_expires_at =
-            Some((now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?);
-        request.updated_at = now;
-        Ok(request.clone())
-    }
-
-    /// Return a transiently failed retirement to the queue without changing
-    /// request/archive identity. Generic controls retain terminal failure.
-    pub fn retry_runtime_control_request(
-        &mut self,
-        input: RetryRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let failure_message = trim_to_option(Some(&input.failure_message))
-            .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
-        let verified = self.verified_runtime_control_request_at(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-            &now,
-        )?;
-        if verified.kind != RuntimeControlKind::Destroy {
-            return Err(CoreError::RuntimeControlOperationConflict);
-        }
-        let request = self
-            .runtime_control_requests
-            .get_mut(&input.request_id)
-            .ok_or(CoreError::RuntimeControlRequestNotFound)?;
-        request.status = RuntimeControlRequestStatus::Requested;
-        request.runner_id = None;
-        request.lease_token = None;
-        request.lease_expires_at = None;
-        request.failure_message = Some(failure_message);
-        request.updated_at = now.clone();
-        request.completed_at = None;
-        if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
-            runtime.host_facts.runtime_status = RuntimeSummaryStatus::Stale;
-            runtime.updated_at = now.clone();
-        }
-        if let Some(snapshot) = self
-            .runtime_status_snapshots
-            .get_mut(&request.agent_runtime_id)
-        {
-            snapshot.status = RuntimeSummaryStatus::Stale;
-            snapshot.updated_at = now;
-        }
-        Ok(request.clone())
-    }
-
-    pub fn register_agent_creation_runtime(
-        &mut self,
-        input: RegisterAgentCreationRuntimeInput,
-    ) -> CoreResult<AgentCreationLease> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let source_host_id = normalize_source_host_id(&input.source_host_id)?;
-        let source_machine_id = normalize_id_part(&input.source_machine_id);
-        if source_machine_id.is_empty() {
-            return Err(CoreError::MissingSourceMachineId);
-        }
-        let token_hash = trim_to_option(Some(&input.runtime_relay_token_hash))
-            .ok_or(CoreError::MissingRuntimeRelayTokenHash)?;
-        let artifact_id = trim_to_option(input.runtime_artifact_id.as_deref())
-            .ok_or(CoreError::MissingRuntimeArtifactId)?;
-        let artifact = self.launchable_runtime_artifact(&artifact_id)?;
-        let state_schema_version = trim_to_option(input.state_schema_version.as_deref())
-            .unwrap_or_else(|| artifact.state_schema_version.clone());
-        let request = self.verified_launching_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-        )?;
-        let provider_operation = self.provider_operations.get(&input.request_id).cloned();
-        let provider_operation_now = provider_operation
-            .as_ref()
-            .map(|_| current_time_iso())
-            .transpose()?;
-        if let Some(provider_operation_now) = provider_operation_now.as_deref() {
-            self.verified_active_launching_request(
-                &input.request_id,
-                &input.runner_id,
-                &input.lease_token,
-                provider_operation_now,
-            )?;
-        }
-        let project = self
-            .projects
-            .get(&request.project_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    request.id, request.project_id
-                ))
-            })?;
-        let source_import_key = source_import_key(&source_host_id, &source_machine_id);
-        if self.agent_runtimes.values().any(|runtime| {
-            runtime.source_import_key == source_import_key && runtime.project_id != project.id
-        }) {
-            return Err(CoreError::Store(format!(
-                "runtime source {source_import_key} is already attached to another project"
-            )));
-        }
-
-        // Resolve the runtime by its natural key (source_import_key is UNIQUE):
-        // reuse the existing surrogate id when the source is already known, mint
-        // a fresh one otherwise. The id is never derived from the source.
-        let runtime_by_source = self.find_agent_runtime_by_source_import_key(&source_import_key);
-        let placement = request.placement.or(project.placement).or(runtime_by_source
-            .as_ref()
-            .and_then(|runtime| runtime.placement));
-        let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
-            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-            let spec = runtime_spec_v1(runtime_spec);
-            validate_runtime_spec_binding(
-                runtime_spec,
-                Some(&request.id),
-                &project.id,
-                &spec.agent_runtime_id,
-                placement,
-                &artifact,
-            )?;
-            if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
-                || runtime_by_source
-                    .as_ref()
-                    .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
-            {
-                return Err(CoreError::RuntimeSpecMismatch);
-            }
-            spec.agent_runtime_id.clone()
-        } else {
-            runtime_by_source
-                .as_ref()
-                .map(|runtime| runtime.id.clone())
-                .map(Ok)
-                .unwrap_or_else(new_agent_runtime_id)?
-        };
-        let runtime_by_id = self.agent_runtimes.get(&runtime_id).cloned();
-        validate_runtime_relocation_registration(
-            &request,
-            runtime_by_id.as_ref(),
-            &source_host_id,
-            &source_machine_id,
-        )?;
-        if request.relocation.is_some() {
-            // A Kata relocation has already passed target health and Agent
-            // Principal verification before this acknowledgement. Keep Core's
-            // source Runtime/link untouched until the following completion
-            // transaction commits the target binding.
-            return Ok(AgentCreationLease {
-                project,
-                request,
-                provider_operation,
-                in_flight_capacity_reservation: None,
-            });
-        }
-        let existing_runtime = runtime_by_source.or_else(|| {
-            self.agent_runtimes
-                .get(&runtime_id)
-                .filter(|runtime| runtime.source_import_key == source_import_key)
-                .cloned()
-        });
-        let (provider_runtime_handle, provider_runtime_handle_history) =
-            merge_provider_runtime_handle(
-                existing_runtime.as_ref(),
-                input.provider_runtime_handle.clone(),
-                placement,
-            )?;
-        let contact_endpoint =
-            normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
-                .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-        let bounded_runtime_capabilities =
-            bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
-        validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
-        let runtime_capabilities =
-            merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
-        let host_facts = HostOwnedRuntimeFacts {
-            display_name: trim_to_option(input.display_name.as_deref())
-                .unwrap_or_else(|| request.display_name.clone()),
-            hostname: trim_to_option(input.hostname.as_deref()),
-            runtime_host: trim_to_option(input.runtime_host.as_deref())
-                .unwrap_or_else(|| source_host_id.clone()),
-            runtime_status: input
-                .runtime_status
-                .unwrap_or(RuntimeSummaryStatus::Unknown),
-            active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
-            hermes_available: input.hermes_available,
-            published_app_urls: input.published_app_urls,
-        };
-        let runtime = AgentRuntime {
-            id: runtime_id.clone(),
-            project_id: project.id.clone(),
-            source_host_id,
-            source_machine_id,
-            source_import_key,
-            runtime_artifact_id: Some(artifact.id),
-            state_schema_version: Some(state_schema_version),
-            placement,
-            provider_runtime_handle,
-            provider_runtime_handle_history,
-            contact_endpoint,
-            runtime_capabilities,
-            host_facts,
-            created_at: existing_runtime
-                .map(|runtime| runtime.created_at)
-                .unwrap_or_else(|| now.clone()),
-            updated_at: now.clone(),
-        };
-        let updated_provider_operation = provider_operation_at_runtime_boundary(
-            provider_operation.as_ref(),
-            runtime.provider_runtime_handle.as_ref(),
-            false,
-            provider_operation_now.as_deref().unwrap_or(&now),
-        )?;
-        if let Some(operation) = updated_provider_operation {
-            self.provider_operations
-                .insert(input.request_id.clone(), operation);
-        }
-        self.agent_runtimes
-            .insert(runtime.id.clone(), runtime.clone());
-        self.runtime_relay_credentials.insert(
-            runtime_id.clone(),
-            RuntimeRelayCredential {
-                agent_runtime_id: runtime_id.clone(),
-                token_hash,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            },
-        );
-
-        for link in self
-            .project_runtime_links
-            .values_mut()
-            .filter(|link| link.project_id == project.id)
-        {
-            link.active = false;
-        }
-        let link = ProjectRuntimeLink {
-            id: project_runtime_link_id_for(&project.id, &runtime_id),
-            project_id: project.id.clone(),
-            agent_runtime_id: runtime_id.clone(),
-            active: true,
-            created_at: now.clone(),
-        };
-        self.project_runtime_links.insert(link.id.clone(), link);
-
-        let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
-            return Err(CoreError::AgentCreationRequestNotFound);
-        };
-        request.agent_runtime_id = Some(runtime_id);
-        request.failure_message = None;
-        request.updated_at = now;
-
-        Ok(AgentCreationLease {
-            project,
-            request: request.clone(),
-            provider_operation: self.provider_operations.get(&input.request_id).cloned(),
-            in_flight_capacity_reservation: None,
-        })
-    }
-
-    pub fn complete_agent_creation_request(
-        &mut self,
-        input: CompleteAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationLease> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let source_host_id = normalize_source_host_id(&input.source_host_id)?;
-        let source_machine_id = normalize_id_part(&input.source_machine_id);
-        if source_machine_id.is_empty() {
-            return Err(CoreError::MissingSourceMachineId);
-        }
-        let request = self.verified_launching_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-        )?;
-        let provider_operation = self.provider_operations.get(&input.request_id).cloned();
-        let provider_operation_now = provider_operation
-            .as_ref()
-            .map(|_| current_time_iso())
-            .transpose()?;
-        if let Some(provider_operation_now) = provider_operation_now.as_deref() {
-            self.verified_active_launching_request(
-                &input.request_id,
-                &input.runner_id,
-                &input.lease_token,
-                provider_operation_now,
-            )?;
-        }
-        let existing_runtime = request
-            .agent_runtime_id
-            .as_ref()
-            .and_then(|runtime_id| self.agent_runtimes.get(runtime_id))
-            .cloned();
-        let artifact_id = trim_to_option(input.runtime_artifact_id.as_deref())
-            .or_else(|| existing_runtime.as_ref()?.runtime_artifact_id.clone())
-            .ok_or(CoreError::MissingRuntimeArtifactId)?;
-        let artifact = self.launchable_runtime_artifact(&artifact_id)?;
-        let state_schema_version = trim_to_option(input.state_schema_version.as_deref())
-            .or_else(|| existing_runtime.as_ref()?.state_schema_version.clone())
-            .unwrap_or_else(|| artifact.state_schema_version.clone());
-        let project = self
-            .projects
-            .get(&request.project_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    request.id, request.project_id
-                ))
-            })?;
-        validate_runtime_relocation_registration(
-            &request,
-            existing_runtime.as_ref(),
-            &source_host_id,
-            &source_machine_id,
-        )?;
-        let source_import_key = source_import_key(&source_host_id, &source_machine_id);
-        if self.agent_runtimes.values().any(|runtime| {
-            runtime.source_import_key == source_import_key && runtime.project_id != project.id
-        }) {
-            return Err(CoreError::Store(format!(
-                "runtime source {source_import_key} is already attached to another project"
-            )));
-        }
-
-        // Reuse the runtime already known for this source (registered earlier or
-        // resolved by its UNIQUE source_import_key); mint a fresh surrogate id
-        // only for a source we have never seen.
-        let runtime_by_source = self.find_agent_runtime_by_source_import_key(&source_import_key);
-        let placement = request
-            .placement
-            .or(project.placement)
-            .or(existing_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.placement))
-            .or(runtime_by_source
-                .as_ref()
-                .and_then(|runtime| runtime.placement));
-        let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
-            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-            let spec = runtime_spec_v1(runtime_spec);
-            validate_runtime_spec_binding(
-                runtime_spec,
-                Some(&request.id),
-                &project.id,
-                &spec.agent_runtime_id,
-                placement,
-                &artifact,
-            )?;
-            if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
-                || runtime_by_source
-                    .as_ref()
-                    .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
-            {
-                return Err(CoreError::RuntimeSpecMismatch);
-            }
-            spec.agent_runtime_id.clone()
-        } else {
-            runtime_by_source
-                .as_ref()
-                .map(|runtime| runtime.id.clone())
-                .map(Ok)
-                .unwrap_or_else(new_agent_runtime_id)?
-        };
-        let existing_runtime = existing_runtime.or(runtime_by_source).or_else(|| {
-            self.agent_runtimes
-                .get(&runtime_id)
-                .filter(|runtime| runtime.source_import_key == source_import_key)
-                .cloned()
-        });
-        let (provider_runtime_handle, provider_runtime_handle_history) =
-            merge_provider_runtime_handle(
-                existing_runtime.as_ref(),
-                input.provider_runtime_handle.clone(),
-                placement,
-            )?;
-        let contact_endpoint =
-            normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
-                .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-        let bounded_runtime_capabilities =
-            bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
-        validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
-        let runtime_capabilities =
-            merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
-        let host_facts = HostOwnedRuntimeFacts {
-            display_name: trim_to_option(input.display_name.as_deref())
-                .unwrap_or_else(|| request.display_name.clone()),
-            hostname: trim_to_option(input.hostname.as_deref()),
-            runtime_host: trim_to_option(input.runtime_host.as_deref())
-                .unwrap_or_else(|| source_host_id.clone()),
-            runtime_status: input
-                .runtime_status
-                .unwrap_or(RuntimeSummaryStatus::Unknown),
-            active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
-            hermes_available: input.hermes_available,
-            published_app_urls: input.published_app_urls,
-        };
-        let runtime = AgentRuntime {
-            id: runtime_id.clone(),
-            project_id: project.id.clone(),
-            source_host_id,
-            source_machine_id,
-            source_import_key,
-            runtime_artifact_id: Some(artifact.id),
-            state_schema_version: Some(state_schema_version),
-            placement,
-            provider_runtime_handle,
-            provider_runtime_handle_history,
-            contact_endpoint,
-            runtime_capabilities,
-            host_facts,
-            created_at: existing_runtime
-                .map(|runtime| runtime.created_at)
-                .unwrap_or_else(|| now.clone()),
-            updated_at: now.clone(),
-        };
-        let updated_provider_operation = provider_operation_at_runtime_boundary(
-            provider_operation.as_ref(),
-            runtime.provider_runtime_handle.as_ref(),
-            true,
-            provider_operation_now.as_deref().unwrap_or(&now),
-        )?;
-        if let Some(operation) = updated_provider_operation {
-            self.provider_operations
-                .insert(input.request_id.clone(), operation);
-        }
-        self.agent_runtimes
-            .insert(runtime.id.clone(), runtime.clone());
-
-        for link in self
-            .project_runtime_links
-            .values_mut()
-            .filter(|link| link.project_id == project.id)
-        {
-            link.active = false;
-        }
-        let link = ProjectRuntimeLink {
-            id: project_runtime_link_id_for(&project.id, &runtime_id),
-            project_id: project.id.clone(),
-            agent_runtime_id: runtime_id.clone(),
-            active: true,
-            created_at: now.clone(),
-        };
-        self.project_runtime_links.insert(link.id.clone(), link);
-
-        let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
-            return Err(CoreError::AgentCreationRequestNotFound);
-        };
-        request.status = AgentCreationRequestStatus::Running;
-        request.agent_runtime_id = Some(runtime_id);
-        request.lease_token = None;
-        request.lease_expires_at = None;
-        request.failure_message = None;
-        request.updated_at = now;
-
-        Ok(AgentCreationLease {
-            project,
-            request: request.clone(),
-            provider_operation: self.provider_operations.get(&input.request_id).cloned(),
-            in_flight_capacity_reservation: None,
-        })
-    }
-
-    pub fn fail_agent_creation_request(
-        &mut self,
-        input: FailAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let failure_message = trim_to_option(Some(&input.failure_message))
-            .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
-        let verified = if let Some(operation) = self.provider_operations.get(&input.request_id) {
-            let fence_now = current_time_iso()?;
-            let verified = self.verified_active_launching_request(
-                &input.request_id,
-                &input.runner_id,
-                &input.lease_token,
-                &fence_now,
-            )?;
-            if !provider_operation_allows_generic_failure(operation) {
-                return Err(CoreError::ProviderOperationBoundaryNotReached);
-            }
-            verified
-        } else {
-            self.verified_launching_request(
-                &input.request_id,
-                &input.runner_id,
-                &input.lease_token,
-            )?
-        };
-        let provisional_runtime_id = verified.agent_runtime_id.clone();
-        let is_relocation = verified.relocation.is_some();
-        if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
-            let key_id =
-                trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
-            let key = self
-                .finite_private_api_keys
-                .get(&key_id)
-                .ok_or(CoreError::InvalidFinitePrivateApiKey)?;
-            if key.project_id.as_deref() != Some(verified.project_id.as_str()) {
-                return Err(CoreError::InvalidFinitePrivateApiKey);
-            }
-            self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
-                key_id,
-                now: Some(now.clone()),
-            })?;
-        }
-        let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
-            return Err(CoreError::AgentCreationRequestNotFound);
-        };
-        request.status = AgentCreationRequestStatus::Failed;
-        if !is_relocation {
-            request.agent_runtime_id = None;
-        }
-        request.lease_token = None;
-        request.lease_expires_at = None;
-        request.failure_message = Some(failure_message);
-        request.updated_at = now;
-        if !is_relocation && let Some(runtime_id) = provisional_runtime_id {
-            self.agent_runtimes.remove(&runtime_id);
-            self.runtime_relay_credentials.remove(&runtime_id);
-            self.runtime_status_snapshots.remove(&runtime_id);
-            self.project_runtime_links
-                .retain(|_, link| link.agent_runtime_id != runtime_id);
-        }
-        Ok(request.clone())
-    }
-
-    pub fn cancel_agent_creation_request(
-        &mut self,
-        input: CancelAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let request = self
-            .agent_creation_requests
-            .get(&input.request_id)
-            .cloned()
-            .ok_or(CoreError::AgentCreationRequestNotFound)?;
-        if request.status == AgentCreationRequestStatus::Running {
-            return Err(CoreError::AgentCreationRequestNotCancellable);
-        }
-        if self
-            .provider_operations
-            .get(&input.request_id)
-            .is_some_and(|operation| !provider_operation_allows_generic_failure(operation))
-        {
-            return Err(CoreError::ProviderOperationBoundaryNotReached);
-        }
-        let provisional_runtime_id = request.agent_runtime_id.clone();
-        let is_relocation = request.relocation.is_some();
-        // Cancellation is the final cleanup step for failed/pre-provider
-        // requests. Revoke every project-scoped launch key, including one a
-        // crashed runner failed to identify in its failure acknowledgment.
-        if !is_relocation {
-            let key_ids = self
-                .finite_private_api_keys
-                .values()
-                .filter(|key| {
-                    key.status == FinitePrivateApiKeyStatus::Active
-                        && key.project_id.as_deref() == Some(request.project_id.as_str())
-                })
-                .map(|key| key.id.clone())
-                .collect::<Vec<_>>();
-            for key_id in key_ids {
-                self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
-                    key_id,
-                    now: Some(now.clone()),
-                })?;
-            }
-        }
-
-        let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
-            return Err(CoreError::AgentCreationRequestNotFound);
-        };
-        request.status = AgentCreationRequestStatus::Cancelled;
-        if !is_relocation {
-            request.agent_runtime_id = None;
-        }
-        request.runner_id = None;
-        request.lease_token = None;
-        request.lease_expires_at = None;
-        request.failure_message = None;
-        request.updated_at = now;
-        if !is_relocation && let Some(runtime_id) = provisional_runtime_id {
-            self.agent_runtimes.remove(&runtime_id);
-            self.runtime_relay_credentials.remove(&runtime_id);
-            self.runtime_status_snapshots.remove(&runtime_id);
-            self.project_runtime_links
-                .retain(|_, link| link.agent_runtime_id != runtime_id);
-        }
-        Ok(request.clone())
-    }
-
-    pub fn record_runtime_heartbeat(&mut self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        let now = current_time_iso()?;
-        let token_hash = hash_runtime_relay_token(relay_token)?;
-        let credential = self
-            .runtime_relay_credentials
-            .values()
-            .find(|credential| credential.token_hash == token_hash)
-            .cloned()
-            .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-        let runtime = self
-            .agent_runtimes
-            .get_mut(&credential.agent_runtime_id)
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "runtime relay credential references missing runtime {}",
-                    credential.agent_runtime_id
-                ))
-            })?;
-        runtime.host_facts.runtime_status = RuntimeSummaryStatus::Online;
-        runtime.updated_at = now.clone();
-        self.runtime_status_snapshots.insert(
-            runtime.id.clone(),
-            RuntimeStatusSnapshot {
-                agent_runtime_id: runtime.id.clone(),
-                status: RuntimeSummaryStatus::Online,
-                last_heartbeat_at: Some(now.clone()),
-                runtime_host: runtime.host_facts.runtime_host.clone(),
-                active_inference_profile: runtime.host_facts.active_inference_profile.clone(),
-                hermes_available: runtime.host_facts.hermes_available,
-                updated_at: now.clone(),
-            },
-        );
-        Ok(RelayHeartbeat {
-            ok: true,
-            machine_id: runtime.source_machine_id.clone(),
-            last_seen_at: now,
-        })
-    }
-
-    pub fn relay_events_for_runtime(&self, relay_token: &str) -> CoreResult<RelayEventsOutput> {
-        let token_hash = hash_runtime_relay_token(relay_token)?;
-        let credential = self
-            .runtime_relay_credentials
-            .values()
-            .find(|credential| credential.token_hash == token_hash)
-            .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-        let runtime = self
-            .agent_runtimes
-            .get(&credential.agent_runtime_id)
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "runtime relay credential references missing runtime {}",
-                    credential.agent_runtime_id
-                ))
-            })?;
-        Ok(RelayEventsOutput {
-            machine_id: runtime.source_machine_id.clone(),
-            events: Vec::new(),
-        })
-    }
-
-    pub fn runtime_heartbeat_for_machine(
-        &self,
-        source_machine_id: &str,
-    ) -> CoreResult<RelayHeartbeat> {
-        let source_machine_id = normalize_id_part(source_machine_id);
-        if source_machine_id.is_empty() {
-            return Err(CoreError::MissingSourceMachineId);
-        }
-        let runtime = self
-            .agent_runtimes
-            .values()
-            .find(|runtime| runtime.source_machine_id == source_machine_id)
-            .ok_or(CoreError::RuntimeHeartbeatNotFound)?;
-        let snapshot = self
-            .runtime_status_snapshots
-            .get(&runtime.id)
-            .filter(|snapshot| snapshot.status == RuntimeSummaryStatus::Online)
-            .and_then(|snapshot| snapshot.last_heartbeat_at.as_ref())
-            .ok_or(CoreError::RuntimeHeartbeatNotFound)?;
-        Ok(RelayHeartbeat {
-            ok: true,
-            machine_id: runtime.source_machine_id.clone(),
-            last_seen_at: snapshot.clone(),
-        })
-    }
-
-    pub fn claimable_candidates_for_email(
-        &self,
-        email: Option<&str>,
-    ) -> Vec<ProjectImportCandidate> {
-        let Some(normalized) = normalize_owner_email(email) else {
-            return Vec::new();
-        };
-
-        self.project_import_candidates
-            .values()
-            .filter(|candidate| {
-                candidate.status == ImportCandidateStatus::Pending
-                    && candidate.owner_email == normalized
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn agent_creation_request_is_leasable(
-        &self,
-        request: &AgentCreationRequest,
-        now: OffsetDateTime,
-    ) -> bool {
-        match request.status {
-            AgentCreationRequestStatus::Requested => true,
-            AgentCreationRequestStatus::Launching => request
-                .lease_expires_at
-                .as_deref()
-                .and_then(|value| parse_time(value).ok())
-                .is_none_or(|lease_expires_at| lease_expires_at <= now),
-            AgentCreationRequestStatus::Running
-            | AgentCreationRequestStatus::Failed
-            | AgentCreationRequestStatus::Cancelled => false,
-        }
-    }
-
-    fn runtime_control_request_is_leasable(
-        &self,
-        request: &RuntimeControlRequest,
-        now: OffsetDateTime,
-    ) -> bool {
-        match request.status {
-            RuntimeControlRequestStatus::Requested => true,
-            RuntimeControlRequestStatus::Running => request
-                .lease_expires_at
-                .as_deref()
-                .and_then(|value| parse_time(value).ok())
-                .is_none_or(|lease_expires_at| lease_expires_at <= now),
-            RuntimeControlRequestStatus::Succeeded | RuntimeControlRequestStatus::Failed => false,
-        }
-    }
-
-    fn verified_launching_request(
-        &self,
-        request_id: &str,
-        runner_id: &str,
-        lease_token: &str,
-    ) -> CoreResult<AgentCreationRequest> {
-        let runner_id =
-            trim_to_option(Some(runner_id)).ok_or(CoreError::MissingAgentCreationRunnerId)?;
-        let lease_token =
-            trim_to_option(Some(lease_token)).ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-        let request = self
-            .agent_creation_requests
-            .get(request_id)
-            .cloned()
-            .ok_or(CoreError::AgentCreationRequestNotFound)?;
-        if request.status != AgentCreationRequestStatus::Launching {
-            return Err(CoreError::AgentCreationRequestNotLaunching);
-        }
-        if request.runner_id.as_deref() != Some(runner_id.as_str())
-            || request.lease_token.as_deref() != Some(lease_token.as_str())
-        {
-            return Err(CoreError::AgentCreationRequestLeaseConflict);
-        }
-        Ok(request)
-    }
-
-    fn verified_active_launching_request(
-        &self,
-        request_id: &str,
-        runner_id: &str,
-        lease_token: &str,
-        now: &str,
-    ) -> CoreResult<AgentCreationRequest> {
-        let request = self.verified_launching_request(request_id, runner_id, lease_token)?;
-        let now = parse_time(now)?;
-        let active = request
-            .lease_expires_at
-            .as_deref()
-            .and_then(|expires_at| parse_time(expires_at).ok())
-            .is_some_and(|expires_at| expires_at > now);
-        if !active {
-            return Err(CoreError::AgentCreationRequestLeaseConflict);
-        }
-        Ok(request)
-    }
-
-    fn verified_runtime_control_request(
-        &self,
-        request_id: &str,
-        runner_id: &str,
-        lease_token: &str,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let runner_id =
-            trim_to_option(Some(runner_id)).ok_or(CoreError::MissingAgentCreationRunnerId)?;
-        let lease_token =
-            trim_to_option(Some(lease_token)).ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-        let request = self
-            .runtime_control_requests
-            .get(request_id)
-            .cloned()
-            .ok_or(CoreError::RuntimeControlRequestNotFound)?;
-        if request.status != RuntimeControlRequestStatus::Running {
-            return Err(CoreError::RuntimeControlRequestNotRunning);
-        }
-        if request.runner_id.as_deref() != Some(runner_id.as_str())
-            || request.lease_token.as_deref() != Some(lease_token.as_str())
-        {
-            return Err(CoreError::RuntimeControlRequestLeaseConflict);
-        }
-        Ok(request)
-    }
-
-    fn verified_runtime_control_request_at(
-        &self,
-        request_id: &str,
-        runner_id: &str,
-        lease_token: &str,
-        now: &str,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let request = self.verified_runtime_control_request(request_id, runner_id, lease_token)?;
-        let now = parse_time(now)?;
-        let active = request
-            .lease_expires_at
-            .as_deref()
-            .and_then(|expires_at| parse_time(expires_at).ok())
-            .is_some_and(|expires_at| expires_at >= now);
-        if !active {
-            return Err(CoreError::RuntimeControlRequestLeaseConflict);
-        }
-        Ok(request)
-    }
-
-    fn active_runtime_for_project(&self, project_id: &str) -> Option<AgentRuntime> {
-        self.project_runtime_links
-            .values()
-            .find(|link| link.project_id == project_id && link.active)
-            .and_then(|link| self.agent_runtimes.get(&link.agent_runtime_id))
-            .cloned()
-    }
-
-    pub fn visible_projects_for_user(&self, user_id: &str) -> Vec<Project> {
-        let Some(identity) = self
-            .chat_identities
-            .values()
-            .find(|identity| identity.user_id == user_id)
-        else {
-            return Vec::new();
-        };
-
-        let project_ids = self
-            .project_room_memberships
-            .values()
-            .filter(|membership| {
-                membership.chat_identity_id == identity.id && membership.archived_at.is_none()
-            })
-            .map(|membership| membership.project_id.as_str())
-            .collect::<BTreeSet<_>>();
-
-        self.projects
-            .values()
-            .filter(|project| project_ids.contains(project.id.as_str()))
-            .filter(|project| !self.project_has_hidden_cancelled_creation_request(&project.id))
-            .cloned()
-            .collect()
-    }
-
-    fn project_has_hidden_cancelled_creation_request(&self, project_id: &str) -> bool {
-        self.agent_creation_requests.values().any(|request| {
-            request.project_id == project_id
-                && request.status == AgentCreationRequestStatus::Cancelled
-                && request.agent_runtime_id.is_none()
-        })
-    }
-
-    fn update_existing_candidate(
-        &mut self,
-        candidate_id: &str,
-        latest_host_owner_email: &str,
-        record: &ExistingHostProjectImport,
-        now: &str,
-    ) {
-        let runtime_id =
-            if let Some(candidate) = self.project_import_candidates.get_mut(candidate_id) {
-                candidate.latest_host_owner_email = Some(latest_host_owner_email.to_string());
-                candidate.host_facts = host_facts_from_record(record);
-                candidate.known_external_channel_participants =
-                    record.known_external_channel_participants.clone();
-                candidate.updated_at = now.to_string();
-                candidate.agent_runtime_id.clone()
-            } else {
-                None
-            };
-
-        if let Some(runtime_id) = runtime_id
-            && let Some(runtime) = self.agent_runtimes.get_mut(&runtime_id)
-        {
-            runtime.host_facts = host_facts_from_record(record);
-            runtime.updated_at = now.to_string();
-        }
-    }
-
-    fn find_user_by_email(&self, email: &str) -> Option<CoreUser> {
-        self.users
-            .values()
-            .find(|user| user.email == email)
-            .cloned()
-    }
-
-    fn find_personal_org_by_owner(&self, owner_user_id: &str) -> Option<CustomerOrganization> {
-        self.customer_orgs
-            .values()
-            .find(|org| org.owner_user_id == owner_user_id)
-            .cloned()
-    }
-
-    fn find_agent_creation_request_by_idempotency(
-        &self,
-        owner_user_id: &str,
-        idempotency_key: &str,
-    ) -> Option<AgentCreationRequest> {
-        self.agent_creation_requests
-            .values()
-            .find(|request| {
-                request.owner_user_id == owner_user_id && request.idempotency_key == idempotency_key
-            })
-            .cloned()
-    }
-
-    fn find_agent_runtime_by_source_import_key(
-        &self,
-        source_import_key: &str,
-    ) -> Option<AgentRuntime> {
-        self.agent_runtimes
-            .values()
-            .find(|runtime| runtime.source_import_key == source_import_key)
-            .cloned()
-    }
-
-    fn ensure_pending_user(&mut self, email: &str, now: &str) -> CoreResult<CoreUser> {
-        // Natural-key lookup by email replaces the old `user_id = f(email)`
-        // derivation: a wiped+recreated account gets a fresh surrogate id and
-        // cannot collide with the previous account's orphaned rows.
-        if let Some(existing) = self.find_user_by_email(email) {
-            return Ok(existing);
-        }
-
-        let id = new_user_id()?;
-        let user = CoreUser {
-            id: id.clone(),
-            email: email.to_string(),
-            status: UserLinkStatus::Pending,
-            workos_user_id: None,
-            created_at: now.to_string(),
-            updated_at: now.to_string(),
-        };
-        self.users.insert(id, user.clone());
-        Ok(user)
-    }
-
-    fn ensure_linked_user(
-        &mut self,
-        email: &str,
-        workos_user_id: &str,
-        now: &str,
-    ) -> CoreResult<CoreUser> {
-        self.ensure_linked_user_with_billing_class(
-            email,
-            workos_user_id,
-            BillingClass::Grandfathered,
-            now,
-        )
-    }
-
-    fn ensure_linked_user_with_billing_class(
-        &mut self,
-        email: &str,
-        workos_user_id: &str,
-        billing_class: BillingClass,
-        now: &str,
-    ) -> CoreResult<CoreUser> {
-        let pending = self.ensure_pending_user(email, now)?;
-        if self.users.values().any(|user| {
-            user.id != pending.id && user.workos_user_id.as_deref() == Some(workos_user_id)
-        }) {
-            return Err(CoreError::WorkosUserConflict);
-        }
-
-        let user = CoreUser {
-            status: UserLinkStatus::Linked,
-            workos_user_id: Some(workos_user_id.to_string()),
-            updated_at: now.to_string(),
-            ..pending
-        };
-        self.users.insert(user.id.clone(), user.clone());
-        self.ensure_personal_org(&user, billing_class, now)?;
-        Ok(user)
-    }
-
-    fn ensure_personal_org(
-        &mut self,
-        user: &CoreUser,
-        billing_class: BillingClass,
-        now: &str,
-    ) -> CoreResult<CustomerOrganization> {
-        // One personal org per owner: look it up by owner_user_id (the DB carries
-        // a matching unique index) and mint a fresh surrogate id only on insert.
-        if let Some(existing) = self.find_personal_org_by_owner(&user.id) {
-            return Ok(existing);
-        }
-
-        let id = new_customer_org_id()?;
-        let org = CustomerOrganization {
-            id: id.clone(),
-            owner_user_id: user.id.clone(),
-            name: user.email.clone(),
-            billing_class,
-            created_at: now.to_string(),
-            updated_at: now.to_string(),
-        };
-        self.customer_orgs.insert(id, org.clone());
-        Ok(org)
-    }
-
-    fn ensure_hosted_web_membership(&mut self, user: &CoreUser, project_id: &str, now: &str) {
-        let identity_id = chat_identity_id_for_user(&user.id);
-        self.chat_identities
-            .entry(identity_id.clone())
-            .or_insert_with(|| ChatIdentity {
-                id: identity_id.clone(),
-                user_id: user.id.clone(),
-                kind: "hosted_web".to_string(),
-                device_id: "dashboard-bridge-v1".to_string(),
-                created_at: now.to_string(),
-            });
-
-        let membership_id = project_room_membership_id_for(project_id, &identity_id);
-        self.project_room_memberships
-            .entry(membership_id.clone())
-            .or_insert_with(|| ProjectRoomMembership {
-                id: membership_id,
-                project_id: project_id.to_string(),
-                chat_identity_id: identity_id,
-                role: ProjectMembershipRole::Owner,
-                created_at: now.to_string(),
-                archived_at: None,
-            });
-    }
-
-    pub fn archive_imported_project(
-        &mut self,
-        input: ArchiveImportedProjectInput,
-    ) -> CoreResult<()> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let user = self.ensure_linked_user(&input.verified_email, &input.workos_user_id, &now)?;
-        let project = self
-            .projects
-            .get(&input.project_id)
-            .ok_or(CoreError::ProjectNotFound)?;
-        if project.owner_user_id != user.id || project.import_candidate_id.is_none() {
-            return Err(CoreError::ProjectNotFound);
-        }
-        let identity_ids = self
-            .chat_identities
-            .values()
-            .filter(|identity| identity.user_id == user.id)
-            .map(|identity| identity.id.as_str())
-            .collect::<BTreeSet<_>>();
-        let membership = self
-            .project_room_memberships
-            .values_mut()
-            .find(|membership| {
-                membership.project_id == input.project_id
-                    && identity_ids.contains(membership.chat_identity_id.as_str())
-            })
-            .ok_or(CoreError::ProjectNotFound)?;
-        membership.archived_at = Some(now);
-        Ok(())
-    }
-
-    fn ensure_agent_creation_entitlement(
-        &mut self,
-        customer_org_id: &str,
-        launch_code_id: Option<&str>,
-        hosting_tier: HostingTier,
-        now: &str,
-    ) -> CoreResult<AgentCreationEntitlement> {
-        if launch_code_id.is_none() && !self.customer_org_has_active_billing(customer_org_id) {
-            return Err(CoreError::BillingRequired);
-        }
-
-        if let Some(existing) = self
-            .agent_creation_entitlements
-            .values()
-            .find(|entitlement| entitlement.customer_org_id == customer_org_id)
-            .cloned()
-        {
-            if let Some(code_id) = launch_code_id
-                && existing.launch_code.as_deref() != Some(code_id)
-            {
-                return Err(CoreError::InvalidLaunchCode);
-            }
-            return Ok(existing);
-        }
-
-        Ok(self.upsert_agent_creation_entitlement(
-            customer_org_id,
-            1,
-            launch_code_id.map(str::to_string),
-            hosting_tier,
-            now,
-        ))
-    }
-
-    fn grant_launch_code_agent_creation_entitlement(
-        &mut self,
-        customer_org_id: &str,
-        launch_code_id: &str,
-        hosting_tier: HostingTier,
-        now: &str,
-    ) -> AgentCreationEntitlement {
-        let id = agent_creation_entitlement_id_for(customer_org_id);
-        if let Some(existing) = self.agent_creation_entitlements.get_mut(&id) {
-            existing.allowed_new_agent_runtimes =
-                existing.allowed_new_agent_runtimes.saturating_add(1);
-            existing.launch_code = Some(launch_code_id.to_string());
-            existing.hosting_tier = Some(hosting_tier);
-            existing.updated_at = now.to_string();
-            return existing.clone();
-        }
-        self.upsert_agent_creation_entitlement(
-            customer_org_id,
-            1,
-            Some(launch_code_id.to_string()),
-            hosting_tier,
-            now,
-        )
-    }
-
-    fn upsert_agent_creation_entitlement(
-        &mut self,
-        customer_org_id: &str,
-        allowed_new_agent_runtimes: i32,
-        launch_code: Option<String>,
-        hosting_tier: HostingTier,
-        now: &str,
-    ) -> AgentCreationEntitlement {
-        let id = agent_creation_entitlement_id_for(customer_org_id);
-        let created_at = self
-            .agent_creation_entitlements
-            .get(&id)
-            .map(|entitlement| entitlement.created_at.clone())
-            .unwrap_or_else(|| now.to_string());
-        let entitlement = AgentCreationEntitlement {
-            id: id.clone(),
-            customer_org_id: customer_org_id.to_string(),
-            hosting_tier: Some(hosting_tier),
-            allowed_new_agent_runtimes,
-            launch_code,
-            created_at,
-            updated_at: now.to_string(),
-        };
-        self.agent_creation_entitlements
-            .insert(id, entitlement.clone());
-        entitlement
-    }
-
-    fn ensure_billing_agent_creation_entitlement(
-        &mut self,
-        customer_org_id: &str,
-        hosting_tier: HostingTier,
-        now: &str,
-    ) -> AgentCreationEntitlement {
-        let id = agent_creation_entitlement_id_for(customer_org_id);
-        if let Some(existing) = self.agent_creation_entitlements.get_mut(&id) {
-            existing.allowed_new_agent_runtimes = existing.allowed_new_agent_runtimes.max(1);
-            existing.hosting_tier.get_or_insert(hosting_tier);
-            existing.updated_at = now.to_string();
-            return existing.clone();
-        }
-        self.upsert_agent_creation_entitlement(customer_org_id, 1, None, hosting_tier, now)
-    }
-
-    fn active_agent_creation_entitlement_count(&self, customer_org_id: &str) -> i32 {
-        let active_runtime_count = self
-            .project_runtime_links
-            .values()
-            .filter(|link| link.active)
-            .filter_map(|link| self.projects.get(&link.project_id))
-            .filter(|project| {
-                project.customer_org_id == customer_org_id && project.import_candidate_id.is_none()
-            })
-            .count();
-        let pending_request_count = self
-            .agent_creation_requests
-            .values()
-            .filter(|request| {
-                request.customer_org_id == customer_org_id
-                    && matches!(
-                        request.status,
-                        AgentCreationRequestStatus::Requested
-                            | AgentCreationRequestStatus::Launching
-                    )
-            })
-            .count();
-        (active_runtime_count + pending_request_count) as i32
-    }
-
-    fn customer_org_has_active_billing(&self, customer_org_id: &str) -> bool {
-        self.customer_billing_accounts
-            .get(customer_org_id)
-            .and_then(|account| account.subscription_status)
-            .is_some_and(BillingSubscriptionStatus::can_create_agent)
-    }
-
-    fn billing_overview_for_org(&self, org: &CustomerOrganization) -> BillingOverview {
-        let billing_account = self.customer_billing_accounts.get(&org.id).cloned();
-        let agent_creation_entitlement = self
-            .agent_creation_entitlements
-            .values()
-            .find(|entitlement| entitlement.customer_org_id == org.id)
-            .cloned();
-        let can_create_agent = agent_creation_entitlement
-            .as_ref()
-            .is_some_and(|entitlement| {
-                self.active_agent_creation_entitlement_count(&org.id)
-                    < entitlement.allowed_new_agent_runtimes
-            })
-            && (self.customer_org_has_active_billing(&org.id)
-                || org.billing_class == BillingClass::Grandfathered
-                || org.billing_class == BillingClass::Sponsored);
-        BillingOverview {
-            customer_org: org.clone(),
-            billing_account,
-            agent_creation_entitlement,
-            can_create_agent,
-            requires_billing: !self.customer_org_has_active_billing(&org.id)
-                && org.billing_class == BillingClass::Standard,
-        }
-    }
-
-    fn link_stripe_customer_to_org(
-        &mut self,
-        customer_org_id: &str,
-        stripe_customer_id: &str,
-        now: &str,
-    ) -> CoreResult<CustomerBillingAccount> {
-        if self.customer_billing_accounts.values().any(|account| {
-            account.customer_org_id != customer_org_id
-                && account.stripe_customer_id.as_deref() == Some(stripe_customer_id)
-        }) {
-            return Err(CoreError::StripeCustomerConflict);
-        }
-        let existing = self.customer_billing_accounts.get(customer_org_id).cloned();
-        if let Some(existing_customer_id) = existing
-            .as_ref()
-            .and_then(|account| account.stripe_customer_id.as_deref())
-            && existing_customer_id != stripe_customer_id
-        {
-            return Err(CoreError::StripeCustomerConflict);
-        }
-        let account = CustomerBillingAccount {
-            customer_org_id: customer_org_id.to_string(),
-            hosting_tier: existing
-                .as_ref()
-                .and_then(|account| account.hosting_tier)
-                .or(Some(HostingTier::Standard)),
-            stripe_customer_id: Some(stripe_customer_id.to_string()),
-            stripe_subscription_id: existing
-                .as_ref()
-                .and_then(|account| account.stripe_subscription_id.clone()),
-            stripe_price_id: existing
-                .as_ref()
-                .and_then(|account| account.stripe_price_id.clone()),
-            subscription_status: existing
-                .as_ref()
-                .and_then(|account| account.subscription_status),
-            current_period_end: existing
-                .as_ref()
-                .and_then(|account| account.current_period_end.clone()),
-            cancel_at_period_end: existing
-                .as_ref()
-                .is_some_and(|account| account.cancel_at_period_end),
-            last_stripe_event_id: existing
-                .as_ref()
-                .and_then(|account| account.last_stripe_event_id.clone()),
-            last_stripe_event_created: existing
-                .as_ref()
-                .and_then(|account| account.last_stripe_event_created),
-            created_at: existing
-                .as_ref()
-                .map(|account| account.created_at.clone())
-                .unwrap_or_else(|| now.to_string()),
-            updated_at: now.to_string(),
-        };
-        self.customer_billing_accounts
-            .insert(customer_org_id.to_string(), account.clone());
-        Ok(account)
-    }
-
-    fn offboard_destroyed_runtime(&mut self, request: &RuntimeControlRequest) {
-        self.offboard_runtime(
-            &request.project_id,
-            &request.agent_runtime_id,
-            &request.updated_at,
-            "finite_private.runtime.destroy_revoke_keys",
-            None,
-        );
-    }
-
-    fn offboard_runtime(
-        &mut self,
-        project_id: &str,
-        agent_runtime_id: &str,
-        now: &str,
-        revocation_action: &'static str,
-        actor: Option<&str>,
-    ) -> Vec<String> {
-        if self
-            .projects
-            .get(project_id)
-            .is_some_and(|project| project.import_candidate_id.is_none())
-        {
-            for membership in self
-                .project_room_memberships
-                .values_mut()
-                .filter(|membership| membership.project_id == project_id)
-            {
-                if membership.archived_at.is_none() {
-                    membership.archived_at = Some(now.to_string());
-                }
-            }
-        }
-        for link in self
-            .project_runtime_links
-            .values_mut()
-            .filter(|link| link.agent_runtime_id == agent_runtime_id)
-        {
-            link.active = false;
-        }
-        self.runtime_relay_credentials.remove(agent_runtime_id);
-        let mut revoked_api_key_ids = Vec::new();
-        for key in self.finite_private_api_keys.values_mut().filter(|key| {
-            key.agent_runtime_id.as_deref() == Some(agent_runtime_id)
-                || key.project_id.as_deref() == Some(project_id)
-        }) {
-            if key.status == FinitePrivateApiKeyStatus::Active {
-                key.status = FinitePrivateApiKeyStatus::Revoked;
-                key.updated_at = now.to_string();
-                revoked_api_key_ids.push(key.id.clone());
-            }
-        }
-        if !revoked_api_key_ids.is_empty() {
-            self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-                action: revocation_action,
-                target_type: "agent_runtime",
-                target_id: agent_runtime_id,
-                grant_id: None,
-                api_key_id: None,
-                actor,
-                metadata: json!({
-                    "projectId": project_id,
-                    "revokedApiKeyIds": revoked_api_key_ids,
-                }),
-                created_at: now,
-            });
-        }
-        revoked_api_key_ids
-    }
-
-    pub fn source_host_relay_endpoint(
-        &self,
-        source_host_id: &str,
-    ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
-        let source_host_id = normalize_source_host_id(source_host_id)?;
-        Ok(self.source_host_relays.get(&source_host_id).cloned())
-    }
-
-    pub fn upsert_source_host_relay_endpoint(
-        &mut self,
-        input: UpsertSourceHostRelayEndpointInput,
-    ) -> CoreResult<SourceHostRelayEndpoint> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let source_host_id = normalize_source_host_id(&input.source_host_id)?;
-        let url = normalize_source_host_relay_url(&input.url)?;
-        let admin_token = input.admin_token.trim();
-        if admin_token.is_empty() {
-            return Err(CoreError::MissingSourceHostRelayAdminToken);
-        }
-
-        let created_at = self
-            .source_host_relays
-            .get(&source_host_id)
-            .map(|endpoint| endpoint.created_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let endpoint = SourceHostRelayEndpoint {
-            source_host_id: source_host_id.clone(),
-            url,
-            admin_token: admin_token.to_string(),
-            created_at,
-            updated_at: now.clone(),
-        };
-        self.source_host_relays
-            .insert(source_host_id, endpoint.clone());
-        Ok(endpoint)
-    }
-
-    pub fn approve_finite_private_grant(
-        &mut self,
-        input: ApproveFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let limit_profile_id = trim_to_option(input.limit_profile_id.as_deref())
-            .unwrap_or_else(|| DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE.to_string());
-        self.ensure_finite_private_limit_profile(&limit_profile_id, &now)?;
-        let user = match trim_to_option(input.workos_user_id.as_deref()) {
-            Some(workos_user_id) => {
-                self.ensure_linked_user(&verified_email, &workos_user_id, &now)?
-            }
-            None => self.ensure_pending_user(&verified_email, &now)?,
-        };
-        let grant_id = finite_private_grant_id_for_user(&user.id);
-        let created_at = self
-            .finite_private_grants
-            .get(&grant_id)
-            .map(|grant| grant.created_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let burst_window_epoch = self
-            .finite_private_grants
-            .get(&grant_id)
-            .map(|grant| grant.burst_window_epoch + 1)
-            .unwrap_or(0);
-        let grant = FinitePrivateGrant {
-            id: grant_id.clone(),
-            user_id: user.id,
-            limit_profile_id,
-            status: FinitePrivateGrantStatus::Active,
-            current_window_started_at: None,
-            current_window_used_units: 0,
-            burst_window_epoch,
-            created_at,
-            updated_at: now.clone(),
-        };
-        self.finite_private_grants.insert(grant_id, grant.clone());
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.grant.approve",
-            target_type: "grant",
-            target_id: &grant.id,
-            grant_id: Some(&grant.id),
-            api_key_id: None,
-            actor: None,
-            metadata: json!({
-                "userId": grant.user_id.clone(),
-                "limitProfileId": grant.limit_profile_id.clone(),
-                "verifiedEmail": verified_email
-            }),
-            created_at: &now,
-        });
-        Ok(grant)
-    }
-
-    pub fn issue_finite_private_api_key(
-        &mut self,
-        input: IssueFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let grant_id =
-            trim_to_option(Some(&input.grant_id)).ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        let grant = self
-            .finite_private_grants
-            .get(&grant_id)
-            .ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        if grant.status != FinitePrivateGrantStatus::Active {
-            return Err(CoreError::FinitePrivateGrantNotActive);
-        }
-        let key_hash = hash_finite_private_api_key(&input.raw_key)?;
-        let key_id = finite_private_api_key_id_for(&grant_id, &key_hash);
-        let created_at = self
-            .finite_private_api_keys
-            .get(&key_id)
-            .map(|key| key.created_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let key = FinitePrivateApiKey {
-            id: key_id.clone(),
-            grant_id,
-            project_id: trim_to_option(input.project_id.as_deref()),
-            agent_runtime_id: trim_to_option(input.agent_runtime_id.as_deref()),
-            key_hash,
-            status: FinitePrivateApiKeyStatus::Active,
-            created_at,
-            updated_at: now.clone(),
-        };
-        self.finite_private_api_keys.insert(key_id, key.clone());
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.api_key.issue",
-            target_type: "api_key",
-            target_id: &key.id,
-            grant_id: Some(&key.grant_id),
-            api_key_id: Some(&key.id),
-            actor: None,
-            metadata: json!({
-                "projectId": key.project_id.clone(),
-                "agentRuntimeId": key.agent_runtime_id.clone()
-            }),
-            created_at: &now,
-        });
-        Ok(key)
-    }
-
-    pub fn provision_finite_private_runtime_key(
-        &mut self,
-        input: ProvisionFinitePrivateRuntimeKeyInput,
-    ) -> CoreResult<ProvisionFinitePrivateRuntimeKeyResult> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let request = self.verified_launching_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-        )?;
-        let project = self
-            .projects
-            .get(&request.project_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    request.id, request.project_id
-                ))
-            })?;
-        let user = self
-            .users
-            .get(&request.owner_user_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing owner user {}",
-                    request.id, request.owner_user_id
-                ))
-            })?;
-        let source_host_id = match input
-            .source_host_id
-            .as_deref()
-            .and_then(|value| trim_to_option(Some(value)))
-        {
-            Some(value) => Some(normalize_source_host_id(&value)?),
-            None => None,
-        };
-        let source_machine_id = match input
-            .source_machine_id
-            .as_deref()
-            .and_then(|value| trim_to_option(Some(value)))
-        {
-            Some(value) => {
-                let normalized = normalize_id_part(&value);
-                if normalized.is_empty() {
-                    return Err(CoreError::MissingSourceMachineId);
-                }
-                Some(normalized)
-            }
-            None => None,
-        };
-        // Resolve the runtime to attach the key to by natural key
-        // (source_import_key) rather than rederiving its id from the source.
-        let agent_runtime_id = match (source_host_id.as_deref(), source_machine_id.as_deref()) {
-            (Some(source_host_id), Some(source_machine_id)) => self
-                .find_agent_runtime_by_source_import_key(&source_import_key(
-                    source_host_id,
-                    source_machine_id,
-                ))
-                .map(|runtime| runtime.id)
-                .or_else(|| {
-                    request
-                        .relocation
-                        .as_ref()
-                        .and(request.agent_runtime_id.clone())
-                }),
-            _ => request
-                .agent_runtime_id
-                .clone()
-                .filter(|runtime_id| self.agent_runtimes.contains_key(runtime_id)),
-        };
-
-        let grant = self.approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-            verified_email: user.email,
-            workos_user_id: user.workos_user_id,
-            limit_profile_id: None,
-            now: Some(now.clone()),
-        })?;
-        let raw_api_key = generate_finite_private_api_key()?;
-        let api_key = self.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-            grant_id: grant.id.clone(),
-            raw_key: raw_api_key.clone(),
-            project_id: Some(project.id),
-            agent_runtime_id,
-            now: Some(now),
-        })?;
-
-        Ok(ProvisionFinitePrivateRuntimeKeyResult {
-            grant,
-            api_key,
-            raw_api_key,
-        })
-    }
-
-    pub fn revoke_finite_private_grant(
-        &mut self,
-        input: RevokeFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let grant_id =
-            trim_to_option(Some(&input.grant_id)).ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        let Some(grant) = self.finite_private_grants.get_mut(&grant_id) else {
-            return Err(CoreError::FinitePrivateGrantNotFound);
-        };
-        grant.status = FinitePrivateGrantStatus::Revoked;
-        grant.updated_at = now.clone();
-        let revoked_api_key_ids = self
-            .finite_private_api_keys
-            .values_mut()
-            .filter(|key| key.grant_id == grant_id)
-            .map(|key| {
-                key.status = FinitePrivateApiKeyStatus::Revoked;
-                key.updated_at = now.clone();
-                key.id.clone()
-            })
-            .collect::<Vec<_>>();
-        let grant = grant.clone();
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.grant.revoke",
-            target_type: "grant",
-            target_id: &grant.id,
-            grant_id: Some(&grant.id),
-            api_key_id: None,
-            actor: None,
-            metadata: json!({ "revokedApiKeyIds": revoked_api_key_ids }),
-            created_at: &now,
-        });
-        Ok(grant)
-    }
-
-    pub fn revoke_finite_private_api_key(
-        &mut self,
-        input: RevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let key_id =
-            trim_to_option(Some(&input.key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
-        let Some(key) = self.finite_private_api_keys.get_mut(&key_id) else {
-            return Err(CoreError::InvalidFinitePrivateApiKey);
-        };
-        key.status = FinitePrivateApiKeyStatus::Revoked;
-        key.updated_at = now.clone();
-        let key = key.clone();
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.api_key.revoke",
-            target_type: "api_key",
-            target_id: &key.id,
-            grant_id: Some(&key.grant_id),
-            api_key_id: Some(&key.id),
-            actor: None,
-            metadata: json!({}),
-            created_at: &now,
-        });
-        Ok(key)
-    }
-
-    pub fn rotate_finite_private_api_key(
-        &mut self,
-        input: RotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let key_id =
-            trim_to_option(Some(&input.key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
-        let Some(old_key) = self.finite_private_api_keys.get(&key_id).cloned() else {
-            return Err(CoreError::InvalidFinitePrivateApiKey);
-        };
-        let new_key_hash = hash_finite_private_api_key(&input.raw_key)?;
-        if new_key_hash == old_key.key_hash {
-            return Err(CoreError::InvalidFinitePrivateApiKey);
-        }
-        let old_key_id = key_id.clone();
-        let new_key = self.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-            grant_id: old_key.grant_id.clone(),
-            raw_key: input.raw_key,
-            project_id: old_key.project_id.clone(),
-            agent_runtime_id: old_key.agent_runtime_id.clone(),
-            now: Some(now.clone()),
-        })?;
-        self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
-            key_id: old_key_id.clone(),
-            now: Some(now.clone()),
-        })?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.api_key.rotate",
-            target_type: "api_key",
-            target_id: &new_key.id,
-            grant_id: Some(&new_key.grant_id),
-            api_key_id: Some(&new_key.id),
-            actor: None,
-            metadata: json!({ "oldApiKeyId": old_key_id }),
-            created_at: &now,
-        });
-        Ok(new_key)
-    }
-
-    pub fn reset_finite_private_usage_window(
-        &mut self,
-        input: ResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let grant_id =
-            trim_to_option(Some(&input.grant_id)).ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        let Some(grant) = self.finite_private_grants.get_mut(&grant_id) else {
-            return Err(CoreError::FinitePrivateGrantNotFound);
-        };
-        grant.current_window_started_at = Some(now.clone());
-        grant.current_window_used_units = 0;
-        grant.burst_window_epoch += 1;
-        grant.updated_at = now.clone();
-        let grant = grant.clone();
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.grant.reset_window",
-            target_type: "grant",
-            target_id: &grant.id,
-            grant_id: Some(&grant.id),
-            api_key_id: None,
-            actor: None,
-            metadata: json!({}),
-            created_at: &now,
-        });
-        Ok(grant)
-    }
-
-    /// Approve (or refresh) a friend grant for a verified email and issue a
-    /// Finite Private API key in one step, mirroring the
-    /// `finite-private-friend-key-issue` CLI. Records an admin-attributed
-    /// audit event on top of the underlying approve/issue events.
-    pub fn admin_issue_finite_private_friend_key(
-        &mut self,
-        input: AdminIssueFinitePrivateFriendKeyInput,
-    ) -> CoreResult<AdminIssuedFinitePrivateKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let grant = self.approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-            verified_email: input.friend_email,
-            workos_user_id: None,
-            limit_profile_id: input.limit_profile_id,
-            now: Some(now.clone()),
-        })?;
-        let api_key = self.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-            grant_id: grant.id.clone(),
-            raw_key: input.raw_key,
-            project_id: None,
-            agent_runtime_id: None,
-            now: Some(now.clone()),
-        })?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.friend_key.admin_issue",
-            target_type: "api_key",
-            target_id: &api_key.id,
-            grant_id: Some(&grant.id),
-            api_key_id: Some(&api_key.id),
-            actor: Some(&admin_email),
-            metadata: json!({
-                "limitProfileId": grant.limit_profile_id.clone(),
-            }),
-            created_at: &now,
-        });
-        Ok(AdminIssuedFinitePrivateKey { grant, api_key })
-    }
-
-    pub fn admin_rotate_finite_private_api_key(
-        &mut self,
-        input: AdminRotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let old_key_id = input.key_id.trim().to_string();
-        let key = self.rotate_finite_private_api_key(RotateFinitePrivateApiKeyInput {
-            key_id: input.key_id,
-            raw_key: input.raw_key,
-            now: Some(now.clone()),
-        })?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.api_key.admin_rotate",
-            target_type: "api_key",
-            target_id: &key.id,
-            grant_id: Some(&key.grant_id),
-            api_key_id: Some(&key.id),
-            actor: Some(&admin_email),
-            metadata: json!({ "oldApiKeyId": old_key_id }),
-            created_at: &now,
-        });
-        Ok(key)
-    }
-
-    pub fn admin_revoke_finite_private_api_key(
-        &mut self,
-        input: AdminRevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let key = self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
-            key_id: input.key_id,
-            now: Some(now.clone()),
-        })?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.api_key.admin_revoke",
-            target_type: "api_key",
-            target_id: &key.id,
-            grant_id: Some(&key.grant_id),
-            api_key_id: Some(&key.id),
-            actor: Some(&admin_email),
-            metadata: json!({}),
-            created_at: &now,
-        });
-        Ok(key)
-    }
-
-    /// Reset the current burst window for a grant, mirroring the
-    /// `finite-private-window-reset` CLI. Weekly limits are computed from a
-    /// rolling reservation window and have no reset lever here by design.
-    pub fn admin_reset_finite_private_usage_window(
-        &mut self,
-        input: AdminResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let grant = self.reset_finite_private_usage_window(ResetFinitePrivateUsageWindowInput {
-            grant_id: input.grant_id,
-            now: Some(now.clone()),
-        })?;
-        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-            action: "finite_private.grant.admin_window_reset",
-            target_type: "grant",
-            target_id: &grant.id,
-            grant_id: Some(&grant.id),
-            api_key_id: None,
-            actor: Some(&admin_email),
-            metadata: json!({}),
-            created_at: &now,
-        });
-        Ok(grant)
-    }
-
-    /// Provisioned-boxes overview for dashboard operators, assembled from
-    /// projects, agent runtimes, status snapshots, and Finite Private keys.
-    pub fn admin_runtime_overviews(&self) -> Vec<AdminRuntimeOverview> {
-        let mut overviews = self
-            .agent_runtimes
-            .values()
-            .map(|runtime| {
-                let project = self.projects.get(&runtime.project_id);
-                let owner_email = project
-                    .and_then(|project| self.users.get(&project.owner_user_id))
-                    .map(|user| user.email.clone());
-                let snapshot = self.runtime_status_snapshots.get(&runtime.id);
-                let artifact = runtime
-                    .runtime_artifact_id
-                    .as_deref()
-                    .and_then(|artifact_id| self.runtime_artifacts.get(artifact_id));
-                let active_finite_private_key_count = self
-                    .finite_private_api_keys
-                    .values()
-                    .filter(|key| key.status == FinitePrivateApiKeyStatus::Active)
-                    .filter(|key| {
-                        key.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                            || key.project_id.as_deref() == Some(runtime.project_id.as_str())
-                    })
-                    .count() as i64;
-                let runtime_link_active = self
-                    .project_runtime_links
-                    .values()
-                    .any(|link| link.agent_runtime_id == runtime.id && link.active);
-                AdminRuntimeOverview {
-                    project_id: runtime.project_id.clone(),
-                    project_display_name: project
-                        .map(|project| project.display_name.clone())
-                        .unwrap_or_else(|| runtime.host_facts.display_name.clone()),
-                    owner_email,
-                    agent_runtime_id: runtime.id.clone(),
-                    source_host_id: runtime.source_host_id.clone(),
-                    source_machine_id: runtime.source_machine_id.clone(),
-                    runtime_artifact_id: runtime.runtime_artifact_id.clone(),
-                    runtime_artifact_version_label: artifact
-                        .map(|artifact| artifact.version_label.clone()),
-                    runtime_status: snapshot
-                        .map(|snapshot| snapshot.status)
-                        .unwrap_or(runtime.host_facts.runtime_status),
-                    last_heartbeat_at: snapshot
-                        .and_then(|snapshot| snapshot.last_heartbeat_at.clone()),
-                    status_updated_at: snapshot.map(|snapshot| snapshot.updated_at.clone()),
-                    runtime_updated_at: runtime.updated_at.clone(),
-                    hermes_available: snapshot
-                        .and_then(|snapshot| snapshot.hermes_available)
-                        .or(runtime.host_facts.hermes_available),
-                    published_app_urls: runtime.host_facts.published_app_urls.clone(),
-                    active_finite_private_key_count,
-                    runtime_link_active,
-                    runtime_capabilities: runtime
-                        .runtime_capabilities
-                        .as_ref()
-                        .map(|capabilities| *capabilities.v1()),
-                }
-            })
-            .collect::<Vec<_>>();
-        overviews.sort_by(|left, right| {
-            left.source_host_id
-                .cmp(&right.source_host_id)
-                .then_with(|| left.source_machine_id.cmp(&right.source_machine_id))
-                .then_with(|| left.agent_runtime_id.cmp(&right.agent_runtime_id))
-        });
-        overviews
-    }
-
-    /// Read one exact lifecycle request for operator-side orchestration.
-    ///
-    /// This deliberately exposes no queue mutation or aggregate inference:
-    /// callers can only observe the request id returned by an existing control
-    /// operation and wait for that same request to become terminal.
-    pub fn runtime_control_request(&self, request_id: &str) -> CoreResult<RuntimeControlRequest> {
-        self.runtime_control_requests
-            .get(request_id)
-            .cloned()
-            .ok_or(CoreError::RuntimeControlRequestNotFound)
-    }
-
-    pub fn reserve_finite_private_usage(
-        &mut self,
-        input: ReserveFinitePrivateUsageInput,
-    ) -> CoreResult<FinitePrivateUsageDecision> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let request_id = trim_to_option(Some(&input.request_id))
-            .unwrap_or_else(|| id_from_parts("fp_request", &[&now, &input.endpoint, &input.model]));
-        let dashboard_url = trim_to_option(Some(&input.dashboard_url))
-            .unwrap_or_else(|| "https://finite.computer/dashboard".to_string());
-        if input.estimated_usage_units <= 0
-            || input.estimated_prompt_tokens < 0
-            || input.estimated_completion_tokens < 0
-        {
-            return Err(CoreError::InvalidFinitePrivateUsageEstimate);
-        }
-        let Some((api_key, grant)) = self.finite_private_key_and_grant(&input.presented_api_key)?
-        else {
-            return Ok(finite_private_denial(
-                request_id,
-                dashboard_url,
-                "Finite Private API key is invalid or revoked.",
-                "invalid_api_key",
-                None,
-                None,
-            ));
-        };
-        let profile = self
-            .finite_private_limit_profiles
-            .get(&grant.limit_profile_id)
-            .cloned()
-            .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
-
-        let reservation_id = finite_private_reservation_id_for(&api_key.id, &request_id);
-        let (weekly_used_units, weekly_reset_at) =
-            self.finite_private_weekly_usage(&grant.id, now_time)?;
-        if let Some(existing) = self.finite_private_reservations.get(&reservation_id) {
-            return Ok(finite_private_allow_decision(
-                existing.id.clone(),
-                &profile,
-                profile.burst_limit_units - grant.current_window_used_units,
-                finite_private_window_reset_at(&grant, &profile, now_time)?,
-                profile
-                    .weekly_limit_units
-                    .map(|limit| limit - weekly_used_units),
-                weekly_reset_at,
-            ));
-        }
-
-        let (window_started_at, current_used_units, reset_at) =
-            finite_private_active_window(&grant, &profile, now_time)?;
-        let begins_new_epoch = finite_private_begins_new_epoch(&grant, &window_started_at)?;
-        let reservation_epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
-        let remaining_before = profile.burst_limit_units - current_used_units;
-        if input.estimated_usage_units > remaining_before {
-            let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
-            let message =
-                finite_private_limit_reached_message("burst window", &reset_at, retry_after);
-            return Ok(finite_private_denial(
-                request_id,
-                dashboard_url,
-                &message,
-                "burst_window_limit_exceeded",
-                Some(retry_after),
-                Some(reset_at),
-            ));
-        }
-        if let Some(weekly_limit_units) = profile.weekly_limit_units {
-            let weekly_remaining_before = weekly_limit_units - weekly_used_units;
-            if input.estimated_usage_units > weekly_remaining_before {
-                let reset_at = weekly_reset_at.clone().unwrap_or_else(|| {
-                    (now_time + Duration::seconds(FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
-                        .format(&Rfc3339)
-                        .unwrap_or_else(|_| now.clone())
-                });
-                let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
-                let message =
-                    finite_private_limit_reached_message("weekly", &reset_at, retry_after);
-                return Ok(finite_private_denial(
-                    request_id,
-                    dashboard_url,
-                    &message,
-                    "weekly_limit_exceeded",
-                    Some(retry_after),
-                    Some(reset_at),
-                ));
-            }
-        }
-
-        let new_used_units = current_used_units + input.estimated_usage_units;
-        if let Some(grant_mut) = self.finite_private_grants.get_mut(&grant.id) {
-            grant_mut.current_window_started_at = Some(window_started_at);
-            grant_mut.current_window_used_units = new_used_units;
-            grant_mut.burst_window_epoch = reservation_epoch;
-            grant_mut.updated_at = now.clone();
-        }
-        let reservation = FinitePrivateReservation {
-            id: reservation_id.clone(),
-            request_id,
-            api_key_id: api_key.id,
-            grant_id: grant.id,
-            endpoint: trim_or_fallback(&input.endpoint, "/v1/chat/completions"),
-            model: trim_or_fallback(&input.model, "kimi-k2-6"),
-            estimated_usage_units: input.estimated_usage_units,
-            reserved_usage_units: input.estimated_usage_units,
-            settled_usage_units: None,
-            settlement_kind: None,
-            status: FinitePrivateReservationStatus::Reserved,
-            burst_window_epoch: reservation_epoch,
-            usage_formula_version: trim_or_fallback(&input.usage_formula_version, "2026-05-26.v1"),
-            upstream_status: None,
-            upstream_error_class: None,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        self.finite_private_reservations
-            .insert(reservation_id.clone(), reservation);
-        Ok(finite_private_allow_decision(
-            reservation_id,
-            &profile,
-            profile.burst_limit_units - new_used_units,
-            reset_at,
-            profile
-                .weekly_limit_units
-                .map(|limit| limit - (weekly_used_units + input.estimated_usage_units)),
-            weekly_reset_at.or_else(|| {
-                profile.weekly_limit_units.map(|_| {
-                    (now_time + Duration::seconds(FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
-                        .format(&Rfc3339)
-                        .unwrap_or_else(|_| now.clone())
-                })
-            }),
-        ))
-    }
-
-    pub fn settle_finite_private_reservation(
-        &mut self,
-        input: SettleFinitePrivateReservationInput,
-    ) -> CoreResult<SettleFinitePrivateReservationResult> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let reservation_id = trim_to_option(Some(&input.reservation_id))
-            .ok_or(CoreError::FinitePrivateReservationNotFound)?;
-        let request_id = trim_to_option(Some(&input.request_id))
-            .ok_or(CoreError::FinitePrivateReservationNotFound)?;
-        let Some(existing) = self
-            .finite_private_reservations
-            .get(&reservation_id)
-            .cloned()
-        else {
-            return Err(CoreError::FinitePrivateReservationNotFound);
-        };
-        if existing.request_id != request_id {
-            return Err(CoreError::FinitePrivateReservationNotFound);
-        }
-        let settled_units = input
-            .usage_units
-            .unwrap_or(existing.reserved_usage_units)
-            .max(0);
-        if existing.status == FinitePrivateReservationStatus::Settled {
-            let formula = trim_or_fallback(
-                &input.usage_formula_version,
-                &existing.usage_formula_version,
-            );
-            if existing.settled_usage_units == Some(settled_units)
-                && existing.settlement_kind == Some(input.settlement)
-                && existing.usage_formula_version == formula
-                && existing.upstream_status == input.upstream_status
-                && existing.upstream_error_class
-                    == trim_to_option(input.upstream_error_class.as_deref())
-            {
-                return Ok(SettleFinitePrivateReservationResult {
-                    settled: true,
-                    reservation_id,
-                });
-            }
-            return Err(CoreError::FinitePrivateReservationAlreadySettled);
-        }
-        match self.finite_private_grants.get_mut(&existing.grant_id) {
-            Some(grant) if grant.burst_window_epoch == existing.burst_window_epoch => {
-                let delta = settled_units - existing.reserved_usage_units;
-                grant.current_window_used_units = (grant.current_window_used_units + delta).max(0);
-                grant.updated_at = now.clone();
-            }
-            _ => {}
-        }
-        let Some(reservation) = self.finite_private_reservations.get_mut(&reservation_id) else {
-            return Err(CoreError::FinitePrivateReservationNotFound);
-        };
-        reservation.status = FinitePrivateReservationStatus::Settled;
-        reservation.settled_usage_units = Some(settled_units);
-        reservation.settlement_kind = Some(input.settlement);
-        reservation.usage_formula_version = trim_or_fallback(
-            &input.usage_formula_version,
-            &reservation.usage_formula_version,
-        );
-        reservation.upstream_status = input.upstream_status;
-        reservation.upstream_error_class = trim_to_option(input.upstream_error_class.as_deref());
-        reservation.updated_at = now;
-        Ok(SettleFinitePrivateReservationResult {
-            settled: true,
-            reservation_id,
-        })
-    }
-
-    pub fn finite_private_usage_status_for_api_key(
-        &mut self,
-        presented_api_key: &str,
-        claim_notice: bool,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let Some((_, grant)) = self.finite_private_key_and_grant(presented_api_key)? else {
-            return Ok(None);
-        };
-        self.finite_private_usage_status_for_grant(&grant.id, claim_notice, now)
-            .map(Some)
-    }
-
-    pub fn finite_private_usage_status_for_workos_user(
-        &mut self,
-        workos_user_id: &str,
-        claim_notice: bool,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let Some(grant_id) = self.finite_private_grant_id_for_workos_user(workos_user_id) else {
-            return Ok(None);
-        };
-        self.finite_private_usage_status_for_grant(&grant_id, claim_notice, now)
-            .map(Some)
-    }
-
-    pub fn claim_finite_private_daily_reset_for_api_key(
-        &mut self,
-        presented_api_key: &str,
-        now: Option<String>,
-    ) -> CoreResult<FinitePrivateDailyResetResult> {
-        let Some((_, grant)) = self.finite_private_key_and_grant(presented_api_key)? else {
-            return Err(CoreError::InvalidFinitePrivateApiKey);
-        };
-        self.claim_finite_private_daily_reset_for_grant(&grant.id, now)
-    }
-
-    pub fn claim_finite_private_daily_reset_for_workos_user(
-        &mut self,
-        workos_user_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
-        let Some(grant_id) = self.finite_private_grant_id_for_workos_user(workos_user_id) else {
-            return Ok(None);
-        };
-        self.claim_finite_private_daily_reset_for_grant(&grant_id, now)
-            .map(Some)
-    }
-
-    fn finite_private_grant_id_for_workos_user(&self, workos_user_id: &str) -> Option<String> {
-        let user_id = self
-            .users
-            .values()
-            .find(|user| user.workos_user_id.as_deref() == Some(workos_user_id))?
-            .id
-            .as_str();
-        self.finite_private_grants
-            .values()
-            .find(|grant| {
-                grant.user_id == user_id && grant.status == FinitePrivateGrantStatus::Active
-            })
-            .map(|grant| grant.id.clone())
-    }
-
-    fn claim_finite_private_daily_reset_for_grant(
-        &mut self,
-        grant_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<FinitePrivateDailyResetResult> {
-        let now = now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let grant = self
-            .finite_private_grants
-            .get(grant_id)
-            .ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        if grant.status != FinitePrivateGrantStatus::Active {
-            return Err(CoreError::FinitePrivateGrantNotActive);
-        }
-        let reset_key = finite_private_daily_reset_key(grant_id, now_time);
-        let performed = self.finite_private_daily_resets.insert(reset_key);
-        if performed {
-            let grant = self
-                .finite_private_grants
-                .get_mut(grant_id)
-                .ok_or(CoreError::FinitePrivateGrantNotFound)?;
-            grant.current_window_started_at = Some(now.clone());
-            grant.current_window_used_units = 0;
-            grant.burst_window_epoch += 1;
-            grant.updated_at = now.clone();
-        }
-        let status =
-            self.finite_private_usage_status_for_grant(grant_id, false, Some(now.clone()))?;
-        Ok(FinitePrivateDailyResetResult { performed, status })
-    }
-
-    fn finite_private_usage_status_for_grant(
-        &mut self,
-        grant_id: &str,
-        claim_notice: bool,
-        now: Option<String>,
-    ) -> CoreResult<FinitePrivateUsageStatus> {
-        let now = now.unwrap_or(current_time_iso()?);
-        let now_time = parse_time(&now)?;
-        let grant = self
-            .finite_private_grants
-            .get(grant_id)
-            .cloned()
-            .ok_or(CoreError::FinitePrivateGrantNotFound)?;
-        if grant.status != FinitePrivateGrantStatus::Active {
-            return Err(CoreError::FinitePrivateGrantNotActive);
-        }
-        let profile = self
-            .finite_private_limit_profiles
-            .get(&grant.limit_profile_id)
-            .cloned()
-            .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
-        let (window_started_at, current_used_units, reset_at) =
-            finite_private_active_window(&grant, &profile, now_time)?;
-        let begins_new_epoch = finite_private_begins_new_epoch(&grant, &window_started_at)?;
-        let epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
-
-        let settled_used_units = self
-            .finite_private_reservations
-            .values()
-            .filter(|reservation| {
-                reservation.grant_id == grant_id
-                    && reservation.burst_window_epoch == epoch
-                    && reservation.status == FinitePrivateReservationStatus::Settled
-                    && reservation.created_at >= window_started_at
-            })
-            .map(|reservation| reservation.settled_usage_units.unwrap_or(0))
-            .sum::<i64>()
-            .max(0);
-        let notice = if claim_notice {
-            self.claim_finite_private_usage_notice(
-                grant_id,
-                epoch,
-                settled_used_units,
-                &profile,
-                &reset_at,
-                now_time,
-            )
-        } else {
-            None
-        };
-        let reset_key = finite_private_daily_reset_key(grant_id, now_time);
-        Ok(FinitePrivateUsageStatus {
-            burst_limit_units: profile.burst_limit_units,
-            burst_used_units: current_used_units.max(0),
-            burst_remaining_units: (profile.burst_limit_units - current_used_units).max(0),
-            burst_reset_at: reset_at,
-            free_daily_reset_available: !self.finite_private_daily_resets.contains(&reset_key),
-            free_daily_reset_available_again_at: finite_private_next_daily_reset_at(now_time)?,
-            notice,
-        })
-    }
-
-    fn claim_finite_private_usage_notice(
-        &mut self,
-        grant_id: &str,
-        epoch: i64,
-        settled_used_units: i64,
-        profile: &FinitePrivateLimitProfile,
-        reset_at: &str,
-        now_time: OffsetDateTime,
-    ) -> Option<FinitePrivateUsageNotice> {
-        let remaining = (profile.burst_limit_units - settled_used_units).max(0);
-        let threshold = if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 10
-        {
-            Some(10)
-        } else if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 25 {
-            Some(25)
-        } else {
-            None
-        }?;
-        if threshold == 10 {
-            self.finite_private_notice_claims
-                .insert(finite_private_notice_key(grant_id, epoch, 25));
-        }
-        if !self
-            .finite_private_notice_claims
-            .insert(finite_private_notice_key(grant_id, epoch, threshold))
-        {
-            return None;
-        }
-        let retry_after = (parse_time(reset_at).ok()? - now_time)
-            .whole_seconds()
-            .max(0);
-        Some(FinitePrivateUsageNotice {
-            threshold_remaining_percent: threshold,
-            message: format!(
-                "You have {threshold}% of your Finite Private burst limit remaining. Your usage resets at {reset_at} ({}).",
-                finite_private_retry_after_label(retry_after)
-            ),
-        })
-    }
-
-    pub fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
-        let id = trim_to_option(Some(id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
-        Ok(self.runtime_artifacts.get(&id).cloned())
-    }
-
-    pub fn upsert_runtime_artifact(
-        &mut self,
-        input: UpsertRuntimeArtifactInput,
-    ) -> CoreResult<RuntimeArtifact> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let id = trim_to_option(Some(&input.id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
-        let reference = trim_to_option(Some(&input.reference))
-            .ok_or(CoreError::MissingRuntimeArtifactReference)?;
-        let version_label = trim_to_option(Some(&input.version_label))
-            .ok_or(CoreError::MissingRuntimeArtifactVersionLabel)?;
-        let state_schema_version = trim_to_option(Some(&input.state_schema_version))
-            .ok_or(CoreError::MissingRuntimeArtifactStateSchemaVersion)?;
-        let existing = self.runtime_artifacts.get(&id).cloned();
-        let created_at = existing
-            .as_ref()
-            .map(|artifact| artifact.created_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let promoted_at = if input.promoted {
-            existing
-                .as_ref()
-                .and_then(|artifact| artifact.promoted_at.clone())
-                .or_else(|| Some(now.clone()))
-        } else {
-            existing
-                .as_ref()
-                .and_then(|artifact| artifact.promoted_at.clone())
-        };
-        let artifact = RuntimeArtifact {
-            id: id.clone(),
-            kind: input.kind,
-            reference,
-            version_label,
-            source_git_sha: trim_to_option(input.source_git_sha.as_deref()),
-            finitec_version: trim_to_option(input.finitec_version.as_deref()),
-            hermes_source_ref: trim_to_option(input.hermes_source_ref.as_deref()),
-            finite_platform_plugin_ref: trim_to_option(input.finite_platform_plugin_ref.as_deref()),
-            state_schema_version,
-            base_image: trim_to_option(input.base_image.as_deref()),
-            recover_known_good_chat: input.recover_known_good_chat,
-            created_at,
-            promoted_at,
-            retired_at: existing
-                .as_ref()
-                .and_then(|artifact| artifact.retired_at.clone()),
-        };
-        if let Some(existing) = existing.as_ref() {
-            let referenced = self.agent_runtimes.values().any(|runtime| {
-                runtime.runtime_artifact_id.as_deref() == Some(existing.id.as_str())
-            });
-            if (existing.promoted_at.is_some() || referenced)
-                && !runtime_artifact_material_matches(existing, &artifact)
-            {
-                return Err(CoreError::RuntimeArtifactImmutable);
-            }
-        }
-        self.runtime_artifacts.insert(id, artifact.clone());
-        Ok(artifact)
-    }
-
-    fn launchable_runtime_artifact(&self, id: &str) -> CoreResult<RuntimeArtifact> {
-        let artifact = self
-            .runtime_artifacts
-            .get(id)
-            .cloned()
-            .ok_or(CoreError::RuntimeArtifactNotFound)?;
-        if artifact.promoted_at.is_none() {
-            return Err(CoreError::RuntimeArtifactNotPromoted);
-        }
-        if artifact.retired_at.is_some() {
-            return Err(CoreError::RuntimeArtifactRetired);
-        }
-        Ok(artifact)
-    }
-
-    fn latest_launchable_runtime_artifact(&self) -> CoreResult<RuntimeArtifact> {
-        self.runtime_artifacts
-            .values()
-            .filter(|artifact| {
-                artifact.promoted_at.is_some()
-                    && artifact.retired_at.is_none()
-                    && artifact.kind == RuntimeArtifactKind::OciImage
-                    && runtime_artifact_reference_is_immutable_oci(&artifact.reference)
-            })
-            .max_by_key(|artifact| {
-                (
-                    artifact.promoted_at.as_deref().unwrap_or_default(),
-                    artifact.created_at.as_str(),
-                    artifact.id.as_str(),
-                )
-            })
-            .cloned()
-            .ok_or(CoreError::RuntimeArtifactUnavailable)
-    }
-
-    fn compatible_runtime_upgrade_artifact(
-        &self,
-        runtime: &AgentRuntime,
-        id: &str,
-    ) -> CoreResult<RuntimeArtifact> {
-        let artifact = self.launchable_runtime_artifact(id)?;
-        self.ensure_runtime_upgrade_artifact_material(runtime, &artifact)?;
-        Ok(artifact)
-    }
-
-    fn ensure_runtime_upgrade_artifact_material(
-        &self,
-        runtime: &AgentRuntime,
-        artifact: &RuntimeArtifact,
-    ) -> CoreResult<()> {
-        if artifact.kind != RuntimeArtifactKind::OciImage
-            || !runtime_artifact_reference_is_immutable_oci(&artifact.reference)
-        {
-            return Err(CoreError::RuntimeUpgradeUnsupported);
-        }
-        if runtime.state_schema_version.as_deref() != Some(artifact.state_schema_version.as_str()) {
-            return Err(CoreError::RuntimeUpgradeStateSchemaIncompatible);
-        }
-        Ok(())
-    }
-
-    fn ensure_finite_private_limit_profile(
-        &mut self,
-        id: &str,
-        now: &str,
-    ) -> CoreResult<FinitePrivateLimitProfile> {
-        if let Some(profile) = self.finite_private_limit_profiles.get(id).cloned() {
-            return Ok(profile);
-        }
-        if id != DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE {
-            return Err(CoreError::FinitePrivateLimitProfileNotFound);
-        }
-        let profile = FinitePrivateLimitProfile {
-            id: id.to_string(),
-            burst_window_seconds: DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS,
-            burst_limit_units: DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS,
-            weekly_limit_units: DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS,
-            created_at: now.to_string(),
-            updated_at: now.to_string(),
-        };
-        self.finite_private_limit_profiles
-            .insert(id.to_string(), profile.clone());
-        Ok(profile)
-    }
-
-    fn record_finite_private_admin_audit_event(
-        &mut self,
-        record: FinitePrivateAdminAuditRecord<'_>,
-    ) {
-        let sequence = (self.finite_private_admin_audit_events.len() + 1).to_string();
-        let id = id_from_parts(
-            "fp_admin_audit",
-            &[
-                record.action,
-                record.target_type,
-                record.target_id,
-                record.created_at,
-                &sequence,
-            ],
-        );
-        let event = FinitePrivateAdminAuditEvent {
-            id: id.clone(),
-            action: record.action.to_string(),
-            target_type: record.target_type.to_string(),
-            target_id: record.target_id.to_string(),
-            grant_id: record.grant_id.map(str::to_string),
-            api_key_id: record.api_key_id.map(str::to_string),
-            actor: record.actor.unwrap_or("finite-saas-core").to_string(),
-            metadata: record.metadata,
-            created_at: record.created_at.to_string(),
-        };
-        self.finite_private_admin_audit_events.insert(id, event);
-    }
-
-    fn finite_private_key_and_grant(
-        &self,
-        presented_api_key: &str,
-    ) -> CoreResult<Option<(FinitePrivateApiKey, FinitePrivateGrant)>> {
-        let key_hash = match hash_finite_private_api_key(presented_api_key) {
-            Ok(hash) => hash,
-            Err(CoreError::MissingFinitePrivateApiKey) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let Some(api_key) = self
-            .finite_private_api_keys
-            .values()
-            .find(|key| key.key_hash == key_hash)
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        if api_key.status != FinitePrivateApiKeyStatus::Active {
-            return Ok(None);
-        }
-        let Some(grant) = self.finite_private_grants.get(&api_key.grant_id).cloned() else {
-            return Ok(None);
-        };
-        if grant.status != FinitePrivateGrantStatus::Active {
-            return Ok(None);
-        }
-        Ok(Some((api_key, grant)))
-    }
-
-    fn finite_private_weekly_usage(
-        &self,
-        grant_id: &str,
-        now_time: OffsetDateTime,
-    ) -> CoreResult<(i64, Option<String>)> {
-        let window_start = now_time - Duration::seconds(FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS);
-        let mut used_units = 0;
-        let mut earliest: Option<OffsetDateTime> = None;
-        for reservation in self
-            .finite_private_reservations
-            .values()
-            .filter(|reservation| reservation.grant_id == grant_id)
-            .filter(|reservation| reservation.status != FinitePrivateReservationStatus::Denied)
-        {
-            let created_at = parse_time(&reservation.created_at)?;
-            if created_at < window_start || created_at > now_time {
-                continue;
-            }
-            used_units += reservation
-                .settled_usage_units
-                .unwrap_or(reservation.reserved_usage_units);
-            earliest = Some(earliest.map_or(created_at, |value| value.min(created_at)));
-        }
-        let reset_at = earliest
-            .map(|created_at| created_at + Duration::seconds(FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
-            .map(|reset_at| reset_at.format(&Rfc3339))
-            .transpose()?;
-        Ok((used_units, reset_at))
-    }
-}
-
-impl BillingClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Grandfathered => "grandfathered",
-            Self::Sponsored => "sponsored",
-            Self::Standard => "standard",
-        }
-    }
-}
-
 impl BillingSubscriptionStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Incomplete => "incomplete",
-            Self::IncompleteExpired => "incomplete_expired",
-            Self::Trialing => "trialing",
-            Self::Active => "active",
-            Self::PastDue => "past_due",
-            Self::Canceled => "canceled",
-            Self::Unpaid => "unpaid",
-            Self::Paused => "paused",
-        }
-    }
-
     pub fn can_create_agent(self) -> bool {
         matches!(self, Self::Active | Self::Trialing)
     }
@@ -6610,143 +1970,12 @@ fn should_replace_stripe_subscription(
     }
 }
 
-impl ImportCandidateStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Claimed => "claimed",
-            Self::AdminReview => "admin_review",
-        }
-    }
-}
-
-impl UserLinkStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Linked => "linked",
-        }
-    }
-}
-
-impl ProjectMembershipRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Owner => "owner",
-            Self::Admin => "admin",
-            Self::Member => "member",
-        }
-    }
-}
-
-impl RuntimeSummaryStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Online => "online",
-            Self::Offline => "offline",
-            Self::Stale => "stale",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-impl RuntimeArtifactKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OciImage => "oci_image",
-        }
-    }
-}
-
 impl std::str::FromStr for RuntimeArtifactKind {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_runtime_artifact_kind(value)
             .ok_or_else(|| format!("invalid runtime artifact kind {value}"))
-    }
-}
-
-impl RuntimeControlKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Restart => "restart",
-            Self::RecoverKnownGoodChatRuntime => "recover_known_good_chat_runtime",
-            Self::Upgrade => "upgrade",
-            Self::Stop => "stop",
-            Self::Destroy => "destroy",
-        }
-    }
-}
-
-impl RuntimeControlRequestStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requested => "requested",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl RunnerClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalDocker => "local_docker",
-            Self::AppleContainer => "apple_container",
-            Self::Kata => "kata",
-            Self::Phala => "phala",
-            Self::Enclavia => "enclavia",
-        }
-    }
-}
-
-impl HostingTier {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Confidential => "confidential",
-        }
-    }
-}
-
-impl RuntimeResourceClass {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Vcpu4Memory8Gib => "vcpu4_memory8_gib",
-            Self::Vcpu2Memory4Gib => "vcpu2_memory4_gib",
-        }
-    }
-}
-
-impl AgentCreationRequestStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requested => "requested",
-            Self::Launching => "launching",
-            Self::Running => "running",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl FinitePrivateGrantStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-        }
-    }
-}
-
-impl FinitePrivateApiKeyStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-        }
     }
 }
 
@@ -6757,156 +1986,6 @@ impl FinitePrivateReservationStatus {
             Self::Settled => "settled",
             Self::Denied => "denied",
         }
-    }
-}
-
-impl FinitePrivateSettlementKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Actual => "actual",
-            Self::Estimate => "estimate",
-        }
-    }
-}
-
-pub fn parse_runtime_artifact_kind(value: &str) -> Option<RuntimeArtifactKind> {
-    match value {
-        "oci_image" => Some(RuntimeArtifactKind::OciImage),
-        _ => None,
-    }
-}
-
-pub fn parse_runner_class(value: &str) -> Option<RunnerClass> {
-    match value {
-        "local_docker" => Some(RunnerClass::LocalDocker),
-        "apple_container" => Some(RunnerClass::AppleContainer),
-        "kata" => Some(RunnerClass::Kata),
-        "phala" => Some(RunnerClass::Phala),
-        "enclavia" => Some(RunnerClass::Enclavia),
-        _ => None,
-    }
-}
-
-pub fn parse_hosting_tier(value: &str) -> Option<HostingTier> {
-    match value {
-        "standard" => Some(HostingTier::Standard),
-        "confidential" => Some(HostingTier::Confidential),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_resource_class(value: &str) -> Option<RuntimeResourceClass> {
-    match value {
-        "vcpu4_memory8_gib" => Some(RuntimeResourceClass::Vcpu4Memory8Gib),
-        "vcpu2_memory4_gib" => Some(RuntimeResourceClass::Vcpu2Memory4Gib),
-        _ => None,
-    }
-}
-
-pub fn parse_billing_class(value: &str) -> Option<BillingClass> {
-    match value {
-        "grandfathered" => Some(BillingClass::Grandfathered),
-        "sponsored" => Some(BillingClass::Sponsored),
-        "standard" => Some(BillingClass::Standard),
-        _ => None,
-    }
-}
-
-pub fn parse_billing_subscription_status(value: &str) -> Option<BillingSubscriptionStatus> {
-    match value {
-        "incomplete" => Some(BillingSubscriptionStatus::Incomplete),
-        "incomplete_expired" => Some(BillingSubscriptionStatus::IncompleteExpired),
-        "trialing" => Some(BillingSubscriptionStatus::Trialing),
-        "active" => Some(BillingSubscriptionStatus::Active),
-        "past_due" => Some(BillingSubscriptionStatus::PastDue),
-        "canceled" => Some(BillingSubscriptionStatus::Canceled),
-        "unpaid" => Some(BillingSubscriptionStatus::Unpaid),
-        "paused" => Some(BillingSubscriptionStatus::Paused),
-        _ => None,
-    }
-}
-
-pub fn parse_import_candidate_status(value: &str) -> Option<ImportCandidateStatus> {
-    match value {
-        "pending" => Some(ImportCandidateStatus::Pending),
-        "claimed" => Some(ImportCandidateStatus::Claimed),
-        "admin_review" => Some(ImportCandidateStatus::AdminReview),
-        _ => None,
-    }
-}
-
-pub fn parse_user_link_status(value: &str) -> Option<UserLinkStatus> {
-    match value {
-        "pending" => Some(UserLinkStatus::Pending),
-        "linked" => Some(UserLinkStatus::Linked),
-        _ => None,
-    }
-}
-
-pub fn parse_project_membership_role(value: &str) -> Option<ProjectMembershipRole> {
-    match value {
-        "owner" => Some(ProjectMembershipRole::Owner),
-        "admin" => Some(ProjectMembershipRole::Admin),
-        "member" => Some(ProjectMembershipRole::Member),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_summary_status(value: &str) -> Option<RuntimeSummaryStatus> {
-    match value {
-        "online" => Some(RuntimeSummaryStatus::Online),
-        "offline" => Some(RuntimeSummaryStatus::Offline),
-        "stale" => Some(RuntimeSummaryStatus::Stale),
-        "unknown" => Some(RuntimeSummaryStatus::Unknown),
-        _ => None,
-    }
-}
-
-pub fn parse_agent_creation_request_status(value: &str) -> Option<AgentCreationRequestStatus> {
-    match value {
-        "requested" => Some(AgentCreationRequestStatus::Requested),
-        "launching" => Some(AgentCreationRequestStatus::Launching),
-        "running" => Some(AgentCreationRequestStatus::Running),
-        "failed" => Some(AgentCreationRequestStatus::Failed),
-        "cancelled" => Some(AgentCreationRequestStatus::Cancelled),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_control_kind(value: &str) -> Option<RuntimeControlKind> {
-    match value {
-        "restart" => Some(RuntimeControlKind::Restart),
-        "recover_known_good_chat_runtime" => Some(RuntimeControlKind::RecoverKnownGoodChatRuntime),
-        "upgrade" => Some(RuntimeControlKind::Upgrade),
-        "stop" => Some(RuntimeControlKind::Stop),
-        "destroy" => Some(RuntimeControlKind::Destroy),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_control_request_status(value: &str) -> Option<RuntimeControlRequestStatus> {
-    match value {
-        "requested" => Some(RuntimeControlRequestStatus::Requested),
-        "running" => Some(RuntimeControlRequestStatus::Running),
-        "succeeded" => Some(RuntimeControlRequestStatus::Succeeded),
-        "failed" => Some(RuntimeControlRequestStatus::Failed),
-        _ => None,
-    }
-}
-
-pub fn parse_finite_private_grant_status(value: &str) -> Option<FinitePrivateGrantStatus> {
-    match value {
-        "active" => Some(FinitePrivateGrantStatus::Active),
-        "revoked" => Some(FinitePrivateGrantStatus::Revoked),
-        _ => None,
-    }
-}
-
-pub fn parse_finite_private_api_key_status(value: &str) -> Option<FinitePrivateApiKeyStatus> {
-    match value {
-        "active" => Some(FinitePrivateApiKeyStatus::Active),
-        "revoked" => Some(FinitePrivateApiKeyStatus::Revoked),
-        _ => None,
     }
 }
 
@@ -6921,19 +2000,17 @@ pub fn parse_finite_private_reservation_status(
     }
 }
 
-pub fn parse_finite_private_settlement_kind(value: &str) -> Option<FinitePrivateSettlementKind> {
-    match value {
-        "actual" => Some(FinitePrivateSettlementKind::Actual),
-        "estimate" => Some(FinitePrivateSettlementKind::Estimate),
-        _ => None,
-    }
-}
-
 pub fn normalize_owner_email(value: Option<&str>) -> Option<String> {
     let email = value?.trim().to_lowercase();
     if email.is_empty() { None } else { Some(email) }
 }
 
+/// The natural key for a runtime: `source_host_id:source_machine_id`
+/// (UNIQUE on `agent_runtimes.source_import_key`). The name is an artifact of
+/// the deleted existing-host import bridge, but the key itself is live
+/// identity machinery — every registration resolves runtimes through it.
+/// Renaming the column would be schema surgery for zero behavior change, so
+/// the legacy name stays.
 pub fn source_import_key(source_host_id: &str, source_machine_id: &str) -> String {
     format!(
         "{}:{}",
@@ -6985,9 +2062,19 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Ok(());
     };
     let existing_runtime = existing_runtime.ok_or(CoreError::RuntimeSpecMismatch)?;
+    // `offline` is the cleanly-stopped case; `stale` is acceptable only when
+    // the envelope itself was minted under the operator's compute-absent
+    // attestation (a failed control marks a runtime stale, and absent
+    // compute can never produce the stop receipt that would make it
+    // offline).
+    let source_status_frozen = match existing_runtime.host_facts.runtime_status {
+        RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Stale => relocation.source_compute_absent,
+        _ => false,
+    };
     let source_is_frozen = relocation.source_host_id == existing_runtime.source_host_id
         && relocation.source_machine_id == existing_runtime.source_machine_id
-        && existing_runtime.host_facts.runtime_status == RuntimeSummaryStatus::Offline;
+        && source_status_frozen;
     let target_is_registered = relocation.target_source_host_id == existing_runtime.source_host_id
         && relocation.source_machine_id == existing_runtime.source_machine_id;
     if request.agent_runtime_id.as_deref() != Some(existing_runtime.id.as_str())
@@ -7000,33 +2087,6 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Err(CoreError::RuntimeSpecMismatch);
     }
     Ok(())
-}
-
-fn normalize_source_host_relay_url(value: &str) -> CoreResult<String> {
-    let url = value.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(CoreError::InvalidSourceHostRelayUrl);
-    }
-    if url.contains(char::is_whitespace) || url.contains('\n') || url.contains('\r') {
-        return Err(CoreError::InvalidSourceHostRelayUrl);
-    }
-    Ok(url.trim_end_matches('/').to_string())
-}
-
-fn host_facts_from_record(record: &ExistingHostProjectImport) -> HostOwnedRuntimeFacts {
-    HostOwnedRuntimeFacts {
-        display_name: trim_or_fallback(&record.display_name, &record.source_machine_id),
-        hostname: trim_to_option(record.hostname.as_deref()),
-        runtime_host: record
-            .runtime_host
-            .as_deref()
-            .and_then(|value| trim_to_option(Some(value)))
-            .unwrap_or_else(|| normalize_id_part(&record.source_host_id)),
-        runtime_status: record.runtime_status,
-        active_inference_profile: trim_to_option(record.active_inference_profile.as_deref()),
-        hermes_available: record.hermes_available,
-        published_app_urls: record.published_app_urls.clone(),
-    }
 }
 
 fn trim_or_fallback(value: &str, fallback: &str) -> String {
@@ -7760,24 +2820,19 @@ pub(crate) fn provider_operation_allows_generic_failure(
 }
 
 fn current_time_iso() -> CoreResult<String> {
-    Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+    // Truncate to microseconds: TIMESTAMPTZ stores exactly six fractional
+    // digits, so a nanosecond-precision stamp would round on write and stop
+    // round-tripping byte-for-byte (macOS clocks tick in microseconds, which
+    // hid this; Linux exposes it).
+    let now = OffsetDateTime::now_utc();
+    let now = now
+        .replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
+        .expect("truncating nanoseconds cannot leave the valid range");
+    Ok(now.format(&Rfc3339)?)
 }
 
 fn parse_time(value: &str) -> CoreResult<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|_| CoreError::InvalidTimestamp)
-}
-
-pub fn runtime_relay_token_hash(value: &str) -> CoreResult<String> {
-    hash_runtime_relay_token(value)
-}
-
-fn hash_runtime_relay_token(value: &str) -> CoreResult<String> {
-    let token = trim_to_option(Some(value)).ok_or(CoreError::MissingRuntimeRelayToken)?;
-    let digest = Sha256::digest(token.as_bytes());
-    Ok(digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>())
 }
 
 fn hash_finite_private_api_key(value: &str) -> CoreResult<String> {
@@ -7860,26 +2915,6 @@ pub(crate) fn new_user_id() -> CoreResult<String> {
 
 pub(crate) fn new_customer_org_id() -> CoreResult<String> {
     generate_surrogate_id("org")
-}
-
-fn candidate_id_for(source_key: &str) -> String {
-    id_from_parts("import", &[source_key])
-}
-
-/// Opaque surrogate id for a project-import candidate, minted at insert time.
-/// The candidate's natural key is `source_import_key` (UNIQUE), so reconcile and
-/// claim resolve the row by that key rather than rederiving its id from the
-/// source identifiers (PERSISTENCE.md anti-pattern #5).
-pub(crate) fn new_import_candidate_id() -> CoreResult<String> {
-    generate_surrogate_id("import")
-}
-
-fn project_id_for(candidate_id: &str) -> String {
-    id_from_parts("project", &[candidate_id])
-}
-
-fn agent_runtime_id_for(candidate_id: &str) -> String {
-    id_from_parts("runtime", &[candidate_id])
 }
 
 pub(crate) fn new_agent_runtime_id() -> CoreResult<String> {
@@ -7999,18 +3034,6 @@ pub(crate) fn runtime_upgrade_prelease_rejection_is_terminal(error: &CoreError) 
 
 fn finite_private_grant_id_for_user(user_id: &str) -> String {
     id_from_parts("fp_grant", &[user_id])
-}
-
-struct FinitePrivateAdminAuditRecord<'a> {
-    action: &'a str,
-    target_type: &'a str,
-    target_id: &'a str,
-    grant_id: Option<&'a str>,
-    api_key_id: Option<&'a str>,
-    /// Admin identity for operator-initiated actions. `None` means Core itself.
-    actor: Option<&'a str>,
-    metadata: Value,
-    created_at: &'a str,
 }
 
 fn finite_private_api_key_id_for(grant_id: &str, key_hash: &str) -> String {
@@ -8157,14 +3180,6 @@ fn finite_private_retry_after_label(seconds: i64) -> String {
     }
 }
 
-fn finite_private_daily_reset_key(grant_id: &str, now: OffsetDateTime) -> String {
-    format!("{grant_id}|{}", now.date())
-}
-
-fn finite_private_notice_key(grant_id: &str, epoch: i64, threshold: i64) -> String {
-    format!("{grant_id}|{epoch}|{threshold}")
-}
-
 fn finite_private_next_daily_reset_at(now: OffsetDateTime) -> CoreResult<String> {
     let next_midnight = (now.unix_timestamp().div_euclid(86_400) + 1) * 86_400;
     OffsetDateTime::from_unix_timestamp(next_midnight)
@@ -8176,9 +3191,167 @@ fn finite_private_next_daily_reset_at(now: OffsetDateTime) -> CoreResult<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestDb, with_isolated_postgres};
+    use serde_json::json;
 
     const NOW: &str = "2026-05-25T12:00:00Z";
     const LATER: &str = "2026-05-25T13:00:00Z";
+
+    /// Assert the three independent encodings of one enum agree.
+    macro_rules! assert_wire_encodings_agree {
+        ($parse:path, $($variant:expr),+ $(,)?) => {
+            $({
+                let value = $variant;
+                let encoded = serde_json::to_value(value).unwrap();
+                let encoded = encoded
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{value:?} does not serialize to a JSON string"));
+                assert_eq!(
+                    encoded,
+                    value.as_str(),
+                    "serde and as_str disagree for {value:?}",
+                );
+                assert_eq!(
+                    $parse(value.as_str()),
+                    Some(value),
+                    "{} rejects the as_str it must round-trip for {value:?}",
+                    stringify!($parse),
+                );
+            })+
+        };
+    }
+
+    /// TIMESTAMPTZ stores six fractional digits, so any stamp Core generates
+    /// with more would round on write and no longer round-trip byte-for-byte.
+    /// On macOS the clock ticks in microseconds and this can never fire; on
+    /// Linux (CI, production) nanosecond stamps are real.
+    #[test]
+    fn current_time_iso_never_exceeds_postgres_microsecond_precision() {
+        for _ in 0..1_000 {
+            let stamp = current_time_iso().unwrap();
+            let parsed = parse_time(&stamp).unwrap();
+            assert_eq!(parsed.nanosecond() % 1_000, 0, "{stamp}");
+        }
+    }
+
+    /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
+    /// variant list, so the three cannot drift by construction. This keeps
+    /// checking them because the guarantee depends on serde's `rename`
+    /// behaving as assumed, and because an enum added outside the macro would
+    /// otherwise reintroduce the three hand-written surfaces unnoticed.
+    #[test]
+    fn enum_serde_as_str_and_parse_encodings_agree() {
+        use BillingClass::*;
+        assert_wire_encodings_agree!(parse_billing_class, Grandfathered, Sponsored, Standard);
+
+        use BillingSubscriptionStatus::*;
+        assert_wire_encodings_agree!(
+            parse_billing_subscription_status,
+            Incomplete,
+            IncompleteExpired,
+            Trialing,
+            BillingSubscriptionStatus::Active,
+            PastDue,
+            Canceled,
+            Unpaid,
+            Paused,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_user_link_status,
+            UserLinkStatus::Pending,
+            UserLinkStatus::Linked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_project_membership_role,
+            ProjectMembershipRole::Owner,
+            ProjectMembershipRole::Admin,
+            ProjectMembershipRole::Member,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_summary_status,
+            RuntimeSummaryStatus::Online,
+            RuntimeSummaryStatus::Offline,
+            RuntimeSummaryStatus::Stale,
+            RuntimeSummaryStatus::Unknown,
+        );
+
+        assert_wire_encodings_agree!(parse_runtime_artifact_kind, RuntimeArtifactKind::OciImage);
+
+        assert_wire_encodings_agree!(
+            parse_hosting_tier,
+            HostingTier::Standard,
+            HostingTier::Confidential,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_resource_class,
+            RuntimeResourceClass::Vcpu4Memory8Gib,
+            RuntimeResourceClass::Vcpu2Memory4Gib,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runner_class,
+            RunnerClass::LocalDocker,
+            RunnerClass::AppleContainer,
+            RunnerClass::Kata,
+            RunnerClass::Phala,
+            RunnerClass::Enclavia,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_control_kind,
+            RuntimeControlKind::Restart,
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+            RuntimeControlKind::Upgrade,
+            RuntimeControlKind::Stop,
+            RuntimeControlKind::Destroy,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_control_request_status,
+            RuntimeControlRequestStatus::Requested,
+            RuntimeControlRequestStatus::Running,
+            RuntimeControlRequestStatus::Succeeded,
+            RuntimeControlRequestStatus::Failed,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_agent_creation_request_status,
+            AgentCreationRequestStatus::Requested,
+            AgentCreationRequestStatus::Launching,
+            AgentCreationRequestStatus::Running,
+            AgentCreationRequestStatus::Failed,
+            AgentCreationRequestStatus::Cancelled,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_grant_status,
+            FinitePrivateGrantStatus::Active,
+            FinitePrivateGrantStatus::Revoked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_api_key_status,
+            FinitePrivateApiKeyStatus::Active,
+            FinitePrivateApiKeyStatus::Revoked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_reservation_status,
+            FinitePrivateReservationStatus::Reserved,
+            FinitePrivateReservationStatus::Settled,
+            FinitePrivateReservationStatus::Denied,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_settlement_kind,
+            FinitePrivateSettlementKind::Actual,
+            FinitePrivateSettlementKind::Estimate,
+        );
+    }
 
     fn phala_runner_capacity(provider_inventory_count: u32) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
@@ -8189,748 +3362,667 @@ mod tests {
         }
     }
 
-    fn issue_test_launch_code(state: &mut BridgeCoreState) -> String {
-        let prepared =
-            launch_codes::prepare_launch_code_batch(launch_codes::IssueLaunchCodeBatchInput {
-                name: "Test batch".to_string(),
-                code_count: 1,
-                expires_in_hours: Some(launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
-                hosting_tier: None,
-                created_by_workos_user_id: "workos-test-operator".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let plaintext = prepared.issued_codes[0].code.clone();
-        state
-            .launch_code_batches
-            .insert(prepared.batch.id.clone(), prepared.batch);
-        for record in prepared.records {
-            state.launch_codes.insert(record.id.clone(), record);
-        }
-        plaintext
+    /// A second handle on the same database with different runtime
+    /// configuration.
+    ///
+    /// The in-memory store took environment/secret references as call
+    /// arguments; the real store carries them on the handle. Tests that prove a
+    /// persisted runtime spec is reused rather than recomputed lease twice
+    /// through differently-configured handles.
+    fn with_runtime_config(
+        db: &TestDb,
+        environment: &BTreeMap<String, String>,
+        secret_references: &[String],
+    ) -> crate::store::CoreStore {
+        db.store
+            .clone()
+            .with_runtime_environment(environment.clone())
+            .unwrap()
+            .with_runtime_secret_references(secret_references.to_vec())
+            .unwrap()
     }
 
-    fn issued_launch_code_id(state: &BridgeCoreState, plaintext: &str) -> String {
-        let hash = launch_codes::hash_launch_code(plaintext).unwrap();
-        state
-            .launch_codes
-            .values()
-            .find(|record| record.code_hash == hash)
-            .unwrap()
-            .id
+    /// One Stripe subscription sync for the `cus_order` fixture.
+    ///
+    /// A plain closure cannot hold `.await`, so the repeated call is a helper.
+    async fn sync_order_subscription(
+        db: &TestDb,
+        org_id: &str,
+        status: BillingSubscriptionStatus,
+        event: &str,
+        created: i64,
+    ) -> CustomerBillingAccount {
+        db.sync_stripe_subscription(SyncStripeSubscriptionInput {
+            customer_org_id: Some(org_id.to_string()),
+            stripe_customer_id: "cus_order".to_string(),
+            stripe_subscription_id: "sub_order".to_string(),
+            stripe_price_id: Some("price_standard".to_string()),
+            expected_stripe_price_id: Some("price_standard".to_string()),
+            subscription_status: status,
+            current_period_end: Some("2026-08-01T12:00:00Z".to_string()),
+            cancel_at_period_end: false,
+            stripe_event_id: Some(event.to_string()),
+            stripe_event_created: Some(created),
+            now: Some(NOW.to_string()),
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn issue_test_launch_code(db: &TestDb) -> String {
+        issue_launch_code(db, None).await
+    }
+
+    /// Issue one real launch code batch and return its single plaintext code.
+    ///
+    /// Staging rows directly is no longer possible (and was never how a code
+    /// reaches production), so tests redeem codes the store actually issued.
+    async fn issue_launch_code(db: &TestDb, hosting_tier: Option<HostingTier>) -> String {
+        db.issue_launch_code_batch(launch_codes::IssueLaunchCodeBatchInput {
+            name: "Test batch".to_string(),
+            code_count: 1,
+            expires_in_hours: Some(launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+            hosting_tier,
+            created_by_workos_user_id: "workos-test-operator".to_string(),
+            now: Some(NOW.to_string()),
+        })
+        .await
+        .unwrap()
+        .codes[0]
+            .code
             .clone()
     }
 
-    #[test]
-    fn existing_host_import_creates_multiple_claimable_candidates_without_visible_projects() {
-        let mut state = BridgeCoreState::default();
-
-        let report = state
-            .reconcile_existing_host_imports(
-                &[
-                    import("smoke", "paul-smoke", "Paul Smoke", Some("PAUL@FINITE.VIP")),
-                    import("box1", "paul-box", "Paul Box", Some("paul@finite.vip")),
-                    import("trf", "paul-trf", "Paul TRF", Some("paul@finite.vip")),
-                ],
-                options(["paul@finite.vip"], NOW),
-            )
-            .unwrap();
-
-        assert_eq!(report.created_candidates.len(), 3);
-        assert_eq!(
-            state
-                .claimable_candidates_for_email(Some("paul@finite.vip"))
-                .len(),
-            3
-        );
-        assert!(state.projects.is_empty());
-        assert!(state.agent_runtimes.is_empty());
-    }
-
-    #[test]
-    fn allowlist_and_owner_email_decide_imports_not_admin_visibility() {
-        let mut state = BridgeCoreState::default();
-        let mut rene_bot = import("trf", "grant", "Grant", Some("rene@example.com"));
-        rene_bot
-            .admin_visible_to_emails
-            .push("paul@finite.vip".to_string());
-
-        let report = state
-            .reconcile_existing_host_imports(&[rene_bot], options(["paul@finite.vip"], NOW))
-            .unwrap();
-
-        assert!(report.created_candidates.is_empty());
-        assert_eq!(report.skipped_records.len(), 1);
-        assert_eq!(
-            report.skipped_records[0].reason,
-            SkippedImportReason::OwnerNotAllowlisted
-        );
-    }
-
-    #[test]
-    fn verified_workos_login_claims_selected_projects_and_keeps_test_user_grandfathered() {
-        let mut state = BridgeCoreState::default();
-        state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "smoke",
-                    "test-smoke",
-                    "Smoke",
-                    Some("test@finite.vip"),
-                )],
-                options(["test@finite.vip"], NOW),
-            )
-            .unwrap();
-        let candidate_id = state.claimable_candidates_for_email(Some("test@finite.vip"))[0]
-            .id
-            .clone();
-
-        let result = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "test@finite.vip".to_string(),
-                workos_user_id: "user_workos_test".to_string(),
-                selected_candidate_ids: vec![candidate_id],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(result.claimed_project_ids.len(), 1);
-        let user = state.users.values().next().unwrap();
-        assert_eq!(user.status, UserLinkStatus::Linked);
-        assert_eq!(user.workos_user_id.as_deref(), Some("user_workos_test"));
-        let org = state.customer_orgs.values().next().unwrap();
-        assert_eq!(org.billing_class, BillingClass::Grandfathered);
-        assert_eq!(state.visible_projects_for_user(&user.id).len(), 1);
-    }
-
-    #[test]
-    fn verified_email_can_relink_to_new_workos_user_and_keep_imported_projects() {
-        let mut state = BridgeCoreState::default();
-        state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
-            )
-            .unwrap();
-        let candidate_id = state.claimable_candidates_for_email(Some("paul@finite.vip"))[0]
-            .id
-            .clone();
-        let claimed = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_staging".to_string(),
-                selected_candidate_ids: vec![candidate_id],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-
-        let user = state
-            .link_verified_user(LinkVerifiedUserInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_prod_google".to_string(),
-                now: Some("2026-05-25T15:00:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(
-            user.workos_user_id.as_deref(),
-            Some("user_workos_prod_google")
-        );
-        assert_eq!(
-            state.visible_projects_for_user(&user.id)[0].id,
-            claimed.claimed_project_ids[0]
-        );
-        let org = state.find_personal_org_by_owner(&user.id).unwrap();
-        assert_eq!(org.billing_class, BillingClass::Grandfathered);
-    }
-
-    #[test]
-    fn claiming_is_idempotent_and_reimport_updates_only_host_owned_facts() {
-        let mut state = BridgeCoreState::default();
-        state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
-            )
-            .unwrap();
-        let candidate_id = state.claimable_candidates_for_email(Some("paul@finite.vip"))[0]
-            .id
-            .clone();
-
-        let first = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_paul".to_string(),
-                selected_candidate_ids: vec![candidate_id.clone()],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        let second = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_paul".to_string(),
-                selected_candidate_ids: vec![candidate_id.clone()],
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(first.claimed_project_ids.len(), 1);
-        assert!(second.claimed_project_ids.is_empty());
-        assert_eq!(
-            second.already_claimed_project_ids,
-            first.claimed_project_ids
-        );
-
-        let mut changed = import(
-            "smoke",
-            "paul-smoke",
-            "Renamed Smoke",
-            Some("other@finite.vip"),
-        );
-        changed.hostname = Some("new-smoke.finite.vip".to_string());
-        changed.runtime_status = RuntimeSummaryStatus::Online;
-        state
-            .reconcile_existing_host_imports(&[changed], options(["other@finite.vip"], LATER))
-            .unwrap();
-
-        let candidate = state.project_import_candidates.get(&candidate_id).unwrap();
-        assert_eq!(candidate.owner_email, "paul@finite.vip");
-        assert_eq!(
-            candidate.latest_host_owner_email.as_deref(),
-            Some("other@finite.vip")
-        );
-        assert_eq!(candidate.host_facts.display_name, "Renamed Smoke");
-        let project = state.projects.get(&first.claimed_project_ids[0]).unwrap();
-        assert_eq!(project.owner_user_id, candidate.pending_user_id);
-    }
-
-    #[test]
-    fn same_historical_machine_id_on_different_hosts_does_not_collide() {
-        let mut state = BridgeCoreState::default();
-
-        state
-            .reconcile_existing_host_imports(
-                &[
-                    import("smoke", "grant", "Smoke Grant", Some("rene@example.com")),
-                    import("trf", "grant", "TRF Grant", Some("rene@example.com")),
-                ],
-                options(["rene@example.com"], NOW),
-            )
-            .unwrap();
-
-        assert_eq!(state.project_import_candidates.len(), 2);
-        let keys = state
-            .project_import_candidates
-            .values()
-            .map(|candidate| candidate.source_import_key.as_str())
-            .collect::<BTreeSet<_>>();
-        assert!(keys.contains("smoke:grant"));
-        assert!(keys.contains("trf:grant"));
-    }
-
-    #[test]
-    fn multi_user_telegram_bot_is_claimable_only_by_owner_without_participant_memberships() {
-        let mut state = BridgeCoreState::default();
-        let mut grant = import("trf", "grant", "Grant", Some("rene@example.com"));
-        grant
-            .known_external_channel_participants
-            .push(KnownExternalChannelParticipant {
-                channel: "telegram".to_string(),
-                external_user_id: Some("telegram:paul".to_string()),
-                username: Some("paul".to_string()),
-                display_name: Some("Paul".to_string()),
-            });
-        state
-            .reconcile_existing_host_imports(
-                &[grant],
-                options(["paul@finite.vip", "rene@example.com"], NOW),
-            )
-            .unwrap();
-        let candidate_id = state.claimable_candidates_for_email(Some("rene@example.com"))[0]
-            .id
-            .clone();
-
-        let denied = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_paul".to_string(),
-                selected_candidate_ids: vec![candidate_id.clone()],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert_eq!(denied.denied_candidate_ids, vec![candidate_id.clone()]);
-        assert!(state.projects.is_empty());
-
-        let claimed = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "rene@example.com".to_string(),
-                workos_user_id: "user_workos_rene".to_string(),
-                selected_candidate_ids: vec![candidate_id.clone()],
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(claimed.claimed_project_ids.len(), 1);
-        assert_eq!(state.project_room_memberships.len(), 1);
-        assert_eq!(
-            state
-                .project_import_candidates
-                .get(&candidate_id)
-                .unwrap()
-                .known_external_channel_participants
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn launch_code_creates_one_self_serve_agent_request_and_visible_project() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-
-        let first = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let second = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent duplicate submit".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-
-        assert!(!first.reused);
-        assert!(second.reused);
-        assert_eq!(first.request.id, second.request.id);
-        assert_eq!(first.project.id, second.project.id);
-        assert_eq!(state.projects.len(), 1);
-        assert_eq!(state.agent_runtimes.len(), 0);
-        assert_eq!(state.agent_creation_requests.len(), 1);
-        assert_eq!(first.project.hosting_tier, Some(HostingTier::Standard));
-        assert_eq!(
-            first.project.placement,
-            Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
-        );
-        assert_eq!(first.request.runner_class, RunnerClass::Kata);
-        assert_eq!(first.request.hosting_tier, Some(HostingTier::Standard));
-        let user = state.users.values().next().unwrap();
-        let org = state.customer_orgs.values().next().unwrap();
-        assert_eq!(org.billing_class, BillingClass::Sponsored);
-        assert_eq!(
-            state.visible_projects_for_user(&user.id),
-            vec![first.project]
-        );
-    }
-
-    #[test]
-    fn confidential_launch_code_resolves_phala_placement_inside_core() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        state
-            .launch_code_batches
-            .values_mut()
-            .next()
+    async fn issued_launch_code_id(db: &TestDb, plaintext: &str) -> String {
+        let hash = launch_codes::hash_launch_code(plaintext).unwrap();
+        db.query_json(
+            "SELECT to_jsonb(t) FROM launch_codes t WHERE t.code_hash = $1",
+            &[&hash],
+        )
+        .await
+        .first()
+        .unwrap()["id"]
+            .as_str()
             .unwrap()
-            .hosting_tier = Some(HostingTier::Confidential);
+            .to_string()
+    }
 
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "confidential@finite.vip".to_string(),
-                workos_user_id: "user_workos_confidential".to_string(),
-                display_name: "Confidential Agent".to_string(),
-                launch_code,
-                idempotency_key: "confidential-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
+    /// LEGACY-ROW CONTRACT. The existing-host import bridge is deleted, but
+    /// production may still hold rows from its 2026-07 near-ship test run.
+    /// This test plants those rows the way the bridge left them (raw SQL —
+    /// the writing machinery is gone; see git history for the original
+    /// reconcile/claim code) and pins the two behaviors that keep them inert:
+    ///
+    /// 1. A project linked to an import candidate stays out of user-facing
+    ///    project lists (`public_visible_projects` filters on
+    ///    `import_candidate_id`).
+    /// 2. Its capability-less runtime refuses every runtime control
+    ///    (`supports_runtime_control` fails closed on NULL capabilities).
+    ///
+    /// A future importer must define its own linkage and lifecycle rather
+    /// than resurrecting these rows' semantics.
+    #[tokio::test]
+    async fn legacy_import_rows_stay_hidden_and_refuse_runtime_controls() {
+        with_isolated_postgres(|db| async move {
+            let owner = db
+                .link_verified_user(LinkVerifiedUserInput {
+                    verified_email: "paul@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paul".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let owner_id = owner.id.clone();
+            // link_verified_user already provisioned the personal org; the
+            // bridge reused it the same way.
+            let org_id = db
+                .query_json(
+                    "SELECT to_jsonb(t.id) FROM customer_orgs t WHERE t.owner_user_id = $1",
+                    &[&owner_id],
+                )
+                .await[0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            for statement in [
+                format!(
+                    "INSERT INTO project_import_candidates \
+                     (id, source_host_id, source_machine_id, source_import_key, owner_email, \
+                      pending_user_id, customer_org_id, status, project_id, agent_runtime_id, \
+                      claimed_by_user_id, host_facts, created_at, updated_at) \
+                     VALUES ('candidate-legacy', 'box1', 'paul-smoke', 'box1:paul-smoke', \
+                      'paul@finite.vip', '{owner_id}', '{org_id}', 'claimed', 'project-legacy', \
+                      'runtime-legacy', '{owner_id}', \
+                      '{{\"display_name\": \"Paul Smoke\", \"hostname\": null, \"runtime_host\": \"box1\", \
+                        \"runtime_status\": \"online\", \"active_inference_profile\": null, \
+                        \"hermes_available\": null, \"published_app_urls\": []}}', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, \
+                      import_candidate_id, created_at, updated_at) \
+                     VALUES ('project-legacy', '{org_id}', '{owner_id}', 'Paul Smoke', \
+                      'candidate-legacy', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO agent_runtimes (id, project_id, source_host_id, source_machine_id, \
+                      source_import_key, host_facts, created_at, updated_at) \
+                     VALUES ('runtime-legacy', 'project-legacy', 'box1', 'paul-smoke', \
+                      'box1:paul-smoke', \
+                      '{{\"display_name\": \"Paul Smoke\", \"hostname\": null, \"runtime_host\": \"box1\", \
+                        \"runtime_status\": \"online\", \"active_inference_profile\": null, \
+                        \"hermes_available\": null, \"published_app_urls\": []}}', '{NOW}', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO project_runtime_links (id, project_id, agent_runtime_id, active, created_at) \
+                     VALUES ('link-legacy', 'project-legacy', 'runtime-legacy', TRUE, '{NOW}')"
+                ),
+                // The bridge granted the claiming user a hosted-web owner
+                // membership; visibility reads flow through these rows.
+                format!(
+                    "INSERT INTO chat_identities (id, user_id, kind, device_id, created_at) \
+                     VALUES ('identity-legacy', '{owner_id}', 'hosted_web', 'dashboard-bridge-v1', '{NOW}')"
+                ),
+                format!(
+                    "INSERT INTO project_room_memberships (id, project_id, chat_identity_id, role, created_at) \
+                     VALUES ('membership-legacy', 'project-legacy', 'identity-legacy', 'owner', '{NOW}')"
+                ),
+            ] {
+                db.exec(&statement).await;
+            }
 
-        assert_eq!(
-            requested.project.hosting_tier,
-            Some(HostingTier::Confidential)
-        );
-        assert_eq!(
-            requested.project.placement,
-            Some(RuntimePlacement::for_hosting_tier(
-                HostingTier::Confidential
-            ))
-        );
-        assert_eq!(requested.request.runner_class, RunnerClass::Phala);
+            let visible = db
+                .visible_projects_for_workos_user("user_workos_paul")
+                .await
+                .unwrap();
+            let legacy = visible
+                .iter()
+                .find(|candidate| candidate.project.id == "project-legacy")
+                .expect("the legacy project row is still readable internally");
+            assert_eq!(
+                legacy.project.import_candidate_id.as_deref(),
+                Some("candidate-legacy"),
+                "the import linkage that keeps this row hidden must survive reads"
+            );
 
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "phala-runner".to_string(),
-                source_host_id: Some("phala-host".to_string()),
-                lease_token: "phala-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity {
+            let error = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "paul@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paul".to_string(),
+                    project_id: "project-legacy".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CoreError::RuntimeControlUnsupported));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn launch_code_creates_one_self_serve_agent_request_and_visible_project() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+
+            let first = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let second = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent duplicate submit".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+
+            assert!(!first.reused);
+            assert!(second.reused);
+            assert_eq!(first.request.id, second.request.id);
+            assert_eq!(first.project.id, second.project.id);
+            assert_eq!(db.table_len("projects").await, 1);
+            assert_eq!(db.table_len("agent_runtimes").await, 0);
+            assert_eq!(db.table_len("agent_creation_requests").await, 1);
+            assert_eq!(first.project.hosting_tier, Some(HostingTier::Standard));
+            assert_eq!(
+                first.project.placement,
+                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+            );
+            assert_eq!(first.request.runner_class, RunnerClass::Kata);
+            assert_eq!(first.request.hosting_tier, Some(HostingTier::Standard));
+            let user = db.all_users().await.into_iter().next().unwrap();
+            let org = db.all_customer_orgs().await.into_iter().next().unwrap();
+            assert_eq!(org.billing_class, BillingClass::Sponsored);
+            assert_eq!(
+                db.visible_projects_for_user(&user.id)
+                    .await
+                    .into_iter()
+                    .map(|visible| visible.project)
+                    .collect::<Vec<_>>(),
+                vec![first.project]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn confidential_launch_code_resolves_phala_placement_inside_core() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_launch_code(&db, Some(HostingTier::Confidential)).await;
+            promote_runtime_artifact(&db).await;
+
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "confidential@finite.vip".to_string(),
+                    workos_user_id: "user_workos_confidential".to_string(),
+                    display_name: "Confidential Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "confidential-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                requested.project.hosting_tier,
+                Some(HostingTier::Confidential)
+            );
+            assert_eq!(
+                requested.project.placement,
+                Some(RuntimePlacement::for_hosting_tier(
+                    HostingTier::Confidential
+                ))
+            );
+            assert_eq!(requested.request.runner_class, RunnerClass::Phala);
+
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "phala-runner".to_string(),
+                    source_host_id: Some("phala-host".to_string()),
+                    lease_token: "phala-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                            RuntimeCapabilitiesV1 {
+                                restart: true,
+                                stop: true,
+                                ..RuntimeCapabilitiesV1::default()
+                            },
+                        )),
+                        ..phala_runner_capacity(0)
+                    }),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let error = db
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: lease.request.id,
+                    runner_id: "phala-runner".to_string(),
+                    lease_token: "phala-lease".to_string(),
+                    source_host_id: "phala-host".to_string(),
+                    source_machine_id: "phala-cvm".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: Some("db-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             restart: true,
+                            runtime_upgrade: true,
                             stop: true,
                             ..RuntimeCapabilitiesV1::default()
                         },
                     )),
-                    ..phala_runner_capacity(0)
-                }),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        let error = state
-            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                request_id: lease.request.id,
-                runner_id: "phala-runner".to_string(),
-                lease_token: "phala-lease".to_string(),
-                source_host_id: "phala-host".to_string(),
-                source_machine_id: "phala-cvm".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: Some("state-v1".to_string()),
-                provider_runtime_handle: None,
-                contact_endpoint: None,
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        restart: true,
-                        runtime_upgrade: true,
-                        stop: true,
-                        ..RuntimeCapabilitiesV1::default()
-                    },
-                )),
-                runtime_relay_token_hash: runtime_relay_token_hash("phala-runtime-token").unwrap(),
-                display_name: None,
-                hostname: None,
-                runtime_host: None,
-                runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                active_inference_profile: None,
-                hermes_available: None,
-                published_app_urls: Vec::new(),
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(error, CoreError::RuntimeCapabilitiesNotAuthorized));
-    }
-
-    #[test]
-    fn selected_hosting_tier_must_match_launch_code_before_code_redemption() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        let input = RequestAgentCreationInput {
-            verified_email: "tier-check@finite.vip".to_string(),
-            workos_user_id: "user_workos_tier_check".to_string(),
-            display_name: "Tier Check".to_string(),
-            launch_code: launch_code.clone(),
-            idempotency_key: "tier-check-submit".to_string(),
-            now: Some(NOW.to_string()),
-        };
-
-        let denied = state
-            .request_agent_creation_configured(
-                input.clone(),
-                AgentCreationConfiguration {
-                    requested_hosting_tier: Some(HostingTier::Confidential),
-                    ..AgentCreationConfiguration::default()
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(denied, CoreError::HostingTierNotAuthorized));
-        assert!(state.users.is_empty());
-        assert!(state.projects.is_empty());
-        assert!(state.agent_creation_requests.is_empty());
-
-        let created = state
-            .request_agent_creation_configured(
-                input,
-                AgentCreationConfiguration {
-                    requested_hosting_tier: Some(HostingTier::Standard),
-                    ..AgentCreationConfiguration::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(created.request.runner_class, RunnerClass::Kata);
-    }
-
-    #[test]
-    fn phala_capacity_reservation_is_atomic_and_releases_only_the_existing_in_flight_request() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let mut request_ids = Vec::new();
-        for index in 0..2 {
-            let launch_code = issue_test_launch_code(&mut state);
-            for batch in state.launch_code_batches.values_mut() {
-                batch.hosting_tier = Some(HostingTier::Confidential);
-            }
-            let requested = state
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: format!("confidential-{index}@finite.vip"),
-                    workos_user_id: format!("user_workos_confidential_{index}"),
-                    display_name: format!("Confidential Agent {index}"),
-                    launch_code,
-                    idempotency_key: format!("confidential-submit-{index}"),
-                    now: Some(NOW.to_string()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: None,
+                    hermes_available: None,
+                    published_app_urls: Vec::new(),
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
                 })
-                .unwrap();
-            request_ids.push(requested.request.id);
-        }
-
-        let first = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "phala-runner-a".to_string(),
-                source_host_id: Some("phala-host".to_string()),
-                lease_token: "phala-lease-a".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(phala_runner_capacity(0)),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert!(request_ids.contains(&first.request.id));
-        let waiting_request_id = request_ids
-            .iter()
-            .find(|request_id| request_id.as_str() != first.request.id)
-            .unwrap();
-        let reservation = first.in_flight_capacity_reservation.as_ref().unwrap().v1();
-        assert_eq!(reservation.request_id, first.request.id);
-        assert_eq!(
-            reservation.placement,
-            RuntimePlacement::for_hosting_tier(HostingTier::Confidential)
-        );
-        assert_eq!(reservation.provider_inventory_count, 0);
-        assert_eq!(reservation.core_in_flight_count, 1);
-        assert_eq!(reservation.max_sandbox_count, 1);
-
-        let second = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "phala-runner-b".to_string(),
-                source_host_id: Some("phala-host".to_string()),
-                lease_token: "phala-lease-b".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(phala_runner_capacity(0)),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(second.is_none());
-
-        let resumed = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "phala-runner-c".to_string(),
-                source_host_id: Some("phala-host".to_string()),
-                lease_token: "phala-lease-c".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(phala_runner_capacity(1)),
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(resumed.request.id, first.request.id);
-        let reservation = resumed
-            .in_flight_capacity_reservation
-            .as_ref()
-            .unwrap()
-            .v1();
-        assert_eq!(reservation.provider_inventory_count, 1);
-        assert_eq!(reservation.core_in_flight_count, 1);
-        assert_eq!(
-            state.agent_creation_requests[waiting_request_id].status,
-            AgentCreationRequestStatus::Requested
-        );
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CoreError::RuntimeCapabilitiesNotAuthorized));
+        })
+        .await;
     }
 
-    #[test]
-    fn project_selected_runner_class_routes_to_a_matching_worker() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation_configured(
-                RequestAgentCreationInput {
-                    verified_email: "kata@finite.vip".to_string(),
-                    workos_user_id: "user_workos_kata".to_string(),
-                    display_name: "Kata Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "kata-submit".to_string(),
-                    now: Some(NOW.to_string()),
-                },
-                AgentCreationConfiguration {
-                    placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                    requested_hosting_tier: None,
-                    profile_picture_url: Some(
-                        "https://chat.finite.computer/v1/blobs/profile".to_string(),
-                    ),
-                },
-            )
-            .unwrap();
-        assert_eq!(requested.request.runner_class, RunnerClass::Kata);
-
-        let draining_kata = RunnerLeaseCapacity {
-            draining: true,
-            runner_classes: vec![RunnerClass::Kata],
-            runtime_capabilities: Some(kata_runtime_capabilities()),
-            ..RunnerLeaseCapacity::default()
-        };
-        assert!(!draining_kata.accepts_agent_creation());
-        assert!(draining_kata.accepts_runtime_control());
-
-        let phala = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "phala-worker".to_string(),
-                source_host_id: None,
-                lease_token: "phala-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(phala_runner_capacity(0)),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(phala.is_none());
-
-        let unspecified = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "unspecified-worker".to_string(),
-                source_host_id: None,
-                lease_token: "unspecified-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity::default()),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(unspecified.is_none());
-
-        let kata = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "kata-worker".to_string(),
-                source_host_id: None,
-                lease_token: "kata-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .expect("Kata worker should claim Kata placement");
-        assert_eq!(kata.request.id, requested.request.id);
-    }
-
-    #[test]
-    fn creation_retry_reuses_the_persisted_complete_runtime_spec() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let launch_code = issue_test_launch_code(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "retry@finite.vip".to_string(),
-                workos_user_id: "user_workos_retry".to_string(),
-                display_name: "Retry Agent".to_string(),
-                launch_code,
-                idempotency_key: "retry-submit".to_string(),
+    #[tokio::test]
+    async fn selected_hosting_tier_must_match_launch_code_before_code_redemption() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            let input = RequestAgentCreationInput {
+                verified_email: "tier-check@finite.vip".to_string(),
+                workos_user_id: "user_workos_tier_check".to_string(),
+                display_name: "Tier Check".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: "tier-check-submit".to_string(),
                 now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let original_environment = BTreeMap::from([(
-            "FINITE_SITES_API".to_string(),
-            "https://api.finite.chat".to_string(),
-        )]);
-        let original_secret_references = vec![
-            "FAL_KEY".to_string(),
-            "FIRECRAWL_API_KEY".to_string(),
-            "XAI_API_KEY".to_string(),
-        ];
-        let first = state
-            .lease_agent_creation_request_with_runtime_configuration(
-                LeaseAgentCreationRequestInput {
-                    runner_id: "kata-worker-1".to_string(),
+            };
+
+            let denied = db
+                .request_agent_creation_configured(
+                    input.clone(),
+                    AgentCreationConfiguration {
+                        requested_hosting_tier: Some(HostingTier::Confidential),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(denied, CoreError::HostingTierNotAuthorized));
+            assert!(db.all_users().await.is_empty());
+            assert!(db.all_projects().await.is_empty());
+            assert!(db.all_agent_creation_requests().await.is_empty());
+
+            let created = db
+                .request_agent_creation_configured(
+                    input,
+                    AgentCreationConfiguration {
+                        requested_hosting_tier: Some(HostingTier::Standard),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.request.runner_class, RunnerClass::Kata);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn phala_capacity_reservation_is_atomic_and_releases_only_the_existing_in_flight_request()
+    {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let mut request_ids = Vec::new();
+            for index in 0..2 {
+                let launch_code = issue_launch_code(&db, Some(HostingTier::Confidential)).await;
+                let requested = db
+                    .request_agent_creation(RequestAgentCreationInput {
+                        verified_email: format!("confidential-{index}@finite.vip"),
+                        workos_user_id: format!("user_workos_confidential_{index}"),
+                        display_name: format!("Confidential Agent {index}"),
+                        launch_code,
+                        idempotency_key: format!("confidential-submit-{index}"),
+                        now: Some(NOW.to_string()),
+                    })
+                    .await
+                    .unwrap();
+                request_ids.push(requested.request.id);
+            }
+
+            let first = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "phala-runner-a".to_string(),
+                    source_host_id: Some("phala-host".to_string()),
+                    lease_token: "phala-lease-a".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(phala_runner_capacity(0)),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(request_ids.contains(&first.request.id));
+            let waiting_request_id = request_ids
+                .iter()
+                .find(|request_id| request_id.as_str() != first.request.id)
+                .unwrap();
+            let reservation = first.in_flight_capacity_reservation.as_ref().unwrap().v1();
+            assert_eq!(reservation.request_id, first.request.id);
+            assert_eq!(
+                reservation.placement,
+                RuntimePlacement::for_hosting_tier(HostingTier::Confidential)
+            );
+            assert_eq!(reservation.provider_inventory_count, 0);
+            assert_eq!(reservation.core_in_flight_count, 1);
+            assert_eq!(reservation.max_sandbox_count, 1);
+
+            let second = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "phala-runner-b".to_string(),
+                    source_host_id: Some("phala-host".to_string()),
+                    lease_token: "phala-lease-b".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(phala_runner_capacity(0)),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(second.is_none());
+
+            let resumed = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "phala-runner-c".to_string(),
+                    source_host_id: Some("phala-host".to_string()),
+                    lease_token: "phala-lease-c".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(phala_runner_capacity(1)),
+                    now: Some("2026-05-25T14:00:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(resumed.request.id, first.request.id);
+            let reservation = resumed
+                .in_flight_capacity_reservation
+                .as_ref()
+                .unwrap()
+                .v1();
+            assert_eq!(reservation.provider_inventory_count, 1);
+            assert_eq!(reservation.core_in_flight_count, 1);
+            assert_eq!(
+                db.agent_creation_request(waiting_request_id)
+                    .await
+                    .unwrap()
+                    .status,
+                AgentCreationRequestStatus::Requested
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn project_selected_runner_class_routes_to_a_matching_worker() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "kata@finite.vip".to_string(),
+                        workos_user_id: "user_workos_kata".to_string(),
+                        display_name: "Kata Agent".to_string(),
+                        launch_code: launch_code.clone(),
+                        idempotency_key: "kata-submit".to_string(),
+                        now: Some(NOW.to_string()),
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: Some(
+                            "https://chat.finite.computer/v1/blobs/profile".to_string(),
+                        ),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(requested.request.runner_class, RunnerClass::Kata);
+
+            let draining_kata = RunnerLeaseCapacity {
+                draining: true,
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+            assert!(!draining_kata.accepts_agent_creation());
+            assert!(draining_kata.accepts_runtime_control());
+
+            let phala = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "phala-worker".to_string(),
                     source_host_id: None,
-                    lease_token: "lease-one".to_string(),
+                    lease_token: "phala-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(phala_runner_capacity(0)),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(phala.is_none());
+
+            let unspecified = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "unspecified-worker".to_string(),
+                    source_host_id: None,
+                    lease_token: "unspecified-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity::default()),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(unspecified.is_none());
+
+            let kata = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "kata-worker".to_string(),
+                    source_host_id: None,
+                    lease_token: "kata-lease".to_string(),
                     lease_seconds: Some(300),
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
                         ..RunnerLeaseCapacity::default()
                     }),
                     now: Some(LATER.to_string()),
-                },
-                &original_environment,
-                &original_secret_references,
-            )
-            .unwrap()
-            .unwrap();
-        let first_spec = first.request.runtime_spec.clone().unwrap();
-        let first_runtime_id = first.request.agent_runtime_id.clone().unwrap();
-        let first_spec_v1 = runtime_spec_v1(&first_spec);
-        assert_eq!(first_spec_v1.operation_id, requested.request.id);
-        assert_eq!(first_spec_v1.agent_runtime_id, first_runtime_id);
-        assert_eq!(first_spec_v1.durable_state_id, first_runtime_id);
-        assert_eq!(first_spec_v1.environment, original_environment);
-        assert_eq!(
-            first_spec_v1.secret_references,
-            vec![
-                FINITE_PRIVATE_SECRET_REFERENCE.to_string(),
+                })
+                .await
+                .unwrap()
+                .expect("Kata worker should claim Kata placement");
+            assert_eq!(kata.request.id, requested.request.id);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn creation_retry_reuses_the_persisted_complete_runtime_spec() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let launch_code = issue_test_launch_code(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "retry@finite.vip".to_string(),
+                    workos_user_id: "user_workos_retry".to_string(),
+                    display_name: "Retry Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "retry-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let original_environment = BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )]);
+            let original_secret_references = vec![
                 "FAL_KEY".to_string(),
                 "FIRECRAWL_API_KEY".to_string(),
                 "XAI_API_KEY".to_string(),
-            ]
-        );
+            ];
+            let first =
+                with_runtime_config(&db, &original_environment, &original_secret_references)
+                    .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                        runner_id: "kata-worker-1".to_string(),
+                        source_host_id: None,
+                        lease_token: "lease-one".to_string(),
+                        lease_seconds: Some(300),
+                        runner_capacity: Some(RunnerLeaseCapacity {
+                            runner_classes: vec![RunnerClass::Kata],
+                            ..RunnerLeaseCapacity::default()
+                        }),
+                        now: Some(LATER.to_string()),
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let first_spec = first.request.runtime_spec.clone().unwrap();
+            let first_runtime_id = first.request.agent_runtime_id.clone().unwrap();
+            let first_spec_v1 = runtime_spec_v1(&first_spec);
+            assert_eq!(first_spec_v1.operation_id, requested.request.id);
+            assert_eq!(first_spec_v1.agent_runtime_id, first_runtime_id);
+            assert_eq!(first_spec_v1.durable_state_id, first_runtime_id);
+            assert_eq!(first_spec_v1.environment, original_environment);
+            assert_eq!(
+                first_spec_v1.secret_references,
+                vec![
+                    FINITE_PRIVATE_SECRET_REFERENCE.to_string(),
+                    "FAL_KEY".to_string(),
+                    "FIRECRAWL_API_KEY".to_string(),
+                    "XAI_API_KEY".to_string(),
+                ]
+            );
 
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-v2",
-            &format!(
-                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
-                "b".repeat(64)
-            ),
-            "v2",
-            "state-v1",
-            "2026-05-25T13:05:00Z",
-        );
-        let second = state
-            .lease_agent_creation_request_with_runtime_configuration(
-                LeaseAgentCreationRequestInput {
-                    runner_id: "kata-worker-2".to_string(),
-                    source_host_id: None,
-                    lease_token: "lease-two".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(RunnerLeaseCapacity {
-                        runner_classes: vec![RunnerClass::Kata],
-                        ..RunnerLeaseCapacity::default()
-                    }),
-                    now: Some("2026-05-25T13:06:00Z".to_string()),
-                },
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-v2",
+                &format!(
+                    "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                    "b".repeat(64)
+                ),
+                "v2",
+                "db-v1",
+                "2026-05-25T13:05:00Z",
+            )
+            .await;
+            let second = with_runtime_config(
+                &db,
                 &BTreeMap::from([(
                     "FINITE_SITES_API".to_string(),
                     "https://changed.example.test".to_string(),
                 )]),
                 &["PERPLEXITY_API_KEY".to_string()],
             )
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "kata-worker-2".to_string(),
+                source_host_id: None,
+                lease_token: "lease-two".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:06:00Z".to_string()),
+            })
+            .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(second.request.runtime_spec.as_ref(), Some(&first_spec));
-        assert_eq!(
-            second.request.desired_runtime_artifact_id.as_deref(),
-            Some("artifact-v1")
-        );
-        assert_eq!(
-            second.request.agent_runtime_id.as_deref(),
-            Some(first_runtime_id.as_str())
-        );
+            assert_eq!(second.request.runtime_spec.as_ref(), Some(&first_spec));
+            assert_eq!(
+                second.request.desired_runtime_artifact_id.as_deref(),
+                Some("artifact-v1")
+            );
+            assert_eq!(
+                second.request.agent_runtime_id.as_deref(),
+                Some(first_runtime_id.as_str())
+            );
+        })
+        .await;
     }
 
     #[test]
@@ -8952,24 +4044,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provider_operation_ledger_is_fenced_monotonic_and_survives_re_lease() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let launch_code = issue_test_launch_code(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "ledger@finite.vip".to_string(),
-                workos_user_id: "workos-ledger".to_string(),
-                display_name: "Ledger Agent".to_string(),
-                launch_code,
-                idempotency_key: "ledger-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let request_id = requested.request.id;
-        state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+    /// A launch key provisioned before a provider failure stays usable until
+    /// the request is finally cancelled.
+    ///
+    /// Split from the ledger fencing test: failing and cancelling terminates the
+    /// request, so it cannot share a database with the assertions that continue
+    /// to drive the same request.
+    #[tokio::test]
+    async fn abandoned_launch_key_survives_failure_and_is_revoked_by_cancellation() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let launch_code = issue_test_launch_code(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "abandoned@finite.vip".to_string(),
+                    workos_user_id: "workos-abandoned".to_string(),
+                    display_name: "Abandoned Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "abandoned-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let request_id = requested.request.id;
+            db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-a".to_string(),
                 lease_token: "token-a".to_string(),
                 lease_seconds: Some(300),
@@ -8980,558 +4078,971 @@ mod tests {
                 source_host_id: None,
                 now: Some(LATER.to_string()),
             })
+            .await
             .unwrap()
             .unwrap();
-        state
-            .agent_creation_requests
-            .get_mut(&request_id)
-            .unwrap()
-            .lease_expires_at = Some("2099-01-01T00:00:00Z".to_string());
-        let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
-        let input = |runner: &str,
-                     token: &str,
-                     correlation: &str,
-                     transition: ProviderOperationTransition| {
-            RecordProviderOperationTransitionInput {
-                request_id: request_id.clone(),
-                runner_id: runner.to_string(),
-                lease_token: token.to_string(),
-                correlation_id: correlation.to_string(),
-                placement,
-                transition,
-            }
-        };
-        let fail_input =
-            |runner: &str, token: &str, key_id: Option<String>| FailAgentCreationRequestInput {
-                request_id: request_id.clone(),
-                runner_id: runner.to_string(),
-                lease_token: token.to_string(),
-                failure_message: "provider launch failed".to_string(),
-                provisioned_finite_private_api_key_id: key_id,
-                now: Some("2098-01-01T00:00:30Z".to_string()),
-            };
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET lease_expires_at = '2099-01-01T00:00:00Z' \
+                 WHERE id = '{request_id}'"
+            ))
+            .await;
+            let reserved = db
+                .record_provider_operation_transition(RecordProviderOperationTransitionInput {
+                    request_id: request_id.clone(),
+                    runner_id: "runner-a".to_string(),
+                    lease_token: "token-a".to_string(),
+                    correlation_id: "provider-correlation-1".to_string(),
+                    placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
+                    transition: ProviderOperationTransition::CorrelationReserved,
+                })
+                .await
+                .unwrap();
 
-        let reserved = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::CorrelationReserved,
-            ))
-            .unwrap();
-        let replay = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::CorrelationReserved,
-            ))
-            .unwrap();
-        assert_eq!(replay, reserved, "replay returns the exact persisted ack");
-        let mut current_failure = state.clone();
-        let abandoned_key = current_failure
-            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: request_id.clone(),
+            let abandoned_key = db
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: request_id.clone(),
+                    runner_id: "runner-a".to_string(),
+                    lease_token: "token-a".to_string(),
+                    source_host_id: None,
+                    source_machine_id: None,
+                    now: Some("2098-01-01T00:00:20Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let failed = db
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: "runner-a".to_string(),
+                    lease_token: "token-a".to_string(),
+                    failure_message: "provider launch failed".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: Some("2098-01-01T00:00:30Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+            assert_eq!(
+                db.finite_private_api_key(&abandoned_key.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active,
+                "failure cannot revoke a launch key the runner failed to identify"
+            );
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&reserved),
+                "the accepted pre-provider failure keeps its audit journal"
+            );
+
+            let cancelled = db
+                .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    now: Some("2098-01-01T00:00:31Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
+            assert_eq!(
+                db.finite_private_api_key(&abandoned_key.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Revoked,
+                "final cancellation revokes an otherwise abandoned project launch key"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn provider_operation_ledger_is_fenced_monotonic_and_survives_re_lease() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let launch_code = issue_test_launch_code(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "ledger@finite.vip".to_string(),
+                    workos_user_id: "workos-ledger".to_string(),
+                    display_name: "Ledger Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "ledger-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let request_id = requested.request.id;
+            db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-a".to_string(),
                 lease_token: "token-a".to_string(),
-                source_host_id: None,
-                source_machine_id: None,
-                now: Some("2098-01-01T00:00:20Z".to_string()),
-            })
-            .unwrap();
-        let failed = current_failure
-            .fail_agent_creation_request(fail_input("runner-a", "token-a", None))
-            .unwrap();
-        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
-        assert_eq!(
-            current_failure.finite_private_api_keys[&abandoned_key.api_key.id].status,
-            FinitePrivateApiKeyStatus::Active,
-            "failure cannot revoke a launch key the runner failed to identify"
-        );
-        assert_eq!(
-            current_failure.provider_operations.get(&request_id),
-            Some(&reserved),
-            "the accepted pre-provider failure keeps its audit journal"
-        );
-        let cancelled = current_failure
-            .cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id: request_id.clone(),
-                now: Some("2098-01-01T00:00:31Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
-        assert_eq!(
-            current_failure.finite_private_api_keys[&abandoned_key.api_key.id].status,
-            FinitePrivateApiKeyStatus::Revoked,
-            "final cancellation revokes an otherwise abandoned project launch key"
-        );
-
-        state
-            .agent_creation_requests
-            .get_mut(&request_id)
-            .unwrap()
-            .lease_expires_at = Some("2020-01-01T00:00:00Z".to_string());
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
-            Err(CoreError::AgentCreationRequestLeaseConflict)
-        ));
-        assert_eq!(state.provider_operations.get(&request_id), Some(&reserved));
-        assert_eq!(
-            state.agent_creation_requests[&request_id].status,
-            AgentCreationRequestStatus::Launching
-        );
-        state
-            .agent_creation_requests
-            .get_mut(&request_id)
-            .unwrap()
-            .lease_expires_at = Some("2099-01-01T00:00:00Z".to_string());
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-a",
-                "wrong-token",
-                "provider-correlation-1",
-                ProviderOperationTransition::CorrelationReserved,
-            )),
-            Err(CoreError::AgentCreationRequestLeaseConflict)
-        ));
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::Provisioned {
-                    provider_facts: json!({"api_token": "must-not-persist"}),
-                },
-            )),
-            Err(CoreError::InvalidProviderOperationFacts)
-        ));
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::Provisioned {
-                    provider_facts: json!({"provider_id": "must-not-skip-start"}),
-                },
-            )),
-            Err(CoreError::ProviderOperationTransitionConflict)
-        ));
-
-        let provision_started = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::ProvisionStarted,
-            ))
-            .unwrap();
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert!(matches!(
-            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id: request_id.clone(),
-                now: Some("2098-01-01T00:00:32Z".to_string()),
-            }),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert_eq!(
-            state.provider_operations.get(&request_id),
-            Some(&provision_started),
-            "a crash after the pre-mutation fence remains resumable"
-        );
-
-        let provision_unknown = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::ProvisionUnknown {
-                    provider_facts: json!({"attempt": "timed_out"}),
-                },
-            ))
-            .unwrap();
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert_eq!(
-            state.provider_operations.get(&request_id),
-            Some(&provision_unknown)
-        );
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::CommitStarted,
-            )),
-            Err(CoreError::ProviderOperationTransitionConflict)
-        ));
-        let provisioned = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::Provisioned {
-                    provider_facts: json!({"provider_id": "opaque-123", "region": "test"}),
-                },
-            ))
-            .unwrap();
-        let provisioned_key = state
-            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: request_id.clone(),
-                runner_id: "runner-a".to_string(),
-                lease_token: "token-a".to_string(),
-                source_host_id: Some("ledger-host".to_string()),
-                source_machine_id: Some("ledger-machine".to_string()),
-                now: Some("2098-01-01T00:00:40Z".to_string()),
-            })
-            .unwrap();
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input(
-                "runner-a",
-                "token-a",
-                Some(provisioned_key.api_key.id.clone()),
-            )),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert_eq!(
-            state.provider_operations.get(&request_id),
-            Some(&provisioned)
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&provisioned_key.api_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
-        assert!(matches!(
-            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id: request_id.clone(),
-                now: Some("2098-01-01T00:00:41Z".to_string()),
-            }),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        let committed = state
-            .record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::CommitStarted,
-            ))
-            .unwrap();
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input(
-                "runner-a",
-                "token-a",
-                Some(provisioned_key.api_key.id.clone()),
-            )),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert_eq!(state.provider_operations.get(&request_id), Some(&committed));
-
-        state
-            .agent_creation_requests
-            .get_mut(&request_id)
-            .unwrap()
-            .lease_expires_at = Some("2097-01-01T00:00:00Z".to_string());
-        let second = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-b".to_string(),
-                lease_token: "token-b".to_string(),
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     ..RunnerLeaseCapacity::default()
                 }),
                 source_host_id: None,
-                now: Some("2098-01-01T00:00:00Z".to_string()),
+                now: Some(LATER.to_string()),
             })
+            .await
             .unwrap()
             .unwrap();
-        assert_eq!(second.provider_operation.as_ref(), Some(&committed));
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-a",
-                "token-a",
-                "provider-correlation-1",
-                ProviderOperationTransition::CommitStarted,
-            )),
-            Err(CoreError::AgentCreationRequestLeaseConflict)
-        ));
-        assert!(matches!(
-            state.record_provider_operation_transition(input(
-                "runner-b",
-                "token-b",
-                "different-correlation",
-                ProviderOperationTransition::CommitStarted,
-            )),
-            Err(CoreError::ProviderOperationIdentityMismatch)
-        ));
-        let replay_after_crash = state
-            .record_provider_operation_transition(input(
-                "runner-b",
-                "token-b",
-                "provider-correlation-1",
-                ProviderOperationTransition::CommitStarted,
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET lease_expires_at = '2099-01-01T00:00:00Z' \
+                 WHERE id = '{request_id}'"
             ))
-            .unwrap();
-        assert_eq!(replay_after_crash, committed);
+            .await;
+            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+            let input = |runner: &str,
+                         token: &str,
+                         correlation: &str,
+                         transition: ProviderOperationTransition| {
+                RecordProviderOperationTransitionInput {
+                    request_id: request_id.clone(),
+                    runner_id: runner.to_string(),
+                    lease_token: token.to_string(),
+                    correlation_id: correlation.to_string(),
+                    placement,
+                    transition,
+                }
+            };
+            let fail_input =
+                |runner: &str, token: &str, key_id: Option<String>| FailAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: runner.to_string(),
+                    lease_token: token.to_string(),
+                    failure_message: "provider launch failed".to_string(),
+                    provisioned_finite_private_api_key_id: key_id,
+                    now: Some("2098-01-01T00:00:30Z".to_string()),
+                };
 
-        let handle = ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
-            runner_class: RunnerClass::Kata,
-            opaque: json!({"sandbox_id": "opaque-123"}),
-        });
-        let registered = state
-            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                request_id: request_id.clone(),
-                runner_id: "runner-b".to_string(),
-                lease_token: "token-b".to_string(),
-                source_host_id: "ledger-host".to_string(),
-                source_machine_id: "ledger-machine".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: Some(handle.clone()),
-                contact_endpoint: None,
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        recover_known_good_chat: true,
-                        ..*kata_runtime_capabilities().v1()
+            let reserved = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CorrelationReserved,
+                ))
+                .await
+                .unwrap();
+            let replay = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CorrelationReserved,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(replay, reserved, "replay returns the exact persisted ack");
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET lease_expires_at = '2020-01-01T00:00:00Z' \
+                 WHERE id = '{request_id}'"
+            ))
+            .await;
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input("runner-a", "token-a", None))
+                    .await,
+                Err(CoreError::AgentCreationRequestLeaseConflict)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&reserved)
+            );
+            assert_eq!(
+                db.agent_creation_request(&request_id).await.unwrap().status,
+                AgentCreationRequestStatus::Launching
+            );
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET lease_expires_at = '2099-01-01T00:00:00Z' \
+                 WHERE id = '{request_id}'"
+            ))
+            .await;
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-a",
+                    "wrong-token",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CorrelationReserved,
+                ))
+                .await,
+                Err(CoreError::AgentCreationRequestLeaseConflict)
+            ));
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::Provisioned {
+                        provider_facts: json!({"api_token": "must-not-persist"}),
                     },
-                )),
-                runtime_relay_token_hash: runtime_relay_token_hash("ledger-relay").unwrap(),
-                display_name: None,
-                hostname: None,
-                runtime_host: None,
-                runtime_status: None,
-                active_inference_profile: None,
-                hermes_available: None,
-                published_app_urls: Vec::new(),
-                now: Some("2098-01-01T00:01:00Z".to_string()),
-            })
-            .unwrap();
-        assert!(
-            !state.agent_runtimes[registered.request.agent_runtime_id.as_ref().unwrap()]
-                .runtime_capabilities
-                .as_ref()
+                ))
+                .await,
+                Err(CoreError::InvalidProviderOperationFacts)
+            ));
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::Provisioned {
+                        provider_facts: json!({"provider_id": "must-not-skip-start"}),
+                    },
+                ))
+                .await,
+                Err(CoreError::ProviderOperationTransitionConflict)
+            ));
+
+            let provision_started = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::ProvisionStarted,
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input("runner-a", "token-a", None))
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert!(matches!(
+                db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    now: Some("2098-01-01T00:00:32Z".to_string()),
+                })
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&provision_started),
+                "a crash after the pre-mutation fence remains resumable"
+            );
+
+            let provision_unknown = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::ProvisionUnknown {
+                        provider_facts: json!({"attempt": "timed_out"}),
+                    },
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input("runner-a", "token-a", None))
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&provision_unknown)
+            );
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await,
+                Err(CoreError::ProviderOperationTransitionConflict)
+            ));
+            let provisioned = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::Provisioned {
+                        provider_facts: json!({"provider_id": "opaque-123", "region": "test"}),
+                    },
+                ))
+                .await
+                .unwrap();
+            let provisioned_key = db
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: request_id.clone(),
+                    runner_id: "runner-a".to_string(),
+                    lease_token: "token-a".to_string(),
+                    source_host_id: Some("ledger-host".to_string()),
+                    source_machine_id: Some("ledger-machine".to_string()),
+                    now: Some("2098-01-01T00:00:40Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input(
+                    "runner-a",
+                    "token-a",
+                    Some(provisioned_key.api_key.id.clone()),
+                ))
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&provisioned)
+            );
+            assert_eq!(
+                db.finite_private_api_key(&provisioned_key.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+            assert!(matches!(
+                db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    now: Some("2098-01-01T00:00:41Z".to_string()),
+                })
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            let committed = db
+                .record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input(
+                    "runner-a",
+                    "token-a",
+                    Some(provisioned_key.api_key.id.clone()),
+                ))
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&committed)
+            );
+
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET lease_expires_at = '2097-01-01T00:00:00Z' \
+                 WHERE id = '{request_id}'"
+            ))
+            .await;
+            let second = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-b".to_string(),
+                    lease_token: "token-b".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: None,
+                    now: Some("2098-01-01T00:00:00Z".to_string()),
+                })
+                .await
                 .unwrap()
-                .v1()
-                .recover_known_good_chat,
-            "an old artifact bounds the worker's process-wide recovery maximum"
-        );
-        assert!(matches!(
-            registered
-                .provider_operation
-                .as_ref()
-                .unwrap()
-                .v1()
-                .transitions
-                .last()
-                .unwrap()
-                .transition,
-            ProviderOperationTransition::ProviderHandleRecorded { .. }
-        ));
-        let runtime_id = registered.request.agent_runtime_id.clone().unwrap();
-        let handle_recorded = registered.provider_operation.clone().unwrap();
-        assert!(matches!(
-            state.fail_agent_creation_request(fail_input(
-                "runner-b",
-                "token-b",
-                Some(provisioned_key.api_key.id.clone()),
-            )),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert_eq!(
-            state.provider_operations.get(&request_id),
-            Some(&handle_recorded)
-        );
-        assert!(state.agent_runtimes.contains_key(&runtime_id));
-        assert_eq!(
-            state.finite_private_api_keys[&provisioned_key.api_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
-        assert!(matches!(
-            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id: request_id.clone(),
-                now: Some("2098-01-01T00:01:01Z".to_string()),
-            }),
-            Err(CoreError::ProviderOperationBoundaryNotReached)
-        ));
-        assert!(state.agent_runtimes.contains_key(&runtime_id));
-        let completed = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id,
-                runner_id: "runner-b".to_string(),
-                lease_token: "token-b".to_string(),
-                source_host_id: "ledger-host".to_string(),
-                source_machine_id: "ledger-machine".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: Some(handle),
-                contact_endpoint: None,
-                runtime_capabilities: Some(kata_runtime_capabilities()),
-                display_name: None,
-                hostname: None,
-                runtime_host: None,
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: None,
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                now: Some("2098-01-01T00:02:00Z".to_string()),
-            })
-            .unwrap();
-        assert!(matches!(
-            completed
-                .provider_operation
-                .unwrap()
-                .v1()
-                .transitions
-                .last()
-                .unwrap()
-                .transition,
-            ProviderOperationTransition::Ready
-        ));
+                .unwrap();
+            assert_eq!(second.provider_operation.as_ref(), Some(&committed));
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-a",
+                    "token-a",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await,
+                Err(CoreError::AgentCreationRequestLeaseConflict)
+            ));
+            assert!(matches!(
+                db.record_provider_operation_transition(input(
+                    "runner-b",
+                    "token-b",
+                    "different-correlation",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await,
+                Err(CoreError::ProviderOperationIdentityMismatch)
+            ));
+            let replay_after_crash = db
+                .record_provider_operation_transition(input(
+                    "runner-b",
+                    "token-b",
+                    "provider-correlation-1",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(replay_after_crash, committed);
+
+            let handle = ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
+                runner_class: RunnerClass::Kata,
+                opaque: json!({"sandbox_id": "opaque-123"}),
+            });
+            let registered = db
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: request_id.clone(),
+                    runner_id: "runner-b".to_string(),
+                    lease_token: "token-b".to_string(),
+                    source_host_id: "ledger-host".to_string(),
+                    source_machine_id: "ledger-machine".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: Some(handle.clone()),
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: None,
+                    active_inference_profile: None,
+                    hermes_available: None,
+                    published_app_urls: Vec::new(),
+                    now: Some("2098-01-01T00:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(
+                !db.agent_runtime(registered.request.agent_runtime_id.as_ref().unwrap())
+                    .await
+                    .unwrap()
+                    .runtime_capabilities
+                    .as_ref()
+                    .unwrap()
+                    .v1()
+                    .recover_known_good_chat,
+                "an old artifact bounds the worker's process-wide recovery maximum"
+            );
+            assert!(matches!(
+                registered
+                    .provider_operation
+                    .as_ref()
+                    .unwrap()
+                    .v1()
+                    .transitions
+                    .last()
+                    .unwrap()
+                    .transition,
+                ProviderOperationTransition::ProviderHandleRecorded { .. }
+            ));
+            let runtime_id = registered.request.agent_runtime_id.clone().unwrap();
+            let handle_recorded = registered.provider_operation.clone().unwrap();
+            assert!(matches!(
+                db.fail_agent_creation_request(fail_input(
+                    "runner-b",
+                    "token-b",
+                    Some(provisioned_key.api_key.id.clone()),
+                ))
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                db.provider_operation(&request_id).await.as_ref(),
+                Some(&handle_recorded)
+            );
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
+            assert_eq!(
+                db.finite_private_api_key(&provisioned_key.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+            assert!(matches!(
+                db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    now: Some("2098-01-01T00:01:01Z".to_string()),
+                })
+                .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
+            let completed = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id,
+                    runner_id: "runner-b".to_string(),
+                    lease_token: "token-b".to_string(),
+                    source_host_id: "ledger-host".to_string(),
+                    source_machine_id: "ledger-machine".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: Some(handle),
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: Some("2098-01-01T00:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                completed
+                    .provider_operation
+                    .unwrap()
+                    .v1()
+                    .transitions
+                    .last()
+                    .unwrap()
+                    .transition,
+                ProviderOperationTransition::Ready
+            ));
+        })
+        .await;
     }
 
-    #[test]
-    fn kata_is_the_only_runtime_recovery_capability_boundary() {
-        let recover = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            recover_known_good_chat: true,
-            ..RuntimeCapabilitiesV1::default()
-        });
-        assert!(
-            RunnerLeaseCapacity {
-                runner_classes: vec![RunnerClass::Kata],
-                runtime_capabilities: Some(recover.clone()),
-                ..RunnerLeaseCapacity::default()
-            }
-            .validate_runtime_capability_policy()
-            .is_ok()
-        );
-        for runner_classes in [
-            Vec::new(),
-            vec![RunnerClass::Phala],
-            vec![RunnerClass::Kata, RunnerClass::Phala],
-        ] {
-            assert!(matches!(
-                (RunnerLeaseCapacity {
-                    runner_classes,
+    #[tokio::test]
+    async fn kata_is_the_only_runtime_recovery_capability_boundary() {
+        with_isolated_postgres(|db| async move {
+            let recover = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                recover_known_good_chat: true,
+                ..RuntimeCapabilitiesV1::default()
+            });
+            assert!(
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(recover.clone()),
                     ..RunnerLeaseCapacity::default()
-                })
-                .validate_runtime_capability_policy(),
+                }
+                .validate_runtime_capability_policy()
+                .is_ok()
+            );
+            for runner_classes in [
+                Vec::new(),
+                vec![RunnerClass::Phala],
+                vec![RunnerClass::Kata, RunnerClass::Phala],
+            ] {
+                assert!(matches!(
+                    (RunnerLeaseCapacity {
+                        runner_classes,
+                        runtime_capabilities: Some(recover.clone()),
+                        ..RunnerLeaseCapacity::default()
+                    })
+                    .validate_runtime_capability_policy(),
+                    Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+                ));
+            }
+            assert!(
+                validate_runtime_capabilities_policy(
+                    Some(&recover),
+                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+                )
+                .is_ok()
+            );
+            assert!(matches!(
+                validate_runtime_capabilities_policy(
+                    Some(&recover),
+                    Some(RuntimePlacement::for_hosting_tier(
+                        HostingTier::Confidential
+                    ))
+                ),
                 Err(CoreError::RuntimeCapabilitiesNotAuthorized)
             ));
-        }
-        assert!(
-            validate_runtime_capabilities_policy(
-                Some(&recover),
-                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
-            )
-            .is_ok()
-        );
-        assert!(matches!(
-            validate_runtime_capabilities_policy(
-                Some(&recover),
-                Some(RuntimePlacement::for_hosting_tier(
-                    HostingTier::Confidential
-                ))
-            ),
-            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
-        ));
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let legacy_artifact = state.runtime_artifacts["artifact-v1"].clone();
-        assert!(matches!(
-            validate_runtime_capabilities_artifact_policy(
-                Some(&recover),
-                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                &legacy_artifact,
-            ),
-            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
-        ));
-        let capable_artifact = RuntimeArtifact {
-            recover_known_good_chat: true,
-            ..legacy_artifact.clone()
-        };
-        assert!(
-            validate_runtime_capabilities_artifact_policy(
-                Some(&recover),
-                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                &capable_artifact,
-            )
-            .is_ok()
-        );
-        assert!(
-            !runtime_artifact_material_matches(&legacy_artifact, &capable_artifact),
-            "artifact recovery support is immutable release material"
-        );
-        for key in ["FINITE_AGENT_BOOT_INTENT_JSON", "FINITE_AGENT_STATE_ROOT"] {
+            promote_runtime_artifact(&db).await;
+            let legacy_artifact = db
+                .runtime_artifact_row("artifact-v1")
+                .await
+                .unwrap()
+                .clone();
             assert!(matches!(
-                validate_runtime_spec_environment(&BTreeMap::from([(
-                    key.to_string(),
-                    "caller-owned".to_string()
-                )])),
-                Err(CoreError::RuntimeSpecMismatch)
+                validate_runtime_capabilities_artifact_policy(
+                    Some(&recover),
+                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    &legacy_artifact,
+                ),
+                Err(CoreError::RuntimeCapabilitiesNotAuthorized)
             ));
-        }
+            let capable_artifact = RuntimeArtifact {
+                recover_known_good_chat: true,
+                ..legacy_artifact.clone()
+            };
+            assert!(
+                validate_runtime_capabilities_artifact_policy(
+                    Some(&recover),
+                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    &capable_artifact,
+                )
+                .is_ok()
+            );
+            assert!(
+                !runtime_artifact_material_matches(&legacy_artifact, &capable_artifact),
+                "artifact recovery support is immutable release material"
+            );
+            for key in ["FINITE_AGENT_BOOT_INTENT_JSON", "FINITE_AGENT_STATE_ROOT"] {
+                assert!(matches!(
+                    validate_runtime_spec_environment(&BTreeMap::from([(
+                        key.to_string(),
+                        "caller-owned".to_string()
+                    )])),
+                    Err(CoreError::RuntimeSpecMismatch)
+                ));
+            }
+        })
+        .await;
     }
 
-    #[test]
-    fn runner_leases_and_completes_self_serve_agent_request() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        state
-            .runtime_artifacts
-            .get_mut("artifact-v1")
-            .unwrap()
-            .recover_known_good_chat = true;
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
+    #[tokio::test]
+    async fn runner_leases_and_completes_self_serve_agent_request() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            db.exec("UPDATE runtime_artifacts SET recover_known_good_chat = true WHERE id = 'artifact-v1'")
+                .await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                }).await
+                .unwrap();
+
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                }).await
+                .unwrap()
+                .expect("pending request should be leased");
+            assert_eq!(lease.project.id, requested.project.id);
+            assert_eq!(lease.request.status, AgentCreationRequestStatus::Launching);
+            assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-1"));
+            assert!(lease.request.lease_expires_at.is_some());
+
+            let none = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-2".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-2".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
+                }).await
+                .unwrap();
+            assert!(none.is_none());
+
+            let completed = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "oslo-agent-001".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                        ProviderRuntimeHandleV1 {
+                            runner_class: RunnerClass::Kata,
+                            opaque: json!({"container": "finite-kata-oslo-001"}),
+                        },
+                    )),
+                    contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    display_name: None,
+                    hostname: Some("oslo-agent-001.finite.computer".to_string()),
+                    runtime_host: Some("oslo-host-1".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                }).await
+                .unwrap();
+
+            assert_eq!(
+                completed.request.status,
+                AgentCreationRequestStatus::Running
+            );
+            assert!(completed.request.lease_token.is_none());
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let runtime = db.agent_runtime(&runtime_id).await.unwrap();
+            assert!(
+                runtime
+                    .runtime_capabilities
+                    .as_ref()
+                    .unwrap()
+                    .v1()
+                    .recover_known_good_chat
+            );
+            assert_eq!(runtime.project_id, requested.project.id);
+            assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v1"));
+            assert_eq!(runtime.state_schema_version.as_deref(), Some("db-v1"));
+            assert_eq!(runtime.source_host_id, "oslo-host-1");
+            assert_eq!(runtime.source_machine_id, "oslo-agent-001");
+            assert_eq!(
+                runtime.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            assert_eq!(
+                db.all("project_runtime_links").await.iter()
+                    .filter(|link| link["project_id"] == requested.project.id.as_str() && link["active"] == true)
+                    .count(),
+                1
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn runtime_artifact_promotion_does_not_mutate_healthy_running_agent() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_a = complete_self_serve_agent(
+                &db,
+                "a@finite.vip",
+                "user_workos_a",
+                "agent-a",
+                "oslo-agent-a",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let runtime_a_before = db.agent_runtime(&runtime_a).await.unwrap().clone();
+
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-v2",
+                &format!(
+                    "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                    "b".repeat(64)
+                ),
+                "v2",
+                "db-v1",
+                "2026-05-25T14:00:00Z",
+            )
+            .await;
+
+            assert_eq!(
+                db.agent_runtime(&runtime_a).await.unwrap(),
+                runtime_a_before
+            );
+            assert_eq!(
+                db.agent_runtime(&runtime_a)
+                    .await
+                    .unwrap()
+                    .runtime_artifact_id
+                    .as_deref(),
+                Some("artifact-v1")
+            );
+
+            let runtime_b = complete_self_serve_agent(
+                &db,
+                "b@finite.vip",
+                "user_workos_b",
+                "agent-b",
+                "oslo-agent-b",
+                "artifact-v2",
+                "2026-05-25T14:05:00Z",
+            )
+            .await;
+            assert_eq!(
+                db.agent_runtime(&runtime_b)
+                    .await
+                    .unwrap()
+                    .runtime_artifact_id
+                    .as_deref(),
+                Some("artifact-v2")
+            );
+            assert_eq!(
+                db.agent_runtime(&runtime_a)
+                    .await
+                    .unwrap()
+                    .runtime_artifact_id
+                    .as_deref(),
+                Some("artifact-v1")
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn promoted_or_runtime_referenced_artifact_material_is_immutable() {
+        with_isolated_postgres(|db| async move {
+            let input = UpsertRuntimeArtifactInput {
+                id: "artifact-immutable".to_string(),
+                kind: RuntimeArtifactKind::OciImage,
+                reference: format!("ghcr.io/finite/runtime@sha256:{}", "a".repeat(64)),
+                version_label: "v1".to_string(),
+                source_git_sha: Some("git-v1".to_string()),
+                finitec_version: Some("finitec-v1".to_string()),
+                hermes_source_ref: Some("hermes-v1".to_string()),
+                finite_platform_plugin_ref: Some("plugin-v1".to_string()),
+                state_schema_version: "db-v1".to_string(),
+                base_image: Some("base-v1".to_string()),
+                recover_known_good_chat: false,
+                promoted: false,
+                now: Some(NOW.to_string()),
+            };
+            db.upsert_runtime_artifact(input.clone()).await.unwrap();
+
+            let mut before_promotion = input.clone();
+            before_promotion.version_label = "v1-corrected".to_string();
+            db.upsert_runtime_artifact(before_promotion.clone())
+                .await
+                .unwrap();
+            before_promotion.promoted = true;
+            db.upsert_runtime_artifact(before_promotion.clone())
+                .await
+                .unwrap();
+
+            let mut exact_retry = before_promotion.clone();
+            exact_retry.now = Some(LATER.to_string());
+            db.upsert_runtime_artifact(exact_retry).await.unwrap();
+            let mut mutation = before_promotion;
+            mutation.reference = format!("ghcr.io/finite/runtime@sha256:{}", "b".repeat(64));
+            assert!(matches!(
+                db.upsert_runtime_artifact(mutation).await.unwrap_err(),
+                CoreError::RuntimeArtifactImmutable
+            ));
+
+            // Same invariant for an UNPROMOTED artifact that a Runtime
+            // references. Create a real Runtime and repoint it, rather than
+            // fabricating a row: `agent_runtimes.runtime_artifact_id` is a
+            // foreign key, and the invariant is about the reference existing,
+            // not about how it got there.
+            // The agent leases the most recently promoted artifact, which is
+            // `artifact-immutable`, so the Runtime references it directly.
+            complete_self_serve_agent(
+                &db,
+                "immutable@finite.vip",
+                "workos_immutable",
+                "immutable-key",
+                "immutable-machine",
+                "artifact-immutable",
+                NOW,
+            )
+            .await;
+            db.exec(
+                "UPDATE runtime_artifacts SET promoted_at = NULL WHERE id = 'artifact-immutable'",
+            )
+            .await;
+
+            let mut referenced_mutation = input;
+            referenced_mutation.version_label = "mutated".to_string();
+            assert!(matches!(
+                db.upsert_runtime_artifact(referenced_mutation)
+                    .await
+                    .unwrap_err(),
+                CoreError::RuntimeArtifactImmutable
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn self_serve_agent_creation_requires_promoted_runtime_artifact() {
+        with_isolated_postgres(|db| async move {
+            // The shared harness seeds one promoted artifact so creation tests
+            // can lease. This test is about having NO launchable artifact.
+            db.exec("UPDATE runtime_artifacts SET promoted_at = NULL")
+                .await;
+            let launch_code = issue_test_launch_code(&db).await;
+            db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: "artifact-v1".to_string(),
+                kind: RuntimeArtifactKind::OciImage,
+                reference: "ghcr.io/finitecomputer/finite-agent-runtime:v1".to_string(),
+                version_label: "v1".to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "db-v1".to_string(),
+                base_image: Some("python:3.11-trixie".to_string()),
+                recover_known_good_chat: false,
+                promoted: false,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let error = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap_err();
 
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .expect("pending request should be leased");
-        assert_eq!(lease.project.id, requested.project.id);
-        assert_eq!(lease.request.status, AgentCreationRequestStatus::Launching);
-        assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-1"));
-        assert!(lease.request.lease_expires_at.is_some());
+            assert!(matches!(error, CoreError::RuntimeArtifactUnavailable));
+            assert!(db.all_agent_runtimes().await.is_empty());
+            assert_eq!(
+                db.agent_creation_request(&requested.request.id)
+                    .await
+                    .unwrap()
+                    .status,
+                AgentCreationRequestStatus::Requested
+            );
+        })
+        .await;
+    }
 
-        let none = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-2".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-2".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap();
-        assert!(none.is_none());
-
-        let completed = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+    #[tokio::test]
+    async fn self_serve_registration_launches_then_completion_marks_running() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let register_input = RegisterAgentCreationRuntimeInput {
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
@@ -9546,514 +5057,228 @@ mod tests {
                     },
                 )),
                 contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        recover_known_good_chat: true,
-                        ..*kata_runtime_capabilities().v1()
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: None,
+                hostname: None,
+                runtime_host: Some("oslo-host-1".to_string()),
+                runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: None,
+                published_app_urls: Vec::new(),
+                now: Some("2026-05-25T13:01:30Z".to_string()),
+            };
+            let registered = db
+                .register_agent_creation_runtime(register_input)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                registered.request.status,
+                AgentCreationRequestStatus::Launching
+            );
+            assert!(registered.request.agent_runtime_id.is_some());
+            let runtime = &db
+                .agent_runtime(registered.request.agent_runtime_id.as_ref().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.contact_endpoint.as_deref(),
+                Some("https://oslo-agent.example.com/contact")
+            );
+            assert_eq!(runtime.provider_runtime_handle_history.len(), 1);
+
+            let completion_input = CompleteAgentCreationRequestInput {
+                request_id: lease.request.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "lease-token-1".to_string(),
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "oslo-agent-001".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: None,
+                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                    ProviderRuntimeHandleV1 {
+                        runner_class: RunnerClass::Kata,
+                        opaque: json!({"container": "finite-kata-oslo-001"}),
                     },
                 )),
+                contact_endpoint: Some("https://oslo-agent.example.com/contact".to_string()),
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
-                hostname: Some("oslo-agent-001.finite.computer".to_string()),
+                hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
                 runtime_status: Some(RuntimeSummaryStatus::Online),
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: Vec::new(),
                 now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap();
+            };
+            let mut mismatched_completion = completion_input.clone();
+            mismatched_completion.runtime_capabilities =
+                Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                    runtime_upgrade: false,
+                    ..*kata_runtime_capabilities().v1()
+                }));
+            assert!(matches!(
+                db.complete_agent_creation_request(mismatched_completion)
+                    .await,
+                Err(CoreError::RuntimeCapabilitiesMismatch)
+            ));
+            let completed = db
+                .complete_agent_creation_request(completion_input)
+                .await
+                .unwrap();
 
-        assert_eq!(
-            completed.request.status,
-            AgentCreationRequestStatus::Running
-        );
-        assert!(completed.request.lease_token.is_none());
-        let runtime_id = completed.request.agent_runtime_id.unwrap();
-        let runtime = state.agent_runtimes.get(&runtime_id).unwrap();
-        assert!(
-            runtime
-                .runtime_capabilities
-                .as_ref()
+            assert_eq!(
+                completed.request.status,
+                AgentCreationRequestStatus::Running
+            );
+            assert_eq!(completed.project.id, requested.project.id);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn user_can_request_and_runner_can_complete_oci_runtime_restart() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
                 .unwrap()
-                .v1()
-                .recover_known_good_chat
-        );
-        assert_eq!(runtime.project_id, requested.project.id);
-        assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v1"));
-        assert_eq!(runtime.state_schema_version.as_deref(), Some("state-v1"));
-        assert_eq!(runtime.source_host_id, "oslo-host-1");
-        assert_eq!(runtime.source_machine_id, "oslo-agent-001");
-        assert_eq!(
-            runtime.host_facts.runtime_status,
-            RuntimeSummaryStatus::Online
-        );
-        assert_eq!(
-            state
-                .project_runtime_links
-                .values()
-                .filter(|link| link.project_id == requested.project.id && link.active)
-                .count(),
-            1
-        );
-    }
+                .project_id
+                .clone();
 
-    #[test]
-    fn runtime_artifact_promotion_does_not_mutate_healthy_running_agent() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_a = complete_self_serve_agent(
-            &mut state,
-            "a@finite.vip",
-            "user_workos_a",
-            "agent-a",
-            "oslo-agent-a",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let runtime_a_before = state.agent_runtimes.get(&runtime_a).unwrap().clone();
+            let restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-v2",
-            &format!(
-                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
-                "b".repeat(64)
-            ),
-            "v2",
-            "state-v1",
-            "2026-05-25T14:00:00Z",
-        );
+            assert_eq!(restart.agent_runtime_id, runtime_id);
+            assert_eq!(restart.source_host_id, "oslo-host-1");
+            assert_eq!(restart.source_machine_id, "oslo-agent-001");
+            assert_eq!(restart.kind, RuntimeControlKind::Restart);
+            assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
 
-        assert_eq!(
-            state.agent_runtimes.get(&runtime_a).unwrap(),
-            &runtime_a_before
-        );
-        assert_eq!(
-            state.agent_runtimes[&runtime_a]
-                .runtime_artifact_id
-                .as_deref(),
-            Some("artifact-v1")
-        );
+            let duplicate = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id: restart.project_id.clone(),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(duplicate.id, restart.id);
 
-        let runtime_b = complete_self_serve_agent(
-            &mut state,
-            "b@finite.vip",
-            "user_workos_b",
-            "agent-b",
-            "oslo-agent-b",
-            "artifact-v2",
-            "2026-05-25T14:05:00Z",
-        );
-        assert_eq!(
-            state.agent_runtimes[&runtime_b]
-                .runtime_artifact_id
-                .as_deref(),
-            Some("artifact-v2")
-        );
-        assert_eq!(
-            state.agent_runtimes[&runtime_a]
-                .runtime_artifact_id
-                .as_deref(),
-            Some("artifact-v1")
-        );
-    }
-
-    #[test]
-    fn promoted_or_runtime_referenced_artifact_material_is_immutable() {
-        let mut state = BridgeCoreState::default();
-        let input = UpsertRuntimeArtifactInput {
-            id: "artifact-immutable".to_string(),
-            kind: RuntimeArtifactKind::OciImage,
-            reference: format!("ghcr.io/finite/runtime@sha256:{}", "a".repeat(64)),
-            version_label: "v1".to_string(),
-            source_git_sha: Some("git-v1".to_string()),
-            finitec_version: Some("finitec-v1".to_string()),
-            hermes_source_ref: Some("hermes-v1".to_string()),
-            finite_platform_plugin_ref: Some("plugin-v1".to_string()),
-            state_schema_version: "state-v1".to_string(),
-            base_image: Some("base-v1".to_string()),
-            recover_known_good_chat: false,
-            promoted: false,
-            now: Some(NOW.to_string()),
-        };
-        state.upsert_runtime_artifact(input.clone()).unwrap();
-
-        let mut before_promotion = input.clone();
-        before_promotion.version_label = "v1-corrected".to_string();
-        state
-            .upsert_runtime_artifact(before_promotion.clone())
-            .unwrap();
-        before_promotion.promoted = true;
-        state
-            .upsert_runtime_artifact(before_promotion.clone())
-            .unwrap();
-
-        let mut exact_retry = before_promotion.clone();
-        exact_retry.now = Some(LATER.to_string());
-        state.upsert_runtime_artifact(exact_retry).unwrap();
-        let mut mutation = before_promotion;
-        mutation.reference = format!("ghcr.io/finite/runtime@sha256:{}", "b".repeat(64));
-        assert!(matches!(
-            state.upsert_runtime_artifact(mutation).unwrap_err(),
-            CoreError::RuntimeArtifactImmutable
-        ));
-
-        let runtime_id = "runtime-references-unpromoted".to_string();
-        state
-            .runtime_artifacts
-            .get_mut("artifact-immutable")
-            .unwrap()
-            .promoted_at = None;
-        state.agent_runtimes.insert(
-            runtime_id.clone(),
-            AgentRuntime {
-                id: runtime_id,
-                project_id: "project-test".to_string(),
-                source_host_id: "host-test".to_string(),
-                source_machine_id: "machine-test".to_string(),
-                source_import_key: "host-test/machine-test".to_string(),
-                runtime_artifact_id: Some("artifact-immutable".to_string()),
-                state_schema_version: Some("state-v1".to_string()),
-                placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                provider_runtime_handle: None,
-                provider_runtime_handle_history: Vec::new(),
-                contact_endpoint: None,
-                runtime_capabilities: None,
-                host_facts: HostOwnedRuntimeFacts {
-                    display_name: "Test Agent".to_string(),
-                    hostname: None,
-                    runtime_host: "host-test".to_string(),
-                    runtime_status: RuntimeSummaryStatus::Online,
-                    active_inference_profile: None,
-                    hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
-                },
-                created_at: NOW.to_string(),
-                updated_at: NOW.to_string(),
-            },
-        );
-        let mut referenced_mutation = input;
-        referenced_mutation.version_label = "mutated".to_string();
-        assert!(matches!(
-            state
-                .upsert_runtime_artifact(referenced_mutation)
-                .unwrap_err(),
-            CoreError::RuntimeArtifactImmutable
-        ));
-    }
-
-    #[test]
-    fn self_serve_agent_creation_requires_promoted_runtime_artifact() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        state
-            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                id: "artifact-v1".to_string(),
-                kind: RuntimeArtifactKind::OciImage,
-                reference: "ghcr.io/finitecomputer/finite-agent-runtime:v1".to_string(),
-                version_label: "v1".to_string(),
-                source_git_sha: None,
-                finitec_version: None,
-                hermes_source_ref: None,
-                finite_platform_plugin_ref: None,
-                state_schema_version: "state-v1".to_string(),
-                base_image: Some("python:3.11-trixie".to_string()),
-                recover_known_good_chat: false,
-                promoted: false,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let error = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, CoreError::RuntimeArtifactUnavailable));
-        assert!(state.agent_runtimes.is_empty());
-        assert_eq!(
-            state.agent_creation_requests[&requested.request.id].status,
-            AgentCreationRequestStatus::Requested
-        );
-    }
-
-    #[test]
-    fn self_serve_runtime_must_publish_relay_heartbeat_before_running() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        let runtime_token = "runtime-token-1";
-        let token_hash = runtime_relay_token_hash(runtime_token).unwrap();
-
-        let register_input = RegisterAgentCreationRuntimeInput {
-            request_id: lease.request.id.clone(),
-            runner_id: "runner-oslo-1".to_string(),
-            lease_token: "lease-token-1".to_string(),
-            source_host_id: "oslo-host-1".to_string(),
-            source_machine_id: "oslo-agent-001".to_string(),
-            runtime_artifact_id: Some("artifact-v1".to_string()),
-            state_schema_version: None,
-            provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
-                ProviderRuntimeHandleV1 {
-                    runner_class: RunnerClass::Kata,
-                    opaque: json!({"container": "finite-kata-oslo-001"}),
-                },
-            )),
-            contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
-            runtime_capabilities: Some(kata_runtime_capabilities()),
-            runtime_relay_token_hash: token_hash,
-            display_name: None,
-            hostname: None,
-            runtime_host: Some("oslo-host-1".to_string()),
-            runtime_status: Some(RuntimeSummaryStatus::Unknown),
-            active_inference_profile: Some("finite-private".to_string()),
-            hermes_available: None,
-            published_app_urls: Vec::new(),
-            now: Some("2026-05-25T13:01:30Z".to_string()),
-        };
-        let registered = state
-            .register_agent_creation_runtime(register_input)
-            .unwrap();
-
-        assert_eq!(
-            registered.request.status,
-            AgentCreationRequestStatus::Launching
-        );
-        assert!(registered.request.agent_runtime_id.is_some());
-        let runtime = &state.agent_runtimes[registered.request.agent_runtime_id.as_ref().unwrap()];
-        assert_eq!(
-            runtime.contact_endpoint.as_deref(),
-            Some("https://oslo-agent.example.com/contact")
-        );
-        assert_eq!(runtime.provider_runtime_handle_history.len(), 1);
-        assert!(
-            state
-                .runtime_heartbeat_for_machine("oslo-agent-001")
-                .is_err()
-        );
-
-        let heartbeat = state.record_runtime_heartbeat(runtime_token).unwrap();
-        assert_eq!(heartbeat.machine_id, "oslo-agent-001");
-        let events = state.relay_events_for_runtime(runtime_token).unwrap();
-        assert_eq!(events.machine_id, "oslo-agent-001");
-        assert!(events.events.is_empty());
-        assert_eq!(
-            state
-                .runtime_heartbeat_for_machine("oslo-agent-001")
-                .unwrap()
-                .last_seen_at,
-            heartbeat.last_seen_at
-        );
-
-        let completion_input = CompleteAgentCreationRequestInput {
-            request_id: lease.request.id,
-            runner_id: "runner-oslo-1".to_string(),
-            lease_token: "lease-token-1".to_string(),
-            source_host_id: "oslo-host-1".to_string(),
-            source_machine_id: "oslo-agent-001".to_string(),
-            runtime_artifact_id: Some("artifact-v1".to_string()),
-            state_schema_version: None,
-            provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
-                ProviderRuntimeHandleV1 {
-                    runner_class: RunnerClass::Kata,
-                    opaque: json!({"container": "finite-kata-oslo-001"}),
-                },
-            )),
-            contact_endpoint: Some("https://oslo-agent.example.com/contact".to_string()),
-            runtime_capabilities: Some(kata_runtime_capabilities()),
-            display_name: None,
-            hostname: None,
-            runtime_host: Some("oslo-host-1".to_string()),
-            runtime_status: Some(RuntimeSummaryStatus::Online),
-            active_inference_profile: Some("finite-private".to_string()),
-            hermes_available: Some(true),
-            published_app_urls: Vec::new(),
-            now: Some("2026-05-25T13:02:00Z".to_string()),
-        };
-        let mut mismatched_completion = completion_input.clone();
-        mismatched_completion.runtime_capabilities =
-            Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-                runtime_upgrade: false,
-                ..*kata_runtime_capabilities().v1()
-            }));
-        assert!(matches!(
-            state.complete_agent_creation_request(mismatched_completion),
-            Err(CoreError::RuntimeCapabilitiesMismatch)
-        ));
-        let completed = state
-            .complete_agent_creation_request(completion_input)
-            .unwrap();
-
-        assert_eq!(
-            completed.request.status,
-            AgentCreationRequestStatus::Running
-        );
-        assert_eq!(completed.project.id, requested.project.id);
-    }
-
-    #[test]
-    fn user_can_request_and_runner_can_complete_oci_runtime_restart() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "first-submit",
-            "oslo-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-
-        let restart = state
-            .request_runtime_restart(RequestRuntimeRestartInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id,
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(restart.agent_runtime_id, runtime_id);
-        assert_eq!(restart.source_host_id, "oslo-host-1");
-        assert_eq!(restart.source_machine_id, "oslo-agent-001");
-        assert_eq!(restart.kind, RuntimeControlKind::Restart);
-        assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
-
-        let duplicate = state
-            .request_runtime_restart(RequestRuntimeRestartInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id: restart.project_id.clone(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(duplicate.id, restart.id);
-
-        let lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "restart-lease-1".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap()
-            .expect("restart request should lease");
-
-        assert_eq!(lease.request.id, restart.id);
-        assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
-        assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
-
-        let stale_complete = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: restart.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "wrong-token".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_capabilities: None,
-                runtime_host: None,
-                published_app_urls: None,
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:04:30Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            stale_complete,
-            CoreError::RuntimeControlRequestLeaseConflict
-        ));
-
-        let forbidden_refresh = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: restart.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "restart-lease-1".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        recover_known_good_chat: true,
-                        ..*kata_runtime_capabilities().v1()
-                    },
-                )),
-                runtime_host: None,
-                published_app_urls: None,
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:04:45Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            forbidden_refresh,
-            CoreError::RuntimeUpgradeCompletionMismatch
-        ));
-
-        let completed = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: restart.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "restart-lease-1".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_capabilities: None,
-                runtime_host: None,
-                published_app_urls: None,
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:05:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
-        assert!(completed.lease_token.is_none());
-        assert_eq!(
-            state.agent_runtimes[&runtime_id].host_facts.runtime_status,
-            RuntimeSummaryStatus::Online
-        );
-        assert!(
-            state
+            let lease = db
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease-1".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("restart request should lease");
+
+            assert_eq!(lease.request.id, restart.id);
+            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
+            assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
+
+            let stale_complete = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "wrong-token".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:04:30Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                stale_complete,
+                CoreError::RuntimeControlRequestLeaseConflict
+            ));
+
+            let forbidden_refresh = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:04:45Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                forbidden_refresh,
+                CoreError::RuntimeUpgradeCompletionMismatch
+            ));
+
+            let completed = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
+            assert!(completed.lease_token.is_none());
+            assert_eq!(
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            assert!(
+                db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
                     runner_id: "runner-oslo-1".to_string(),
                     lease_token: "restart-lease-2".to_string(),
                     lease_seconds: Some(60),
@@ -10065,133 +5290,169 @@ mod tests {
                     }),
                     now: Some("2026-05-25T13:06:00Z".to_string()),
                 })
+                .await
                 .unwrap()
                 .is_none()
-        );
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn known_good_chat_recovery_is_fail_closed_until_a_real_recovery_path_exists() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "first-submit",
-            "oslo-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+    #[tokio::test]
+    async fn known_good_chat_recovery_is_fail_closed_until_a_real_recovery_path_exists() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
 
-        let error = state
-            .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id,
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap_err();
+            let error = db
+                .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
 
-        assert!(matches!(error, CoreError::RuntimeControlUnsupported));
-        assert!(state.runtime_control_requests.is_empty());
+            assert!(matches!(error, CoreError::RuntimeControlUnsupported));
+            assert!(db.all_runtime_control_requests().await.is_empty());
+        })
+        .await;
     }
 
-    #[test]
-    fn stop_is_supported_but_runtime_retirement_is_fail_closed() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "first-submit",
-            "oslo-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        let unrelated_runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "second-submit",
-            "oslo-agent-002",
-            "artifact-v1",
-            "2026-05-25T13:02:10Z",
-        );
-        let unrelated_project_id = state.agent_runtimes[&unrelated_runtime_id]
-            .project_id
-            .clone();
-        let user_id = state
-            .users
-            .values()
-            .find(|user| user.workos_user_id.as_deref() == Some("user_workos_new"))
-            .unwrap()
-            .id
-            .clone();
-        assert_eq!(state.visible_projects_for_user(&user_id).len(), 2);
-        state.runtime_relay_credentials.insert(
-            runtime_id.clone(),
-            RuntimeRelayCredential {
-                agent_runtime_id: runtime_id.clone(),
-                token_hash: runtime_relay_token_hash("destroy-test-relay-token").unwrap(),
-                created_at: "2026-05-25T13:02:15Z".to_string(),
-                updated_at: "2026-05-25T13:02:15Z".to_string(),
-            },
-        );
-        assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_new".to_string()),
-                limit_profile_id: None,
-                now: Some("2026-05-25T13:02:30Z".to_string()),
-            })
-            .unwrap();
-        let runtime_key = state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id,
-                raw_key: "fpk_live_destroy_test".to_string(),
-                project_id: Some(project_id.clone()),
-                agent_runtime_id: Some(runtime_id.clone()),
-                now: Some("2026-05-25T13:02:31Z".to_string()),
-            })
-            .unwrap();
-        state
-            .agent_runtimes
-            .get_mut(&runtime_id)
-            .unwrap()
-            .host_facts
-            .published_app_urls = vec!["https://oslo-agent.example.com/contact".to_string()];
+    #[tokio::test]
+    async fn stop_is_supported_but_runtime_retirement_is_fail_closed() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let unrelated_runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "second-submit",
+                "oslo-agent-002",
+                "artifact-v1",
+                "2026-05-25T13:02:10Z",
+            )
+            .await;
+            let unrelated_project_id = db
+                .agent_runtime(&unrelated_runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let user_id = db
+                .all_users()
+                .await
+                .iter()
+                .find(|user| user.workos_user_id.as_deref() == Some("user_workos_new"))
+                .unwrap()
+                .id
+                .clone();
+            assert_eq!(db.visible_projects_for_user(&user_id).await.len(), 2);
+            // A legacy relay credential row: nothing writes these anymore, but
+            // destroy still clears any left behind by earlier Core generations.
+            let relay_hash = "ab".repeat(32);
+            db.exec(&format!(
+                "INSERT INTO runtime_relay_credentials \
+                 (agent_runtime_id, token_hash, created_at, updated_at) \
+                 VALUES ('{runtime_id}', '{relay_hash}', \
+                 '2026-05-25T13:02:15Z', '2026-05-25T13:02:15Z')"
+            ))
+            .await;
+            assert!(
+                !db.query_json(
+                    "SELECT to_jsonb(t) FROM runtime_relay_credentials t \
+                 WHERE t.agent_runtime_id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .is_empty()
+            );
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_new".to_string()),
+                    limit_profile_id: None,
+                    now: Some("2026-05-25T13:02:30Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let runtime_key = db
+                .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                    grant_id: grant.id,
+                    raw_key: "fpk_live_destroy_test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    agent_runtime_id: Some(runtime_id.clone()),
+                    now: Some("2026-05-25T13:02:31Z".to_string()),
+                })
+                .await
+                .unwrap();
+            db.exec(&format!(
+                "UPDATE agent_runtimes SET host_facts = jsonb_set(host_facts, \
+                 '{{published_app_urls}}', \
+                 '[\"https://oslo-agent.example.com/contact\"]'::jsonb) \
+                 WHERE id = '{runtime_id}'"
+            ))
+            .await;
 
-        let stop = state
-            .request_runtime_stop(RequestRuntimeStopInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
-        let stop_lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "stop-lease-1".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap()
-            .expect("stop request should lease");
-        assert_eq!(stop_lease.request.kind, RuntimeControlKind::Stop);
-        state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+            let stop = db
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let stop_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "stop-lease-1".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("stop request should lease");
+            assert_eq!(stop_lease.request.kind, RuntimeControlKind::Stop);
+            db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                 request_id: stop.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "stop-lease-1".to_string(),
@@ -10203,285 +5464,274 @@ mod tests {
                 retirement_snapshot: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let stopped_runtime = &state.agent_runtimes[&runtime_id];
-        assert_eq!(
-            stopped_runtime.host_facts.runtime_status,
-            RuntimeSummaryStatus::Offline
-        );
-        assert_eq!(
-            stopped_runtime.host_facts.published_app_urls,
-            vec!["https://oslo-agent.example.com/contact".to_string()]
-        );
+            let stopped_runtime = &db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(
+                stopped_runtime.host_facts.runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            assert_eq!(
+                stopped_runtime.host_facts.published_app_urls,
+                vec!["https://oslo-agent.example.com/contact".to_string()]
+            );
 
-        let destroy_error = state
-            .request_runtime_destroy(RequestRuntimeDestroyInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:06:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            destroy_error,
-            CoreError::RuntimeControlUnsupported
-        ));
+            let destroy_error = db
+                .request_runtime_destroy(RequestRuntimeDestroyInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                destroy_error,
+                CoreError::RuntimeControlUnsupported
+            ));
 
-        // A stale N-1 request cannot bypass the persisted-runtime and worker
-        // capability intersection at lease time.
-        let stale_destroy_id = "runtime_ctl_stale_destroy".to_string();
-        state.runtime_control_requests.insert(
-            stale_destroy_id.clone(),
-            RuntimeControlRequest {
-                id: stale_destroy_id.clone(),
-                project_id: project_id.clone(),
-                agent_runtime_id: runtime_id.clone(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "oslo-agent-001".to_string(),
-                requested_by_user_id: user_id.clone(),
-                kind: RuntimeControlKind::Destroy,
-                target_runtime_artifact_id: None,
-                status: RuntimeControlRequestStatus::Requested,
-                runner_id: None,
-                lease_token: None,
-                lease_expires_at: None,
-                failure_message: None,
-                created_at: "2026-05-25T13:06:30Z".to_string(),
-                updated_at: "2026-05-25T13:06:30Z".to_string(),
-                completed_at: None,
-            },
-        );
-        let stale_destroy_lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-1".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:07:00Z".to_string()),
-            })
-            .unwrap();
-        assert!(stale_destroy_lease.is_none());
-        assert_eq!(
-            state.runtime_control_requests[&stale_destroy_id].status,
-            RuntimeControlRequestStatus::Requested
-        );
-        assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
-        assert!(
-            state
-                .project_runtime_links
-                .values()
-                .any(|link| link.agent_runtime_id == runtime_id && link.active)
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&runtime_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
-        assert!(
-            !state
-                .finite_private_admin_audit_events
-                .values()
-                .any(|event| event.action == "finite_private.runtime.destroy_revoke_keys")
-        );
-        let visible_project_ids = state
-            .visible_projects_for_user(&user_id)
-            .into_iter()
-            .map(|project| project.id)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            visible_project_ids,
-            BTreeSet::from([project_id.clone(), unrelated_project_id.clone()]),
-            "unsupported retirement cannot hide either project"
-        );
-        assert!(
-            state.projects.contains_key(&project_id),
-            "destroy retains the project row"
-        );
-        assert!(
-            state.agent_runtimes.contains_key(&runtime_id),
-            "destroy retains the runtime row"
-        );
-        assert!(
-            state
-                .project_room_memberships
-                .values()
-                .find(|membership| membership.project_id == project_id)
-                .unwrap()
-                .archived_at
-                .is_none()
-        );
-        assert!(
-            state
-                .project_room_memberships
-                .values()
-                .find(|membership| membership.project_id == unrelated_project_id)
-                .unwrap()
-                .archived_at
-                .is_none(),
-            "unrelated membership remains active"
-        );
-        assert!(state.agent_runtimes.contains_key(&unrelated_runtime_id));
+            // A stale N-1 request cannot bypass the persisted-runtime and worker
+            // capability intersection at lease time.
+            let stale_destroy_id = "runtime_ctl_stale_destroy".to_string();
+            db.exec(&format!(
+                "INSERT INTO runtime_control_requests \
+                 (id, project_id, agent_runtime_id, source_host_id, source_machine_id, \
+                  requested_by_user_id, kind, status, created_at, updated_at) \
+                 VALUES ('{stale_destroy_id}', '{project_id}', '{runtime_id}', \
+                 'oslo-host-1', 'oslo-agent-001', '{user_id}', 'destroy', 'requested', \
+                 '2026-05-25T13:06:30Z', '2026-05-25T13:06:30Z')"
+            ))
+            .await;
+            let stale_destroy_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-1".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:07:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(stale_destroy_lease.is_none());
+            assert_eq!(
+                db.runtime_control_request(&stale_destroy_id)
+                    .await
+                    .unwrap()
+                    .status,
+                RuntimeControlRequestStatus::Requested
+            );
+            assert!(
+                !db.query_json(
+                    "SELECT to_jsonb(t) FROM runtime_relay_credentials t \
+                 WHERE t.agent_runtime_id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .is_empty()
+            );
+            assert!(
+                db.all("project_runtime_links")
+                    .await
+                    .iter()
+                    .any(|link| link["agent_runtime_id"] == runtime_id.as_str()
+                        && link["active"] == true)
+            );
+            assert_eq!(
+                db.finite_private_api_key(&runtime_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+            assert!(
+                !db.finite_private_admin_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.action == "finite_private.runtime.destroy_revoke_keys")
+            );
+            let visible_project_ids = db
+                .visible_projects_for_user(&user_id)
+                .await
+                .into_iter()
+                .map(|visible| visible.project.id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                visible_project_ids,
+                BTreeSet::from([project_id.clone(), unrelated_project_id.clone()]),
+                "unsupported retirement cannot hide either project"
+            );
+            assert!(
+                db.project(&project_id).await.is_some(),
+                "destroy retains the project row"
+            );
+            assert!(
+                db.agent_runtime(&runtime_id).await.is_some(),
+                "destroy retains the runtime row"
+            );
+            assert!(
+                db.all("project_room_memberships")
+                    .await
+                    .iter()
+                    .find(|membership| membership["project_id"] == project_id.as_str())
+                    .unwrap()["archived_at"]
+                    .is_null()
+            );
+            assert!(
+                db.all("project_room_memberships")
+                    .await
+                    .iter()
+                    .find(|membership| membership["project_id"] == unrelated_project_id.as_str())
+                    .unwrap()["archived_at"]
+                    .is_null(),
+                "unrelated membership remains active"
+            );
+            assert!(db.agent_runtime(&unrelated_runtime_id).await.is_some());
+        })
+        .await;
     }
 
-    #[test]
-    fn retirement_requires_exact_immutable_receipt_and_retries_same_request() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "retirement-submit",
-            "oslo-agent-retire",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        state
-            .agent_runtimes
-            .get_mut(&runtime_id)
-            .unwrap()
-            .runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            runtime_retirement: true,
-            ..*kata_runtime_capabilities().v1()
-        }));
-        let request = state
-            .request_runtime_destroy(RequestRuntimeDestroyInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
-        let capacity = RunnerLeaseCapacity {
-            runner_classes: vec![RunnerClass::Kata],
-            runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-                runtime_retirement: true,
-                ..*kata_runtime_capabilities().v1()
-            })),
-            ..RunnerLeaseCapacity::default()
-        };
-        let first = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-1".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(capacity.clone()),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        let spec = runtime_spec_v1(first.runtime_spec.as_ref().unwrap());
-        let receipt = RuntimeRetirementSnapshotReceipt {
-            schema: RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
-            request_id: request.id.clone(),
-            project_id: project_id.clone(),
-            agent_runtime_id: runtime_id.clone(),
-            durable_state_id: spec.durable_state_id.clone(),
-            runtime_artifact_id: spec.runtime_artifact_id.clone(),
-            backend: RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
-            locator: runtime_retirement_archive_locator(&request.id),
-            zip_bytes: 4096,
-            zip_sha256: "a".repeat(64),
-            manifest_sha256: "b".repeat(64),
-            created_at: "2026-05-25T13:04:10Z".to_string(),
-            verified_at: "2026-05-25T13:04:20Z".to_string(),
-            recovery_authority_id: "finite-assisted-v1".to_string(),
-            retention_policy: RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
-        };
-
-        let bare = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+    #[tokio::test]
+    async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "retirement-submit",
+                "oslo-agent-retire",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let retirement_capable =
+                serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                    runtime_retirement: true,
+                    ..*kata_runtime_capabilities().v1()
+                }))
+                .unwrap();
+            db.exec(&format!(
+                "UPDATE agent_runtimes SET runtime_capabilities = '{retirement_capable}'::jsonb \
+                 WHERE id = '{runtime_id}'"
+            ))
+            .await;
+            let request = db
+                .request_runtime_destroy(RequestRuntimeDestroyInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        runtime_retirement: true,
+                        ..*kata_runtime_capabilities().v1()
+                    },
+                )),
+                ..RunnerLeaseCapacity::default()
+            };
+            let first = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-1".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(capacity.clone()),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let spec = runtime_spec_v1(first.runtime_spec.as_ref().unwrap());
+            let receipt = RuntimeRetirementSnapshotReceipt {
+                schema: RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
                 request_id: request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-1".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_capabilities: None,
-                runtime_host: None,
-                published_app_urls: None,
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:04:25Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(bare, CoreError::RuntimeRetirementSnapshotMismatch));
-        assert!(state.runtime_retirement_snapshots.is_empty());
-        assert!(state.active_runtime_for_project(&project_id).is_some());
+                project_id: project_id.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                durable_state_id: spec.durable_state_id.clone(),
+                runtime_artifact_id: spec.runtime_artifact_id.clone(),
+                backend: RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+                locator: runtime_retirement_archive_locator(&request.id),
+                zip_bytes: 4096,
+                zip_sha256: "a".repeat(64),
+                manifest_sha256: "b".repeat(64),
+                created_at: "2026-05-25T13:04:10Z".to_string(),
+                verified_at: "2026-05-25T13:04:20Z".to_string(),
+                recovery_authority_id: "finite-assisted-v1".to_string(),
+                retention_policy: RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+            };
 
-        state
-            .renew_runtime_control_request(RenewRuntimeControlRequestInput {
+            let bare = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:04:25Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(bare, CoreError::RuntimeRetirementSnapshotMismatch));
+            assert!(db.all("runtime_retirement_snapshots").await.is_empty());
+            assert!(db.active_runtime_for_project(&project_id).await.is_some());
+
+            db.renew_runtime_control_request(RenewRuntimeControlRequestInput {
                 request_id: request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-1".to_string(),
                 lease_seconds: Some(60),
                 now: Some("2026-05-25T13:04:30Z".to_string()),
             })
+            .await
             .unwrap();
-        let retry = state
-            .retry_runtime_control_request(RetryRuntimeControlRequestInput {
-                request_id: request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-1".to_string(),
-                failure_message: "synthetic upload interruption".to_string(),
-                now: Some("2026-05-25T13:04:40Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(retry.id, request.id);
-        assert_eq!(retry.status, RuntimeControlRequestStatus::Requested);
-        let second = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-2".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(capacity),
-                now: Some("2026-05-25T13:04:45Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(second.request.id, request.id);
+            let retry = db
+                .retry_runtime_control_request(RetryRuntimeControlRequestInput {
+                    request_id: request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-1".to_string(),
+                    failure_message: "synthetic upload interruption".to_string(),
+                    now: Some("2026-05-25T13:04:40Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(retry.id, request.id);
+            assert_eq!(retry.status, RuntimeControlRequestStatus::Requested);
+            let second = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-2".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(capacity),
+                    now: Some("2026-05-25T13:04:45Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.request.id, request.id);
 
-        let completion = CompleteRuntimeControlRequestInput {
-            request_id: request.id.clone(),
-            runner_id: "runner-oslo-1".to_string(),
-            lease_token: "destroy-lease-2".to_string(),
-            runtime_artifact_id: None,
-            state_schema_version: None,
-            runtime_capabilities: None,
-            runtime_host: None,
-            published_app_urls: None,
-            retirement_snapshot: Some(receipt.clone()),
-            now: Some("2026-05-25T13:05:00Z".to_string()),
-        };
-        let completed = state
-            .complete_runtime_control_request(completion.clone())
-            .unwrap();
-        assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
-        assert_eq!(
-            state.runtime_retirement_snapshots[&request.id].receipt,
-            receipt
-        );
-        assert!(state.active_runtime_for_project(&project_id).is_none());
-        assert_eq!(
-            state
-                .visible_projects_for_user(&completed.requested_by_user_id)
-                .len(),
-            0
-        );
-
-        let replay = state
-            .complete_runtime_control_request(completion)
-            .expect("identical completion replay is idempotent");
-        assert_eq!(replay.id, request.id);
-        let mut conflicting = receipt;
-        conflicting.zip_sha256 = "c".repeat(64);
-        let conflict = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+            let completion = CompleteRuntimeControlRequestInput {
                 request_id: request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-2".to_string(),
@@ -10490,180 +5740,199 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
-                retirement_snapshot: Some(conflicting),
-                now: Some("2026-05-25T13:05:01Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            conflict,
-            CoreError::RuntimeRetirementSnapshotConflict
-        ));
-        assert_eq!(
-            state.runtime_retirement_snapshots[&request.id]
-                .receipt
-                .zip_sha256,
-            "a".repeat(64),
-            "a conflicting replay must not replace the immutable receipt"
-        );
+                retirement_snapshot: Some(receipt.clone()),
+                now: Some("2026-05-25T13:05:00Z".to_string()),
+            };
+            let completed = db
+                .complete_runtime_control_request(completion.clone())
+                .await
+                .unwrap();
+            assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
+            let snapshot = db
+                .row("runtime_retirement_snapshots", &request.id)
+                .await
+                .expect("a completed retirement persists its snapshot");
+            assert_eq!(snapshot["zip_sha256"], receipt.zip_sha256);
+            assert_eq!(snapshot["manifest_sha256"], receipt.manifest_sha256);
+            assert_eq!(snapshot["locator"], receipt.locator);
+            assert_eq!(snapshot["backend"], receipt.backend);
+            assert!(db.active_runtime_for_project(&project_id).await.is_none());
+            assert_eq!(
+                db.visible_projects_for_user(&completed.requested_by_user_id)
+                    .await
+                    .len(),
+                0
+            );
+
+            let replay = db
+                .complete_runtime_control_request(completion)
+                .await
+                .expect("identical completion replay is idempotent");
+            assert_eq!(replay.id, request.id);
+            let mut conflicting = receipt;
+            conflicting.zip_sha256 = "c".repeat(64);
+            let conflict = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "destroy-lease-2".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: Some(conflicting),
+                    now: Some("2026-05-25T13:05:01Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                conflict,
+                CoreError::RuntimeRetirementSnapshotConflict
+            ));
+            assert_eq!(
+                db.row("runtime_retirement_snapshots", &request.id)
+                    .await
+                    .unwrap()["zip_sha256"],
+                "a".repeat(64),
+                "a conflicting replay must not replace the immutable receipt"
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn oci_runtime_artifacts_support_hosted_runtime_control() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        state.runtime_artifacts.get_mut("artifact-v1").unwrap().kind =
-            RuntimeArtifactKind::OciImage;
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "new@finite.vip",
-            "user_workos_new",
-            "first-submit",
-            "docker-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-
-        let restart = state
-            .request_runtime_restart(RequestRuntimeRestartInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id,
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(restart.agent_runtime_id, runtime_id);
-        assert_eq!(restart.kind, RuntimeControlKind::Restart);
-    }
-
-    #[test]
-    fn imported_legacy_runtime_restart_is_rejected() {
-        let mut state = BridgeCoreState::default();
-        state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "smoke",
-                    "paul-smoke",
-                    "Paul Smoke",
-                    Some("paul@finite.vip"),
-                )],
-                options(["paul@finite.vip"], NOW),
+    #[tokio::test]
+    async fn oci_runtime_artifacts_support_hosted_runtime_control() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "docker-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
             )
-            .unwrap();
-        let candidate_id = state.claimable_candidates_for_email(Some("paul@finite.vip"))[0]
-            .id
-            .clone();
-        let claimed = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_paul".to_string(),
-                selected_candidate_ids: vec![candidate_id],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
 
-        let error = state
-            .request_runtime_restart(RequestRuntimeRestartInput {
-                verified_email: "paul@finite.vip".to_string(),
-                workos_user_id: "user_workos_paul".to_string(),
-                project_id: claimed.claimed_project_ids[0].clone(),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap_err();
+            let restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert!(matches!(error, CoreError::RuntimeControlUnsupported));
+            assert_eq!(restart.agent_runtime_id, runtime_id);
+            assert_eq!(restart.kind, RuntimeControlKind::Restart);
+        })
+        .await;
     }
 
-    #[test]
-    fn runner_lease_can_expire_and_reassign_but_completion_requires_current_token() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let first_lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-a".to_string(),
-                source_host_id: None,
-                lease_token: "lease-a".to_string(),
-                lease_seconds: Some(60),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(first_lease.request.project_id, requested.project.id);
-        let second_lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-b".to_string(),
-                source_host_id: None,
-                lease_token: "lease-b".to_string(),
-                lease_seconds: Some(60),
-                runner_capacity: None,
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(second_lease.request.runner_id.as_deref(), Some("runner-b"));
+    #[tokio::test]
+    async fn runner_lease_can_expire_and_reassign_but_completion_requires_current_token() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let first_lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-a".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-a".to_string(),
+                    lease_seconds: Some(60),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first_lease.request.project_id, requested.project.id);
+            let second_lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-b".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-b".to_string(),
+                    lease_seconds: Some(60),
+                    runner_capacity: None,
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second_lease.request.runner_id.as_deref(), Some("runner-b"));
 
-        let stale_complete = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: requested.request.id,
-                runner_id: "runner-a".to_string(),
-                lease_token: "lease-a".to_string(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "oslo-agent-001".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: None,
-                contact_endpoint: None,
-                runtime_capabilities: None,
-                display_name: None,
-                hostname: None,
-                runtime_host: None,
-                runtime_status: None,
-                active_inference_profile: None,
-                hermes_available: None,
-                published_app_urls: Vec::new(),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            stale_complete,
-            CoreError::AgentCreationRequestLeaseConflict
-        ));
+            let stale_complete = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: requested.request.id,
+                    runner_id: "runner-a".to_string(),
+                    lease_token: "lease-a".to_string(),
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "oslo-agent-001".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
+                    runtime_capabilities: None,
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: None,
+                    active_inference_profile: None,
+                    hermes_available: None,
+                    published_app_urls: Vec::new(),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                stale_complete,
+                CoreError::AgentCreationRequestLeaseConflict
+            ));
+        })
+        .await;
     }
 
-    #[test]
-    fn runner_can_mark_agent_creation_request_failed_without_runtime() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let launch_code = issue_test_launch_code(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+    #[tokio::test]
+    async fn runner_can_mark_agent_creation_request_failed_without_runtime() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let launch_code = issue_test_launch_code(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-oslo-1".to_string(),
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
@@ -10671,45 +5940,49 @@ mod tests {
                 runner_capacity: None,
                 now: Some(LATER.to_string()),
             })
+            .await
             .unwrap();
 
-        let failed = state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
-                request_id: requested.request.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                failure_message: "runner capacity unavailable".to_string(),
-                provisioned_finite_private_api_key_id: None,
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap();
+            let failed = db
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: requested.request.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    failure_message: "runner capacity unavailable".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
-        assert_eq!(
-            failed.failure_message.as_deref(),
-            Some("runner capacity unavailable")
-        );
-        assert!(failed.agent_runtime_id.is_none());
-        assert!(state.agent_runtimes.is_empty());
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+            assert_eq!(
+                failed.failure_message.as_deref(),
+                Some("runner capacity unavailable")
+            );
+            assert!(failed.agent_runtime_id.is_none());
+            assert!(db.all_agent_runtimes().await.is_empty());
+        })
+        .await;
     }
 
-    #[test]
-    fn cancelled_request_does_not_make_a_redeemed_launch_code_reusable() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let launch_code = issue_test_launch_code(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+    #[tokio::test]
+    async fn cancelled_request_does_not_make_a_redeemed_launch_code_reusable() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let launch_code = issue_test_launch_code(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-oslo-1".to_string(),
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
@@ -10717,9 +5990,9 @@ mod tests {
                 runner_capacity: None,
                 now: Some(LATER.to_string()),
             })
+            .await
             .unwrap();
-        state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
+            db.fail_agent_creation_request(FailAgentCreationRequestInput {
                 request_id: requested.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
@@ -10727,64 +6000,70 @@ mod tests {
                 provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
+            .await
             .unwrap();
 
-        let cancelled = state
-            .cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id: requested.request.id,
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
+            let cancelled = db
+                .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: requested.request.id,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
-        assert!(cancelled.agent_runtime_id.is_none());
-        assert!(
-            state
-                .visible_projects_for_user(&requested.project.owner_user_id)
-                .is_empty()
-        );
+            assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
+            assert!(cancelled.agent_runtime_id.is_none());
+            assert!(
+                db.visible_projects_for_user(&requested.project.owner_user_id)
+                    .await
+                    .is_empty()
+            );
 
-        let retry = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Retry Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "second-submit".to_string(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(retry, CoreError::InvalidLaunchCode));
+            let retry = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Retry Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "second-submit".to_string(),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(retry, CoreError::InvalidLaunchCode));
+        })
+        .await;
     }
 
-    #[test]
-    fn failed_self_serve_launch_removes_provisional_runtime() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        state
-            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+    #[tokio::test]
+    async fn failed_self_serve_launch_removes_provisional_runtime() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            db.register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
@@ -10795,7 +6074,6 @@ mod tests {
                 provider_runtime_handle: None,
                 contact_endpoint: None,
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: runtime_relay_token_hash("runtime-token-1").unwrap(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -10805,57 +6083,54 @@ mod tests {
                 published_app_urls: Vec::new(),
                 now: Some("2026-05-25T13:01:30Z".to_string()),
             })
+            .await
             .unwrap();
 
-        assert_eq!(state.agent_runtimes.len(), 1);
-        assert_eq!(state.runtime_relay_credentials.len(), 1);
-        assert_eq!(state.project_runtime_links.len(), 1);
+            assert_eq!(db.table_len("agent_runtimes").await, 1);
+            assert_eq!(db.table_len("project_runtime_links").await, 1);
 
-        let failed = state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
-                request_id: requested.request.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                failure_message: "runtime did not publish a relay heartbeat".to_string(),
-                provisioned_finite_private_api_key_id: None,
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
+            let failed = db
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: requested.request.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    failure_message: "runtime did not publish a relay heartbeat".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
-        assert!(failed.agent_runtime_id.is_none());
-        assert!(state.agent_runtimes.is_empty());
-        assert!(state.runtime_relay_credentials.is_empty());
-        assert!(state.project_runtime_links.is_empty());
-        assert!(
-            state
-                .runtime_heartbeat_for_machine("oslo-agent-001")
-                .is_err()
-        );
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+            assert!(failed.agent_runtime_id.is_none());
+            assert!(db.all_agent_runtimes().await.is_empty());
+            assert!(db.all("project_runtime_links").await.is_empty());
+        })
+        .await;
     }
 
-    #[test]
-    fn fresh_launch_code_adds_one_creation_to_an_exhausted_entitlement() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
+    #[tokio::test]
+    async fn fresh_launch_code_adds_one_creation_to_an_exhausted_entitlement() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
 
-        let bad = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: "wrong".to_string(),
-                idempotency_key: "bad-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(bad, CoreError::InvalidLaunchCode));
-        assert!(state.users.is_empty());
-        assert!(state.customer_orgs.is_empty());
-        assert!(state.agent_creation_entitlements.is_empty());
+            let bad = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: "wrong".to_string(),
+                    idempotency_key: "bad-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(bad, CoreError::InvalidLaunchCode));
+            assert!(db.all_users().await.is_empty());
+            assert!(db.all_customer_orgs().await.is_empty());
+            assert!(db.all("agent_creation_entitlements").await.is_empty());
 
-        state
-            .request_agent_creation(RequestAgentCreationInput {
+            db.request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
@@ -10863,245 +6138,99 @@ mod tests {
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let unused_launch_code = issue_test_launch_code(&mut state);
-        let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
-        let second = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Second Agent".to_string(),
-                launch_code: unused_launch_code.clone(),
-                idempotency_key: "second-submit".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(!second.reused);
-        assert!(
-            state.launch_codes[&unused_launch_code_id]
-                .redeemed_at
-                .is_some(),
-            "the top-up code must be consumed"
-        );
-        let entitlement = state
-            .agent_creation_entitlements
-            .values()
-            .find(|entitlement| entitlement.customer_org_id == second.project.customer_org_id)
-            .unwrap();
-        assert_eq!(entitlement.allowed_new_agent_runtimes, 2);
-        let entitlement_id = entitlement.id.clone();
+            let unused_launch_code = issue_test_launch_code(&db).await;
+            let unused_launch_code_id = issued_launch_code_id(&db, &unused_launch_code).await;
+            let second = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Second Agent".to_string(),
+                    launch_code: unused_launch_code.clone(),
+                    idempotency_key: "second-submit".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(!second.reused);
+            assert!(
+                !db.row("launch_codes", &unused_launch_code_id)
+                    .await
+                    .unwrap()["redeemed_at"]
+                    .is_null(),
+                "the top-up code must be consumed"
+            );
+            let entitlement = db
+                .all("agent_creation_entitlements")
+                .await
+                .iter()
+                .find(|entitlement| {
+                    entitlement["customer_org_id"] == second.project.customer_org_id.as_str()
+                })
+                .unwrap()
+                .clone();
+            assert_eq!(entitlement["allowed_new_agent_runtimes"], 2);
+            let entitlement_org_id = entitlement["customer_org_id"].as_str().unwrap().to_string();
 
-        let retry = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Second Agent".to_string(),
-                launch_code: unused_launch_code,
-                idempotency_key: "second-submit".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(retry.reused);
-        assert_eq!(
-            state.agent_creation_entitlements[&entitlement_id].allowed_new_agent_runtimes, 2,
-            "an identical retry must not apply the top-up twice"
-        );
+            let retry = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Second Agent".to_string(),
+                    launch_code: unused_launch_code,
+                    idempotency_key: "second-submit".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(retry.reused);
+            assert_eq!(
+                db.agent_creation_entitlement(&entitlement_org_id)
+                    .await
+                    .unwrap()
+                    .allowed_new_agent_runtimes,
+                2,
+                "an identical retry must not apply the top-up twice"
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn imported_runtime_does_not_consume_self_serve_launch_entitlement() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        let email = "import-with-launch@finite.vip";
-        let workos_user_id = "user_workos_import_with_launch";
+    #[tokio::test]
+    async fn paid_self_serve_agent_creation_requires_active_stripe_billing() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
 
-        let reconciled = state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "legacy-host",
-                    "legacy-agent-001",
-                    "Imported Agent",
-                    Some(email),
-                )],
-                options([email], NOW),
-            )
-            .unwrap();
-        let candidate_id = reconciled.created_candidates[0].clone();
-        let claimed = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                selected_candidate_ids: vec![candidate_id.clone()],
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        let imported_project_id = claimed.claimed_project_ids[0].clone();
-        let imported_candidate = state.project_import_candidates[&candidate_id].clone();
-        let imported_runtime_id = imported_candidate
-            .agent_runtime_id
-            .clone()
-            .expect("claimed import has a runtime");
-        let imported_project = state.projects[&imported_project_id].clone();
-        let imported_runtime = state.agent_runtimes[&imported_runtime_id].clone();
-        let imported_link = state
-            .project_runtime_links
-            .values()
-            .find(|link| link.project_id == imported_project_id && link.active)
-            .cloned()
-            .expect("claimed import has an active runtime link");
+            let unpaid = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "paid@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paid".to_string(),
+                    display_name: "Paid Agent".to_string(),
+                    launch_code: String::new(),
+                    idempotency_key: "paid-submit-before-billing".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(unpaid, CoreError::BillingRequired));
+            assert!(db.all_users().await.is_empty());
+            assert!(db.all_customer_orgs().await.is_empty());
 
-        let created = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                display_name: "New Hosted Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-self-serve-submit".to_string(),
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .expect("an imported runtime must not consume the hosted launch");
-        assert!(created.project.import_candidate_id.is_none());
-
-        let unused_launch_code = issue_test_launch_code(&mut state);
-        let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
-        let second = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                display_name: "Another Hosted Agent".to_string(),
-                launch_code: unused_launch_code,
-                idempotency_key: "second-self-serve-submit".to_string(),
-                now: Some("2026-05-25T15:00:00Z".to_string()),
-            })
-            .expect("a second fresh code grants one more hosted agent");
-        assert!(!second.reused);
-        assert!(
-            state.launch_codes[&unused_launch_code_id]
-                .redeemed_at
-                .is_some()
-        );
-
-        assert_eq!(state.agent_creation_requests.len(), 2);
-        assert_eq!(
-            state.project_import_candidates[&candidate_id],
-            imported_candidate
-        );
-        assert_eq!(state.projects[&imported_project_id], imported_project);
-        assert_eq!(state.agent_runtimes[&imported_runtime_id], imported_runtime);
-        assert_eq!(
-            state.project_runtime_links[&imported_link.id],
-            imported_link
-        );
-    }
-
-    #[test]
-    fn owner_can_archive_imported_project_without_deleting_runtime_history() {
-        let mut state = BridgeCoreState::default();
-        let email = "archive-import@finite.vip";
-        let workos_user_id = "user_workos_archive_import";
-        let reconciled = state
-            .reconcile_existing_host_imports(
-                &[import(
-                    "legacy-host",
-                    "legacy-agent-archive",
-                    "Old Agent",
-                    Some(email),
-                )],
-                options([email], NOW),
-            )
-            .unwrap();
-        let claimed = state
-            .claim_project_imports(ClaimProjectImportsInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                selected_candidate_ids: reconciled.created_candidates,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        let project_id = claimed.claimed_project_ids[0].clone();
-        let runtime_count = state.agent_runtimes.len();
-        let link_count = state.project_runtime_links.len();
-
-        state
-            .archive_imported_project(ArchiveImportedProjectInput {
-                verified_email: email.to_string(),
-                workos_user_id: workos_user_id.to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T16:00:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert!(
-            state
-                .visible_projects_for_user(&state.find_user_by_email(email).unwrap().id)
-                .is_empty()
-        );
-        assert!(state.projects.contains_key(&project_id));
-        assert_eq!(state.agent_runtimes.len(), runtime_count);
-        assert_eq!(state.project_runtime_links.len(), link_count);
-        assert!(state.project_room_memberships.values().any(|membership| {
-            membership.project_id == project_id && membership.archived_at.is_some()
-        }));
-    }
-
-    #[test]
-    fn hosted_project_cannot_use_import_archive_path() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        let created = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "hosted-archive@finite.vip".to_string(),
-                workos_user_id: "user_workos_hosted_archive".to_string(),
-                display_name: "Hosted Agent".to_string(),
-                launch_code,
-                idempotency_key: "hosted-archive".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let error = state
-            .archive_imported_project(ArchiveImportedProjectInput {
-                verified_email: "hosted-archive@finite.vip".to_string(),
-                workos_user_id: "user_workos_hosted_archive".to_string(),
-                project_id: created.project.id,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(error, CoreError::ProjectNotFound));
-    }
-
-    #[test]
-    fn paid_self_serve_agent_creation_requires_active_stripe_billing() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-
-        let unpaid = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "paid@finite.vip".to_string(),
-                workos_user_id: "user_workos_paid".to_string(),
-                display_name: "Paid Agent".to_string(),
-                launch_code: String::new(),
-                idempotency_key: "paid-submit-before-billing".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(unpaid, CoreError::BillingRequired));
-        assert!(state.users.is_empty());
-        assert!(state.customer_orgs.is_empty());
-
-        state
-            .link_stripe_customer(LinkStripeCustomerInput {
+            db.link_stripe_customer(LinkStripeCustomerInput {
                 verified_email: "paid@finite.vip".to_string(),
                 workos_user_id: "user_workos_paid".to_string(),
                 stripe_customer_id: "cus_paid".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let org_id = state
-            .find_personal_org_by_owner(&state.find_user_by_email("paid@finite.vip").unwrap().id)
-            .unwrap()
-            .id;
-        state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
+            let org_id = db
+                .personal_org_by_owner(&db.user_by_email("paid@finite.vip").await.unwrap().id)
+                .await
+                .unwrap()
+                .id;
+            db.sync_stripe_subscription(SyncStripeSubscriptionInput {
                 customer_org_id: Some(org_id.clone()),
                 stripe_customer_id: "cus_paid".to_string(),
                 stripe_subscription_id: "sub_paid".to_string(),
@@ -11114,88 +6243,93 @@ mod tests {
                 stripe_event_created: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
 
-        let overview = state
-            .billing_overview(LinkVerifiedUserInput {
-                verified_email: "paid@finite.vip".to_string(),
-                workos_user_id: "user_workos_paid".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert!(overview.can_create_agent);
-        assert!(!overview.requires_billing);
-        assert_eq!(
-            overview
-                .agent_creation_entitlement
-                .as_ref()
-                .and_then(|entitlement| entitlement.launch_code.as_deref()),
-            None
-        );
+            let overview = db
+                .billing_overview(LinkVerifiedUserInput {
+                    verified_email: "paid@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paid".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(overview.can_create_agent);
+            assert!(!overview.requires_billing);
+            assert_eq!(
+                overview
+                    .agent_creation_entitlement
+                    .as_ref()
+                    .and_then(|entitlement| entitlement.launch_code.as_deref()),
+                None
+            );
 
-        let created = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "paid@finite.vip".to_string(),
-                workos_user_id: "user_workos_paid".to_string(),
-                display_name: "Paid Agent".to_string(),
-                launch_code: String::new(),
-                idempotency_key: "paid-submit".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert_eq!(created.request.requested_launch_code, None);
-        assert_eq!(
-            state.customer_orgs[&org_id].billing_class,
-            BillingClass::Standard
-        );
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-paid-1".to_string(),
-                source_host_id: None,
-                lease_token: "paid-lease-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap()
-            .expect("paid request should be leased");
-        let provisioned = state
-            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-paid-1".to_string(),
-                lease_token: "paid-lease-1".to_string(),
-                source_host_id: Some("paid-host-1".to_string()),
-                source_machine_id: Some("paid-agent-001".to_string()),
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap();
-        let completed = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-paid-1".to_string(),
-                lease_token: "paid-lease-1".to_string(),
-                source_host_id: "paid-host-1".to_string(),
-                source_machine_id: "paid-agent-001".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: None,
-                contact_endpoint: None,
-                runtime_capabilities: Some(kata_runtime_capabilities()),
-                display_name: None,
-                hostname: None,
-                runtime_host: Some("paid-host-1".to_string()),
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: vec!["https://paid-agent.example.com/contact".to_string()],
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap();
-        let runtime_id = completed.request.agent_runtime_id.unwrap();
-        assert!(state.agent_runtimes.contains_key(&runtime_id));
+            let created = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "paid@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paid".to_string(),
+                    display_name: "Paid Agent".to_string(),
+                    launch_code: String::new(),
+                    idempotency_key: "paid-submit".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(created.request.requested_launch_code, None);
+            assert_eq!(
+                db.customer_org(&org_id).await.unwrap().billing_class,
+                BillingClass::Standard
+            );
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-paid-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "paid-lease-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("paid request should be leased");
+            let provisioned = db
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-paid-1".to_string(),
+                    lease_token: "paid-lease-1".to_string(),
+                    source_host_id: Some("paid-host-1".to_string()),
+                    source_machine_id: Some("paid-agent-001".to_string()),
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let completed = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-paid-1".to_string(),
+                    lease_token: "paid-lease-1".to_string(),
+                    source_host_id: "paid-host-1".to_string(),
+                    source_machine_id: "paid-agent-001".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some("paid-host-1".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: vec!["https://paid-agent.example.com/contact".to_string()],
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
 
-        state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
+            db.sync_stripe_subscription(SyncStripeSubscriptionInput {
                 customer_org_id: Some(org_id),
                 stripe_customer_id: "cus_paid".to_string(),
                 stripe_subscription_id: "sub_paid".to_string(),
@@ -11208,94 +6342,106 @@ mod tests {
                 stripe_event_created: None,
                 now: Some("2026-05-25T14:00:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let blocked_after_past_due = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "paid@finite.vip".to_string(),
-                workos_user_id: "user_workos_paid".to_string(),
-                display_name: "Second Paid Agent".to_string(),
-                launch_code: String::new(),
-                idempotency_key: "paid-submit-2".to_string(),
-                now: Some("2026-05-25T14:01:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(blocked_after_past_due, CoreError::BillingRequired));
-        assert!(state.agent_runtimes.contains_key(&runtime_id));
-        assert!(
-            state
-                .project_runtime_links
-                .values()
-                .any(|link| link.agent_runtime_id == runtime_id && link.active)
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&provisioned.api_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
+            let blocked_after_past_due = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "paid@finite.vip".to_string(),
+                    workos_user_id: "user_workos_paid".to_string(),
+                    display_name: "Second Paid Agent".to_string(),
+                    launch_code: String::new(),
+                    idempotency_key: "paid-submit-2".to_string(),
+                    now: Some("2026-05-25T14:01:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(blocked_after_past_due, CoreError::BillingRequired));
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
+            assert!(
+                db.all("project_runtime_links")
+                    .await
+                    .iter()
+                    .any(|link| link["agent_runtime_id"] == runtime_id.as_str()
+                        && link["active"] == true)
+            );
+            assert_eq!(
+                db.finite_private_api_key(&provisioned.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn stripe_subscription_sync_ignores_non_current_subscription_events() {
-        let mut state = BridgeCoreState::default();
-        state
-            .link_stripe_customer(LinkStripeCustomerInput {
+    #[tokio::test]
+    async fn stripe_subscription_sync_ignores_non_current_subscription_events() {
+        with_isolated_postgres(|db| async move {
+            db.link_stripe_customer(LinkStripeCustomerInput {
                 verified_email: "paid@finite.vip".to_string(),
                 workos_user_id: "user_workos_paid".to_string(),
                 stripe_customer_id: "cus_paid".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let org_id = state
-            .find_personal_org_by_owner(&state.find_user_by_email("paid@finite.vip").unwrap().id)
-            .unwrap()
-            .id;
-        let current = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id.clone()),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_current".to_string(),
-                stripe_price_id: Some("price_standard".to_string()),
-                expected_stripe_price_id: Some("price_standard".to_string()),
-                subscription_status: BillingSubscriptionStatus::Active,
-                current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_current_active".to_string()),
-                stripe_event_created: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        assert_eq!(
-            current.stripe_subscription_id.as_deref(),
-            Some("sub_current")
-        );
+            let org_id = db
+                .personal_org_by_owner(&db.user_by_email("paid@finite.vip").await.unwrap().id)
+                .await
+                .unwrap()
+                .id;
+            let current = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id.clone()),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_current".to_string(),
+                    stripe_price_id: Some("price_standard".to_string()),
+                    expected_stripe_price_id: Some("price_standard".to_string()),
+                    subscription_status: BillingSubscriptionStatus::Active,
+                    current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_current_active".to_string()),
+                    stripe_event_created: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                current.stripe_subscription_id.as_deref(),
+                Some("sub_current")
+            );
 
-        let ignored = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id.clone()),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_second".to_string(),
-                stripe_price_id: Some("price_standard".to_string()),
-                expected_stripe_price_id: Some("price_standard".to_string()),
-                subscription_status: BillingSubscriptionStatus::Active,
-                current_period_end: Some("2026-07-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_second_active".to_string()),
-                stripe_event_created: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert_eq!(
-            ignored.stripe_subscription_id.as_deref(),
-            Some("sub_current")
-        );
-        assert_eq!(
-            state.customer_billing_accounts[&org_id]
-                .last_stripe_event_id
-                .as_deref(),
-            Some("evt_current_active")
-        );
+            let ignored = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id.clone()),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_second".to_string(),
+                    stripe_price_id: Some("price_standard".to_string()),
+                    expected_stripe_price_id: Some("price_standard".to_string()),
+                    subscription_status: BillingSubscriptionStatus::Active,
+                    current_period_end: Some("2026-07-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_second_active".to_string()),
+                    stripe_event_created: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                ignored.stripe_subscription_id.as_deref(),
+                Some("sub_current")
+            );
+            assert_eq!(
+                db.customer_billing_account(&org_id)
+                    .await
+                    .unwrap()
+                    .last_stripe_event_id
+                    .as_deref(),
+                Some("evt_current_active")
+            );
 
-        state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
+            db.sync_stripe_subscription(SyncStripeSubscriptionInput {
                 customer_org_id: Some(org_id.clone()),
                 stripe_customer_id: "cus_paid".to_string(),
                 stripe_subscription_id: "sub_current".to_string(),
@@ -11308,175 +6454,192 @@ mod tests {
                 stripe_event_created: None,
                 now: Some("2026-05-25T14:00:00Z".to_string()),
             })
+            .await
             .unwrap();
 
-        let replacement = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id.clone()),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_replacement".to_string(),
-                stripe_price_id: Some("price_standard".to_string()),
-                expected_stripe_price_id: Some("price_standard".to_string()),
-                subscription_status: BillingSubscriptionStatus::Active,
-                current_period_end: Some("2026-08-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_replacement_active".to_string()),
-                stripe_event_created: None,
-                now: Some("2026-05-25T15:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(
-            replacement.stripe_subscription_id.as_deref(),
-            Some("sub_replacement")
-        );
+            let replacement = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id.clone()),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_replacement".to_string(),
+                    stripe_price_id: Some("price_standard".to_string()),
+                    expected_stripe_price_id: Some("price_standard".to_string()),
+                    subscription_status: BillingSubscriptionStatus::Active,
+                    current_period_end: Some("2026-08-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_replacement_active".to_string()),
+                    stripe_event_created: None,
+                    now: Some("2026-05-25T15:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                replacement.stripe_subscription_id.as_deref(),
+                Some("sub_replacement")
+            );
 
-        let old_event = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id.clone()),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_current".to_string(),
-                stripe_price_id: Some("price_standard".to_string()),
-                expected_stripe_price_id: Some("price_standard".to_string()),
-                subscription_status: BillingSubscriptionStatus::PastDue,
-                current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_current_late_past_due".to_string()),
-                stripe_event_created: None,
-                now: Some("2026-05-25T16:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(
-            old_event.stripe_subscription_id.as_deref(),
-            Some("sub_replacement")
-        );
-        assert_eq!(
-            state.customer_billing_accounts[&org_id]
-                .subscription_status
-                .unwrap(),
-            BillingSubscriptionStatus::Active
-        );
+            let old_event = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id.clone()),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_current".to_string(),
+                    stripe_price_id: Some("price_standard".to_string()),
+                    expected_stripe_price_id: Some("price_standard".to_string()),
+                    subscription_status: BillingSubscriptionStatus::PastDue,
+                    current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_current_late_past_due".to_string()),
+                    stripe_event_created: None,
+                    now: Some("2026-05-25T16:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                old_event.stripe_subscription_id.as_deref(),
+                Some("sub_replacement")
+            );
+            assert_eq!(
+                db.customer_billing_account(&org_id)
+                    .await
+                    .unwrap()
+                    .subscription_status
+                    .unwrap(),
+                BillingSubscriptionStatus::Active
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn stripe_subscription_sync_ignores_stale_out_of_order_event() {
-        // Event-ordering guard: for the SAME subscription, a webhook whose Stripe
-        // `event.created` predates the last applied event must be ignored, so a
-        // stale `active` delivered after `canceled` cannot resurrect billing.
-        let mut state = BridgeCoreState::default();
-        state
-            .link_stripe_customer(LinkStripeCustomerInput {
+    #[tokio::test]
+    async fn stripe_subscription_sync_ignores_stale_out_of_order_event() {
+        with_isolated_postgres(|db| async move {
+            // Event-ordering guard: for the SAME subscription, a webhook whose Stripe
+            // `event.created` predates the last applied event must be ignored, so a
+            // stale `active` delivered after `canceled` cannot resurrect billing.
+            db.link_stripe_customer(LinkStripeCustomerInput {
                 verified_email: "order@finite.vip".to_string(),
                 workos_user_id: "user_workos_order".to_string(),
                 stripe_customer_id: "cus_order".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let org_id = state
-            .find_personal_org_by_owner(&state.find_user_by_email("order@finite.vip").unwrap().id)
-            .unwrap()
-            .id;
-
-        let mut sync = |status: BillingSubscriptionStatus, event: &str, created: i64| {
-            state
-                .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                    customer_org_id: Some(org_id.clone()),
-                    stripe_customer_id: "cus_order".to_string(),
-                    stripe_subscription_id: "sub_order".to_string(),
-                    stripe_price_id: Some("price_standard".to_string()),
-                    expected_stripe_price_id: Some("price_standard".to_string()),
-                    subscription_status: status,
-                    current_period_end: Some("2026-08-01T12:00:00Z".to_string()),
-                    cancel_at_period_end: false,
-                    stripe_event_id: Some(event.to_string()),
-                    stripe_event_created: Some(created),
-                    now: Some(NOW.to_string()),
-                })
+            let org_id = db
+                .personal_org_by_owner(&db.user_by_email("order@finite.vip").await.unwrap().id)
+                .await
                 .unwrap()
-        };
+                .id;
 
-        sync(BillingSubscriptionStatus::Active, "evt_active", 1_000);
-        let canceled = sync(BillingSubscriptionStatus::Canceled, "evt_canceled", 2_000);
-        assert_eq!(
-            canceled.subscription_status,
-            Some(BillingSubscriptionStatus::Canceled)
-        );
+            sync_order_subscription(
+                &db,
+                &org_id,
+                BillingSubscriptionStatus::Active,
+                "evt_active",
+                1_000,
+            )
+            .await;
+            let canceled = sync_order_subscription(
+                &db,
+                &org_id,
+                BillingSubscriptionStatus::Canceled,
+                "evt_canceled",
+                2_000,
+            )
+            .await;
+            assert_eq!(
+                canceled.subscription_status,
+                Some(BillingSubscriptionStatus::Canceled)
+            );
 
-        // Stale `active` (created BEFORE the canceled event) arrives last.
-        let stale = sync(BillingSubscriptionStatus::Active, "evt_active_stale", 1_500);
-        assert_eq!(
-            stale.subscription_status,
-            Some(BillingSubscriptionStatus::Canceled),
-            "stale out-of-order webhook must be ignored; billing stays canceled"
-        );
-        assert_eq!(stale.last_stripe_event_id.as_deref(), Some("evt_canceled"));
+            // Stale `active` (created BEFORE the canceled event) arrives last.
+            let stale = sync_order_subscription(
+                &db,
+                &org_id,
+                BillingSubscriptionStatus::Active,
+                "evt_active_stale",
+                1_500,
+            )
+            .await;
+            assert_eq!(
+                stale.subscription_status,
+                Some(BillingSubscriptionStatus::Canceled),
+                "stale out-of-order webhook must be ignored; billing stays canceled"
+            );
+            assert_eq!(stale.last_stripe_event_id.as_deref(), Some("evt_canceled"));
+        })
+        .await;
     }
 
-    #[test]
-    fn stripe_subscription_sync_requires_standard_price_before_entitlement() {
-        let mut state = BridgeCoreState::default();
-        state
-            .link_stripe_customer(LinkStripeCustomerInput {
+    #[tokio::test]
+    async fn stripe_subscription_sync_requires_standard_price_before_entitlement() {
+        with_isolated_postgres(|db| async move {
+            db.link_stripe_customer(LinkStripeCustomerInput {
                 verified_email: "paid@finite.vip".to_string(),
                 workos_user_id: "user_workos_paid".to_string(),
                 stripe_customer_id: "cus_paid".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let org_id = state
-            .find_personal_org_by_owner(&state.find_user_by_email("paid@finite.vip").unwrap().id)
-            .unwrap()
-            .id;
+            let org_id = db
+                .personal_org_by_owner(&db.user_by_email("paid@finite.vip").await.unwrap().id)
+                .await
+                .unwrap()
+                .id;
 
-        let wrong_price = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id.clone()),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_wrong_price".to_string(),
-                stripe_price_id: Some("price_other".to_string()),
-                expected_stripe_price_id: Some("price_standard".to_string()),
-                subscription_status: BillingSubscriptionStatus::Active,
-                current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_wrong_price_active".to_string()),
-                stripe_event_created: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            wrong_price,
-            CoreError::StripeSubscriptionPriceMismatch
-        ));
-        assert!(state.agent_creation_entitlements.is_empty());
+            let wrong_price = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id.clone()),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_wrong_price".to_string(),
+                    stripe_price_id: Some("price_other".to_string()),
+                    expected_stripe_price_id: Some("price_standard".to_string()),
+                    subscription_status: BillingSubscriptionStatus::Active,
+                    current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_wrong_price_active".to_string()),
+                    stripe_event_created: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                wrong_price,
+                CoreError::StripeSubscriptionPriceMismatch
+            ));
+            assert!(db.all("agent_creation_entitlements").await.is_empty());
 
-        let missing_expected_price = state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: Some(org_id),
-                stripe_customer_id: "cus_paid".to_string(),
-                stripe_subscription_id: "sub_missing_expected".to_string(),
-                stripe_price_id: Some("price_standard".to_string()),
-                expected_stripe_price_id: None,
-                subscription_status: BillingSubscriptionStatus::Trialing,
-                current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
-                cancel_at_period_end: false,
-                stripe_event_id: Some("evt_missing_expected_trialing".to_string()),
-                stripe_event_created: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            missing_expected_price,
-            CoreError::MissingStripeStandardPriceId
-        ));
-        assert!(state.agent_creation_entitlements.is_empty());
+            let missing_expected_price = db
+                .sync_stripe_subscription(SyncStripeSubscriptionInput {
+                    customer_org_id: Some(org_id),
+                    stripe_customer_id: "cus_paid".to_string(),
+                    stripe_subscription_id: "sub_missing_expected".to_string(),
+                    stripe_price_id: Some("price_standard".to_string()),
+                    expected_stripe_price_id: None,
+                    subscription_status: BillingSubscriptionStatus::Trialing,
+                    current_period_end: Some("2026-06-25T12:00:00Z".to_string()),
+                    cancel_at_period_end: false,
+                    stripe_event_id: Some("evt_missing_expected_trialing".to_string()),
+                    stripe_event_created: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                missing_expected_price,
+                CoreError::MissingStripeStandardPriceId
+            ));
+            assert!(db.all("agent_creation_entitlements").await.is_empty());
+        })
+        .await;
     }
 
-    #[test]
-    fn stripe_subscription_lapse_preserves_launch_code_entitlement() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        let launch_code_id = issued_launch_code_id(&state, &launch_code);
-        state
-            .request_agent_creation(RequestAgentCreationInput {
+    #[tokio::test]
+    async fn stripe_subscription_lapse_preserves_launch_code_entitlement() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            let launch_code_id = issued_launch_code_id(&db, &launch_code).await;
+            db.request_agent_creation(RequestAgentCreationInput {
                 verified_email: "bridge@finite.vip".to_string(),
                 workos_user_id: "user_workos_bridge".to_string(),
                 display_name: "Bridge Agent".to_string(),
@@ -11484,22 +6647,23 @@ mod tests {
                 idempotency_key: "bridge-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let org_id = state
-            .find_personal_org_by_owner(&state.find_user_by_email("bridge@finite.vip").unwrap().id)
-            .unwrap()
-            .id;
-        assert_eq!(
-            state
-                .agent_creation_entitlements
-                .values()
-                .find(|entitlement| entitlement.customer_org_id == org_id)
-                .and_then(|entitlement| entitlement.launch_code.as_deref()),
-            Some(launch_code_id.as_str())
-        );
+            let org_id = db
+                .personal_org_by_owner(&db.user_by_email("bridge@finite.vip").await.unwrap().id)
+                .await
+                .unwrap()
+                .id;
+            assert_eq!(
+                db.all("agent_creation_entitlements")
+                    .await
+                    .iter()
+                    .find(|entitlement| entitlement["customer_org_id"] == org_id.as_str())
+                    .and_then(|entitlement| entitlement["launch_code"].as_str()),
+                Some(launch_code_id.as_str())
+            );
 
-        state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
+            db.sync_stripe_subscription(SyncStripeSubscriptionInput {
                 customer_org_id: Some(org_id.clone()),
                 stripe_customer_id: "cus_bridge".to_string(),
                 stripe_subscription_id: "sub_bridge".to_string(),
@@ -11512,16 +6676,18 @@ mod tests {
                 stripe_event_created: None,
                 now: Some(LATER.to_string()),
             })
+            .await
             .unwrap();
-        assert_eq!(
-            state.agent_creation_entitlements[&agent_creation_entitlement_id_for(&org_id)]
-                .launch_code
-                .as_deref(),
-            Some(launch_code_id.as_str())
-        );
+            assert_eq!(
+                db.agent_creation_entitlement(&org_id)
+                    .await
+                    .unwrap()
+                    .launch_code
+                    .as_deref(),
+                Some(launch_code_id.as_str())
+            );
 
-        state
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
+            db.sync_stripe_subscription(SyncStripeSubscriptionInput {
                 customer_org_id: Some(org_id.clone()),
                 stripe_customer_id: "cus_bridge".to_string(),
                 stripe_subscription_id: "sub_bridge".to_string(),
@@ -11534,503 +6700,564 @@ mod tests {
                 stripe_event_created: None,
                 now: Some("2026-05-25T14:00:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let entitlement =
-            &state.agent_creation_entitlements[&agent_creation_entitlement_id_for(&org_id)];
-        assert_eq!(
-            entitlement.launch_code.as_deref(),
-            Some(launch_code_id.as_str())
-        );
-        assert_eq!(entitlement.allowed_new_agent_runtimes, 1);
+            let entitlement = &db.agent_creation_entitlement(&org_id).await.unwrap();
+            assert_eq!(
+                entitlement.launch_code.as_deref(),
+                Some(launch_code_id.as_str())
+            );
+            assert_eq!(entitlement.allowed_new_agent_runtimes, 1);
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_runtime_key_provisioning_is_bound_to_launching_request() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                display_name: "Oslo Agent".to_string(),
-                launch_code: launch_code.clone(),
-                idempotency_key: "first-submit".to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                source_host_id: None,
-                lease_token: "lease-token-1".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .expect("request should be leased");
-
-        let provisioned = state
-            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                source_host_id: Some("oslo-host-1".to_string()),
-                source_machine_id: Some("finite-agent_123".to_string()),
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap();
-
-        assert!(provisioned.raw_api_key.starts_with("fpk_live_"));
-        assert_eq!(provisioned.grant.status, FinitePrivateGrantStatus::Active);
-        assert_eq!(
-            provisioned.api_key.project_id.as_deref(),
-            Some(requested.project.id.as_str())
-        );
-        assert!(provisioned.api_key.agent_runtime_id.is_none());
-        assert!(
-            !serde_json::to_string(&state.finite_private_api_keys)
+    #[tokio::test]
+    async fn finite_private_runtime_key_provisioning_is_bound_to_launching_request() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    display_name: "Oslo Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: "first-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-token-1".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
                 .unwrap()
-                .contains(&provisioned.raw_api_key)
-        );
+                .expect("request should be leased");
 
-        let wrong_lease = state
-            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "wrong-token".to_string(),
-                source_host_id: Some("oslo-host-1".to_string()),
-                source_machine_id: Some("finite-agent_123".to_string()),
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            wrong_lease,
-            CoreError::AgentCreationRequestLeaseConflict
-        ));
+            let provisioned = db
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    source_machine_id: Some("finite-agent_123".to_string()),
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        let unrelated_key = state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-                grant_id: provisioned.grant.id.clone(),
-                raw_key: "fpk_live_unrelated_project_key".to_string(),
-                project_id: Some("project-unrelated".to_string()),
-                agent_runtime_id: None,
-                now: Some("2026-05-25T13:01:30Z".to_string()),
-            })
-            .unwrap();
-        let mismatched = state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                failure_message: "runtime failed".to_string(),
-                provisioned_finite_private_api_key_id: Some(unrelated_key.id.clone()),
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(mismatched, CoreError::InvalidFinitePrivateApiKey));
-        assert_eq!(
-            state.agent_creation_requests[&lease.request.id].status,
-            AgentCreationRequestStatus::Launching
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&unrelated_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
+            assert!(provisioned.raw_api_key.starts_with("fpk_live_"));
+            assert_eq!(provisioned.grant.status, FinitePrivateGrantStatus::Active);
+            assert_eq!(
+                provisioned.api_key.project_id.as_deref(),
+                Some(requested.project.id.as_str())
+            );
+            assert!(provisioned.api_key.agent_runtime_id.is_none());
+            assert!(
+                !serde_json::to_string(&db.all("finite_private_api_keys").await)
+                    .unwrap()
+                    .contains(&provisioned.raw_api_key)
+            );
 
-        let failed = state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
-                request_id: lease.request.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                failure_message: "runtime failed".to_string(),
-                provisioned_finite_private_api_key_id: Some(provisioned.api_key.id.clone()),
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
-        assert_eq!(
-            state.finite_private_api_keys[&provisioned.api_key.id].status,
-            FinitePrivateApiKeyStatus::Revoked
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&unrelated_key.id].status,
-            FinitePrivateApiKeyStatus::Active
-        );
+            let wrong_lease = db
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "wrong-token".to_string(),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    source_machine_id: Some("finite-agent_123".to_string()),
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                wrong_lease,
+                CoreError::AgentCreationRequestLeaseConflict
+            ));
+
+            let unrelated_key = db
+                .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                    grant_id: provisioned.grant.id.clone(),
+                    raw_key: "fpk_live_unrelated_project_key".to_string(),
+                    project_id: None,
+                    agent_runtime_id: None,
+                    now: Some("2026-05-25T13:01:30Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let mismatched = db
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    failure_message: "runtime failed".to_string(),
+                    provisioned_finite_private_api_key_id: Some(unrelated_key.id.clone()),
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(mismatched, CoreError::InvalidFinitePrivateApiKey));
+            assert_eq!(
+                db.agent_creation_request(&lease.request.id)
+                    .await
+                    .unwrap()
+                    .status,
+                AgentCreationRequestStatus::Launching
+            );
+            assert_eq!(
+                db.finite_private_api_key(&unrelated_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+
+            let failed = db
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: lease.request.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "lease-token-1".to_string(),
+                    failure_message: "runtime failed".to_string(),
+                    provisioned_finite_private_api_key_id: Some(provisioned.api_key.id.clone()),
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+            assert_eq!(
+                db.finite_private_api_key(&provisioned.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Revoked
+            );
+            assert_eq!(
+                db.finite_private_api_key(&unrelated_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_reserve_and_settle_keeps_core_as_usage_authority() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "private@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_private".to_string()),
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let key = state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id.clone(),
-                raw_key: "fpk_live_secret".to_string(),
-                project_id: Some("project-private".to_string()),
-                agent_runtime_id: Some("runtime-private".to_string()),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        assert_ne!(key.key_hash, "fpk_live_secret");
-        assert!(
-            !serde_json::to_string(&state.finite_private_api_keys)
-                .unwrap()
-                .contains("fpk_live_secret")
-        );
+    #[tokio::test]
+    async fn finite_private_reserve_and_settle_keeps_core_as_usage_authority() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "private@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_private".to_string()),
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let key = db
+                .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                    grant_id: grant.id.clone(),
+                    raw_key: "fpk_live_secret".to_string(),
+                    project_id: None,
+                    agent_runtime_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_ne!(key.key_hash, "fpk_live_secret");
+            assert!(
+                !serde_json::to_string(&db.all("finite_private_api_keys").await)
+                    .unwrap()
+                    .contains("fpk_live_secret")
+            );
 
-        let reserved = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-private-1".to_string(),
-                presented_api_key: "fpk_live_secret".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "kimi-k2-6".to_string(),
-                estimated_prompt_tokens: 120_000,
-                estimated_completion_tokens: 4_096,
-                estimated_usage_units: 250_000,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-25T13:00:00Z".to_string()),
-            })
-            .unwrap();
+            let reserved = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-private-1".to_string(),
+                    presented_api_key: "fpk_live_secret".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "kimi-k2-6".to_string(),
+                    estimated_prompt_tokens: 120_000,
+                    estimated_completion_tokens: 4_096,
+                    estimated_usage_units: 250_000,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-25T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert_eq!(reserved.decision, "allow");
-        assert_eq!(reserved.burst_limit_units, Some(100_000_000));
-        assert_eq!(reserved.burst_remaining_units, Some(99_750_000));
-        assert_eq!(reserved.weekly_limit_units, None);
-        assert_eq!(reserved.weekly_remaining_units, None);
-        let reservation_id = reserved.reservation_id.clone().unwrap();
-        assert_eq!(
-            state.finite_private_grants[&grant.id].current_window_used_units,
-            250_000
-        );
+            assert_eq!(reserved.decision, "allow");
+            assert_eq!(reserved.burst_limit_units, Some(100_000_000));
+            assert_eq!(reserved.burst_remaining_units, Some(99_750_000));
+            assert_eq!(reserved.weekly_limit_units, None);
+            assert_eq!(reserved.weekly_remaining_units, None);
+            let reservation_id = reserved.reservation_id.clone().unwrap();
+            assert_eq!(
+                db.finite_private_grant(&grant.id)
+                    .await
+                    .unwrap()
+                    .current_window_used_units,
+                250_000
+            );
 
-        let settled = state
-            .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
-                reservation_id: reservation_id.clone(),
-                request_id: "req-private-1".to_string(),
-                settlement: FinitePrivateSettlementKind::Actual,
-                prompt_tokens: Some(120_000),
-                completion_tokens: Some(1_200),
-                usage_units: Some(160_000),
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                upstream_status: Some(200),
-                upstream_error_class: None,
-                now: Some("2026-05-25T13:05:00Z".to_string()),
-            })
-            .unwrap();
+            let settled = db
+                .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
+                    reservation_id: reservation_id.clone(),
+                    request_id: "req-private-1".to_string(),
+                    settlement: FinitePrivateSettlementKind::Actual,
+                    prompt_tokens: Some(120_000),
+                    completion_tokens: Some(1_200),
+                    usage_units: Some(160_000),
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    upstream_status: Some(200),
+                    upstream_error_class: None,
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
 
-        assert!(settled.settled);
-        assert_eq!(
-            state.finite_private_grants[&grant.id].current_window_used_units,
-            160_000
-        );
-        let reservation = &state.finite_private_reservations[&reservation_id];
-        assert_eq!(reservation.status, FinitePrivateReservationStatus::Settled);
-        assert_eq!(
-            reservation.settlement_kind,
-            Some(FinitePrivateSettlementKind::Actual)
-        );
-        assert_eq!(reservation.settled_usage_units, Some(160_000));
+            assert!(settled.settled);
+            assert_eq!(
+                db.finite_private_grant(&grant.id)
+                    .await
+                    .unwrap()
+                    .current_window_used_units,
+                160_000
+            );
+            let reservation = &db
+                .finite_private_reservation(&reservation_id)
+                .await
+                .unwrap();
+            assert_eq!(reservation.status, FinitePrivateReservationStatus::Settled);
+            assert_eq!(
+                reservation.settlement_kind,
+                Some(FinitePrivateSettlementKind::Actual)
+            );
+            assert_eq!(reservation.settled_usage_units, Some(160_000));
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_grant_can_start_as_pending_email_and_later_link_workos() {
-        let mut state = BridgeCoreState::default();
-        let pending_grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "friend@finite.vip".to_string(),
-                workos_user_id: None,
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let pending_user = state.users.get(&pending_grant.user_id).unwrap();
-        assert_eq!(pending_user.email, "friend@finite.vip");
-        assert_eq!(pending_user.status, UserLinkStatus::Pending);
-        assert_eq!(pending_user.workos_user_id, None);
+    #[tokio::test]
+    async fn finite_private_grant_can_start_as_pending_email_and_later_link_workos() {
+        with_isolated_postgres(|db| async move {
+            let pending_grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "friend@finite.vip".to_string(),
+                    workos_user_id: None,
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let pending_user = db.user(&pending_grant.user_id).await.unwrap();
+            assert_eq!(pending_user.email, "friend@finite.vip");
+            assert_eq!(pending_user.status, UserLinkStatus::Pending);
+            assert_eq!(pending_user.workos_user_id, None);
 
-        let linked_grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "friend@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_friend".to_string()),
-                limit_profile_id: None,
-                now: Some("2026-05-26T13:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(linked_grant.id, pending_grant.id);
-        let linked_user = state.users.get(&linked_grant.user_id).unwrap();
-        assert_eq!(linked_user.status, UserLinkStatus::Linked);
-        assert_eq!(
-            linked_user.workos_user_id.as_deref(),
-            Some("user_workos_friend")
-        );
+            let linked_grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "friend@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_friend".to_string()),
+                    limit_profile_id: None,
+                    now: Some("2026-05-26T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(linked_grant.id, pending_grant.id);
+            let linked_user = db.user(&linked_grant.user_id).await.unwrap();
+            assert_eq!(linked_user.status, UserLinkStatus::Linked);
+            assert_eq!(
+                linked_user.workos_user_id.as_deref(),
+                Some("user_workos_friend")
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_admin_operations_write_audit_events_without_raw_keys() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "friend@finite.vip".to_string(),
-                workos_user_id: None,
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let key = state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id.clone(),
-                raw_key: "fpk_live_first_secret".to_string(),
-                project_id: Some("project_friend".to_string()),
-                agent_runtime_id: None,
-                now: Some("2026-05-26T12:01:00Z".to_string()),
-            })
-            .unwrap();
-        state
-            .reset_finite_private_usage_window(ResetFinitePrivateUsageWindowInput {
+    #[tokio::test]
+    async fn finite_private_admin_operations_write_audit_events_without_raw_keys() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "friend@finite.vip".to_string(),
+                    workos_user_id: None,
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let key = db
+                .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                    grant_id: grant.id.clone(),
+                    raw_key: "fpk_live_first_secret".to_string(),
+                    project_id: None,
+                    agent_runtime_id: None,
+                    now: Some("2026-05-26T12:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            db.reset_finite_private_usage_window(ResetFinitePrivateUsageWindowInput {
                 grant_id: grant.id.clone(),
                 now: Some("2026-05-26T12:02:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let rotated = state
-            .rotate_finite_private_api_key(RotateFinitePrivateApiKeyInput {
-                key_id: key.id.clone(),
-                raw_key: "fpk_live_second_secret".to_string(),
-                now: Some("2026-05-26T12:03:00Z".to_string()),
-            })
-            .unwrap();
-        state
-            .revoke_finite_private_grant(RevokeFinitePrivateGrantInput {
+            let rotated = db
+                .rotate_finite_private_api_key(RotateFinitePrivateApiKeyInput {
+                    key_id: key.id.clone(),
+                    raw_key: "fpk_live_second_secret".to_string(),
+                    now: Some("2026-05-26T12:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            db.revoke_finite_private_grant(RevokeFinitePrivateGrantInput {
                 grant_id: grant.id.clone(),
                 now: Some("2026-05-26T12:04:00Z".to_string()),
             })
+            .await
             .unwrap();
 
-        let actions = state
-            .finite_private_admin_audit_events
-            .values()
-            .map(|event| event.action.as_str())
-            .collect::<BTreeSet<_>>();
-        for expected in [
-            "finite_private.grant.approve",
-            "finite_private.api_key.issue",
-            "finite_private.grant.reset_window",
-            "finite_private.api_key.rotate",
-            "finite_private.grant.revoke",
-        ] {
-            assert!(actions.contains(expected));
-        }
-        assert_eq!(
-            state
-                .finite_private_admin_audit_events
-                .values()
-                .filter(|event| event.grant_id.as_deref() == Some(grant.id.as_str()))
-                .count(),
-            state.finite_private_admin_audit_events.len()
-        );
-        assert_eq!(
-            state.finite_private_api_keys[&rotated.id].status,
-            FinitePrivateApiKeyStatus::Revoked
-        );
-        let audit_json = serde_json::to_string(&state.finite_private_admin_audit_events).unwrap();
-        assert!(!audit_json.contains("fpk_live_first_secret"));
-        assert!(!audit_json.contains("fpk_live_second_secret"));
+            let events = db.finite_private_admin_audit_events().await.unwrap();
+            let actions = events
+                .iter()
+                .map(|event| event.action.as_str())
+                .collect::<BTreeSet<_>>();
+            for expected in [
+                "finite_private.grant.approve",
+                "finite_private.api_key.issue",
+                "finite_private.grant.reset_window",
+                "finite_private.api_key.rotate",
+                "finite_private.grant.revoke",
+            ] {
+                assert!(actions.contains(expected));
+            }
+            assert_eq!(
+                db.finite_private_admin_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.grant_id.as_deref() == Some(grant.id.as_str()))
+                    .count(),
+                db.table_len("finite_private_admin_audit_events").await
+            );
+            assert_eq!(
+                db.finite_private_api_key(&rotated.id).await.unwrap().status,
+                FinitePrivateApiKeyStatus::Revoked
+            );
+            let audit_json =
+                serde_json::to_string(&db.finite_private_admin_audit_events().await.unwrap())
+                    .unwrap();
+            assert!(!audit_json.contains("fpk_live_first_secret"));
+            assert!(!audit_json.contains("fpk_live_second_secret"));
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_reserve_denies_unknown_key_and_over_limit_without_upstream_work() {
-        let mut state = BridgeCoreState::default();
-        let unknown = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-private-unknown".to_string(),
-                presented_api_key: "fpk_live_unknown".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "kimi-k2-6".to_string(),
-                estimated_prompt_tokens: 100,
-                estimated_completion_tokens: 100,
-                estimated_usage_units: 200,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-25T13:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(unknown.decision, "deny");
-        assert_eq!(
-            unknown.error.as_ref().map(|error| error.code.as_str()),
-            Some("invalid_api_key")
-        );
-        assert!(state.finite_private_reservations.is_empty());
+    #[tokio::test]
+    async fn finite_private_reserve_denies_unknown_key_and_over_limit_without_upstream_work() {
+        with_isolated_postgres(|db| async move {
+            let unknown = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-private-unknown".to_string(),
+                    presented_api_key: "fpk_live_unknown".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "kimi-k2-6".to_string(),
+                    estimated_prompt_tokens: 100,
+                    estimated_completion_tokens: 100,
+                    estimated_usage_units: 200,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-25T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(unknown.decision, "deny");
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code.as_str()),
+                Some("invalid_api_key")
+            );
+            assert!(db.all_finite_private_reservations().await.is_empty());
 
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "private@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_private".to_string()),
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "private@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_private".to_string()),
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id.clone(),
                 raw_key: "fpk_live_secret".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
 
-        let denied = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-private-over".to_string(),
-                presented_api_key: "fpk_live_secret".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "kimi-k2-6".to_string(),
-                estimated_prompt_tokens: DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS + 1,
-                estimated_completion_tokens: 0,
-                estimated_usage_units: DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS + 1,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-25T13:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(denied.decision, "deny");
-        assert_eq!(
-            denied.error.as_ref().map(|error| error.code.as_str()),
-            Some("burst_window_limit_exceeded")
-        );
-        let denied_error = denied.error.as_ref().unwrap();
-        assert!(denied_error.message.contains("2026-05-25T18:00:00Z"));
-        assert!(denied_error.message.contains("(in 5h)"));
-        assert_eq!(
-            state.finite_private_grants[&grant.id].current_window_used_units,
-            0
-        );
-        assert!(state.finite_private_reservations.is_empty());
+            let denied = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-private-over".to_string(),
+                    presented_api_key: "fpk_live_secret".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "kimi-k2-6".to_string(),
+                    estimated_prompt_tokens: DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS + 1,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS + 1,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-25T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(denied.decision, "deny");
+            assert_eq!(
+                denied.error.as_ref().map(|error| error.code.as_str()),
+                Some("burst_window_limit_exceeded")
+            );
+            let denied_error = denied.error.as_ref().unwrap();
+            assert!(denied_error.message.contains("2026-05-25T18:00:00Z"));
+            assert!(denied_error.message.contains("(in 5h)"));
+            assert_eq!(
+                db.finite_private_grant(&grant.id)
+                    .await
+                    .unwrap()
+                    .current_window_used_units,
+                0
+            );
+            assert!(db.all_finite_private_reservations().await.is_empty());
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_weekly_limit_denies_without_upstream_work() {
-        let mut state = BridgeCoreState::default();
-        state.finite_private_limit_profiles.insert(
-            "weekly-small".to_string(),
-            FinitePrivateLimitProfile {
-                id: "weekly-small".to_string(),
-                burst_window_seconds: 3600,
-                burst_limit_units: 10_000_000,
-                weekly_limit_units: Some(1_000),
-                created_at: NOW.to_string(),
-                updated_at: NOW.to_string(),
-            },
-        );
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "private@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_private".to_string()),
-                limit_profile_id: Some("weekly-small".to_string()),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+    #[tokio::test]
+    async fn finite_private_weekly_limit_denies_without_upstream_work() {
+        with_isolated_postgres(|db| async move {
+            db.exec(
+                "INSERT INTO finite_private_limit_profiles \
+                 (id, burst_window_seconds, burst_limit_units, weekly_limit_units, \
+                  created_at, updated_at) \
+                 VALUES ('weekly-small', 3600, 10000000, 1000, \
+                 '2026-05-25T12:00:00Z', '2026-05-25T12:00:00Z')",
+            )
+            .await;
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "private@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_private".to_string()),
+                    limit_profile_id: Some("weekly-small".to_string()),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id.clone(),
                 raw_key: "fpk_live_secret".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
 
-        let allowed = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-private-weekly-1".to_string(),
-                presented_api_key: "fpk_live_secret".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
-                estimated_prompt_tokens: 800,
-                estimated_completion_tokens: 0,
-                estimated_usage_units: 800,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-25T13:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(allowed.decision, "allow");
-        assert_eq!(allowed.weekly_remaining_units, Some(200));
+            let allowed = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-private-weekly-1".to_string(),
+                    presented_api_key: "fpk_live_secret".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: 800,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: 800,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-25T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(allowed.decision, "allow");
+            assert_eq!(allowed.weekly_remaining_units, Some(200));
 
-        let denied = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-private-weekly-2".to_string(),
-                presented_api_key: "fpk_live_secret".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
-                estimated_prompt_tokens: 300,
-                estimated_completion_tokens: 0,
-                estimated_usage_units: 300,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-26T13:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(denied.decision, "deny");
-        assert_eq!(
-            denied.error.as_ref().map(|error| error.code.as_str()),
-            Some("weekly_limit_exceeded")
-        );
-        let denied_error = denied.error.as_ref().unwrap();
-        assert!(denied_error.message.contains("2026-06-01T13:00:00Z"));
-        assert!(denied_error.message.contains("(in 6d)"));
-        assert_eq!(state.finite_private_reservations.len(), 1);
+            let denied = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-private-weekly-2".to_string(),
+                    presented_api_key: "fpk_live_secret".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: 300,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: 300,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-26T13:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(denied.decision, "deny");
+            assert_eq!(
+                denied.error.as_ref().map(|error| error.code.as_str()),
+                Some("weekly_limit_exceeded")
+            );
+            let denied_error = denied.error.as_ref().unwrap();
+            assert!(denied_error.message.contains("2026-06-01T13:00:00Z"));
+            assert!(denied_error.message.contains("(in 6d)"));
+            assert_eq!(db.table_len("finite_private_reservations").await, 1);
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_status_does_not_start_or_roll_the_usage_window() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "status-read@finite.vip".to_string(),
-                workos_user_id: None,
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+    #[tokio::test]
+    async fn finite_private_status_does_not_start_or_roll_the_usage_window() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "status-read@finite.vip".to_string(),
+                    workos_user_id: None,
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id.clone(),
                 raw_key: "fpk_live_status_read".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
 
-        let status = state
-            .finite_private_usage_status_for_api_key(
-                "fpk_live_status_read",
-                false,
-                Some("2026-05-26T13:00:00Z".to_string()),
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(status.burst_used_units, 0);
-        assert_eq!(status.burst_reset_at, "2026-05-26T18:00:00Z");
-        let after_unstarted_read = &state.finite_private_grants[&grant.id];
-        assert!(after_unstarted_read.current_window_started_at.is_none());
-        assert_eq!(
-            after_unstarted_read.burst_window_epoch,
-            grant.burst_window_epoch
-        );
+            let status = db
+                .finite_private_usage_status_for_api_key(
+                    "fpk_live_status_read",
+                    false,
+                    Some("2026-05-26T13:00:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.burst_used_units, 0);
+            assert_eq!(status.burst_reset_at, "2026-05-26T18:00:00Z");
+            let after_unstarted_read = &db.finite_private_grant(&grant.id).await.unwrap();
+            assert!(after_unstarted_read.current_window_started_at.is_none());
+            assert_eq!(
+                after_unstarted_read.burst_window_epoch,
+                grant.burst_window_epoch
+            );
 
-        state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+            db.reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
                 request_id: "req-status-window".to_string(),
                 presented_api_key: "fpk_live_status_read".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
@@ -12042,81 +7269,94 @@ mod tests {
                 dashboard_url: "https://finite.computer/dashboard".to_string(),
                 now: Some("2026-05-26T14:00:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let started = state.finite_private_grants[&grant.id].clone();
-        assert_eq!(
-            started.current_window_started_at.as_deref(),
-            Some("2026-05-26T14:00:00Z")
-        );
+            let started = db.finite_private_grant(&grant.id).await.unwrap().clone();
+            assert_eq!(
+                started.current_window_started_at.as_deref(),
+                Some("2026-05-26T14:00:00Z")
+            );
 
-        let expired_status = state
-            .finite_private_usage_status_for_api_key(
-                "fpk_live_status_read",
-                false,
-                Some("2026-05-26T20:00:00Z".to_string()),
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(expired_status.burst_used_units, 0);
-        assert_eq!(expired_status.burst_reset_at, "2026-05-27T01:00:00Z");
-        assert_eq!(state.finite_private_grants[&grant.id], started);
+            let expired_status = db
+                .finite_private_usage_status_for_api_key(
+                    "fpk_live_status_read",
+                    false,
+                    Some("2026-05-26T20:00:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(expired_status.burst_used_units, 0);
+            assert_eq!(expired_status.burst_reset_at, "2026-05-27T01:00:00Z");
+            assert_eq!(db.finite_private_grant(&grant.id).await.unwrap(), started);
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_daily_reset_is_once_per_utc_day_and_epoch_safe() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "reset@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_reset".to_string()),
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+    #[tokio::test]
+    async fn finite_private_daily_reset_is_once_per_utc_day_and_epoch_safe() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "reset@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_reset".to_string()),
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id.clone(),
                 raw_key: "fpk_live_reset".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let reserved = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-before-reset".to_string(),
-                presented_api_key: "fpk_live_reset".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
-                estimated_prompt_tokens: 10,
-                estimated_completion_tokens: 0,
-                estimated_usage_units: 10,
-                usage_formula_version: "v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some("2026-05-26T23:59:00Z".to_string()),
-            })
-            .unwrap();
-        let old_epoch = state.finite_private_grants[&grant.id].burst_window_epoch;
+            let reserved = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-before-reset".to_string(),
+                    presented_api_key: "fpk_live_reset".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: 10,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: 10,
+                    usage_formula_version: "v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some("2026-05-26T23:59:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let old_epoch = db
+                .finite_private_grant(&grant.id)
+                .await
+                .unwrap()
+                .burst_window_epoch;
 
-        let reset = state
-            .claim_finite_private_daily_reset_for_api_key(
-                "fpk_live_reset",
-                Some("2026-05-26T23:59:30Z".to_string()),
-            )
-            .unwrap();
-        assert!(reset.performed);
-        assert_eq!(reset.status.burst_used_units, 0);
-        assert_eq!(
-            reset.status.free_daily_reset_available_again_at,
-            "2026-05-27T00:00:00Z"
-        );
-        assert_eq!(
-            state.finite_private_grants[&grant.id].burst_window_epoch,
-            old_epoch + 1
-        );
+            let reset = db
+                .claim_finite_private_daily_reset_for_api_key(
+                    "fpk_live_reset",
+                    Some("2026-05-26T23:59:30Z".to_string()),
+                )
+                .await
+                .unwrap();
+            assert!(reset.performed);
+            assert_eq!(reset.status.burst_used_units, 0);
+            assert_eq!(
+                reset.status.free_daily_reset_available_again_at,
+                "2026-05-27T00:00:00Z"
+            );
+            assert_eq!(
+                db.finite_private_grant(&grant.id)
+                    .await
+                    .unwrap()
+                    .burst_window_epoch,
+                old_epoch + 1
+            );
 
-        state
-            .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
+            db.settle_finite_private_reservation(SettleFinitePrivateReservationInput {
                 reservation_id: reserved.reservation_id.unwrap(),
                 request_id: "req-before-reset".to_string(),
                 settlement: FinitePrivateSettlementKind::Actual,
@@ -12128,70 +7368,79 @@ mod tests {
                 upstream_error_class: None,
                 now: Some("2026-05-26T23:59:40Z".to_string()),
             })
+            .await
             .unwrap();
-        assert_eq!(
-            state.finite_private_grants[&grant.id].current_window_used_units,
-            0
-        );
+            assert_eq!(
+                db.finite_private_grant(&grant.id)
+                    .await
+                    .unwrap()
+                    .current_window_used_units,
+                0
+            );
 
-        let repeated = state
-            .claim_finite_private_daily_reset_for_api_key(
-                "fpk_live_reset",
-                Some("2026-05-26T23:59:50Z".to_string()),
-            )
-            .unwrap();
-        assert!(!repeated.performed);
-        let next_day = state
-            .claim_finite_private_daily_reset_for_workos_user(
-                "user_workos_reset",
-                Some("2026-05-27T00:00:00Z".to_string()),
-            )
-            .unwrap()
-            .unwrap();
-        assert!(next_day.performed);
+            let repeated = db
+                .claim_finite_private_daily_reset_for_api_key(
+                    "fpk_live_reset",
+                    Some("2026-05-26T23:59:50Z".to_string()),
+                )
+                .await
+                .unwrap();
+            assert!(!repeated.performed);
+            let next_day = db
+                .claim_finite_private_daily_reset_for_workos_user(
+                    "user_workos_reset",
+                    Some("2026-05-27T00:00:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(next_day.performed);
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "notice@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_notice".to_string()),
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+    #[tokio::test]
+    async fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "notice@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_notice".to_string()),
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id,
                 raw_key: "fpk_live_notice".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
 
-        for (request_id, units, at) in [
-            ("req-notice-25", 76_000_000, "2026-05-26T13:00:00Z"),
-            ("req-notice-10", 16_000_000, "2026-05-26T13:10:00Z"),
-        ] {
-            let reserved = state
-                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                    request_id: request_id.to_string(),
-                    presented_api_key: "fpk_live_notice".to_string(),
-                    endpoint: "/v1/chat/completions".to_string(),
-                    model: "glm-5.2".to_string(),
-                    estimated_prompt_tokens: units,
-                    estimated_completion_tokens: 0,
-                    estimated_usage_units: units,
-                    usage_formula_version: "v1".to_string(),
-                    dashboard_url: "https://finite.computer/dashboard".to_string(),
-                    now: Some(at.to_string()),
-                })
-                .unwrap();
-            state
-                .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
+            for (request_id, units, at) in [
+                ("req-notice-25", 76_000_000, "2026-05-26T13:00:00Z"),
+                ("req-notice-10", 16_000_000, "2026-05-26T13:10:00Z"),
+            ] {
+                let reserved = db
+                    .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                        request_id: request_id.to_string(),
+                        presented_api_key: "fpk_live_notice".to_string(),
+                        endpoint: "/v1/chat/completions".to_string(),
+                        model: "glm-5.2".to_string(),
+                        estimated_prompt_tokens: units,
+                        estimated_completion_tokens: 0,
+                        estimated_usage_units: units,
+                        usage_formula_version: "v1".to_string(),
+                        dashboard_url: "https://finite.computer/dashboard".to_string(),
+                        now: Some(at.to_string()),
+                    })
+                    .await
+                    .unwrap();
+                db.settle_finite_private_reservation(SettleFinitePrivateReservationInput {
                     reservation_id: reserved.reservation_id.unwrap(),
                     request_id: request_id.to_string(),
                     settlement: FinitePrivateSettlementKind::Actual,
@@ -12203,105 +7452,114 @@ mod tests {
                     upstream_error_class: None,
                     now: Some(at.to_string()),
                 })
+                .await
                 .unwrap();
-            let status = state
+                let status = db
+                    .finite_private_usage_status_for_api_key(
+                        "fpk_live_notice",
+                        true,
+                        Some(at.to_string()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    status
+                        .notice
+                        .as_ref()
+                        .map(|notice| notice.threshold_remaining_percent),
+                    Some(if units == 76_000_000 { 25 } else { 10 })
+                );
+                assert!(
+                    status
+                        .notice
+                        .unwrap()
+                        .message
+                        .contains(&status.burst_reset_at)
+                );
+            }
+            let repeated = db
                 .finite_private_usage_status_for_api_key(
                     "fpk_live_notice",
                     true,
-                    Some(at.to_string()),
+                    Some("2026-05-26T13:20:00Z".to_string()),
                 )
+                .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                status
-                    .notice
-                    .as_ref()
-                    .map(|notice| notice.threshold_remaining_percent),
-                Some(if units == 76_000_000 { 25 } else { 10 })
-            );
-            assert!(
-                status
-                    .notice
-                    .unwrap()
-                    .message
-                    .contains(&status.burst_reset_at)
-            );
-        }
-        let repeated = state
-            .finite_private_usage_status_for_api_key(
-                "fpk_live_notice",
-                true,
-                Some("2026-05-26T13:20:00Z".to_string()),
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(repeated.notice, None);
+            assert_eq!(repeated.notice, None);
+        })
+        .await;
     }
 
-    #[test]
-    fn finite_private_settlement_retry_is_idempotent_but_mismatch_conflicts() {
-        let mut state = BridgeCoreState::default();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "settle@finite.vip".to_string(),
-                workos_user_id: None,
-                limit_profile_id: None,
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+    #[tokio::test]
+    async fn finite_private_settlement_retry_is_idempotent_but_mismatch_conflicts() {
+        with_isolated_postgres(|db| async move {
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "settle@finite.vip".to_string(),
+                    workos_user_id: None,
+                    limit_profile_id: None,
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
                 grant_id: grant.id,
                 raw_key: "fpk_live_settle".to_string(),
                 project_id: None,
                 agent_runtime_id: None,
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let reserved = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+            let reserved = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-settle-retry".to_string(),
+                    presented_api_key: "fpk_live_settle".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: 100,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: 100,
+                    usage_formula_version: "v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+            let input = SettleFinitePrivateReservationInput {
+                reservation_id: reserved.reservation_id.unwrap(),
                 request_id: "req-settle-retry".to_string(),
-                presented_api_key: "fpk_live_settle".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
-                estimated_prompt_tokens: 100,
-                estimated_completion_tokens: 0,
-                estimated_usage_units: 100,
+                settlement: FinitePrivateSettlementKind::Actual,
+                prompt_tokens: Some(80),
+                completion_tokens: Some(0),
+                usage_units: Some(80),
                 usage_formula_version: "v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
+                upstream_status: Some(200),
+                upstream_error_class: None,
                 now: Some(NOW.to_string()),
-            })
-            .unwrap();
-        let input = SettleFinitePrivateReservationInput {
-            reservation_id: reserved.reservation_id.unwrap(),
-            request_id: "req-settle-retry".to_string(),
-            settlement: FinitePrivateSettlementKind::Actual,
-            prompt_tokens: Some(80),
-            completion_tokens: Some(0),
-            usage_units: Some(80),
-            usage_formula_version: "v1".to_string(),
-            upstream_status: Some(200),
-            upstream_error_class: None,
-            now: Some(NOW.to_string()),
-        };
-        assert!(
-            state
-                .settle_finite_private_reservation(input.clone())
-                .unwrap()
-                .settled
-        );
-        assert!(
-            state
-                .settle_finite_private_reservation(input.clone())
-                .unwrap()
-                .settled
-        );
-        let mut mismatch = input;
-        mismatch.usage_units = Some(81);
-        assert!(matches!(
-            state.settle_finite_private_reservation(mismatch),
-            Err(CoreError::FinitePrivateReservationAlreadySettled)
-        ));
+            };
+            assert!(
+                db.settle_finite_private_reservation(input.clone())
+                    .await
+                    .unwrap()
+                    .settled
+            );
+            assert!(
+                db.settle_finite_private_reservation(input.clone())
+                    .await
+                    .unwrap()
+                    .settled
+            );
+            let mut mismatch = input;
+            mismatch.usage_units = Some(81);
+            assert!(matches!(
+                db.settle_finite_private_reservation(mismatch).await,
+                Err(CoreError::FinitePrivateReservationAlreadySettled)
+            ));
+        })
+        .await;
     }
 
     #[test]
@@ -12309,6 +7567,9 @@ mod tests {
         for table in [
             "users",
             "customer_orgs",
+            // Written only by the deleted existing-host import bridge; the
+            // table stays because production may hold rows from its 2026-07
+            // test run and dropping schema is a rollback boundary.
             "project_import_candidates",
             "projects",
             "runtime_artifacts",
@@ -12338,6 +7599,8 @@ mod tests {
         assert!(CORE_SCHEMA_SQL.contains("TIMESTAMPTZ"));
         assert!(CORE_SCHEMA_SQL.contains("finite-private-generous-v2"));
         assert!(CORE_SCHEMA_SQL.contains("100000000"));
+        assert!(CORE_SCHEMA_SQL.contains(FINITE_PRIVATE_5X_LIMIT_PROFILE));
+        assert!(CORE_SCHEMA_SQL.contains("500000000"));
         assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
     }
@@ -12478,1091 +7741,296 @@ mod tests {
         ));
     }
 
-    fn options<const N: usize>(
-        allowlisted_owner_emails: [&str; N],
-        now: &str,
-    ) -> ReconcileExistingHostImportsOptions {
-        ReconcileExistingHostImportsOptions {
-            allowlisted_owner_emails: allowlisted_owner_emails
-                .iter()
-                .map(|email| email.to_string())
-                .collect(),
-            now: Some(now.to_string()),
-        }
-    }
-
-    fn import(
-        source_host_id: &str,
-        source_machine_id: &str,
-        display_name: &str,
-        owner_email: Option<&str>,
-    ) -> ExistingHostProjectImport {
-        ExistingHostProjectImport {
-            source_host_id: source_host_id.to_string(),
-            source_machine_id: source_machine_id.to_string(),
-            owner_email: owner_email.map(str::to_string),
-            display_name: display_name.to_string(),
-            hostname: None,
-            runtime_host: None,
-            runtime_status: RuntimeSummaryStatus::Unknown,
-            active_inference_profile: None,
-            hermes_available: None,
-            published_app_urls: Vec::new(),
-            known_external_channel_participants: Vec::new(),
-            admin_visible_to_emails: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn admin_runtime_control_skips_owner_check_and_matches_runner_lease_shape() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "owner@finite.vip",
-            "user_workos_owner",
-            "first-submit",
-            "oslo-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-
-        // The owner-scoped path rejects non-owners outright.
-        let denied = state
-            .request_runtime_restart(RequestRuntimeRestartInput {
-                verified_email: "admin@finite.vip".to_string(),
-                workos_user_id: "user_workos_admin".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(denied, CoreError::ProjectNotFound));
-
-        // The admin path creates the request without owning the project.
-        let restart = state
-            .admin_request_runtime_restart(AdminRuntimeControlInput {
-                admin_verified_email: "Admin@Finite.VIP".to_string(),
-                admin_workos_user_id: "user_workos_admin".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:03:30Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(restart.project_id, project_id);
-        assert_eq!(restart.agent_runtime_id, runtime_id);
-        assert_eq!(restart.source_host_id, "oslo-host-1");
-        assert_eq!(restart.source_machine_id, "oslo-agent-001");
-        assert_eq!(restart.kind, RuntimeControlKind::Restart);
-        assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
-        assert_eq!(
-            restart.requested_by_user_id,
-            state.find_user_by_email("admin@finite.vip").unwrap().id
-        );
-
-        // Idempotent while an equivalent request is pending, like the owner path.
-        let duplicate = state
-            .admin_request_runtime_restart(AdminRuntimeControlInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "user_workos_admin".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(duplicate.id, restart.id);
-
-        // The runner consumes it through the exact same lease machinery.
-        let lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "admin-restart-lease-1".to_string(),
-                lease_seconds: Some(60),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:04:30Z".to_string()),
-            })
-            .unwrap()
-            .expect("admin restart request should lease");
-        assert_eq!(lease.request.id, restart.id);
-        assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
-        assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
-        let completed = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: restart.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "admin-restart-lease-1".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_capabilities: None,
-                runtime_host: None,
-                published_app_urls: None,
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:05:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
-
-        // Recovery is not restart-by-another-name: until a genuine recovery
-        // implementation exists, even the admin path is fail closed.
-        let recover_error = state
-            .admin_request_runtime_recover_known_good_chat(AdminRuntimeControlInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "user_workos_admin".to_string(),
-                project_id,
-                now: Some("2026-05-25T13:06:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            recover_error,
-            CoreError::RuntimeControlUnsupported
-        ));
-
-        let actions = state
-            .finite_private_admin_audit_events
-            .values()
-            .map(|event| (event.action.clone(), event.actor.clone()))
-            .collect::<Vec<_>>();
-        assert!(actions.contains(&(
-            "runtime.admin_restart".to_string(),
-            "admin@finite.vip".to_string()
-        )));
-        assert!(
-            !actions
-                .iter()
-                .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
-        );
-    }
-
-    #[test]
-    fn admin_runtime_retirement_requires_the_exact_active_binding() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "owner@finite.vip",
-            "user_workos_owner_retire",
-            "retire-submit",
-            "oslo-agent-retire",
-            "artifact-v1",
-            "2026-07-22T15:00:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        state
-            .agent_runtimes
-            .get_mut(&runtime_id)
-            .unwrap()
-            .runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            runtime_retirement: true,
-            ..*kata_runtime_capabilities().v1()
-        }));
-
-        let changed_binding = state
-            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "user_workos_admin_retire".to_string(),
-                project_id: project_id.clone(),
-                expected_agent_runtime_id: "runtime-replaced-after-review".to_string(),
-                expected_source_host_id: "oslo-host-1".to_string(),
-                expected_source_machine_id: "oslo-agent-retire".to_string(),
-                now: Some("2026-07-22T15:01:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
-        assert!(state.runtime_control_requests.is_empty());
-
-        let retirement = state
-            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
-                admin_verified_email: "Admin@Finite.VIP".to_string(),
-                admin_workos_user_id: "user_workos_admin_retire".to_string(),
-                project_id,
-                expected_agent_runtime_id: runtime_id.clone(),
-                expected_source_host_id: "oslo-host-1".to_string(),
-                expected_source_machine_id: "oslo-agent-retire".to_string(),
-                now: Some("2026-07-22T15:02:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(retirement.kind, RuntimeControlKind::Destroy);
-        assert_eq!(retirement.agent_runtime_id, runtime_id);
-        assert_eq!(retirement.status, RuntimeControlRequestStatus::Requested);
-        assert!(
-            state
-                .finite_private_admin_audit_events
-                .values()
-                .any(|event| {
-                    event.action == "runtime.admin_destroy"
-                        && event.actor == "admin@finite.vip"
-                        && event.target_id == retirement.agent_runtime_id
-                })
-        );
-    }
-
-    #[test]
-    fn unrecoverable_runtime_archive_is_exact_fail_closed_and_retains_history() {
-        let mut base = BridgeCoreState::default();
-        promote_runtime_artifact(&mut base);
-        let runtime_id = complete_self_serve_agent(
-            &mut base,
-            "owner@finite.vip",
-            "user_workos_owner_archive",
-            "archive-submit",
-            "legacy-agent-001",
-            "artifact-v1",
-            "2026-07-21T20:00:00Z",
-        );
-        let project_id = base.agent_runtimes[&runtime_id].project_id.clone();
-        let input = |compute_absent: bool| AdminArchiveUnrecoverableRuntimeInput {
-            admin_verified_email: "admin@finite.vip".to_string(),
-            admin_workos_user_id: "user_workos_admin_archive".to_string(),
-            project_id: project_id.clone(),
-            expected_agent_runtime_id: runtime_id.clone(),
-            expected_source_host_id: "oslo-host-1".to_string(),
-            expected_source_machine_id: "legacy-agent-001".to_string(),
-            expected_owner_email: "owner@finite.vip".to_string(),
-            operator_observed_compute_absent: compute_absent,
-            operator_observed_durable_state_absent: true,
-            owner_acknowledged_unrecoverable: true,
-            now: Some("2026-07-21T20:10:00Z".to_string()),
-        };
-
-        let mut missing_acknowledgement = base.clone();
-        assert!(matches!(
-            missing_acknowledgement.admin_archive_unrecoverable_runtime(input(false)),
-            Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired)
-        ));
-        assert!(
-            missing_acknowledgement
-                .active_runtime_for_project(&project_id)
-                .is_some()
-        );
-
-        let mut wrong_binding = base.clone();
-        let mut wrong_binding_input = input(true);
-        wrong_binding_input.expected_source_machine_id = "replacement-agent".to_string();
-        assert!(matches!(
-            wrong_binding.admin_archive_unrecoverable_runtime(wrong_binding_input),
-            Err(CoreError::RuntimeSpecMismatch)
-        ));
-
-        let mut provider_managed = base.clone();
-        provider_managed
-            .agent_runtimes
-            .get_mut(&runtime_id)
-            .unwrap()
-            .contact_endpoint = Some("https://legacy-agent.example.test/contact".to_string());
-        assert!(matches!(
-            provider_managed.admin_archive_unrecoverable_runtime(input(true)),
-            Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent)
-        ));
-
-        let mut control_in_flight = base.clone();
-        control_in_flight
-            .admin_request_runtime_restart(AdminRuntimeControlInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "user_workos_admin_archive".to_string(),
-                project_id: project_id.clone(),
-                now: Some("2026-07-21T20:05:00Z".to_string()),
-            })
-            .unwrap();
-        assert!(matches!(
-            control_in_flight.admin_archive_unrecoverable_runtime(input(true)),
-            Err(CoreError::RuntimeControlOperationConflict)
-        ));
-
-        let receipt = base
-            .admin_archive_unrecoverable_runtime(input(true))
-            .unwrap();
-        assert_eq!(receipt.project_id, project_id);
-        assert_eq!(receipt.agent_runtime_id, runtime_id);
-        assert_eq!(receipt.owner_email, "owner@finite.vip");
-        assert_eq!(receipt.revoked_finite_private_key_count, 0);
-        assert!(base.active_runtime_for_project(&project_id).is_none());
-        assert!(base.projects.contains_key(&project_id));
-        assert!(base.agent_runtimes.contains_key(&runtime_id));
-        assert!(base.project_room_memberships.values().any(|membership| {
-            membership.project_id == project_id
-                && membership.archived_at.as_deref() == Some("2026-07-21T20:10:00Z")
-        }));
-        assert!(
-            base.finite_private_admin_audit_events
-                .values()
-                .any(|event| {
-                    event.action == "runtime.admin_archive_unrecoverable"
-                        && event.target_id == runtime_id
-                        && event.actor == "admin@finite.vip"
-                })
-        );
-    }
-
-    #[test]
-    fn admin_friend_key_issue_mirrors_cli_and_records_admin_audit() {
-        let mut state = BridgeCoreState::default();
-        let raw_key = "fpk_live_test_friend_key_material_0001";
-        let issued = state
-            .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                friend_email: "Friend@Finite.VIP".to_string(),
-                limit_profile_id: None,
-                raw_key: raw_key.to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-
-        assert_eq!(issued.grant.status, FinitePrivateGrantStatus::Active);
-        assert_eq!(issued.grant.limit_profile_id, "finite-private-generous-v2");
-        assert_eq!(issued.api_key.status, FinitePrivateApiKeyStatus::Active);
-        assert_ne!(issued.api_key.key_hash, raw_key);
-        assert!(issued.api_key.project_id.is_none());
-        assert!(issued.api_key.agent_runtime_id.is_none());
-
-        let resolved = state
-            .finite_private_key_and_grant(raw_key)
-            .unwrap()
-            .expect("issued raw key should validate");
-        assert_eq!(resolved.0.id, issued.api_key.id);
-        assert_eq!(resolved.1.id, issued.grant.id);
-
-        let admin_event = state
-            .finite_private_admin_audit_events
-            .values()
-            .find(|event| event.action == "finite_private.friend_key.admin_issue")
-            .expect("friend key issue should record an admin audit event");
-        assert_eq!(admin_event.actor, "admin@finite.vip");
-        assert_eq!(
-            admin_event.api_key_id.as_deref(),
-            Some(issued.api_key.id.as_str())
-        );
-    }
-
-    #[test]
-    fn admin_rotate_invalidates_old_raw_key_and_revoke_disables_key() {
-        let mut state = BridgeCoreState::default();
-        let old_raw = "fpk_live_old_raw_key_material_000000001";
-        let issued = state
-            .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                friend_email: "friend@finite.vip".to_string(),
-                limit_profile_id: None,
-                raw_key: old_raw.to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-
-        let new_raw = "fpk_live_new_raw_key_material_000000002";
-        let rotated = state
-            .admin_rotate_finite_private_api_key(AdminRotateFinitePrivateApiKeyInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                key_id: issued.api_key.id.clone(),
-                raw_key: new_raw.to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert_ne!(rotated.id, issued.api_key.id);
-        assert_eq!(rotated.status, FinitePrivateApiKeyStatus::Active);
-
-        assert!(
-            state
-                .finite_private_key_and_grant(old_raw)
-                .unwrap()
-                .is_none(),
-            "old raw key must stop validating after rotate"
-        );
-        let resolved = state
-            .finite_private_key_and_grant(new_raw)
-            .unwrap()
-            .expect("new raw key should validate");
-        assert_eq!(resolved.0.id, rotated.id);
-        assert_eq!(
-            state.finite_private_api_keys[&issued.api_key.id].status,
-            FinitePrivateApiKeyStatus::Revoked
-        );
-
-        let revoked = state
-            .admin_revoke_finite_private_api_key(AdminRevokeFinitePrivateApiKeyInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                key_id: rotated.id.clone(),
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(revoked.status, FinitePrivateApiKeyStatus::Revoked);
-        assert!(
-            state
-                .finite_private_key_and_grant(new_raw)
-                .unwrap()
-                .is_none()
-        );
-
-        let actions = state
-            .finite_private_admin_audit_events
-            .values()
-            .filter(|event| event.actor == "admin@finite.vip")
-            .map(|event| event.action.clone())
-            .collect::<Vec<_>>();
-        assert!(actions.contains(&"finite_private.api_key.admin_rotate".to_string()));
-        assert!(actions.contains(&"finite_private.api_key.admin_revoke".to_string()));
-    }
-
-    #[test]
-    fn admin_window_reset_clears_burst_window_but_not_weekly_reservations() {
-        let mut state = BridgeCoreState::default();
-        let raw_key = "fpk_live_reset_raw_key_material_00000003";
-        let issued = state
-            .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                friend_email: "friend@finite.vip".to_string(),
-                limit_profile_id: None,
-                raw_key: raw_key.to_string(),
-                now: Some(NOW.to_string()),
-            })
-            .unwrap();
-
-        let decision = state
-            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
-                request_id: "req-1".to_string(),
-                presented_api_key: raw_key.to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "kimi-k2-6".to_string(),
-                estimated_prompt_tokens: 10,
-                estimated_completion_tokens: 10,
-                estimated_usage_units: 1_000,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        assert_eq!(decision.decision, "allow");
-        assert_eq!(
-            state.finite_private_grants[&issued.grant.id].current_window_used_units,
-            1_000
-        );
-
-        let reset = state
-            .admin_reset_finite_private_usage_window(AdminResetFinitePrivateUsageWindowInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                grant_id: issued.grant.id.clone(),
-                now: Some("2026-05-25T14:00:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(reset.current_window_used_units, 0);
-        assert_eq!(
-            reset.current_window_started_at.as_deref(),
-            Some("2026-05-25T14:00:00Z")
-        );
-
-        // Weekly usage is a rolling reservation window; reset must not touch it.
-        let (weekly_used, _) = state
-            .finite_private_weekly_usage(
-                &issued.grant.id,
-                parse_time("2026-05-25T14:00:00Z").unwrap(),
+    #[tokio::test]
+    async fn admin_runtime_control_skips_owner_check_and_matches_runner_lease_shape() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
             )
-            .unwrap();
-        assert_eq!(weekly_used, 1_000);
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
 
-        let admin_event = state
-            .finite_private_admin_audit_events
-            .values()
-            .find(|event| event.action == "finite_private.grant.admin_window_reset")
-            .expect("window reset should record an admin audit event");
-        assert_eq!(admin_event.actor, "admin@finite.vip");
-    }
+            // The owner-scoped path rejects non-owners outright.
+            let denied = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "admin@finite.vip".to_string(),
+                    workos_user_id: "user_workos_admin".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(denied, CoreError::ProjectNotFound));
 
-    #[test]
-    fn admin_runtime_overviews_assemble_provisioned_box_facts() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "owner@finite.vip",
-            "user_workos_owner",
-            "first-submit",
-            "oslo-agent-001",
-            "artifact-v1",
-            "2026-05-25T13:02:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        let grant = state
-            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
-                verified_email: "owner@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_owner".to_string()),
-                limit_profile_id: None,
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
-        state
-            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id.clone(),
-                raw_key: "fpk_live_overview_key_material_00000004".to_string(),
-                project_id: Some(project_id.clone()),
-                agent_runtime_id: Some(runtime_id.clone()),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap();
+            // The admin path creates the request without owning the project.
+            let restart = db
+                .admin_request_runtime_restart(AdminRuntimeControlInput {
+                    admin_verified_email: "Admin@Finite.VIP".to_string(),
+                    admin_workos_user_id: "user_workos_admin".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:03:30Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(restart.project_id, project_id);
+            assert_eq!(restart.agent_runtime_id, runtime_id);
+            assert_eq!(restart.source_host_id, "oslo-host-1");
+            assert_eq!(restart.source_machine_id, "oslo-agent-001");
+            assert_eq!(restart.kind, RuntimeControlKind::Restart);
+            assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
+            assert_eq!(
+                restart.requested_by_user_id,
+                db.user_by_email("admin@finite.vip").await.unwrap().id
+            );
 
-        let overviews = state.admin_runtime_overviews();
-        assert_eq!(overviews.len(), 1);
-        let overview = &overviews[0];
-        assert_eq!(overview.project_id, project_id);
-        assert_eq!(overview.agent_runtime_id, runtime_id);
-        assert_eq!(overview.owner_email.as_deref(), Some("owner@finite.vip"));
-        assert_eq!(overview.source_host_id, "oslo-host-1");
-        assert_eq!(overview.source_machine_id, "oslo-agent-001");
-        assert_eq!(overview.runtime_artifact_id.as_deref(), Some("artifact-v1"));
-        assert_eq!(
-            overview.runtime_artifact_version_label.as_deref(),
-            Some("v1")
-        );
-        assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Online);
-        assert_eq!(overview.hermes_available, Some(true));
-        assert_eq!(overview.active_finite_private_key_count, 1);
-        assert!(overview.runtime_link_active);
-        assert_eq!(
-            overview.runtime_capabilities,
-            Some(*kata_runtime_capabilities().v1())
-        );
-    }
+            // Idempotent while an equivalent request is pending, like the owner path.
+            let duplicate = db
+                .admin_request_runtime_restart(AdminRuntimeControlInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "user_workos_admin".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(duplicate.id, restart.id);
 
-    #[test]
-    fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_facts_atomically() {
-        let mut state = BridgeCoreState::default();
-        let launch_code = issue_test_launch_code(&mut state);
-        promote_runtime_artifact(&mut state);
-        let requested = state
-            .request_agent_creation_configured(
-                RequestAgentCreationInput {
-                    verified_email: "upgrade@finite.vip".to_string(),
-                    workos_user_id: "workos-upgrade".to_string(),
-                    display_name: "Upgrade Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "upgrade-agent".to_string(),
-                    now: Some(NOW.to_string()),
-                },
-                AgentCreationConfiguration {
-                    placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-                    requested_hosting_tier: None,
-                    profile_picture_url: None,
-                },
-            )
-            .unwrap();
-        state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "kata-runner".to_string(),
-                source_host_id: None,
-                lease_token: "launch-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some(LATER.to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        let completed = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: requested.request.id,
-                runner_id: "kata-runner".to_string(),
-                lease_token: "launch-lease".to_string(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "finite-kata-upgrade".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: None,
-                contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
-                runtime_capabilities: Some(kata_runtime_capabilities()),
-                display_name: None,
-                hostname: None,
-                runtime_host: Some("http://127.0.0.1:41001".to_string()),
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
-            .unwrap();
-        let runtime_id = completed.request.agent_runtime_id.unwrap();
-        state.runtime_relay_credentials.insert(
-            runtime_id.clone(),
-            RuntimeRelayCredential {
-                agent_runtime_id: runtime_id.clone(),
-                token_hash: "existing-relay-token-hash".to_string(),
-                created_at: "2026-05-25T13:02:00Z".to_string(),
-                updated_at: "2026-05-25T13:02:00Z".to_string(),
-            },
-        );
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-mutable",
-            "ghcr.io/finitecomputer/agent-runtime:latest",
-            "mutable",
-            "state-v1",
-            "2026-05-25T13:02:10Z",
-        );
-        let mutable = state
-            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: requested.project.id.clone(),
-                target_runtime_artifact_id: "artifact-mutable".to_string(),
-                now: Some("2026-05-25T13:02:20Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(mutable, CoreError::RuntimeUpgradeUnsupported));
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-incompatible",
-            &format!(
-                "ghcr.io/finitecomputer/agent-runtime:future@sha256:{}",
-                "c".repeat(64)
-            ),
-            "future",
-            "state-v2",
-            "2026-05-25T13:02:30Z",
-        );
-        let incompatible = state
-            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: requested.project.id.clone(),
-                target_runtime_artifact_id: "artifact-incompatible".to_string(),
-                now: Some("2026-05-25T13:02:40Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            incompatible,
-            CoreError::RuntimeUpgradeStateSchemaIncompatible
-        ));
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-v2",
-            &format!(
-                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
-                "b".repeat(64)
-            ),
-            "v2",
-            "state-v1",
-            "2026-05-25T13:03:00Z",
-        );
-        state
-            .runtime_artifacts
-            .get_mut("artifact-v2")
-            .unwrap()
-            .recover_known_good_chat = true;
-
-        let changed_binding = state
-            .admin_request_runtime_upgrade_exact(AdminRuntimeUpgradeExactInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: requested.project.id.clone(),
-                expected_agent_runtime_id: "runtime-replaced-after-plan".to_string(),
-                expected_source_host_id: "oslo-host-1".to_string(),
-                expected_source_machine_id: "finite-kata-upgrade".to_string(),
-                target_runtime_artifact_id: "artifact-v2".to_string(),
-                now: Some("2026-05-25T13:03:30Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
-        assert!(state.runtime_control_requests.is_empty());
-
-        let upgrade = state
-            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: requested.project.id.clone(),
-                target_runtime_artifact_id: "artifact-v2".to_string(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(upgrade.kind, RuntimeControlKind::Upgrade);
-        assert_eq!(
-            upgrade.target_runtime_artifact_id.as_deref(),
-            Some("artifact-v2")
-        );
-        let conflicting_stop = state
-            .request_runtime_stop(RequestRuntimeStopInput {
-                verified_email: "upgrade@finite.vip".to_string(),
-                workos_user_id: "workos-upgrade".to_string(),
-                project_id: requested.project.id.clone(),
-                now: Some("2026-05-25T13:04:30Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            conflicting_stop,
-            CoreError::RuntimeControlOperationConflict
-        ));
-        state
-            .runtime_artifacts
-            .get_mut("artifact-v2")
-            .unwrap()
-            .retired_at = Some("2026-05-25T13:04:40Z".to_string());
-        let healthy_runtime_id = "runtime-healthy-behind-poison".to_string();
-        let mut healthy_runtime = state.agent_runtimes[&runtime_id].clone();
-        healthy_runtime.id = healthy_runtime_id.clone();
-        healthy_runtime.source_machine_id = "healthy-behind-poison".to_string();
-        state
-            .agent_runtimes
-            .insert(healthy_runtime_id.clone(), healthy_runtime);
-        let healthy_request_id = "runtime_ctl_healthy_behind_poison".to_string();
-        state.runtime_control_requests.insert(
-            healthy_request_id.clone(),
-            RuntimeControlRequest {
-                id: healthy_request_id.clone(),
-                project_id: requested.project.id.clone(),
-                agent_runtime_id: healthy_runtime_id,
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "healthy-behind-poison".to_string(),
-                requested_by_user_id: "healthy-user".to_string(),
-                kind: RuntimeControlKind::Restart,
-                target_runtime_artifact_id: None,
-                status: RuntimeControlRequestStatus::Requested,
-                runner_id: None,
-                lease_token: None,
-                lease_expires_at: None,
-                failure_message: None,
-                created_at: "2026-05-25T13:04:45Z".to_string(),
-                updated_at: "2026-05-25T13:04:45Z".to_string(),
-                completed_at: None,
-            },
-        );
-        let healthy_lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "kata-runner".to_string(),
-                lease_token: "must-not-stick".to_string(),
-                lease_seconds: Some(300),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:04:50Z".to_string()),
-            })
-            .unwrap()
-            .expect("poisoned upgrade must not starve the next healthy request");
-        assert_eq!(healthy_lease.request.id, healthy_request_id);
-        assert_eq!(
-            state.runtime_control_requests[&upgrade.id].status,
-            RuntimeControlRequestStatus::Failed
-        );
-        assert!(
-            state.runtime_control_requests[&upgrade.id]
-                .failure_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("retired")
-        );
-        state
-            .runtime_artifacts
-            .get_mut("artifact-v2")
-            .unwrap()
-            .retired_at = None;
-        let legacy_creation = state
-            .agent_creation_requests
-            .values_mut()
-            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
-            .unwrap();
-        legacy_creation.runtime_spec = None;
-        let upgrade = state
-            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: requested.project.id.clone(),
-                target_runtime_artifact_id: "artifact-v2".to_string(),
-                now: Some("2026-05-25T13:04:55Z".to_string()),
-            })
-            .unwrap();
-        let refreshed_environment = BTreeMap::from([(
-            "FINITE_BRAIN_SERVER_URL".to_string(),
-            "https://brain.finite.computer".to_string(),
-        )]);
-        let refreshed_secret_references = vec!["FAL_KEY".to_string(), "XAI_API_KEY".to_string()];
-        let lease = state
-            .lease_runtime_control_request_with_runtime_configuration(
-                LeaseRuntimeControlRequestInput {
-                    runner_id: "kata-runner".to_string(),
-                    lease_token: "upgrade-lease".to_string(),
-                    lease_seconds: Some(300),
+            // The runner consumes it through the exact same lease machinery.
+            let lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "admin-restart-lease-1".to_string(),
+                    lease_seconds: Some(60),
                     source_host_id: Some("oslo-host-1".to_string()),
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
                         ..RunnerLeaseCapacity::default()
                     }),
-                    now: Some("2026-05-25T13:05:00Z".to_string()),
-                },
-                &refreshed_environment,
-                &refreshed_secret_references,
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            lease
-                .target_runtime_artifact
-                .as_ref()
-                .map(|artifact| artifact.id.as_str()),
-            Some("artifact-v2")
-        );
-        let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
-        assert_eq!(
-            runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
-            "finite-kata-upgrade",
-            "legacy synthesis preserves the source-machine /data directory"
-        );
-        assert_eq!(
-            runtime_spec_v1(synthesized_upgrade_spec).operation_id,
-            upgrade.id
-        );
-        assert_eq!(
-            runtime_spec_v1(synthesized_upgrade_spec).secret_references,
-            vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
-        );
-        assert_eq!(
-            runtime_spec_v1(synthesized_upgrade_spec).environment,
-            refreshed_environment
-        );
-
-        let mismatch = state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: upgrade.id.clone(),
-                runner_id: "kata-runner".to_string(),
-                lease_token: "upgrade-lease".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: Some("state-v1".to_string()),
-                runtime_capabilities: None,
-                runtime_host: Some("http://127.0.0.1:41002".to_string()),
-                published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
-                retirement_snapshot: None,
-                now: Some("2026-05-25T13:06:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            mismatch,
-            CoreError::RuntimeUpgradeCompletionMismatch
-        ));
-        assert_eq!(
-            state.runtime_control_requests[&upgrade.id].status,
-            RuntimeControlRequestStatus::Running
-        );
-        assert_eq!(
-            state.agent_runtimes[&runtime_id]
-                .runtime_artifact_id
-                .as_deref(),
-            Some("artifact-v1")
-        );
-
-        state
-            .runtime_artifacts
-            .get_mut("artifact-v2")
-            .unwrap()
-            .retired_at = Some("2026-05-25T13:06:30Z".to_string());
-        state
-            .complete_runtime_control_request_with_runtime_configuration(
-                CompleteRuntimeControlRequestInput {
-                    request_id: upgrade.id.clone(),
-                    runner_id: "kata-runner".to_string(),
-                    lease_token: "upgrade-lease".to_string(),
-                    runtime_artifact_id: Some("artifact-v2".to_string()),
-                    state_schema_version: Some("state-v1".to_string()),
-                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                        RuntimeCapabilitiesV1 {
-                            recover_known_good_chat: true,
-                            ..*kata_runtime_capabilities().v1()
-                        },
-                    )),
-                    runtime_host: Some("http://127.0.0.1:41002".to_string()),
-                    published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
-                    retirement_snapshot: None,
-                    now: Some("2026-05-25T13:06:40Z".to_string()),
-                },
-                Some(&refreshed_environment),
-                &refreshed_secret_references,
-            )
-            .unwrap();
-        let runtime = &state.agent_runtimes[&runtime_id];
-        assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
-        assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
-        assert_eq!(
-            runtime.contact_endpoint.as_deref(),
-            Some("http://127.0.0.1:41002/contact")
-        );
-        assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
-        assert!(
-            runtime
-                .runtime_capabilities
-                .as_ref()
-                .unwrap()
-                .v1()
-                .recover_known_good_chat
-        );
-        assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
-        let persisted_spec = state
-            .agent_creation_requests
-            .values()
-            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
-            .and_then(|request| request.runtime_spec.as_ref())
-            .unwrap();
-        assert_eq!(
-            runtime_spec_v1(persisted_spec).secret_references,
-            vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
-        );
-        assert_eq!(
-            runtime_spec_v1(persisted_spec).environment,
-            refreshed_environment
-        );
-        assert!(
-            state
-                .project_runtime_links
-                .values()
-                .any(|link| { link.agent_runtime_id == runtime_id && link.active })
-        );
-        assert!(state.finite_private_api_keys.values().all(|key| {
-            key.agent_runtime_id.as_deref() != Some(runtime_id.as_str())
-                || key.status == FinitePrivateApiKeyStatus::Active
-        }));
-        assert!(
-            state
-                .finite_private_admin_audit_events
-                .values()
-                .any(|event| {
-                    event.action == "runtime.admin_upgrade"
-                        && event.metadata["targetRuntimeArtifactId"] == "artifact-v2"
+                    now: Some("2026-05-25T13:04:30Z".to_string()),
                 })
-        );
+                .await
+                .unwrap()
+                .expect("admin restart request should lease");
+            assert_eq!(lease.request.id, restart.id);
+            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
+            assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
+            let completed = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "admin-restart-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
 
-        let recovery = state
-            .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
-                verified_email: "upgrade@finite.vip".to_string(),
-                workos_user_id: "workos-upgrade".to_string(),
-                project_id: requested.project.id,
-                now: Some("2026-05-25T13:07:00Z".to_string()),
-            })
-            .unwrap();
-        let recovery_capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            recover_known_good_chat: true,
-            ..*kata_runtime_capabilities().v1()
-        });
-        let recovery_lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "kata-runner".to_string(),
-                lease_token: "recovery-lease".to_string(),
-                lease_seconds: Some(300),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(recovery_capabilities),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:07:01Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovery_lease.request.id, recovery.id);
-        let recovery_spec = runtime_spec_v1(recovery_lease.runtime_spec.as_ref().unwrap());
-        assert_eq!(
-            recovery_spec.boot_intent,
-            RuntimeBootIntent::RecoverKnownGood
-        );
-        assert_eq!(recovery_spec.runtime_artifact_id, "artifact-v2");
+            // Recovery is not restart-by-another-name: until a genuine recovery
+            // implementation exists, even the admin path is fail closed.
+            let recover_error = db
+                .admin_request_runtime_recover_known_good_chat(AdminRuntimeControlInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "user_workos_admin".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                recover_error,
+                CoreError::RuntimeControlUnsupported
+            ));
+
+            let actions = db
+                .finite_private_admin_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .map(|event| (event.action.clone(), event.actor.clone()))
+                .collect::<Vec<_>>();
+            assert!(actions.contains(&(
+                "runtime.admin_restart".to_string(),
+                "admin@finite.vip".to_string()
+            )));
+            assert!(
+                !actions
+                    .iter()
+                    .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn runtime_upgrade_rejects_non_kata_runtime_before_leasing() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "not-kata@finite.vip",
-            "workos-not-kata",
-            "not-kata",
-            "not-kata-runtime",
-            "artifact-v1",
-            LATER,
-        );
-        promote_runtime_artifact_version(
-            &mut state,
-            "artifact-mutable",
-            "ghcr.io/finitecomputer/agent-runtime:latest",
-            "mutable",
-            "state-v1",
-            "2026-05-25T13:03:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        let error = state
-            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id,
-                target_runtime_artifact_id: "artifact-mutable".to_string(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(error, CoreError::RuntimeUpgradeUnsupported));
-        assert!(state.runtime_control_requests.is_empty());
+    #[tokio::test]
+    async fn admin_runtime_retirement_requires_the_exact_active_binding() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner_retire",
+                "retire-submit",
+                "oslo-agent-retire",
+                "artifact-v1",
+                "2026-07-22T15:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let retirement_capable =
+                serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                    runtime_retirement: true,
+                    ..*kata_runtime_capabilities().v1()
+                }))
+                .unwrap();
+            db.exec(&format!(
+                "UPDATE agent_runtimes SET runtime_capabilities = '{retirement_capable}'::jsonb \
+                 WHERE id = '{runtime_id}'"
+            ))
+            .await;
+
+            let changed_binding = db
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: "runtime-replaced-after-review".to_string(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "oslo-agent-retire".to_string(),
+                    now: Some("2026-07-22T15:01:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+            assert!(db.all_runtime_control_requests().await.is_empty());
+
+            let retirement = db
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: "Admin@Finite.VIP".to_string(),
+                    admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                    project_id,
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "oslo-agent-retire".to_string(),
+                    now: Some("2026-07-22T15:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(retirement.kind, RuntimeControlKind::Destroy);
+            assert_eq!(retirement.agent_runtime_id, runtime_id);
+            assert_eq!(retirement.status, RuntimeControlRequestStatus::Requested);
+            assert!(
+                db.finite_private_admin_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| {
+                        event.action == "runtime.admin_destroy"
+                            && event.actor == "admin@finite.vip"
+                            && event.target_id == retirement.agent_runtime_id
+                    })
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn cold_relocation_is_stopped_exact_targeted_and_failure_preserves_source_runtime() {
-        let mut state = BridgeCoreState::default();
-        promote_runtime_artifact(&mut state);
-        let runtime_id = complete_self_serve_agent(
-            &mut state,
-            "canary@finite.vip",
-            "workos-canary",
-            "canary-create",
-            "finite-kata-canary",
-            "artifact-v1",
-            "2026-05-25T13:00:00Z",
-        );
-        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-        let running = state
-            .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: project_id.clone(),
-                expected_agent_runtime_id: runtime_id.clone(),
-                expected_source_host_id: "oslo-host-1".to_string(),
-                expected_source_machine_id: "finite-kata-canary".to_string(),
-                target_source_host_id: "oslo-host-3".to_string(),
-                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
-                durable_state_manifest_sha256: "b".repeat(64),
-                now: Some("2026-05-25T13:01:00Z".to_string()),
-            })
-            .unwrap_err();
-        assert!(matches!(running, CoreError::RuntimeControlUnsupported));
-
-        let stop = state
-            .admin_request_runtime_control(
-                AdminRuntimeControlInput {
+    /// Unrecoverable archive is fail-closed on every guard, and a successful
+    /// archive retains history.
+    ///
+    /// Each rejected attempt leaves state untouched, so they run in sequence
+    /// against one database instead of forking an in-memory snapshot.
+    #[tokio::test]
+    async fn cold_relocation_is_stopped_exact_targeted_and_failure_preserves_source_runtime() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "canary@finite.vip",
+                "workos-canary",
+                "canary-create",
+                "finite-kata-canary",
+                "artifact-v1",
+                "2026-05-25T13:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let running = db
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
                     admin_verified_email: "admin@finite.vip".to_string(),
                     admin_workos_user_id: "workos-admin".to_string(),
                     project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "finite-kata-canary".to_string(),
+                    target_source_host_id: "oslo-host-3".to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
+                    now: Some("2026-05-25T13:01:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(running, CoreError::RuntimeControlUnsupported));
+
+            // Stopping is the precondition for relocation, not the subject of
+            // this test. The owner path reaches the same state; the admin
+            // variant was an in-memory-only helper.
+            let stop = db
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: "canary@finite.vip".to_string(),
+                    workos_user_id: "workos-canary".to_string(),
+                    project_id: project_id.clone(),
                     now: Some("2026-05-25T13:02:00Z".to_string()),
-                },
-                RuntimeControlKind::Stop,
-                None,
-            )
-            .unwrap();
-        let capacity = RunnerLeaseCapacity {
-            runner_classes: vec![RunnerClass::Kata],
-            runtime_capabilities: Some(kata_runtime_capabilities()),
-            ..RunnerLeaseCapacity::default()
-        };
-        let stop_lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "stop-lease".to_string(),
-                lease_seconds: Some(300),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(capacity.clone()),
-                now: Some("2026-05-25T13:03:00Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(stop_lease.request.id, stop.id);
-        state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                })
+                .await
+                .unwrap();
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+            let stop_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "stop-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(capacity.clone()),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stop_lease.request.id, stop.id);
+            db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                 request_id: stop.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "stop-lease".to_string(),
@@ -13574,35 +8042,37 @@ mod tests {
                 retirement_snapshot: None,
                 now: Some("2026-05-25T13:04:00Z".to_string()),
             })
+            .await
             .unwrap();
 
-        let relocation = state
-            .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
-                admin_verified_email: "admin@finite.vip".to_string(),
-                admin_workos_user_id: "workos-admin".to_string(),
-                project_id: project_id.clone(),
-                expected_agent_runtime_id: runtime_id.clone(),
-                expected_source_host_id: "oslo-host-1".to_string(),
-                expected_source_machine_id: "finite-kata-canary".to_string(),
-                target_source_host_id: "oslo-host-3".to_string(),
-                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
-                durable_state_manifest_sha256: "b".repeat(64),
-                now: Some("2026-05-25T13:05:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(
-            relocation.target_source_host_id.as_deref(),
-            Some("oslo-host-3")
-        );
-        assert_eq!(
-            relocation.agent_runtime_id.as_deref(),
-            Some(runtime_id.as_str())
-        );
-        assert!(relocation.relocation.is_some());
+            let relocation = db
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "finite-kata-canary".to_string(),
+                    target_source_host_id: "oslo-host-3".to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                relocation.target_source_host_id.as_deref(),
+                Some("oslo-host-3")
+            );
+            assert_eq!(
+                relocation.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert!(relocation.relocation.is_some());
 
-        assert!(
-            state
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+            assert!(
+                db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
                     runner_id: "runner-oslo-1".to_string(),
                     lease_token: "wrong-host".to_string(),
                     lease_seconds: Some(300),
@@ -13610,34 +8080,34 @@ mod tests {
                     source_host_id: Some("oslo-host-1".to_string()),
                     now: Some("2026-05-25T13:06:00Z".to_string()),
                 })
+                .await
                 .unwrap()
                 .is_none()
-        );
-        let lease = state
-            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner-oslo-3".to_string(),
-                lease_token: "relocate-lease".to_string(),
-                lease_seconds: Some(300),
-                runner_capacity: Some(capacity),
-                source_host_id: Some("oslo-host-3".to_string()),
-                now: Some("2026-05-25T13:06:00Z".to_string()),
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(lease.request.id, relocation.id);
-        state
-            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+            );
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-3".to_string(),
+                    lease_token: "relocate-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity),
+                    source_host_id: Some("oslo-host-3".to_string()),
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.request.id, relocation.id);
+            db.register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                 request_id: relocation.id.clone(),
                 runner_id: "runner-oslo-3".to_string(),
                 lease_token: "relocate-lease".to_string(),
                 source_host_id: "oslo-host-3".to_string(),
                 source_machine_id: "finite-kata-canary".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: Some("state-v1".to_string()),
+                state_schema_version: Some("db-v1".to_string()),
                 provider_runtime_handle: None,
                 contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: "relay-token-hash".to_string(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("http://oslo-host-3:4201".to_string()),
@@ -13647,15 +8117,15 @@ mod tests {
                 published_app_urls: Vec::new(),
                 now: Some("2026-05-25T13:06:30Z".to_string()),
             })
+            .await
             .unwrap();
-        let still_source = &state.agent_runtimes[&runtime_id];
-        assert_eq!(still_source.source_host_id, "oslo-host-1");
-        assert_eq!(
-            still_source.host_facts.runtime_status,
-            RuntimeSummaryStatus::Offline
-        );
-        state
-            .fail_agent_creation_request(FailAgentCreationRequestInput {
+            let still_source = db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(still_source.source_host_id, "oslo-host-1");
+            assert_eq!(
+                still_source.host_facts.runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            db.fail_agent_creation_request(FailAgentCreationRequestInput {
                 request_id: relocation.id.clone(),
                 runner_id: "runner-oslo-3".to_string(),
                 lease_token: "relocate-lease".to_string(),
@@ -13663,67 +8133,1026 @@ mod tests {
                 provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:07:00Z".to_string()),
             })
+            .await
             .unwrap();
-        let source = &state.agent_runtimes[&runtime_id];
-        assert_eq!(source.source_host_id, "oslo-host-1");
-        assert_eq!(
-            source.host_facts.runtime_status,
-            RuntimeSummaryStatus::Offline
-        );
-        assert_eq!(
-            state.agent_creation_requests[&relocation.id]
-                .agent_runtime_id
-                .as_deref(),
-            Some(runtime_id.as_str())
-        );
-        assert!(state.project_runtime_links.values().any(|link| {
-            link.project_id == project_id && link.agent_runtime_id == runtime_id && link.active
-        }));
+            let source = db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(source.source_host_id, "oslo-host-1");
+            assert_eq!(
+                source.host_facts.runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            assert_eq!(
+                db.agent_creation_request(&relocation.id)
+                    .await
+                    .unwrap()
+                    .agent_runtime_id
+                    .as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert!(db.all("project_runtime_links").await.iter().any(|link| {
+                link["project_id"] == project_id.as_str()
+                    && link["agent_runtime_id"] == runtime_id.as_str()
+                    && link["active"] == true
+            }));
+        })
+        .await;
     }
 
-    fn promote_runtime_artifact(state: &mut BridgeCoreState) {
+    #[tokio::test]
+    async fn cold_relocation_with_absent_compute_accepts_stale_and_waives_stop_receipt() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "eddie-case@finite.vip",
+                "workos-eddie-case",
+                "absent-create",
+                "finite-kata-absent",
+                "artifact-v1",
+                "2026-08-12T13:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let relocate_input = |absent: bool, now: &str| AdminRuntimeRelocateExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-absent".to_string(),
+                target_source_host_id: "oslo-host-3".to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "c".repeat(64),
+                operator_observed_compute_absent: absent,
+                now: Some(now.to_string()),
+            };
+
+            // The attestation is not a bypass: an online runtime stays
+            // unrelocatable even with the flag set.
+            let online = db
+                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T13:01:00Z"))
+                .await
+                .unwrap_err();
+            assert!(matches!(online, CoreError::RuntimeControlUnsupported));
+
+            // Reach `stale` the way absent compute does in production: a
+            // control request that fails at the provider.
+            let restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "eddie-case@finite.vip".to_string(),
+                    workos_user_id: "workos-eddie-case".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-08-12T13:02:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+            let restart_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(capacity),
+                    now: Some("2026-08-12T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(restart_lease.request.id, restart.id);
+            db.fail_runtime_control_request(FailRuntimeControlRequestInput {
+                request_id: restart.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "restart-lease".to_string(),
+                failure_message: "no such object finite-kata-absent".to_string(),
+                now: Some("2026-08-12T13:04:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Stale
+            );
+
+            // Without the attestation, `stale` (and the missing stop
+            // receipt) keep refusing — the existing posture is pinned.
+            let unattested = db
+                .admin_request_runtime_relocate_exact(relocate_input(false, "2026-08-12T13:05:00Z"))
+                .await
+                .unwrap_err();
+            assert!(matches!(unattested, CoreError::RuntimeControlUnsupported));
+
+            // With it, the enqueue succeeds despite `stale` and despite the
+            // runtime never having a succeeded stop, and the attestation
+            // rides the envelope for lease-time validation.
+            let relocation = db
+                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T13:06:00Z"))
+                .await
+                .unwrap();
+            assert_eq!(
+                relocation.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert_eq!(
+                relocation.target_source_host_id.as_deref(),
+                Some("oslo-host-3")
+            );
+            let envelope = relocation.relocation.as_ref().unwrap().v1();
+            assert!(envelope.source_compute_absent);
+            assert_eq!(envelope.source_machine_id, "finite-kata-absent");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unrecoverable_runtime_archive_is_exact_fail_closed_and_retains_history() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner_archive",
+                "archive-submit",
+                "legacy-agent-001",
+                "artifact-v1",
+                "2026-07-21T20:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let input = |compute_absent: bool| AdminArchiveUnrecoverableRuntimeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_archive".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "legacy-agent-001".to_string(),
+                expected_owner_email: "owner@finite.vip".to_string(),
+                operator_observed_compute_absent: compute_absent,
+                operator_observed_durable_state_absent: true,
+                owner_acknowledged_unrecoverable: true,
+                now: Some("2026-07-21T20:10:00Z".to_string()),
+            };
+
+            // Compute must be observed absent.
+            assert!(matches!(
+                db.admin_archive_unrecoverable_runtime(input(false)).await,
+                Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired)
+            ));
+            assert!(db.active_runtime_for_project(&project_id).await.is_some());
+
+            // The binding must match exactly.
+            let mut wrong_binding_input = input(true);
+            wrong_binding_input.expected_source_machine_id = "replacement-agent".to_string();
+            assert!(matches!(
+                db.admin_archive_unrecoverable_runtime(wrong_binding_input)
+                    .await,
+                Err(CoreError::RuntimeSpecMismatch)
+            ));
+
+            // Provider metadata means the runtime is not actually unreachable.
+            db.exec(&format!(
+                "UPDATE agent_runtimes \
+                 SET contact_endpoint = 'https://legacy-agent.example.test/contact' \
+                 WHERE id = '{runtime_id}'"
+            ))
+            .await;
+            assert!(matches!(
+                db.admin_archive_unrecoverable_runtime(input(true)).await,
+                Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent)
+            ));
+            db.exec(&format!(
+                "UPDATE agent_runtimes SET contact_endpoint = NULL WHERE id = '{runtime_id}'"
+            ))
+            .await;
+
+            // An in-flight control operation blocks the archive until it settles.
+            let in_flight = db
+                .admin_request_runtime_restart(AdminRuntimeControlInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "user_workos_admin_archive".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-07-21T20:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.admin_archive_unrecoverable_runtime(input(true)).await,
+                Err(CoreError::RuntimeControlOperationConflict)
+            ));
+            db.exec(&format!(
+                "UPDATE runtime_control_requests SET status = 'succeeded' WHERE id = '{}'",
+                in_flight.id
+            ))
+            .await;
+
+            let receipt = db
+                .admin_archive_unrecoverable_runtime(input(true))
+                .await
+                .unwrap();
+            assert_eq!(receipt.project_id, project_id);
+            assert_eq!(receipt.agent_runtime_id, runtime_id);
+            assert_eq!(receipt.owner_email, "owner@finite.vip");
+            assert_eq!(receipt.revoked_finite_private_key_count, 0);
+
+            // History is retained: the Project and Runtime rows survive, the
+            // room membership is archived, and the action is audited.
+            assert!(db.active_runtime_for_project(&project_id).await.is_none());
+            assert!(db.project(&project_id).await.is_some());
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
+            assert!(
+                db.all("project_room_memberships")
+                    .await
+                    .iter()
+                    .any(|membership| {
+                        membership["project_id"] == project_id.as_str()
+                            && !membership["archived_at"].is_null()
+                    })
+            );
+            let events = db.finite_private_admin_audit_events().await.unwrap();
+            assert!(events.iter().any(|event| {
+                event.action == "runtime.admin_archive_unrecoverable"
+                    && event.target_id == runtime_id
+                    && event.actor == "admin@finite.vip"
+            }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn admin_friend_key_issue_mirrors_cli_and_records_admin_audit() {
+        with_isolated_postgres(|db| async move {
+            let raw_key = "fpk_live_test_friend_key_material_0001";
+            let issued = db
+                .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    friend_email: "Friend@Finite.VIP".to_string(),
+                    limit_profile_id: None,
+                    raw_key: raw_key.to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(issued.grant.status, FinitePrivateGrantStatus::Active);
+            assert_eq!(issued.grant.limit_profile_id, "finite-private-generous-v2");
+            assert_eq!(issued.api_key.status, FinitePrivateApiKeyStatus::Active);
+            assert_ne!(issued.api_key.key_hash, raw_key);
+            assert!(issued.api_key.project_id.is_none());
+            assert!(issued.api_key.agent_runtime_id.is_none());
+
+            let resolved = db
+                .finite_private_key_and_grant(raw_key)
+                .await
+                .expect("issued raw key should validate");
+            assert_eq!(resolved.0.id, issued.api_key.id);
+            assert_eq!(resolved.1.id, issued.grant.id);
+
+            let events = db.finite_private_admin_audit_events().await.unwrap();
+            let admin_event = events
+                .iter()
+                .find(|event| event.action == "finite_private.friend_key.admin_issue")
+                .expect("friend key issue should record an admin audit event");
+            assert_eq!(admin_event.actor, "admin@finite.vip");
+            assert_eq!(
+                admin_event.api_key_id.as_deref(),
+                Some(issued.api_key.id.as_str())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn admin_rotate_invalidates_old_raw_key_and_revoke_disables_key() {
+        with_isolated_postgres(|db| async move {
+            let old_raw = "fpk_live_old_raw_key_material_000000001";
+            let issued = db
+                .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    friend_email: "friend@finite.vip".to_string(),
+                    limit_profile_id: None,
+                    raw_key: old_raw.to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+
+            let new_raw = "fpk_live_new_raw_key_material_000000002";
+            let rotated = db
+                .admin_rotate_finite_private_api_key(AdminRotateFinitePrivateApiKeyInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    key_id: issued.api_key.id.clone(),
+                    raw_key: new_raw.to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_ne!(rotated.id, issued.api_key.id);
+            assert_eq!(rotated.status, FinitePrivateApiKeyStatus::Active);
+
+            assert!(
+                db.finite_private_key_and_grant(old_raw).await.is_none(),
+                "old raw key must stop validating after rotate"
+            );
+            let resolved = db
+                .finite_private_key_and_grant(new_raw)
+                .await
+                .expect("new raw key should validate");
+            assert_eq!(resolved.0.id, rotated.id);
+            assert_eq!(
+                db.finite_private_api_key(&issued.api_key.id)
+                    .await
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Revoked
+            );
+
+            let revoked = db
+                .admin_revoke_finite_private_api_key(AdminRevokeFinitePrivateApiKeyInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    key_id: rotated.id.clone(),
+                    now: Some("2026-05-25T14:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(revoked.status, FinitePrivateApiKeyStatus::Revoked);
+            assert!(db.finite_private_key_and_grant(new_raw).await.is_none());
+
+            let actions = db
+                .finite_private_admin_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.actor == "admin@finite.vip")
+                .map(|event| event.action.clone())
+                .collect::<Vec<_>>();
+            assert!(actions.contains(&"finite_private.api_key.admin_rotate".to_string()));
+            assert!(actions.contains(&"finite_private.api_key.admin_revoke".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn admin_window_reset_clears_burst_window_but_not_weekly_reservations() {
+        with_isolated_postgres(|db| async move {
+            let raw_key = "fpk_live_reset_raw_key_material_00000003";
+            let issued = db
+                .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    friend_email: "friend@finite.vip".to_string(),
+                    limit_profile_id: None,
+                    raw_key: raw_key.to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .await
+                .unwrap();
+
+            let decision = db
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: "req-1".to_string(),
+                    presented_api_key: raw_key.to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "kimi-k2-6".to_string(),
+                    estimated_prompt_tokens: 10,
+                    estimated_completion_tokens: 10,
+                    estimated_usage_units: 1_000,
+                    usage_formula_version: "2026-05-26.v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(decision.decision, "allow");
+            assert_eq!(
+                db.finite_private_grant(&issued.grant.id)
+                    .await
+                    .unwrap()
+                    .current_window_used_units,
+                1_000
+            );
+
+            let reset = db
+                .admin_reset_finite_private_usage_window(AdminResetFinitePrivateUsageWindowInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    grant_id: issued.grant.id.clone(),
+                    now: Some("2026-05-25T14:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(reset.current_window_used_units, 0);
+            assert_eq!(
+                reset.current_window_started_at.as_deref(),
+                Some("2026-05-25T14:00:00Z")
+            );
+
+            // Weekly usage is a rolling reservation window; reset must not touch it.
+            let (weekly_used, _) = db
+                .finite_private_weekly_usage(
+                    &issued.grant.id,
+                    parse_time("2026-05-25T14:00:00Z").unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(weekly_used, 1_000);
+
+            let events = db.finite_private_admin_audit_events().await.unwrap();
+            let admin_event = events
+                .iter()
+                .find(|event| event.action == "finite_private.grant.admin_window_reset")
+                .expect("window reset should record an admin audit event");
+            assert_eq!(admin_event.actor, "admin@finite.vip");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn admin_runtime_overviews_assemble_provisioned_box_facts() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let grant = db
+                .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                    verified_email: "owner@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_owner".to_string()),
+                    limit_profile_id: None,
+                    now: Some(LATER.to_string()),
+                })
+                .await
+                .unwrap();
+            db.issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id.clone(),
+                raw_key: "fpk_live_overview_key_material_00000004".to_string(),
+                project_id: Some(project_id.clone()),
+                agent_runtime_id: Some(runtime_id.clone()),
+                now: Some(LATER.to_string()),
+            })
+            .await
+            .unwrap();
+
+            let overviews = db.admin_runtime_overviews().await.unwrap();
+            assert_eq!(overviews.len(), 1);
+            let overview = &overviews[0];
+            assert_eq!(overview.project_id, project_id);
+            assert_eq!(overview.agent_runtime_id, runtime_id);
+            assert_eq!(overview.owner_email.as_deref(), Some("owner@finite.vip"));
+            assert_eq!(overview.source_host_id, "oslo-host-1");
+            assert_eq!(overview.source_machine_id, "oslo-agent-001");
+            assert_eq!(overview.runtime_artifact_id.as_deref(), Some("artifact-v1"));
+            assert_eq!(
+                overview.runtime_artifact_version_label.as_deref(),
+                Some("v1")
+            );
+            assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Online);
+            assert_eq!(overview.hermes_available, Some(true));
+            assert_eq!(overview.active_finite_private_key_count, 1);
+            assert!(overview.runtime_link_active);
+            assert_eq!(
+                overview.runtime_capabilities,
+                Some(*kata_runtime_capabilities().v1())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_facts_atomically() {
+        with_isolated_postgres(|db| async move {
+            let launch_code = issue_test_launch_code(&db).await;
+            promote_runtime_artifact(&db).await;
+            let requested = db
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "upgrade@finite.vip".to_string(),
+                        workos_user_id: "workos-upgrade".to_string(),
+                        display_name: "Upgrade Agent".to_string(),
+                        launch_code: launch_code.clone(),
+                        idempotency_key: "upgrade-agent".to_string(),
+                        now: Some(NOW.to_string()),
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                    },
+                ).await
+                .unwrap();
+            db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "kata-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "launch-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                }).await
+                .unwrap()
+                .unwrap();
+            let completed = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: requested.request.id,
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "launch-lease".to_string(),
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "finite-kata-upgrade".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: None,
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some("http://127.0.0.1:41001".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                }).await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            db.exec(&format!(
+                "INSERT INTO runtime_relay_credentials \
+                 (agent_runtime_id, token_hash, created_at, updated_at) \
+                 VALUES ('{runtime_id}', 'existing-relay-token-hash', \
+                 '2026-05-25T13:02:00Z', '2026-05-25T13:02:00Z')"
+            ))
+            .await;
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-mutable",
+                "ghcr.io/finitecomputer/agent-runtime:latest",
+                "mutable",
+                "db-v1",
+                "2026-05-25T13:02:10Z",
+            ).await;
+            let mutable = db
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: requested.project.id.clone(),
+                    target_runtime_artifact_id: "artifact-mutable".to_string(),
+                    now: Some("2026-05-25T13:02:20Z".to_string()),
+                }).await
+                .unwrap_err();
+            assert!(matches!(mutable, CoreError::RuntimeUpgradeUnsupported));
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-incompatible",
+                &format!(
+                    "ghcr.io/finitecomputer/agent-runtime:future@sha256:{}",
+                    "c".repeat(64)
+                ),
+                "future",
+                "db-v2",
+                "2026-05-25T13:02:30Z",
+            ).await;
+            let incompatible = db
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: requested.project.id.clone(),
+                    target_runtime_artifact_id: "artifact-incompatible".to_string(),
+                    now: Some("2026-05-25T13:02:40Z".to_string()),
+                }).await
+                .unwrap_err();
+            assert!(matches!(
+                incompatible,
+                CoreError::RuntimeUpgradeStateSchemaIncompatible
+            ));
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-v2",
+                &format!(
+                    "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                    "b".repeat(64)
+                ),
+                "v2",
+                "db-v1",
+                "2026-05-25T13:03:00Z",
+            ).await;
+            db.exec("UPDATE runtime_artifacts SET recover_known_good_chat = true WHERE id = 'artifact-v2'")
+                .await;
+
+            let changed_binding = db
+                .admin_request_runtime_upgrade_exact(AdminRuntimeUpgradeExactInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: requested.project.id.clone(),
+                    expected_agent_runtime_id: "runtime-replaced-after-plan".to_string(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "finite-kata-upgrade".to_string(),
+                    target_runtime_artifact_id: "artifact-v2".to_string(),
+                    now: Some("2026-05-25T13:03:30Z".to_string()),
+                }).await
+                .unwrap_err();
+            assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+            assert!(db.all_runtime_control_requests().await.is_empty());
+
+            let upgrade = db
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: requested.project.id.clone(),
+                    target_runtime_artifact_id: "artifact-v2".to_string(),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                }).await
+                .unwrap();
+            assert_eq!(upgrade.kind, RuntimeControlKind::Upgrade);
+            assert_eq!(
+                upgrade.target_runtime_artifact_id.as_deref(),
+                Some("artifact-v2")
+            );
+            let conflicting_stop = db
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: "upgrade@finite.vip".to_string(),
+                    workos_user_id: "workos-upgrade".to_string(),
+                    project_id: requested.project.id.clone(),
+                    now: Some("2026-05-25T13:04:30Z".to_string()),
+                }).await
+                .unwrap_err();
+            assert!(matches!(
+                conflicting_stop,
+                CoreError::RuntimeControlOperationConflict
+            ));
+            db.exec("UPDATE runtime_artifacts SET retired_at = '2026-05-25T13:04:40Z' WHERE id = 'artifact-v2'")
+                .await;
+            // A second, healthy Runtime on the same Project, copied from the
+            // first so it shares its artifact and capabilities.
+            let healthy_runtime_id = "runtime-healthy-behind-poison".to_string();
+            db.exec(&format!(
+                "INSERT INTO agent_runtimes \
+                 (id, project_id, source_host_id, source_machine_id, source_import_key, \
+                  runtime_artifact_id, state_schema_version, host_facts, \
+                  created_at, updated_at, placement_runner_class, runtime_resource_class, \
+                  runtime_capabilities) \
+                 SELECT '{healthy_runtime_id}', project_id, source_host_id, \
+                        'healthy-behind-poison', \
+                        source_host_id || '/healthy-behind-poison', \
+                        runtime_artifact_id, state_schema_version, host_facts, \
+                        created_at, updated_at, placement_runner_class, \
+                        runtime_resource_class, runtime_capabilities \
+                 FROM agent_runtimes WHERE id = '{runtime_id}'"
+            ))
+            .await;
+            let user_id = db
+                .user_by_email("upgrade@finite.vip")
+                .await
+                .expect("owner exists")
+                .id;
+            let healthy_request_id = "runtime_ctl_healthy_behind_poison".to_string();
+            let healthy_project_id = requested.project.id.clone();
+            db.exec(&format!(
+                "INSERT INTO runtime_control_requests \
+                 (id, project_id, agent_runtime_id, source_host_id, source_machine_id, \
+                  requested_by_user_id, kind, status, created_at, updated_at) \
+                 VALUES ('{healthy_request_id}', '{healthy_project_id}', \
+                 '{healthy_runtime_id}', 'oslo-host-1', 'healthy-behind-poison', \
+                 '{user_id}', 'restart', 'requested', \
+                 '2026-05-25T13:04:45Z', '2026-05-25T13:04:45Z')"
+            ))
+            .await;
+            let healthy_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "must-not-stick".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:04:50Z".to_string()),
+                }).await
+                .unwrap()
+                .expect("poisoned upgrade must not starve the next healthy request");
+            assert_eq!(healthy_lease.request.id, healthy_request_id);
+            assert_eq!(
+                db.runtime_control_request(&upgrade.id).await.unwrap().status,
+                RuntimeControlRequestStatus::Failed
+            );
+            assert!(
+                db.runtime_control_request(&upgrade.id).await.unwrap()
+                    .failure_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("retired")
+            );
+            db.exec("UPDATE runtime_artifacts SET retired_at = NULL WHERE id = 'artifact-v2'")
+                .await;
+            // An N-1 request that predates persisted runtime specs.
+            db.exec(&format!(
+                "UPDATE agent_creation_requests SET runtime_spec = NULL \
+                 WHERE agent_runtime_id = '{runtime_id}'"
+            ))
+            .await;
+            let upgrade = db
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: requested.project.id.clone(),
+                    target_runtime_artifact_id: "artifact-v2".to_string(),
+                    now: Some("2026-05-25T13:04:55Z".to_string()),
+                }).await
+                .unwrap();
+            let refreshed_secret_references = vec!["FAL_KEY".to_string(), "XAI_API_KEY".to_string()];
+            let lease = with_runtime_config(&db, &BTreeMap::new(), &refreshed_secret_references).lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                        runner_id: "kata-runner".to_string(),
+                        lease_token: "upgrade-lease".to_string(),
+                        lease_seconds: Some(300),
+                        source_host_id: Some("oslo-host-1".to_string()),
+                        runner_capacity: Some(RunnerLeaseCapacity {
+                            runner_classes: vec![RunnerClass::Kata],
+                            runtime_capabilities: Some(kata_runtime_capabilities()),
+                            ..RunnerLeaseCapacity::default()
+                        }),
+                        now: Some("2026-05-25T13:05:00Z".to_string()),
+                    }).await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lease
+                    .target_runtime_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.id.as_str()),
+                Some("artifact-v2")
+            );
+            let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
+            assert_eq!(
+                runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
+                "finite-kata-upgrade",
+                "legacy synthesis preserves the source-machine /data directory"
+            );
+            assert_eq!(
+                runtime_spec_v1(synthesized_upgrade_spec).operation_id,
+                upgrade.id
+            );
+            assert_eq!(
+                runtime_spec_v1(synthesized_upgrade_spec).secret_references,
+                vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+            );
+
+            let mismatch = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: upgrade.id.clone(),
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "upgrade-lease".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: Some("db-v1".to_string()),
+                    runtime_capabilities: None,
+                    runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                    published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                }).await
+                .unwrap_err();
+            assert!(matches!(
+                mismatch,
+                CoreError::RuntimeUpgradeCompletionMismatch
+            ));
+            assert_eq!(
+                db.runtime_control_request(&upgrade.id).await.unwrap().status,
+                RuntimeControlRequestStatus::Running
+            );
+            assert_eq!(
+                db.agent_runtime(&runtime_id).await.unwrap()
+                    .runtime_artifact_id
+                    .as_deref(),
+                Some("artifact-v1")
+            );
+
+            db.exec("UPDATE runtime_artifacts SET retired_at = '2026-05-25T13:06:30Z' WHERE id = 'artifact-v2'")
+                .await;
+            with_runtime_config(&db, &BTreeMap::new(), &refreshed_secret_references).complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                        request_id: upgrade.id.clone(),
+                        runner_id: "kata-runner".to_string(),
+                        lease_token: "upgrade-lease".to_string(),
+                        runtime_artifact_id: Some("artifact-v2".to_string()),
+                        state_schema_version: Some("db-v1".to_string()),
+                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                            RuntimeCapabilitiesV1 {
+                                recover_known_good_chat: true,
+                                ..*kata_runtime_capabilities().v1()
+                            },
+                        )),
+                        runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                        published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                        retirement_snapshot: None,
+                        now: Some("2026-05-25T13:06:40Z".to_string()),
+                    }).await
+                .unwrap();
+            let runtime = &db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
+            assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
+            assert_eq!(
+                runtime.contact_endpoint.as_deref(),
+                Some("http://127.0.0.1:41002/contact")
+            );
+            assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
+            assert!(
+                runtime
+                    .runtime_capabilities
+                    .as_ref()
+                    .unwrap()
+                    .v1()
+                    .recover_known_good_chat
+            );
+            assert!(!db.query_json(
+                "SELECT to_jsonb(t) FROM runtime_relay_credentials t \
+                 WHERE t.agent_runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .is_empty());
+            let requests = db.all_agent_creation_requests().await;
+            let persisted_spec = requests
+                .iter()
+                .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+                .and_then(|request| request.runtime_spec.as_ref())
+                .unwrap();
+            assert_eq!(
+                runtime_spec_v1(persisted_spec).secret_references,
+                vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+            );
+            assert!(
+                db.all("project_runtime_links").await.iter()
+                    .any(|link| { link["agent_runtime_id"] == runtime_id.as_str() && link["active"] == true })
+            );
+            assert!(db.all_finite_private_api_keys().await.iter().all(|key| {
+                key.agent_runtime_id.as_deref() != Some(runtime_id.as_str())
+                    || key.status == FinitePrivateApiKeyStatus::Active
+            }));
+            assert!(
+                db.finite_private_admin_audit_events().await.unwrap().iter()
+                    .any(|event| {
+                        event.action == "runtime.admin_upgrade"
+                            && event.metadata["targetRuntimeArtifactId"] == "artifact-v2"
+                    })
+            );
+
+            let recovery = db
+                .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
+                    verified_email: "upgrade@finite.vip".to_string(),
+                    workos_user_id: "workos-upgrade".to_string(),
+                    project_id: requested.project.id,
+                    now: Some("2026-05-25T13:07:00Z".to_string()),
+                }).await
+                .unwrap();
+            let recovery_capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                recover_known_good_chat: true,
+                ..*kata_runtime_capabilities().v1()
+            });
+            let recovery_lease = db
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "recovery-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(recovery_capabilities),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:07:01Z".to_string()),
+                }).await
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovery_lease.request.id, recovery.id);
+            let recovery_spec = runtime_spec_v1(recovery_lease.runtime_spec.as_ref().unwrap());
+            assert_eq!(
+                recovery_spec.boot_intent,
+                RuntimeBootIntent::RecoverKnownGood
+            );
+            assert_eq!(recovery_spec.runtime_artifact_id, "artifact-v2");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn runtime_upgrade_rejects_non_kata_runtime_before_leasing() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "not-kata@finite.vip",
+                "workos-not-kata",
+                "not-kata",
+                "not-kata-runtime",
+                "artifact-v1",
+                LATER,
+            )
+            .await;
+            promote_runtime_artifact_version(
+                &db,
+                "artifact-mutable",
+                "ghcr.io/finitecomputer/agent-runtime:latest",
+                "mutable",
+                "db-v1",
+                "2026-05-25T13:03:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let error = db
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id,
+                    target_runtime_artifact_id: "artifact-mutable".to_string(),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CoreError::RuntimeUpgradeUnsupported));
+            assert!(db.all_runtime_control_requests().await.is_empty());
+        })
+        .await;
+    }
+
+    async fn promote_runtime_artifact(db: &TestDb) {
         promote_runtime_artifact_version(
-            state,
+            db,
             "artifact-v1",
             &format!(
                 "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
                 "a".repeat(64)
             ),
             "v1",
-            "state-v1",
+            "db-v1",
             NOW,
-        );
+        )
+        .await;
     }
 
-    fn promote_runtime_artifact_version(
-        state: &mut BridgeCoreState,
+    async fn promote_runtime_artifact_version(
+        db: &TestDb,
         id: &str,
         reference: &str,
         version_label: &str,
         state_schema_version: &str,
         now: &str,
     ) {
-        state
-            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                id: id.to_string(),
-                kind: RuntimeArtifactKind::OciImage,
-                reference: reference.to_string(),
-                version_label: version_label.to_string(),
-                source_git_sha: Some("git-sha".to_string()),
-                finitec_version: Some("finitec-test".to_string()),
-                hermes_source_ref: Some("hermes-ref".to_string()),
-                finite_platform_plugin_ref: Some("plugin-ref".to_string()),
-                state_schema_version: state_schema_version.to_string(),
-                base_image: Some("python:3.11-trixie".to_string()),
-                recover_known_good_chat: false,
-                promoted: true,
-                now: Some(now.to_string()),
-            })
-            .unwrap();
+        db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+            id: id.to_string(),
+            kind: RuntimeArtifactKind::OciImage,
+            reference: reference.to_string(),
+            version_label: version_label.to_string(),
+            source_git_sha: Some("git-sha".to_string()),
+            finitec_version: Some("finitec-test".to_string()),
+            hermes_source_ref: Some("hermes-ref".to_string()),
+            finite_platform_plugin_ref: Some("plugin-ref".to_string()),
+            state_schema_version: state_schema_version.to_string(),
+            base_image: Some("python:3.11-trixie".to_string()),
+            recover_known_good_chat: false,
+            promoted: true,
+            now: Some(now.to_string()),
+        })
+        .await
+        .unwrap();
     }
 
-    fn complete_self_serve_agent(
-        state: &mut BridgeCoreState,
+    async fn complete_self_serve_agent(
+        db: &TestDb,
         email: &str,
         workos_user_id: &str,
         idempotency_key: &str,
@@ -13731,8 +9160,8 @@ mod tests {
         artifact_id: &str,
         now: &str,
     ) -> String {
-        let launch_code = issue_test_launch_code(state);
-        let requested = state
+        let launch_code = issue_test_launch_code(db).await;
+        let requested = db
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: email.to_string(),
                 workos_user_id: workos_user_id.to_string(),
@@ -13741,8 +9170,9 @@ mod tests {
                 idempotency_key: idempotency_key.to_string(),
                 now: Some(NOW.to_string()),
             })
+            .await
             .unwrap();
-        let lease = state
+        let lease = db
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-oslo-1".to_string(),
                 source_host_id: None,
@@ -13751,9 +9181,10 @@ mod tests {
                 runner_capacity: None,
                 now: Some(LATER.to_string()),
             })
+            .await
             .unwrap()
             .unwrap();
-        let completed = state
+        let completed = db
             .complete_agent_creation_request(CompleteAgentCreationRequestInput {
                 request_id: requested.request.id,
                 runner_id: "runner-oslo-1".to_string(),
@@ -13774,6 +9205,7 @@ mod tests {
                 published_app_urls: Vec::new(),
                 now: Some(now.to_string()),
             })
+            .await
             .unwrap();
         assert_eq!(lease.project.id, completed.project.id);
         completed.request.agent_runtime_id.unwrap()

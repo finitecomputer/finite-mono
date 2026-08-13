@@ -4,31 +4,29 @@ use crate::launch_codes::{
     prepare_launch_code_batch,
 };
 use crate::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
-    AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
-    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
-    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
-    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput,
-    ArchiveImportedProjectInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
-    BrainAgentAccount, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
-    HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    AdminArchiveUnrecoverableRuntimeInput, AdminAssignFinitePrivateLimitProfileInput,
+    AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
+    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
+    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
+    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
+    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
+    ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
+    BrainAgentAccount, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
+    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
+    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
+    LinkVerifiedUserInput, Project, ProjectMembershipRole, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
     RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
@@ -36,69 +34,60 @@ use crate::{
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
-    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
+    RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
     UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
-    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
-    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
-    finite_private_api_key_id_for, finite_private_grant_id_for_user,
-    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
-    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
-    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    agent_creation_entitlement_id_for, append_provider_operation_transition,
+    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
+    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
+    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
+    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
+    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
-    parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
-    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
-    parse_runtime_control_request_status, parse_runtime_resource_class,
-    parse_runtime_summary_status, parse_time, parse_user_link_status,
+    parse_finite_private_reservation_status, parse_hosting_tier, parse_runner_class,
+    parse_runtime_artifact_kind, parse_runtime_control_kind, parse_runtime_control_request_status,
+    parse_runtime_resource_class, parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
-    runtime_spec_v1, runtime_upgrade_contact_endpoint,
-    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
+    runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
+    should_replace_stripe_subscription, source_import_key, trim_to_option, valid_agent_npub,
+    valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::Mutex;
 use tokio_postgres::{GenericClient, NoTls, Row};
 use tracing::Instrument;
 
 const DEFAULT_POSTGRES_POOL_SIZE: usize = 8;
 
 #[derive(Clone)]
-pub enum CoreStore {
-    Memory(MemoryCoreStore),
-    Postgres(PostgresCoreStore),
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryCoreStore {
-    state: Arc<Mutex<BridgeCoreState>>,
-    runtime_environment: Arc<BTreeMap<String, String>>,
-    runtime_secret_references: Arc<Vec<String>>,
-}
-
-#[derive(Clone)]
-pub struct PostgresCoreStore {
+pub struct CoreStore {
     pool: Pool,
     runtime_environment: Arc<BTreeMap<String, String>>,
     runtime_secret_references: Arc<Vec<String>>,
+    /// When set, every write transaction rolls back instead of committing.
+    ///
+    /// A dry run executes the real SQL against real production rows and then
+    /// discards the write, so the preview reflects the state the operator is
+    /// actually about to change. Previewing against an empty store instead
+    /// would report creations for rows that already exist and would fail every
+    /// operation that looks up an existing row.
+    dry_run: bool,
 }
 
 struct FinitePrivateAdminAuditInsert<'a> {
@@ -113,761 +102,6 @@ struct FinitePrivateAdminAuditInsert<'a> {
     now: &'a str,
 }
 
-impl CoreStore {
-    pub fn memory() -> Self {
-        Self::Memory(MemoryCoreStore::default())
-    }
-
-    pub async fn connect_postgres(database_url: &str) -> CoreResult<Self> {
-        Ok(Self::Postgres(
-            PostgresCoreStore::connect(database_url).await?,
-        ))
-    }
-
-    pub fn with_runtime_environment(
-        mut self,
-        runtime_environment: BTreeMap<String, String>,
-    ) -> CoreResult<Self> {
-        validate_runtime_spec_environment(&runtime_environment)?;
-        let runtime_environment = Arc::new(runtime_environment);
-        match &mut self {
-            Self::Memory(store) => store.runtime_environment = runtime_environment,
-            Self::Postgres(store) => store.runtime_environment = runtime_environment,
-        }
-        Ok(self)
-    }
-
-    pub fn with_runtime_secret_references(
-        mut self,
-        runtime_secret_references: Vec<String>,
-    ) -> CoreResult<Self> {
-        runtime_spec_secret_references(&runtime_secret_references)?;
-        let runtime_secret_references = Arc::new(runtime_secret_references);
-        match &mut self {
-            Self::Memory(store) => store.runtime_secret_references = runtime_secret_references,
-            Self::Postgres(store) => store.runtime_secret_references = runtime_secret_references,
-        }
-        Ok(self)
-    }
-
-    pub async fn migrate(&self) -> CoreResult<()> {
-        match self {
-            Self::Memory(_) => Ok(()),
-            Self::Postgres(store) => store.migrate().await,
-        }
-    }
-
-    pub async fn reconcile_existing_host_imports(
-        &self,
-        records: Vec<ExistingHostProjectImport>,
-        options: ReconcileExistingHostImportsOptions,
-    ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .reconcile_existing_host_imports(records, options)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .reconcile_existing_host_imports(records, options)
-                    .await
-            }
-        }
-    }
-
-    pub async fn claim_project_imports(
-        &self,
-        input: ClaimProjectImportsInput,
-    ) -> CoreResult<ClaimProjectImportsResult> {
-        match self {
-            Self::Memory(store) => store.claim_project_imports(input).await,
-            Self::Postgres(store) => store.claim_project_imports(input).await,
-        }
-    }
-
-    pub async fn issue_launch_code_batch(
-        &self,
-        input: IssueLaunchCodeBatchInput,
-    ) -> CoreResult<IssuedLaunchCodeBatch> {
-        match self {
-            Self::Memory(store) => store.issue_launch_code_batch(input).await,
-            Self::Postgres(store) => store.issue_launch_code_batch(input).await,
-        }
-    }
-
-    pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
-        match self {
-            Self::Memory(store) => store.list_launch_code_batches().await,
-            Self::Postgres(store) => store.list_launch_code_batches().await,
-        }
-    }
-
-    pub async fn revoke_launch_code_batch(
-        &self,
-        input: RevokeLaunchCodeBatchInput,
-    ) -> CoreResult<LaunchCodeBatchDetails> {
-        match self {
-            Self::Memory(store) => store.revoke_launch_code_batch(input).await,
-            Self::Postgres(store) => store.revoke_launch_code_batch(input).await,
-        }
-    }
-
-    pub async fn request_agent_creation(
-        &self,
-        input: RequestAgentCreationInput,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
-            .await
-    }
-
-    pub async fn request_agent_creation_configured(
-        &self,
-        input: RequestAgentCreationInput,
-        configuration: AgentCreationConfiguration,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .request_agent_creation_configured(input, configuration)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .request_agent_creation_configured(input, configuration)
-                    .await
-            }
-        }
-    }
-
-    pub async fn request_runtime_restart(
-        &self,
-        input: RequestRuntimeRestartInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.request_runtime_restart(input).await,
-            Self::Postgres(store) => store.request_runtime_restart(input).await,
-        }
-    }
-
-    pub async fn request_runtime_recover_known_good_chat(
-        &self,
-        input: RequestRuntimeRecoverKnownGoodChatInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.request_runtime_recover_known_good_chat(input).await,
-            Self::Postgres(store) => store.request_runtime_recover_known_good_chat(input).await,
-        }
-    }
-
-    pub async fn request_runtime_stop(
-        &self,
-        input: RequestRuntimeStopInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.request_runtime_stop(input).await,
-            Self::Postgres(store) => store.request_runtime_stop(input).await,
-        }
-    }
-
-    pub async fn request_runtime_destroy(
-        &self,
-        input: RequestRuntimeDestroyInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.request_runtime_destroy(input).await,
-            Self::Postgres(store) => store.request_runtime_destroy(input).await,
-        }
-    }
-
-    pub async fn archive_imported_project(
-        &self,
-        input: ArchiveImportedProjectInput,
-    ) -> CoreResult<()> {
-        match self {
-            Self::Memory(store) => store.archive_imported_project(input).await,
-            Self::Postgres(store) => store.archive_imported_project(input).await,
-        }
-    }
-
-    pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
-        match self {
-            Self::Memory(store) => store.link_verified_user(input).await,
-            Self::Postgres(store) => store.link_verified_user(input).await,
-        }
-    }
-
-    pub async fn billing_overview(
-        &self,
-        input: LinkVerifiedUserInput,
-    ) -> CoreResult<BillingOverview> {
-        match self {
-            Self::Memory(store) => store.billing_overview(input).await,
-            Self::Postgres(store) => store.billing_overview(input).await,
-        }
-    }
-
-    pub async fn link_stripe_customer(
-        &self,
-        input: LinkStripeCustomerInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        match self {
-            Self::Memory(store) => store.link_stripe_customer(input).await,
-            Self::Postgres(store) => store.link_stripe_customer(input).await,
-        }
-    }
-
-    pub async fn sync_stripe_subscription(
-        &self,
-        input: SyncStripeSubscriptionInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        match self {
-            Self::Memory(store) => store.sync_stripe_subscription(input).await,
-            Self::Postgres(store) => store.sync_stripe_subscription(input).await,
-        }
-    }
-
-    pub async fn lease_agent_creation_request(
-        &self,
-        input: LeaseAgentCreationRequestInput,
-    ) -> CoreResult<Option<AgentCreationLease>> {
-        match self {
-            Self::Memory(store) => store.lease_agent_creation_request(input).await,
-            Self::Postgres(store) => store.lease_agent_creation_request(input).await,
-        }
-    }
-
-    pub async fn record_provider_operation_transition(
-        &self,
-        input: RecordProviderOperationTransitionInput,
-    ) -> CoreResult<ProviderOperationEnvelope> {
-        match self {
-            Self::Memory(store) => store.record_provider_operation_transition(input).await,
-            Self::Postgres(store) => store.record_provider_operation_transition(input).await,
-        }
-    }
-
-    pub async fn lease_runtime_control_request(
-        &self,
-        input: LeaseRuntimeControlRequestInput,
-    ) -> CoreResult<Option<RuntimeControlLease>> {
-        match self {
-            Self::Memory(store) => store.lease_runtime_control_request(input).await,
-            Self::Postgres(store) => store.lease_runtime_control_request(input).await,
-        }
-    }
-
-    pub async fn complete_runtime_control_request(
-        &self,
-        input: CompleteRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.complete_runtime_control_request(input).await,
-            Self::Postgres(store) => store.complete_runtime_control_request(input).await,
-        }
-    }
-
-    pub async fn fail_runtime_control_request(
-        &self,
-        input: FailRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.fail_runtime_control_request(input).await,
-            Self::Postgres(store) => store.fail_runtime_control_request(input).await,
-        }
-    }
-
-    pub async fn renew_runtime_control_request(
-        &self,
-        input: RenewRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.renew_runtime_control_request(input).await,
-            Self::Postgres(store) => store.renew_runtime_control_request(input).await,
-        }
-    }
-
-    pub async fn retry_runtime_control_request(
-        &self,
-        input: RetryRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.retry_runtime_control_request(input).await,
-            Self::Postgres(store) => store.retry_runtime_control_request(input).await,
-        }
-    }
-
-    pub async fn complete_agent_creation_request(
-        &self,
-        input: CompleteAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationLease> {
-        match self {
-            Self::Memory(store) => store.complete_agent_creation_request(input).await,
-            Self::Postgres(store) => store.complete_agent_creation_request(input).await,
-        }
-    }
-
-    pub async fn register_agent_creation_runtime(
-        &self,
-        input: RegisterAgentCreationRuntimeInput,
-    ) -> CoreResult<AgentCreationLease> {
-        match self {
-            Self::Memory(store) => store.register_agent_creation_runtime(input).await,
-            Self::Postgres(store) => store.register_agent_creation_runtime(input).await,
-        }
-    }
-
-    pub async fn fail_agent_creation_request(
-        &self,
-        input: FailAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        match self {
-            Self::Memory(store) => store.fail_agent_creation_request(input).await,
-            Self::Postgres(store) => store.fail_agent_creation_request(input).await,
-        }
-    }
-
-    pub async fn cancel_agent_creation_request(
-        &self,
-        input: CancelAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        match self {
-            Self::Memory(store) => store.cancel_agent_creation_request(input).await,
-            Self::Postgres(store) => store.cancel_agent_creation_request(input).await,
-        }
-    }
-
-    pub async fn record_runtime_heartbeat(&self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        match self {
-            Self::Memory(store) => store.record_runtime_heartbeat(relay_token).await,
-            Self::Postgres(store) => store.record_runtime_heartbeat(relay_token).await,
-        }
-    }
-
-    pub async fn relay_events_for_runtime(
-        &self,
-        relay_token: &str,
-    ) -> CoreResult<RelayEventsOutput> {
-        match self {
-            Self::Memory(store) => store.relay_events_for_runtime(relay_token).await,
-            Self::Postgres(store) => store.relay_events_for_runtime(relay_token).await,
-        }
-    }
-
-    pub async fn runtime_heartbeat_for_machine(
-        &self,
-        source_machine_id: &str,
-    ) -> CoreResult<RelayHeartbeat> {
-        match self {
-            Self::Memory(store) => store.runtime_heartbeat_for_machine(source_machine_id).await,
-            Self::Postgres(store) => store.runtime_heartbeat_for_machine(source_machine_id).await,
-        }
-    }
-
-    pub async fn claimable_candidates_for_email(
-        &self,
-        email: Option<&str>,
-    ) -> CoreResult<Vec<ProjectImportCandidate>> {
-        match self {
-            Self::Memory(store) => store.claimable_candidates_for_email(email).await,
-            Self::Postgres(store) => store.claimable_candidates_for_email(email).await,
-        }
-    }
-
-    pub async fn visible_projects_for_workos_user(
-        &self,
-        workos_user_id: &str,
-    ) -> CoreResult<Vec<VisibleProject>> {
-        match self {
-            Self::Memory(store) => store.visible_projects_for_workos_user(workos_user_id).await,
-            Self::Postgres(store) => store.visible_projects_for_workos_user(workos_user_id).await,
-        }
-    }
-
-    pub async fn brain_agent_account(
-        &self,
-        managed_agent_email: &str,
-    ) -> CoreResult<Option<BrainAgentAccount>> {
-        match self {
-            Self::Memory(store) => store.brain_agent_account(managed_agent_email).await,
-            Self::Postgres(store) => store.brain_agent_account(managed_agent_email).await,
-        }
-    }
-
-    pub async fn agent_creation_requests_for_workos_user(
-        &self,
-        workos_user_id: &str,
-    ) -> CoreResult<Vec<AgentCreationRequest>> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .agent_creation_requests_for_workos_user(workos_user_id)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .agent_creation_requests_for_workos_user(workos_user_id)
-                    .await
-            }
-        }
-    }
-
-    pub async fn source_host_relay_endpoint(
-        &self,
-        source_host_id: &str,
-    ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
-        match self {
-            Self::Memory(store) => store.source_host_relay_endpoint(source_host_id).await,
-            Self::Postgres(store) => store.source_host_relay_endpoint(source_host_id).await,
-        }
-    }
-
-    pub async fn upsert_source_host_relay_endpoint(
-        &self,
-        input: UpsertSourceHostRelayEndpointInput,
-    ) -> CoreResult<SourceHostRelayEndpoint> {
-        match self {
-            Self::Memory(store) => store.upsert_source_host_relay_endpoint(input).await,
-            Self::Postgres(store) => store.upsert_source_host_relay_endpoint(input).await,
-        }
-    }
-
-    pub async fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
-        match self {
-            Self::Memory(store) => store.runtime_artifact(id).await,
-            Self::Postgres(store) => store.runtime_artifact(id).await,
-        }
-    }
-
-    pub async fn upsert_runtime_artifact(
-        &self,
-        input: UpsertRuntimeArtifactInput,
-    ) -> CoreResult<RuntimeArtifact> {
-        match self {
-            Self::Memory(store) => store.upsert_runtime_artifact(input).await,
-            Self::Postgres(store) => store.upsert_runtime_artifact(input).await,
-        }
-    }
-
-    pub async fn approve_finite_private_grant(
-        &self,
-        input: ApproveFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        match self {
-            Self::Memory(store) => store.approve_finite_private_grant(input).await,
-            Self::Postgres(store) => store.approve_finite_private_grant(input).await,
-        }
-    }
-
-    pub async fn issue_finite_private_api_key(
-        &self,
-        input: IssueFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        match self {
-            Self::Memory(store) => store.issue_finite_private_api_key(input).await,
-            Self::Postgres(store) => store.issue_finite_private_api_key(input).await,
-        }
-    }
-
-    pub async fn provision_finite_private_runtime_key(
-        &self,
-        input: ProvisionFinitePrivateRuntimeKeyInput,
-    ) -> CoreResult<ProvisionFinitePrivateRuntimeKeyResult> {
-        match self {
-            Self::Memory(store) => store.provision_finite_private_runtime_key(input).await,
-            Self::Postgres(store) => store.provision_finite_private_runtime_key(input).await,
-        }
-    }
-
-    pub async fn revoke_finite_private_grant(
-        &self,
-        input: RevokeFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        match self {
-            Self::Memory(store) => store.revoke_finite_private_grant(input).await,
-            Self::Postgres(store) => store.revoke_finite_private_grant(input).await,
-        }
-    }
-
-    pub async fn revoke_finite_private_api_key(
-        &self,
-        input: RevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        match self {
-            Self::Memory(store) => store.revoke_finite_private_api_key(input).await,
-            Self::Postgres(store) => store.revoke_finite_private_api_key(input).await,
-        }
-    }
-
-    pub async fn rotate_finite_private_api_key(
-        &self,
-        input: RotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        match self {
-            Self::Memory(store) => store.rotate_finite_private_api_key(input).await,
-            Self::Postgres(store) => store.rotate_finite_private_api_key(input).await,
-        }
-    }
-
-    pub async fn reset_finite_private_usage_window(
-        &self,
-        input: ResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        match self {
-            Self::Memory(store) => store.reset_finite_private_usage_window(input).await,
-            Self::Postgres(store) => store.reset_finite_private_usage_window(input).await,
-        }
-    }
-
-    pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
-        match self {
-            Self::Memory(store) => store.admin_runtime_overviews().await,
-            Self::Postgres(store) => store.admin_runtime_overviews().await,
-        }
-    }
-
-    pub async fn admin_archive_unrecoverable_runtime(
-        &self,
-        input: AdminArchiveUnrecoverableRuntimeInput,
-    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
-        match self {
-            Self::Memory(store) => store.admin_archive_unrecoverable_runtime(input).await,
-            Self::Postgres(store) => store.admin_archive_unrecoverable_runtime(input).await,
-        }
-    }
-
-    pub async fn admin_request_runtime_restart(
-        &self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.admin_request_runtime_restart(input).await,
-            Self::Postgres(store) => store.admin_request_runtime_restart(input).await,
-        }
-    }
-
-    pub async fn admin_request_runtime_recover_known_good_chat(
-        &self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .admin_request_runtime_recover_known_good_chat(input)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .admin_request_runtime_recover_known_good_chat(input)
-                    .await
-            }
-        }
-    }
-
-    pub async fn admin_request_runtime_upgrade(
-        &self,
-        input: AdminRuntimeUpgradeInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.admin_request_runtime_upgrade(input).await,
-            Self::Postgres(store) => store.admin_request_runtime_upgrade(input).await,
-        }
-    }
-
-    pub async fn admin_request_runtime_upgrade_exact(
-        &self,
-        input: AdminRuntimeUpgradeExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.admin_request_runtime_upgrade_exact(input).await,
-            Self::Postgres(store) => store.admin_request_runtime_upgrade_exact(input).await,
-        }
-    }
-
-    pub async fn admin_request_runtime_retire_exact(
-        &self,
-        input: AdminRuntimeRetireExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.admin_request_runtime_retire_exact(input).await,
-            Self::Postgres(store) => store.admin_request_runtime_retire_exact(input).await,
-        }
-    }
-
-    pub async fn admin_request_runtime_relocate_exact(
-        &self,
-        input: AdminRuntimeRelocateExactInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        match self {
-            Self::Memory(store) => store.admin_request_runtime_relocate_exact(input).await,
-            Self::Postgres(store) => store.admin_request_runtime_relocate_exact(input).await,
-        }
-    }
-
-    pub async fn runtime_control_request(
-        &self,
-        request_id: &str,
-    ) -> CoreResult<RuntimeControlRequest> {
-        match self {
-            Self::Memory(store) => store.runtime_control_request(request_id).await,
-            Self::Postgres(store) => store.runtime_control_request(request_id).await,
-        }
-    }
-
-    pub async fn admin_issue_finite_private_friend_key(
-        &self,
-        input: AdminIssueFinitePrivateFriendKeyInput,
-    ) -> CoreResult<AdminIssuedFinitePrivateKey> {
-        match self {
-            Self::Memory(store) => store.admin_issue_finite_private_friend_key(input).await,
-            Self::Postgres(store) => store.admin_issue_finite_private_friend_key(input).await,
-        }
-    }
-
-    pub async fn admin_rotate_finite_private_api_key(
-        &self,
-        input: AdminRotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        match self {
-            Self::Memory(store) => store.admin_rotate_finite_private_api_key(input).await,
-            Self::Postgres(store) => store.admin_rotate_finite_private_api_key(input).await,
-        }
-    }
-
-    pub async fn admin_revoke_finite_private_api_key(
-        &self,
-        input: AdminRevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        match self {
-            Self::Memory(store) => store.admin_revoke_finite_private_api_key(input).await,
-            Self::Postgres(store) => store.admin_revoke_finite_private_api_key(input).await,
-        }
-    }
-
-    pub async fn admin_reset_finite_private_usage_window(
-        &self,
-        input: AdminResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        match self {
-            Self::Memory(store) => store.admin_reset_finite_private_usage_window(input).await,
-            Self::Postgres(store) => store.admin_reset_finite_private_usage_window(input).await,
-        }
-    }
-
-    pub async fn finite_private_admin_audit_events(
-        &self,
-    ) -> CoreResult<Vec<FinitePrivateAdminAuditEvent>> {
-        match self {
-            Self::Memory(store) => store.finite_private_admin_audit_events().await,
-            Self::Postgres(store) => store.finite_private_admin_audit_events().await,
-        }
-    }
-
-    pub async fn finite_private_admin_state(&self) -> CoreResult<FinitePrivateAdminState> {
-        match self {
-            Self::Memory(store) => store.finite_private_admin_state().await,
-            Self::Postgres(store) => store.finite_private_admin_state().await,
-        }
-    }
-
-    pub async fn reserve_finite_private_usage(
-        &self,
-        input: ReserveFinitePrivateUsageInput,
-    ) -> CoreResult<FinitePrivateUsageDecision> {
-        match self {
-            Self::Memory(store) => store.reserve_finite_private_usage(input).await,
-            Self::Postgres(store) => store.reserve_finite_private_usage(input).await,
-        }
-    }
-
-    pub async fn settle_finite_private_reservation(
-        &self,
-        input: SettleFinitePrivateReservationInput,
-    ) -> CoreResult<SettleFinitePrivateReservationResult> {
-        match self {
-            Self::Memory(store) => store.settle_finite_private_reservation(input).await,
-            Self::Postgres(store) => store.settle_finite_private_reservation(input).await,
-        }
-    }
-
-    pub async fn finite_private_usage_status_for_api_key(
-        &self,
-        presented_api_key: &str,
-        claim_notice: bool,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
-                    .await
-            }
-        }
-    }
-
-    pub async fn finite_private_usage_status_for_workos_user(
-        &self,
-        workos_user_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .finite_private_usage_status_for_workos_user(workos_user_id, now)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .finite_private_usage_status_for_workos_user(workos_user_id, now)
-                    .await
-            }
-        }
-    }
-
-    pub async fn claim_finite_private_daily_reset_for_api_key(
-        &self,
-        presented_api_key: &str,
-        now: Option<String>,
-    ) -> CoreResult<FinitePrivateDailyResetResult> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
-                    .await
-            }
-        }
-    }
-
-    pub async fn claim_finite_private_daily_reset_for_workos_user(
-        &self,
-        workos_user_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
-        match self {
-            Self::Memory(store) => {
-                store
-                    .claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
-                    .await
-            }
-            Self::Postgres(store) => {
-                store
-                    .claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
-                    .await
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibleProject {
@@ -876,617 +110,7 @@ pub struct VisibleProject {
     pub active_runtime_control: Option<RuntimeControlRequest>,
 }
 
-impl MemoryCoreStore {
-    pub async fn reconcile_existing_host_imports(
-        &self,
-        records: Vec<ExistingHostProjectImport>,
-        options: ReconcileExistingHostImportsOptions,
-    ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        let mut state = self.state.lock().await;
-        state.reconcile_existing_host_imports(&records, options)
-    }
-
-    pub async fn claim_project_imports(
-        &self,
-        input: ClaimProjectImportsInput,
-    ) -> CoreResult<ClaimProjectImportsResult> {
-        let mut state = self.state.lock().await;
-        state.claim_project_imports(input)
-    }
-
-    pub async fn issue_launch_code_batch(
-        &self,
-        input: IssueLaunchCodeBatchInput,
-    ) -> CoreResult<IssuedLaunchCodeBatch> {
-        let prepared = prepare_launch_code_batch(input)?;
-        let response = IssuedLaunchCodeBatch {
-            batch: prepared.batch.clone(),
-            codes: prepared.issued_codes,
-        };
-        let mut state = self.state.lock().await;
-        state
-            .launch_code_batches
-            .insert(prepared.batch.id.clone(), prepared.batch);
-        for record in prepared.records {
-            state.launch_codes.insert(record.id.clone(), record);
-        }
-        Ok(response)
-    }
-
-    pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
-        let state = self.state.lock().await;
-        let mut batches = state
-            .launch_code_batches
-            .values()
-            .map(|batch| memory_launch_code_batch_details(&state, batch))
-            .collect::<Vec<_>>();
-        batches.sort_by(|left, right| {
-            right
-                .batch
-                .created_at
-                .cmp(&left.batch.created_at)
-                .then_with(|| right.batch.id.cmp(&left.batch.id))
-        });
-        Ok(batches)
-    }
-
-    pub async fn revoke_launch_code_batch(
-        &self,
-        input: RevokeLaunchCodeBatchInput,
-    ) -> CoreResult<LaunchCodeBatchDetails> {
-        let actor = input.revoked_by_workos_user_id.trim();
-        if actor.is_empty() {
-            return Err(CoreError::MissingWorkosUserId);
-        }
-        let now = input.now.unwrap_or(current_time_iso()?);
-        parse_time(&now)?;
-        let mut state = self.state.lock().await;
-        let batch_id = input.batch_id.trim();
-        let batch = state
-            .launch_code_batches
-            .get_mut(batch_id)
-            .ok_or(CoreError::LaunchCodeBatchNotFound)?;
-        if batch.revoked_at.is_none() {
-            batch.revoked_at = Some(now);
-            batch.revoked_by_workos_user_id = Some(actor.to_string());
-        }
-        let batch = batch.clone();
-        Ok(memory_launch_code_batch_details(&state, &batch))
-    }
-
-    pub async fn request_agent_creation(
-        &self,
-        input: RequestAgentCreationInput,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
-            .await
-    }
-
-    pub async fn request_agent_creation_configured(
-        &self,
-        input: RequestAgentCreationInput,
-        configuration: AgentCreationConfiguration,
-    ) -> CoreResult<RequestAgentCreationResult> {
-        let mut state = self.state.lock().await;
-        state.request_agent_creation_configured(input, configuration)
-    }
-
-    pub async fn request_runtime_restart(
-        &self,
-        input: RequestRuntimeRestartInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.request_runtime_restart(input)
-    }
-
-    pub async fn request_runtime_recover_known_good_chat(
-        &self,
-        input: RequestRuntimeRecoverKnownGoodChatInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.request_runtime_recover_known_good_chat(input)
-    }
-
-    pub async fn request_runtime_stop(
-        &self,
-        input: RequestRuntimeStopInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.request_runtime_stop(input)
-    }
-
-    pub async fn request_runtime_destroy(
-        &self,
-        input: RequestRuntimeDestroyInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.request_runtime_destroy(input)
-    }
-
-    pub async fn archive_imported_project(
-        &self,
-        input: ArchiveImportedProjectInput,
-    ) -> CoreResult<()> {
-        let mut state = self.state.lock().await;
-        state.archive_imported_project(input)
-    }
-
-    pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
-        let mut state = self.state.lock().await;
-        state.link_verified_user(input)
-    }
-
-    pub async fn billing_overview(
-        &self,
-        input: LinkVerifiedUserInput,
-    ) -> CoreResult<BillingOverview> {
-        let mut state = self.state.lock().await;
-        state.billing_overview(input)
-    }
-
-    pub async fn link_stripe_customer(
-        &self,
-        input: LinkStripeCustomerInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        let mut state = self.state.lock().await;
-        state.link_stripe_customer(input)
-    }
-
-    pub async fn sync_stripe_subscription(
-        &self,
-        input: SyncStripeSubscriptionInput,
-    ) -> CoreResult<CustomerBillingAccount> {
-        let mut state = self.state.lock().await;
-        state.sync_stripe_subscription(input)
-    }
-
-    pub async fn lease_agent_creation_request(
-        &self,
-        input: LeaseAgentCreationRequestInput,
-    ) -> CoreResult<Option<AgentCreationLease>> {
-        let mut state = self.state.lock().await;
-        state.lease_agent_creation_request_with_runtime_configuration(
-            input,
-            self.runtime_environment.as_ref(),
-            self.runtime_secret_references.as_ref(),
-        )
-    }
-
-    pub async fn record_provider_operation_transition(
-        &self,
-        input: RecordProviderOperationTransitionInput,
-    ) -> CoreResult<ProviderOperationEnvelope> {
-        let mut state = self.state.lock().await;
-        state.record_provider_operation_transition(input)
-    }
-
-    pub async fn lease_runtime_control_request(
-        &self,
-        input: LeaseRuntimeControlRequestInput,
-    ) -> CoreResult<Option<RuntimeControlLease>> {
-        let mut state = self.state.lock().await;
-        state.lease_runtime_control_request_with_runtime_configuration(
-            input,
-            self.runtime_environment.as_ref(),
-            self.runtime_secret_references.as_ref(),
-        )
-    }
-
-    pub async fn complete_runtime_control_request(
-        &self,
-        input: CompleteRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.complete_runtime_control_request_with_runtime_configuration(
-            input,
-            Some(self.runtime_environment.as_ref()),
-            self.runtime_secret_references.as_ref(),
-        )
-    }
-
-    pub async fn fail_runtime_control_request(
-        &self,
-        input: FailRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.fail_runtime_control_request(input)
-    }
-
-    pub async fn renew_runtime_control_request(
-        &self,
-        input: RenewRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.renew_runtime_control_request(input)
-    }
-
-    pub async fn retry_runtime_control_request(
-        &self,
-        input: RetryRuntimeControlRequestInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.retry_runtime_control_request(input)
-    }
-
-    pub async fn complete_agent_creation_request(
-        &self,
-        input: CompleteAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationLease> {
-        let mut state = self.state.lock().await;
-        state.complete_agent_creation_request(input)
-    }
-
-    pub async fn register_agent_creation_runtime(
-        &self,
-        input: RegisterAgentCreationRuntimeInput,
-    ) -> CoreResult<AgentCreationLease> {
-        let mut state = self.state.lock().await;
-        state.register_agent_creation_runtime(input)
-    }
-
-    pub async fn fail_agent_creation_request(
-        &self,
-        input: FailAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let mut state = self.state.lock().await;
-        state.fail_agent_creation_request(input)
-    }
-
-    pub async fn cancel_agent_creation_request(
-        &self,
-        input: CancelAgentCreationRequestInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let mut state = self.state.lock().await;
-        state.cancel_agent_creation_request(input)
-    }
-
-    pub async fn record_runtime_heartbeat(&self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        let mut state = self.state.lock().await;
-        state.record_runtime_heartbeat(relay_token)
-    }
-
-    pub async fn relay_events_for_runtime(
-        &self,
-        relay_token: &str,
-    ) -> CoreResult<RelayEventsOutput> {
-        let state = self.state.lock().await;
-        state.relay_events_for_runtime(relay_token)
-    }
-
-    pub async fn runtime_heartbeat_for_machine(
-        &self,
-        source_machine_id: &str,
-    ) -> CoreResult<RelayHeartbeat> {
-        let state = self.state.lock().await;
-        state.runtime_heartbeat_for_machine(source_machine_id)
-    }
-
-    pub async fn claimable_candidates_for_email(
-        &self,
-        email: Option<&str>,
-    ) -> CoreResult<Vec<ProjectImportCandidate>> {
-        let state = self.state.lock().await;
-        Ok(state.claimable_candidates_for_email(email))
-    }
-
-    pub async fn visible_projects_for_workos_user(
-        &self,
-        workos_user_id: &str,
-    ) -> CoreResult<Vec<VisibleProject>> {
-        let state = self.state.lock().await;
-        Ok(visible_projects_for_workos_user(&state, workos_user_id))
-    }
-
-    pub async fn brain_agent_account(
-        &self,
-        managed_agent_email: &str,
-    ) -> CoreResult<Option<BrainAgentAccount>> {
-        let email = managed_agent_email.trim().to_ascii_lowercase();
-        let state = self.state.lock().await;
-        let project = state
-            .projects
-            .values()
-            .find(|project| project.agent_email.as_deref() == Some(email.as_str()));
-        let Some(project) = project else {
-            return Ok(None);
-        };
-        let Some(user) = state.users.get(&project.owner_user_id) else {
-            return Err(crate::CoreError::Store(
-                "project owner is missing".to_owned(),
-            ));
-        };
-        let Some(workos_user_id) = user.workos_user_id.as_ref() else {
-            return Ok(None);
-        };
-        Ok(Some(BrainAgentAccount {
-            workos_user_id: workos_user_id.clone(),
-            managed_agent_email: email,
-            verified_email: user.email.clone(),
-            status: "active".to_owned(),
-        }))
-    }
-
-    pub async fn agent_creation_requests_for_workos_user(
-        &self,
-        workos_user_id: &str,
-    ) -> CoreResult<Vec<AgentCreationRequest>> {
-        let state = self.state.lock().await;
-        Ok(agent_creation_requests_for_workos_user(
-            &state,
-            workos_user_id,
-        ))
-    }
-
-    pub async fn source_host_relay_endpoint(
-        &self,
-        source_host_id: &str,
-    ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
-        let state = self.state.lock().await;
-        state.source_host_relay_endpoint(source_host_id)
-    }
-
-    pub async fn upsert_source_host_relay_endpoint(
-        &self,
-        input: UpsertSourceHostRelayEndpointInput,
-    ) -> CoreResult<SourceHostRelayEndpoint> {
-        let mut state = self.state.lock().await;
-        state.upsert_source_host_relay_endpoint(input)
-    }
-
-    pub async fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
-        let state = self.state.lock().await;
-        state.runtime_artifact(id)
-    }
-
-    pub async fn upsert_runtime_artifact(
-        &self,
-        input: UpsertRuntimeArtifactInput,
-    ) -> CoreResult<RuntimeArtifact> {
-        let mut state = self.state.lock().await;
-        state.upsert_runtime_artifact(input)
-    }
-
-    pub async fn approve_finite_private_grant(
-        &self,
-        input: ApproveFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let mut state = self.state.lock().await;
-        state.approve_finite_private_grant(input)
-    }
-
-    pub async fn issue_finite_private_api_key(
-        &self,
-        input: IssueFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let mut state = self.state.lock().await;
-        state.issue_finite_private_api_key(input)
-    }
-
-    pub async fn provision_finite_private_runtime_key(
-        &self,
-        input: ProvisionFinitePrivateRuntimeKeyInput,
-    ) -> CoreResult<ProvisionFinitePrivateRuntimeKeyResult> {
-        let mut state = self.state.lock().await;
-        state.provision_finite_private_runtime_key(input)
-    }
-
-    pub async fn revoke_finite_private_grant(
-        &self,
-        input: RevokeFinitePrivateGrantInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let mut state = self.state.lock().await;
-        state.revoke_finite_private_grant(input)
-    }
-
-    pub async fn revoke_finite_private_api_key(
-        &self,
-        input: RevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let mut state = self.state.lock().await;
-        state.revoke_finite_private_api_key(input)
-    }
-
-    pub async fn rotate_finite_private_api_key(
-        &self,
-        input: RotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let mut state = self.state.lock().await;
-        state.rotate_finite_private_api_key(input)
-    }
-
-    pub async fn reset_finite_private_usage_window(
-        &self,
-        input: ResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let mut state = self.state.lock().await;
-        state.reset_finite_private_usage_window(input)
-    }
-
-    pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
-        let state = self.state.lock().await;
-        Ok(state.admin_runtime_overviews())
-    }
-
-    pub async fn admin_archive_unrecoverable_runtime(
-        &self,
-        input: AdminArchiveUnrecoverableRuntimeInput,
-    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
-        let mut state = self.state.lock().await;
-        state.admin_archive_unrecoverable_runtime(input)
-    }
-
-    pub async fn admin_request_runtime_restart(
-        &self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_restart(input)
-    }
-
-    pub async fn admin_request_runtime_recover_known_good_chat(
-        &self,
-        input: AdminRuntimeControlInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_recover_known_good_chat(input)
-    }
-
-    pub async fn admin_request_runtime_upgrade(
-        &self,
-        input: AdminRuntimeUpgradeInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_upgrade(input)
-    }
-
-    pub async fn admin_request_runtime_upgrade_exact(
-        &self,
-        input: AdminRuntimeUpgradeExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_upgrade_exact(input)
-    }
-
-    pub async fn admin_request_runtime_retire_exact(
-        &self,
-        input: AdminRuntimeRetireExactInput,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_retire_exact(input)
-    }
-
-    pub async fn admin_request_runtime_relocate_exact(
-        &self,
-        input: AdminRuntimeRelocateExactInput,
-    ) -> CoreResult<AgentCreationRequest> {
-        let mut state = self.state.lock().await;
-        state.admin_request_runtime_relocate_exact(input)
-    }
-
-    pub async fn runtime_control_request(
-        &self,
-        request_id: &str,
-    ) -> CoreResult<RuntimeControlRequest> {
-        let state = self.state.lock().await;
-        state.runtime_control_request(request_id)
-    }
-
-    pub async fn admin_issue_finite_private_friend_key(
-        &self,
-        input: AdminIssueFinitePrivateFriendKeyInput,
-    ) -> CoreResult<AdminIssuedFinitePrivateKey> {
-        let mut state = self.state.lock().await;
-        state.admin_issue_finite_private_friend_key(input)
-    }
-
-    pub async fn admin_rotate_finite_private_api_key(
-        &self,
-        input: AdminRotateFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let mut state = self.state.lock().await;
-        state.admin_rotate_finite_private_api_key(input)
-    }
-
-    pub async fn admin_revoke_finite_private_api_key(
-        &self,
-        input: AdminRevokeFinitePrivateApiKeyInput,
-    ) -> CoreResult<FinitePrivateApiKey> {
-        let mut state = self.state.lock().await;
-        state.admin_revoke_finite_private_api_key(input)
-    }
-
-    pub async fn admin_reset_finite_private_usage_window(
-        &self,
-        input: AdminResetFinitePrivateUsageWindowInput,
-    ) -> CoreResult<FinitePrivateGrant> {
-        let mut state = self.state.lock().await;
-        state.admin_reset_finite_private_usage_window(input)
-    }
-
-    pub async fn finite_private_admin_audit_events(
-        &self,
-    ) -> CoreResult<Vec<FinitePrivateAdminAuditEvent>> {
-        let state = self.state.lock().await;
-        Ok(finite_private_admin_audit_events_from_state(&state))
-    }
-
-    pub async fn finite_private_admin_state(&self) -> CoreResult<FinitePrivateAdminState> {
-        let state = self.state.lock().await;
-        Ok(finite_private_admin_state_from_state(&state))
-    }
-
-    pub async fn reserve_finite_private_usage(
-        &self,
-        input: ReserveFinitePrivateUsageInput,
-    ) -> CoreResult<FinitePrivateUsageDecision> {
-        let mut state = self.state.lock().await;
-        state.reserve_finite_private_usage(input)
-    }
-
-    pub async fn settle_finite_private_reservation(
-        &self,
-        input: SettleFinitePrivateReservationInput,
-    ) -> CoreResult<SettleFinitePrivateReservationResult> {
-        let mut state = self.state.lock().await;
-        state.settle_finite_private_reservation(input)
-    }
-
-    pub async fn finite_private_usage_status_for_api_key(
-        &self,
-        presented_api_key: &str,
-        claim_notice: bool,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let mut state = self.state.lock().await;
-        state.finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
-    }
-
-    pub async fn finite_private_usage_status_for_workos_user(
-        &self,
-        workos_user_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let mut state = self.state.lock().await;
-        state.finite_private_usage_status_for_workos_user(workos_user_id, false, now)
-    }
-
-    pub async fn claim_finite_private_daily_reset_for_api_key(
-        &self,
-        presented_api_key: &str,
-        now: Option<String>,
-    ) -> CoreResult<FinitePrivateDailyResetResult> {
-        let mut state = self.state.lock().await;
-        state.claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
-    }
-
-    pub async fn claim_finite_private_daily_reset_for_workos_user(
-        &self,
-        workos_user_id: &str,
-        now: Option<String>,
-    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
-        let mut state = self.state.lock().await;
-        state.claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
-    }
-}
-
-fn memory_launch_code_batch_details(
-    state: &BridgeCoreState,
-    batch: &LaunchCodeBatch,
-) -> LaunchCodeBatchDetails {
-    let mut codes = state
-        .launch_codes
-        .values()
-        .filter(|code| code.batch_id == batch.id)
-        .map(LaunchCodeRecord::status)
-        .collect::<Vec<_>>();
-    codes.sort_by(|left, right| left.id.cmp(&right.id));
-    LaunchCodeBatchDetails {
-        batch: batch.clone(),
-        codes,
-    }
-}
-
-impl PostgresCoreStore {
+impl CoreStore {
     pub async fn connect(database_url: &str) -> CoreResult<Self> {
         let config = database_url
             .parse()
@@ -1509,11 +133,41 @@ impl PostgresCoreStore {
             pool,
             runtime_environment: Arc::new(BTreeMap::new()),
             runtime_secret_references: Arc::new(Vec::new()),
+            dry_run: false,
         };
         // Fail startup/retry at the same boundary as the former eager
         // connection. Deadpool otherwise opens its first connection lazily.
         let _ = store.connection().await?;
         Ok(store)
+    }
+
+    /// Connect a store whose writes are always rolled back.
+    ///
+    /// Reads still see committed production state, so a preview reports what
+    /// the operation would really do.
+    pub async fn connect_dry_run(database_url: &str) -> CoreResult<Self> {
+        Ok(Self {
+            dry_run: true,
+            ..Self::connect(database_url).await?
+        })
+    }
+
+    pub fn with_runtime_environment(
+        mut self,
+        runtime_environment: BTreeMap<String, String>,
+    ) -> CoreResult<Self> {
+        validate_runtime_spec_environment(&runtime_environment)?;
+        self.runtime_environment = Arc::new(runtime_environment);
+        Ok(self)
+    }
+
+    pub fn with_runtime_secret_references(
+        mut self,
+        runtime_secret_references: Vec<String>,
+    ) -> CoreResult<Self> {
+        runtime_spec_secret_references(&runtime_secret_references)?;
+        self.runtime_secret_references = Arc::new(runtime_secret_references);
+        Ok(self)
     }
 
     async fn connection(&self) -> CoreResult<Object> {
@@ -1525,35 +179,24 @@ impl PostgresCoreStore {
         })
     }
 
+    /// Commit, or roll back when this store is in dry-run mode.
+    ///
+    /// Every write path in this impl ends here, so `--dry-run` cannot silently
+    /// miss a mutation that a later method introduces.
+    async fn finish(&self, tx: Transaction<'_>) -> CoreResult<()> {
+        if self.dry_run {
+            tx.rollback().await.map_err(store_error)
+        } else {
+            tx.commit().await.map_err(store_error)
+        }
+    }
+
     pub async fn migrate(&self) -> CoreResult<()> {
         let client = self.connection().await?;
         client
             .batch_execute(CORE_SCHEMA_SQL)
             .await
             .map_err(store_error)
-    }
-
-    pub async fn reconcile_existing_host_imports(
-        &self,
-        records: Vec<ExistingHostProjectImport>,
-        options: ReconcileExistingHostImportsOptions,
-    ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let report = postgres_reconcile_existing_host_imports(&*tx, &records, options).await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(report)
-    }
-
-    pub async fn claim_project_imports(
-        &self,
-        input: ClaimProjectImportsInput,
-    ) -> CoreResult<ClaimProjectImportsResult> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_claim_project_imports(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
     }
 
     pub async fn issue_launch_code_batch(
@@ -1603,7 +246,7 @@ impl PostgresCoreStore {
             .await
             .map_err(store_error)?;
         }
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(response)
     }
 
@@ -1630,9 +273,9 @@ impl PostgresCoreStore {
                     SET revoked_at = COALESCE(revoked_at, $2::text::timestamptz),
                         revoked_by_workos_user_id = COALESCE(revoked_by_workos_user_id, $3)
                   WHERE id = $1
-                  RETURNING id, name, hosting_tier, code_count, expires_at::text,
-                            revoked_at::text, revoked_by_workos_user_id,
-                            created_by_workos_user_id, created_at::text",
+                  RETURNING id, name, hosting_tier, code_count, core_rfc3339(expires_at) AS expires_at,
+                            core_rfc3339(revoked_at) AS revoked_at, revoked_by_workos_user_id,
+                            created_by_workos_user_id, core_rfc3339(created_at) AS created_at",
                 &[&input.batch_id.trim(), &now, &actor],
             )
             .await
@@ -1640,7 +283,7 @@ impl PostgresCoreStore {
             .ok_or(CoreError::LaunchCodeBatchNotFound)?;
         let batch = launch_code_batch_from_row(&row)?;
         let details = postgres_launch_code_batch_details(&*tx, batch).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(details)
     }
 
@@ -1651,7 +294,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_upgrade(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1662,7 +305,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1673,7 +316,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1684,7 +327,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1712,7 +355,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_request_agent_creation(&*tx, input, configuration).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1724,7 +367,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Restart).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1740,7 +383,7 @@ impl PostgresCoreStore {
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1752,7 +395,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Stop).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1764,47 +407,8 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Destroy).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
-    }
-
-    pub async fn archive_imported_project(
-        &self,
-        input: ArchiveImportedProjectInput,
-    ) -> CoreResult<()> {
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified_email = normalize_owner_email(Some(&input.verified_email))
-            .ok_or(CoreError::MissingVerifiedEmail)?;
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let user = ensure_linked_user_row(
-            &*tx,
-            &verified_email,
-            &input.workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )
-        .await?;
-        let updated = tx
-            .execute(
-                "UPDATE project_room_memberships AS membership
-             SET archived_at = $1::text::timestamptz
-             FROM chat_identities AS identity, projects AS project
-             WHERE membership.project_id = $2
-               AND identity.id = membership.chat_identity_id
-               AND identity.user_id = $3
-               AND project.id = membership.project_id
-               AND project.owner_user_id = $3
-               AND project.import_candidate_id IS NOT NULL",
-                &[&now, &input.project_id, &user.id],
-            )
-            .await
-            .map_err(store_error)?;
-        if updated == 0 {
-            return Err(CoreError::ProjectNotFound);
-        }
-        tx.commit().await.map_err(store_error)?;
-        Ok(())
     }
 
     pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
@@ -1825,7 +429,7 @@ impl PostgresCoreStore {
             &now,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(user)
     }
 
@@ -1842,7 +446,7 @@ impl PostgresCoreStore {
             .await
             .map_err(store_error)?;
         let overview = postgres_billing_overview(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(overview)
     }
 
@@ -1853,7 +457,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let account = postgres_link_stripe_customer(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(account)
     }
 
@@ -1864,7 +468,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let account = postgres_sync_stripe_subscription(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(account)
     }
 
@@ -1881,7 +485,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1892,7 +496,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_record_provider_operation_transition(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1909,7 +513,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1926,7 +530,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1937,7 +541,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_fail_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1948,7 +552,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_renew_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1959,7 +563,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_retry_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1970,7 +574,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_complete_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1981,7 +585,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_register_agent_creation_runtime(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1992,7 +596,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_fail_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2003,40 +607,8 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_cancel_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
-    }
-
-    pub async fn record_runtime_heartbeat(&self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_record_runtime_heartbeat(&*tx, relay_token).await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
-    }
-
-    pub async fn relay_events_for_runtime(
-        &self,
-        relay_token: &str,
-    ) -> CoreResult<RelayEventsOutput> {
-        let client = self.connection().await?;
-        postgres_relay_events_for_runtime(&**client, relay_token).await
-    }
-
-    pub async fn runtime_heartbeat_for_machine(
-        &self,
-        source_machine_id: &str,
-    ) -> CoreResult<RelayHeartbeat> {
-        let client = self.connection().await?;
-        postgres_runtime_heartbeat_for_machine(&**client, source_machine_id).await
-    }
-
-    pub async fn claimable_candidates_for_email(
-        &self,
-        email: Option<&str>,
-    ) -> CoreResult<Vec<ProjectImportCandidate>> {
-        let client = self.connection().await?;
-        postgres_claimable_candidates_for_email(&**client, email).await
     }
 
     pub async fn visible_projects_for_workos_user(
@@ -2082,26 +654,6 @@ impl PostgresCoreStore {
         postgres_agent_creation_requests_for_workos_user(&**client, workos_user_id).await
     }
 
-    pub async fn source_host_relay_endpoint(
-        &self,
-        source_host_id: &str,
-    ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
-        let source_host_id = normalize_source_host_id(source_host_id)?;
-        let client = self.connection().await?;
-        select_source_host_relay(&**client, &source_host_id).await
-    }
-
-    pub async fn upsert_source_host_relay_endpoint(
-        &self,
-        input: UpsertSourceHostRelayEndpointInput,
-    ) -> CoreResult<SourceHostRelayEndpoint> {
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        let endpoint = postgres_upsert_source_host_relay_endpoint(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(endpoint)
-    }
-
     pub async fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
         let id = trim_to_option(Some(id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
         let client = self.connection().await?;
@@ -2115,7 +667,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(artifact)
     }
 
@@ -2126,7 +678,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_approve_finite_private_grant(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2137,7 +689,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_issue_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2148,7 +700,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_provision_finite_private_runtime_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2159,7 +711,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_revoke_finite_private_grant(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2170,7 +722,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_revoke_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2181,7 +733,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_rotate_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2192,7 +744,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_reset_finite_private_usage_window(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2208,7 +760,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(receipt)
     }
 
@@ -2221,7 +773,7 @@ impl PostgresCoreStore {
         let result =
             postgres_admin_request_runtime_control(&*tx, input, RuntimeControlKind::Restart, None)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2238,7 +790,7 @@ impl PostgresCoreStore {
             None,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2249,7 +801,18 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_issue_finite_private_friend_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
+    pub async fn issue_finite_private_friend_key(
+        &self,
+        input: IssueFinitePrivateFriendKeyInput,
+    ) -> CoreResult<IssuedFinitePrivateFriendKey> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_issue_finite_private_friend_key(&*tx, input).await?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2260,7 +823,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_rotate_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2271,7 +834,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_revoke_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2282,7 +845,18 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
+    pub async fn admin_assign_finite_private_limit_profile(
+        &self,
+        input: AdminAssignFinitePrivateLimitProfileInput,
+    ) -> CoreResult<FinitePrivateGrant> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_assign_finite_private_limit_profile(&*tx, input).await?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2305,7 +879,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let decision = postgres_reserve_finite_private_usage(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(decision)
     }
 
@@ -2316,7 +890,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_settle_finite_private_reservation(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2335,7 +909,7 @@ impl PostgresCoreStore {
             now,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2348,7 +922,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_finite_private_usage_status_for_workos_user(&*tx, workos_user_id, now).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2362,7 +936,7 @@ impl PostgresCoreStore {
         let result =
             postgres_claim_finite_private_daily_reset_for_api_key(&*tx, presented_api_key, now)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2376,125 +950,9 @@ impl PostgresCoreStore {
         let result =
             postgres_claim_finite_private_daily_reset_for_workos_user(&*tx, workos_user_id, now)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
-}
-
-fn visible_projects_for_workos_user(
-    state: &BridgeCoreState,
-    workos_user_id: &str,
-) -> Vec<VisibleProject> {
-    let Some(user) = state
-        .users
-        .values()
-        .find(|user| user.workos_user_id.as_deref() == Some(workos_user_id))
-    else {
-        return Vec::new();
-    };
-
-    state
-        .visible_projects_for_user(&user.id)
-        .into_iter()
-        .map(|project| {
-            let runtime = state
-                .project_runtime_links
-                .values()
-                .find(|link| link.project_id == project.id && link.active)
-                .and_then(|link| state.agent_runtimes.get(&link.agent_runtime_id))
-                .cloned();
-            let active_runtime_control = runtime.as_ref().and_then(|runtime| {
-                state
-                    .runtime_control_requests
-                    .values()
-                    .filter(|request| {
-                        request.agent_runtime_id == runtime.id
-                            && matches!(
-                                request.status,
-                                RuntimeControlRequestStatus::Requested
-                                    | RuntimeControlRequestStatus::Running
-                            )
-                    })
-                    .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
-                    .cloned()
-            });
-            VisibleProject {
-                project,
-                runtime,
-                active_runtime_control,
-            }
-        })
-        .collect()
-}
-
-fn finite_private_admin_audit_events_from_state(
-    state: &BridgeCoreState,
-) -> Vec<FinitePrivateAdminAuditEvent> {
-    let mut events = state
-        .finite_private_admin_audit_events
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    events.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    events
-}
-
-fn finite_private_admin_state_from_state(state: &BridgeCoreState) -> FinitePrivateAdminState {
-    let mut grants = state
-        .finite_private_grants
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    grants.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let mut api_keys = state
-        .finite_private_api_keys
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    api_keys.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    FinitePrivateAdminState {
-        grants,
-        api_keys,
-        admin_audit_events: finite_private_admin_audit_events_from_state(state),
-    }
-}
-
-fn agent_creation_requests_for_workos_user(
-    state: &BridgeCoreState,
-    workos_user_id: &str,
-) -> Vec<AgentCreationRequest> {
-    let Some(user) = state
-        .users
-        .values()
-        .find(|user| user.workos_user_id.as_deref() == Some(workos_user_id))
-    else {
-        return Vec::new();
-    };
-
-    let mut requests = state
-        .agent_creation_requests
-        .values()
-        .filter(|request| request.owner_user_id == user.id)
-        .cloned()
-        .collect::<Vec<_>>();
-    requests.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    requests
 }
 
 /// Observability wrapper around the agent-creation mutation. This is the single
@@ -2802,8 +1260,8 @@ where
 {
     let sql = format!(
         "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                subscription_status, current_period_end::text, cancel_at_period_end,
-                last_stripe_event_id, last_stripe_event_created, created_at::text, updated_at::text
+                subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
+                last_stripe_event_id, last_stripe_event_created, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
          FROM customer_billing_accounts WHERE customer_org_id = $1{}",
         if for_update { " FOR UPDATE" } else { "" }
     );
@@ -2825,8 +1283,8 @@ where
     client
         .query_opt(
             "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                    subscription_status, current_period_end::text, cancel_at_period_end,
-                    last_stripe_event_id, last_stripe_event_created, created_at::text, updated_at::text
+                    subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
+                    last_stripe_event_id, last_stripe_event_created, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM customer_billing_accounts WHERE stripe_customer_id = $1",
             &[&stripe_customer_id],
         )
@@ -2846,7 +1304,7 @@ where
     client
         .query_opt(
             "SELECT id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM agent_creation_entitlements WHERE customer_org_id = $1",
             &[&customer_org_id],
         )
@@ -3009,9 +1467,9 @@ where
                stripe_customer_id = EXCLUDED.stripe_customer_id,
                updated_at = EXCLUDED.updated_at
              RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       hosting_tier, subscription_status, current_period_end::text, cancel_at_period_end,
+                       hosting_tier, subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
                        last_stripe_event_id, last_stripe_event_created,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&customer_org_id, &stripe_customer_id, &now],
         )
         .await
@@ -3156,9 +1614,9 @@ where
                last_stripe_event_created = EXCLUDED.last_stripe_event_created,
                updated_at = EXCLUDED.updated_at
              RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       hosting_tier, subscription_status, current_period_end::text, cancel_at_period_end,
+                       hosting_tier, subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
                        last_stripe_event_id, last_stripe_event_created,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[
                 &customer_org_id,
                 &stripe_customer_id,
@@ -3348,8 +1806,8 @@ where
                        request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                        request.profile_picture_url,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
-                       request.runner_id, request.lease_token, request.lease_expires_at::text,
-                       request.failure_message, request.created_at::text, request.updated_at::text",
+                       request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
+                       request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at",
             &[
                 &runner_id,
                 &lease_token,
@@ -3540,8 +1998,6 @@ where
     if source_machine_id.is_empty() {
         return Err(CoreError::MissingSourceMachineId);
     }
-    let token_hash = trim_to_option(Some(&input.runtime_relay_token_hash))
-        .ok_or(CoreError::MissingRuntimeRelayTokenHash)?;
     let artifact_id = trim_to_option(input.runtime_artifact_id.as_deref())
         .ok_or(CoreError::MissingRuntimeArtifactId)?;
     let artifact = select_runtime_artifact(client, &artifact_id)
@@ -3674,16 +2130,6 @@ where
         provider_operation.clone()
     };
     upsert_agent_runtime_row(client, &runtime).await?;
-    upsert_runtime_relay_credential_row(
-        client,
-        &RuntimeRelayCredential {
-            agent_runtime_id: runtime_id.clone(),
-            token_hash,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        },
-    )
-    .await?;
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_runtime_registered(client, &input.request_id, &runtime_id, &now)
@@ -3908,7 +2354,7 @@ where
         let key_row = client
             .query_opt(
                 "SELECT id, grant_id, project_id, agent_runtime_id, key_hash, status,
-                        created_at::text, updated_at::text
+                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
                  FROM finite_private_api_keys WHERE id = $1 FOR UPDATE",
                 &[&key_id],
             )
@@ -3951,8 +2397,8 @@ where
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&input.request_id, &failure_message, &now, &agent_runtime_id],
         )
         .await
@@ -4028,8 +2474,8 @@ where
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&input.request_id, &agent_runtime_id, &now],
         )
         .await
@@ -4140,7 +2586,7 @@ where
              SET status = 'revoked', updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, grant_id, project_id, agent_runtime_id, key_hash, status,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&key_id, &now],
         )
         .await
@@ -4164,90 +2610,6 @@ where
     Ok(key)
 }
 
-async fn postgres_record_runtime_heartbeat<C>(
-    client: &C,
-    relay_token: &str,
-) -> CoreResult<RelayHeartbeat>
-where
-    C: GenericClient + Sync,
-{
-    let now = current_time_iso()?;
-    let token_hash = runtime_relay_token_hash(relay_token)?;
-    let row = client
-        .query_opt(
-            "SELECT runtime.id, runtime.project_id, runtime.source_host_id,
-                    runtime.source_machine_id, runtime.source_import_key,
-                    runtime.runtime_artifact_id, runtime.state_schema_version,
-                    runtime.placement_runner_class, runtime.runtime_resource_class,
-                    runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
-                    runtime.contact_endpoint, runtime.runtime_capabilities,
-                    runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
-             FROM runtime_relay_credentials AS credential
-             JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
-             WHERE credential.token_hash = $1
-             FOR UPDATE OF runtime",
-            &[&token_hash],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-    let mut runtime = agent_runtime_from_row(&row)?;
-    runtime.host_facts.runtime_status = RuntimeSummaryStatus::Online;
-    runtime.updated_at = now.clone();
-    upsert_agent_runtime_row(client, &runtime).await?;
-    upsert_runtime_status_snapshot_row(
-        client,
-        &RuntimeStatusSnapshot {
-            agent_runtime_id: runtime.id.clone(),
-            status: RuntimeSummaryStatus::Online,
-            last_heartbeat_at: Some(now.clone()),
-            runtime_host: runtime.host_facts.runtime_host.clone(),
-            active_inference_profile: runtime.host_facts.active_inference_profile.clone(),
-            hermes_available: runtime.host_facts.hermes_available,
-            updated_at: now.clone(),
-        },
-    )
-    .await?;
-    Ok(RelayHeartbeat {
-        ok: true,
-        machine_id: runtime.source_machine_id,
-        last_seen_at: now,
-    })
-}
-
-async fn postgres_runtime_heartbeat_for_machine<C>(
-    client: &C,
-    source_machine_id: &str,
-) -> CoreResult<RelayHeartbeat>
-where
-    C: GenericClient + Sync,
-{
-    let source_machine_id = normalize_id_part(source_machine_id);
-    if source_machine_id.is_empty() {
-        return Err(CoreError::MissingSourceMachineId);
-    }
-    let row = client
-        .query_opt(
-            "SELECT runtime.source_machine_id, snapshot.last_heartbeat_at::text
-             FROM agent_runtimes AS runtime
-             JOIN runtime_status_snapshots AS snapshot ON snapshot.agent_runtime_id = runtime.id
-             WHERE runtime.source_machine_id = $1
-               AND snapshot.status = 'online'
-               AND snapshot.last_heartbeat_at IS NOT NULL
-             ORDER BY snapshot.last_heartbeat_at DESC
-             LIMIT 1",
-            &[&source_machine_id],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::RuntimeHeartbeatNotFound)?;
-    Ok(RelayHeartbeat {
-        ok: true,
-        machine_id: row.get("source_machine_id"),
-        last_seen_at: row.get("last_heartbeat_at"),
-    })
-}
-
 async fn postgres_visible_projects_for_workos_user<C>(
     client: &C,
     workos_user_id: &str,
@@ -4266,14 +2628,28 @@ where
     else {
         return Ok(Vec::new());
     };
+    postgres_visible_projects_for_user(client, &user_id).await
+}
+
+/// Visible projects for an already-resolved internal user id.
+///
+/// Split out so the WorkOS-keyed entry point and callers that already hold the
+/// internal id share one query.
+async fn postgres_visible_projects_for_user<C>(
+    client: &C,
+    user_id: &str,
+) -> CoreResult<Vec<VisibleProject>>
+where
+    C: GenericClient + Sync,
+{
     let rows = client
         .query(
             "SELECT project.id AS project_id, project.customer_org_id, project.owner_user_id,
                     project.display_name, project.agent_email, project.import_candidate_id,
                     project.hosting_tier,
                     project.placement_runner_class, project.runtime_resource_class,
-                    project.created_at::text,
-                    project.updated_at::text,
+                    core_rfc3339(project.created_at) AS created_at,
+                    core_rfc3339(project.updated_at) AS updated_at,
                     runtime.id AS runtime_id, runtime.project_id AS runtime_project_id,
                     runtime.source_host_id, runtime.source_machine_id, runtime.source_import_key,
                     runtime.runtime_artifact_id, runtime.state_schema_version,
@@ -4281,8 +2657,8 @@ where
                     runtime.runtime_resource_class AS runtime_runtime_resource_class,
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
                     runtime.contact_endpoint, runtime.runtime_capabilities,
-                    runtime.host_facts, runtime.created_at::text AS runtime_created_at,
-                    runtime.updated_at::text AS runtime_updated_at,
+                    runtime.host_facts, core_rfc3339(runtime.created_at) AS runtime_created_at,
+                    core_rfc3339(runtime.updated_at) AS runtime_updated_at,
                     control.id AS control_id, control.project_id AS control_project_id,
                     control.agent_runtime_id AS control_agent_runtime_id,
                     control.source_host_id AS control_source_host_id,
@@ -4292,11 +2668,11 @@ where
                     control.target_runtime_artifact_id AS control_target_runtime_artifact_id,
                     control.status AS control_status, control.runner_id AS control_runner_id,
                     control.lease_token AS control_lease_token,
-                    control.lease_expires_at::text AS control_lease_expires_at,
+                    core_rfc3339(control.lease_expires_at) AS control_lease_expires_at,
                     control.failure_message AS control_failure_message,
-                    control.created_at::text AS control_created_at,
-                    control.updated_at::text AS control_updated_at,
-                    control.completed_at::text AS control_completed_at
+                    core_rfc3339(control.created_at) AS control_created_at,
+                    core_rfc3339(control.updated_at) AS control_updated_at,
+                    core_rfc3339(control.completed_at) AS control_completed_at
              FROM project_room_memberships AS membership
              JOIN chat_identities AS identity ON identity.id = membership.chat_identity_id
              JOIN projects AS project ON project.id = membership.project_id
@@ -4438,8 +2814,8 @@ where
                     request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                     request.profile_picture_url,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
-                    request.runner_id, request.lease_token, request.lease_expires_at::text,
-                    request.failure_message, request.created_at::text, request.updated_at::text
+                    request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
+                    request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at
              FROM agent_creation_requests AS request
              JOIN users AS owner ON owner.id = request.owner_user_id
              WHERE owner.workos_user_id = $1
@@ -4710,7 +3086,7 @@ where
     client
         .query_opt(
             "SELECT id, normalized_email, link_status, workos_user_id,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM users WHERE id = $1",
             &[&user_id],
         )
@@ -4730,7 +3106,7 @@ where
     client
         .query_opt(
             "SELECT id, normalized_email, link_status, workos_user_id,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM users WHERE normalized_email = $1",
             &[&email],
         )
@@ -4751,7 +3127,7 @@ where
 {
     client
         .query_opt(
-            "SELECT id, owner_user_id, name, billing_class, created_at::text, updated_at::text
+            "SELECT id, owner_user_id, name, billing_class, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM customer_orgs WHERE owner_user_id = $1",
             &[&owner_user_id],
         )
@@ -4770,7 +3146,7 @@ where
             "SELECT id, customer_org_id, owner_user_id, display_name, agent_email,
                     import_candidate_id,
                     hosting_tier, placement_runner_class, runtime_resource_class,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM projects WHERE id = $1",
             &[&project_id],
         )
@@ -4799,8 +3175,8 @@ where
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
-                    runner_id, lease_token, lease_expires_at::text, failure_message,
-                    created_at::text, updated_at::text
+                    runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM agent_creation_requests
              WHERE owner_user_id = $1 AND idempotency_key = $2",
             &[&owner_user_id, &idempotency_key],
@@ -4825,8 +3201,8 @@ where
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
-                    runner_id, lease_token, lease_expires_at::text, failure_message,
-                    created_at::text, updated_at::text
+                    runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM agent_creation_requests WHERE id = $1
              FOR UPDATE",
             &[&request_id],
@@ -4849,7 +3225,7 @@ where
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
                     base_image, recover_known_good_chat,
-                    created_at::text, promoted_at::text, retired_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts WHERE id = $1",
             &[&artifact_id],
         )
@@ -4868,10 +3244,14 @@ where
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
                     base_image, recover_known_good_chat,
-                    created_at::text, promoted_at::text, retired_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
-             ORDER BY promoted_at DESC, created_at DESC, id DESC
+             -- Qualified: a bare name here would bind the rendered-text output
+             -- column and sort lexicographically, which is not chronological
+             -- once fractional seconds vary.
+             ORDER BY runtime_artifacts.promoted_at DESC,
+                      runtime_artifacts.created_at DESC, id DESC
              LIMIT 1",
             &[],
         )
@@ -4894,7 +3274,7 @@ where
                     runtime_resource_class, provider_runtime_handle,
                     provider_runtime_handle_history, contact_endpoint, runtime_capabilities,
                     host_facts,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM agent_runtimes WHERE id = $1",
             &[&runtime_id],
         )
@@ -4921,7 +3301,7 @@ where
                     runtime_resource_class, provider_runtime_handle,
                     provider_runtime_handle_history, contact_endpoint, runtime_capabilities,
                     host_facts,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM agent_runtimes WHERE source_import_key = $1",
             &[&source_import_key],
         )
@@ -4937,11 +3317,11 @@ where
 {
     let rows = client
         .query(
-            "SELECT id, name, hosting_tier, code_count, expires_at::text, revoked_at::text,
+            "SELECT id, name, hosting_tier, code_count, core_rfc3339(expires_at) AS expires_at, core_rfc3339(revoked_at) AS revoked_at,
                     revoked_by_workos_user_id, created_by_workos_user_id,
-                    created_at::text
+                    core_rfc3339(created_at) AS created_at
                FROM launch_code_batches
-              ORDER BY created_at DESC, id DESC",
+              ORDER BY launch_code_batches.created_at DESC, id DESC",
             &[],
         )
         .await
@@ -4964,7 +3344,7 @@ where
 {
     let rows = client
         .query(
-            "SELECT id, redeemed_customer_org_id, redeemed_at::text
+            "SELECT id, redeemed_customer_org_id, core_rfc3339(redeemed_at) AS redeemed_at
                FROM launch_codes
               WHERE batch_id = $1
               ORDER BY id",
@@ -5017,8 +3397,8 @@ where
         .query_opt(
             "SELECT code.id, code.batch_id, code.code_hash,
                     code.redeemed_customer_org_id,
-                    code.redemption_idempotency_key, code.redeemed_at::text,
-                    code.created_at::text,
+                    code.redemption_idempotency_key, core_rfc3339(code.redeemed_at) AS redeemed_at,
+                    core_rfc3339(code.created_at) AS created_at,
                     batch.hosting_tier,
                     batch.revoked_at IS NOT NULL AS batch_revoked,
                     batch.expires_at <= $2::text::timestamptz AS batch_expired
@@ -5104,7 +3484,7 @@ where
                workos_user_id = EXCLUDED.workos_user_id,
                updated_at = EXCLUDED.updated_at
              RETURNING id, normalized_email, link_status, workos_user_id,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&user_id, &email, &workos_user_id, &now],
         )
         .await
@@ -5129,7 +3509,7 @@ where
             "INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5::text::timestamptz, $5::text::timestamptz)
              ON CONFLICT (owner_user_id) DO UPDATE SET updated_at = customer_orgs.updated_at
-             RETURNING id, owner_user_id, name, billing_class, created_at::text, updated_at::text",
+             RETURNING id, owner_user_id, name, billing_class, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&org_id, &user.id, &user.email, &billing_class.as_str(), &now],
         )
         .await
@@ -5159,7 +3539,7 @@ where
                launch_code = EXCLUDED.launch_code,
                updated_at = EXCLUDED.updated_at
              RETURNING id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[
                 &id,
                 &customer_org_id,
@@ -5195,7 +3575,7 @@ where
                launch_code = agent_creation_entitlements.launch_code,
                updated_at = EXCLUDED.updated_at
              RETURNING id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&id, &customer_org_id, &now],
         )
         .await
@@ -5448,71 +3828,8 @@ where
     Ok(())
 }
 
-async fn upsert_runtime_relay_credential_row<C>(
-    client: &C,
-    credential: &RuntimeRelayCredential,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO runtime_relay_credentials (agent_runtime_id, token_hash, created_at, updated_at)
-             VALUES ($1, $2, $3::text::timestamptz, $4::text::timestamptz)
-             ON CONFLICT (agent_runtime_id) DO UPDATE SET
-               token_hash = EXCLUDED.token_hash,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &credential.agent_runtime_id,
-                &credential.token_hash,
-                &credential.created_at,
-                &credential.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn upsert_runtime_status_snapshot_row<C>(
-    client: &C,
-    snapshot: &RuntimeStatusSnapshot,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO runtime_status_snapshots (
-               agent_runtime_id, status, last_heartbeat_at, runtime_host,
-               active_inference_profile, hermes_available, updated_at
-             )
-             VALUES ($1, $2, $3::text::timestamptz, $4, $5, $6, $7::text::timestamptz)
-             ON CONFLICT (agent_runtime_id) DO UPDATE SET
-               status = EXCLUDED.status,
-               last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-               runtime_host = EXCLUDED.runtime_host,
-               active_inference_profile = EXCLUDED.active_inference_profile,
-               hermes_available = EXCLUDED.hermes_available,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &snapshot.agent_runtime_id,
-                &snapshot.status.as_str(),
-                &snapshot.last_heartbeat_at,
-                &snapshot.runtime_host,
-                &snapshot.active_inference_profile,
-                &snapshot.hermes_available,
-                &snapshot.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-/// Mirror `ensure_finite_private_limit_profile`: an existing profile is
-/// returned; the DEFAULT profile is created on demand matching the in-memory
-/// spec; any other missing profile is an error.
+/// Return an existing profile, create one of Core's built-in profiles on
+/// demand, and reject unknown profile identifiers.
 async fn ensure_finite_private_limit_profile_row<C>(
     client: &C,
     id: &str,
@@ -5532,9 +3849,13 @@ where
     {
         return Ok(());
     }
-    if id != crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE {
-        return Err(CoreError::FinitePrivateLimitProfileNotFound);
-    }
+    let burst_limit_units = match id {
+        crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE => {
+            crate::DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS
+        }
+        crate::FINITE_PRIVATE_5X_LIMIT_PROFILE => crate::FINITE_PRIVATE_5X_BURST_LIMIT_UNITS,
+        _ => return Err(CoreError::FinitePrivateLimitProfileNotFound),
+    };
     client
         .execute(
             "INSERT INTO finite_private_limit_profiles (
@@ -5543,9 +3864,9 @@ where
              VALUES ($1, $2, $3, $4, $5::text::timestamptz, $5::text::timestamptz)
              ON CONFLICT (id) DO NOTHING",
             &[
-                &crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE,
+                &id,
                 &crate::DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS,
-                &crate::DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS,
+                &burst_limit_units,
                 &crate::DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS,
                 &now,
             ],
@@ -5580,8 +3901,11 @@ where
                current_window_used_units = 0,
                burst_window_epoch = finite_private_grants.burst_window_epoch + 1,
                updated_at = EXCLUDED.updated_at
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       core_rfc3339(current_window_started_at) AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at",
             &[&grant_id, &user.id, &limit_profile_id, &now],
         )
         .await
@@ -5636,7 +3960,7 @@ where
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                updated_at = EXCLUDED.updated_at
              RETURNING id, grant_id, project_id, agent_runtime_id, key_hash, status,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[
                 &key_id,
                 &grant.id,
@@ -5827,7 +4151,7 @@ where
     };
     let rows = client
         .query(
-            "SELECT sequence, transition, recorded_at::text
+            "SELECT sequence, transition, core_rfc3339(recorded_at) AS recorded_at
              FROM agent_creation_provider_operation_transitions
              WHERE agent_creation_request_id = $1
              ORDER BY sequence",
@@ -6034,8 +4358,8 @@ where
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&request_id, &runtime_id, &now],
         )
         .await
@@ -6067,8 +4391,8 @@ where
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&request_id, &runtime_id, &now],
         )
         .await
@@ -6137,7 +4461,7 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
 const RUNTIME_CONTROL_REQUEST_COLUMNS: &str = "id, project_id, agent_runtime_id, source_host_id,
     source_machine_id, requested_by_user_id, kind, target_runtime_artifact_id,
     status, runner_id, lease_token,
-    lease_expires_at::text, failure_message, created_at::text, updated_at::text, completed_at::text";
+    core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at";
 
 async fn postgres_runtime_control_request<C>(
     client: &C,
@@ -6193,7 +4517,7 @@ where
                     runtime.placement_runner_class, runtime.runtime_resource_class,
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
                     runtime.contact_endpoint, runtime.runtime_capabilities,
-                    runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
+                    runtime.host_facts, core_rfc3339(runtime.created_at) AS created_at, core_rfc3339(runtime.updated_at) AS updated_at
              FROM project_runtime_links AS link
              JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
              WHERE link.project_id = $1 AND link.active
@@ -6337,8 +4661,8 @@ where
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
                        runner_id, lease_token,
-                       lease_expires_at::text, failure_message, created_at::text,
-                       updated_at::text, completed_at::text",
+                       core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[
                 &request.id,
                 &request.project_id,
@@ -6696,9 +5020,16 @@ where
         return Err(CoreError::RuntimeSpecMismatch);
     }
     let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-    if placement.runner_class != crate::RunnerClass::Kata
-        || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Offline
-    {
+    // `offline` is the cleanly-stopped precondition. Under the operator's
+    // compute-absent attestation, `stale` is also frozen: a failed control
+    // marks a runtime stale, and absent compute can never reach `offline`
+    // because the stop that would record it fails by definition.
+    let source_status_frozen = match runtime.host_facts.runtime_status {
+        RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Stale => input.operator_observed_compute_absent,
+        _ => false,
+    };
+    if placement.runner_class != crate::RunnerClass::Kata || !source_status_frozen {
         return Err(CoreError::RuntimeControlUnsupported);
     }
     let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
@@ -6727,9 +5058,14 @@ where
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
-    if client
-        .query_opt(
-            "SELECT 1
+    // The succeeded stop receipt proves no writer survives on the source.
+    // Under the compute-absent attestation there is nothing to stop and the
+    // receipt is unobtainable; absence itself (verified by the operator's
+    // bounded probe per the relocation runbook) is the stronger guarantee.
+    if !input.operator_observed_compute_absent
+        && client
+            .query_opt(
+                "SELECT 1
              FROM runtime_control_requests
              WHERE agent_runtime_id = $1
                AND source_host_id = $2
@@ -6737,15 +5073,15 @@ where
                AND kind = 'stop'
                AND status = 'succeeded'
              LIMIT 1",
-            &[
-                &runtime.id,
-                &runtime.source_host_id,
-                &runtime.source_machine_id,
-            ],
-        )
-        .await
-        .map_err(store_error)?
-        .is_none()
+                &[
+                    &runtime.id,
+                    &runtime.source_host_id,
+                    &runtime.source_machine_id,
+                ],
+            )
+            .await
+            .map_err(store_error)?
+            .is_none()
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
@@ -6770,6 +5106,7 @@ where
         target_source_host_id: target_source_host_id.clone(),
         expected_agent_npub,
         durable_state_manifest_sha256: manifest,
+        source_compute_absent: input.operator_observed_compute_absent,
     });
     let active_sql = "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
                display_name, runner_class, hosting_tier, placement_runner_class,
@@ -7002,9 +5339,9 @@ where
                        request.source_host_id, request.source_machine_id,
                        request.requested_by_user_id, request.kind,
                        request.target_runtime_artifact_id, request.status,
-                       request.runner_id, request.lease_token, request.lease_expires_at::text,
-                       request.failure_message, request.created_at::text,
-                       request.updated_at::text, request.completed_at::text",
+                       request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
+                       request.failure_message, core_rfc3339(request.created_at) AS created_at,
+                       core_rfc3339(request.updated_at) AS updated_at, core_rfc3339(request.completed_at) AS completed_at",
             &[
                 &runner_id,
                 &lease_token,
@@ -7566,8 +5903,8 @@ where
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
                        runner_id, lease_token,
-                       lease_expires_at::text, failure_message, created_at::text,
-                       updated_at::text, completed_at::text",
+                       core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &now],
         )
         .await
@@ -7640,8 +5977,8 @@ where
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
                        runner_id, lease_token,
-                       lease_expires_at::text, failure_message, created_at::text,
-                       updated_at::text, completed_at::text",
+                       core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &failure_message, &now],
         )
         .await
@@ -7698,8 +6035,8 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text, completed_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &lease_expires_at, &now],
         )
         .await
@@ -7738,8 +6075,8 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, lease_expires_at::text, failure_message,
-                       created_at::text, updated_at::text, completed_at::text",
+                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &failure_message, &now],
         )
         .await
@@ -7913,66 +6250,6 @@ where
     .await
 }
 
-async fn select_source_host_relay<C>(
-    client: &C,
-    source_host_id: &str,
-) -> CoreResult<Option<SourceHostRelayEndpoint>>
-where
-    C: GenericClient + Sync,
-{
-    Ok(client
-        .query_opt(
-            "SELECT source_host_id, url, admin_token, created_at::text, updated_at::text
-             FROM source_host_relays WHERE source_host_id = $1",
-            &[&source_host_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| SourceHostRelayEndpoint {
-            source_host_id: row.get("source_host_id"),
-            url: row.get("url"),
-            admin_token: row.get("admin_token"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }))
-}
-
-async fn postgres_upsert_source_host_relay_endpoint<C>(
-    client: &C,
-    input: UpsertSourceHostRelayEndpointInput,
-) -> CoreResult<SourceHostRelayEndpoint>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let source_host_id = normalize_source_host_id(&input.source_host_id)?;
-    let url = crate::normalize_source_host_relay_url(&input.url)?;
-    let admin_token = input.admin_token.trim();
-    if admin_token.is_empty() {
-        return Err(CoreError::MissingSourceHostRelayAdminToken);
-    }
-    let row = client
-        .query_one(
-            "INSERT INTO source_host_relays (source_host_id, url, admin_token, created_at, updated_at)
-             VALUES ($1, $2, $3, $4::text::timestamptz, $4::text::timestamptz)
-             ON CONFLICT (source_host_id) DO UPDATE SET
-               url = EXCLUDED.url,
-               admin_token = EXCLUDED.admin_token,
-               updated_at = EXCLUDED.updated_at
-             RETURNING source_host_id, url, admin_token, created_at::text, updated_at::text",
-            &[&source_host_id, &url, &admin_token, &now],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(SourceHostRelayEndpoint {
-        source_host_id: row.get("source_host_id"),
-        url: row.get("url"),
-        admin_token: row.get("admin_token"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
-}
-
 async fn postgres_upsert_runtime_artifact<C>(
     client: &C,
     input: UpsertRuntimeArtifactInput,
@@ -7995,7 +6272,7 @@ where
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
                     base_image, recover_known_good_chat,
-                    created_at::text, promoted_at::text, retired_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
         )
@@ -8077,7 +6354,7 @@ where
              RETURNING id, kind, reference, version_label, source_git_sha, finitec_version,
                        hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
                        base_image, recover_known_good_chat,
-                       created_at::text, promoted_at::text, retired_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at",
             &[
                 &artifact.id,
                 &artifact.kind.as_str(),
@@ -8100,31 +6377,6 @@ where
     runtime_artifact_from_row(&row)
 }
 
-async fn postgres_relay_events_for_runtime<C>(
-    client: &C,
-    relay_token: &str,
-) -> CoreResult<RelayEventsOutput>
-where
-    C: GenericClient + Sync,
-{
-    let token_hash = runtime_relay_token_hash(relay_token)?;
-    let row = client
-        .query_opt(
-            "SELECT runtime.source_machine_id
-             FROM runtime_relay_credentials AS credential
-             JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
-             WHERE credential.token_hash = $1",
-            &[&token_hash],
-        )
-        .await
-        .map_err(store_error)?
-        .ok_or(CoreError::InvalidRuntimeRelayToken)?;
-    Ok(RelayEventsOutput {
-        machine_id: row.get("source_machine_id"),
-        events: Vec::new(),
-    })
-}
-
 async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<AdminRuntimeOverview>>
 where
     C: GenericClient + Sync,
@@ -8133,12 +6385,12 @@ where
         .query(
             "SELECT runtime.id AS agent_runtime_id, runtime.project_id, runtime.source_host_id,
                     runtime.source_machine_id, runtime.runtime_artifact_id, runtime.host_facts,
-                    runtime.updated_at::text AS runtime_updated_at,
+                    core_rfc3339(runtime.updated_at) AS runtime_updated_at,
                     project.display_name AS project_display_name,
                     owner.normalized_email AS owner_email,
                     snapshot.status AS snapshot_status,
-                    snapshot.last_heartbeat_at::text AS last_heartbeat_at,
-                    snapshot.updated_at::text AS status_updated_at,
+                    core_rfc3339(snapshot.last_heartbeat_at) AS last_heartbeat_at,
+                    core_rfc3339(snapshot.updated_at) AS status_updated_at,
                     snapshot.hermes_available AS snapshot_hermes_available,
                     artifact.version_label AS runtime_artifact_version_label,
                     runtime.runtime_capabilities,
@@ -8205,75 +6457,6 @@ where
         .collect()
 }
 
-fn import_candidate_from_row(row: &Row) -> CoreResult<ProjectImportCandidate> {
-    let status: String = row.get("status");
-    Ok(ProjectImportCandidate {
-        id: row.get("id"),
-        source_host_id: row.get("source_host_id"),
-        source_machine_id: row.get("source_machine_id"),
-        source_import_key: row.get("source_import_key"),
-        owner_email: row.get("owner_email"),
-        latest_host_owner_email: row.get("latest_host_owner_email"),
-        pending_user_id: row.get("pending_user_id"),
-        customer_org_id: row.get("customer_org_id"),
-        status: parse_import_candidate_status(&status)
-            .ok_or_else(|| CoreError::Store(format!("invalid import candidate status {status}")))?,
-        project_id: row.get("project_id"),
-        agent_runtime_id: row.get("agent_runtime_id"),
-        claimed_by_user_id: row.get("claimed_by_user_id"),
-        host_facts: json_column(row, "host_facts")?,
-        known_external_channel_participants: json_column(
-            row,
-            "known_external_channel_participants",
-        )?,
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
-}
-
-const IMPORT_CANDIDATE_COLUMNS: &str = "id, source_host_id, source_machine_id, source_import_key,
-    owner_email, latest_host_owner_email, pending_user_id, customer_org_id, status, project_id,
-    agent_runtime_id, claimed_by_user_id, host_facts, known_external_channel_participants,
-    created_at::text, updated_at::text";
-
-async fn select_import_candidate_by_source_import_key<C>(
-    client: &C,
-    source_import_key: &str,
-) -> CoreResult<Option<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE source_import_key = $1 FOR UPDATE"
-    );
-    client
-        .query_opt(&sql, &[&source_import_key])
-        .await
-        .map_err(store_error)?
-        .map(|row| import_candidate_from_row(&row))
-        .transpose()
-}
-
-async fn select_import_candidate<C>(
-    client: &C,
-    candidate_id: &str,
-) -> CoreResult<Option<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE id = $1 FOR UPDATE"
-    );
-    client
-        .query_opt(&sql, &[&candidate_id])
-        .await
-        .map_err(store_error)?
-        .map(|row| import_candidate_from_row(&row))
-        .transpose()
-}
-
 /// Find-or-create a PENDING user by natural key (email). Mirrors
 /// `ensure_pending_user`: an existing row (pending or linked) keeps its
 /// surrogate id; a brand-new email gets a fresh one. Never derives id from PII.
@@ -8291,7 +6474,7 @@ where
              VALUES ($1, $2, 'pending', NULL, $3::text::timestamptz, $3::text::timestamptz)
              ON CONFLICT (normalized_email) DO UPDATE SET updated_at = users.updated_at
              RETURNING id, normalized_email, link_status, workos_user_id,
-                       created_at::text, updated_at::text",
+                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
             &[&user_id, &email, &now],
         )
         .await
@@ -8299,290 +6482,11 @@ where
     core_user_from_row(&row)
 }
 
-async fn upsert_import_candidate_row<C>(
-    client: &C,
-    candidate: &ProjectImportCandidate,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let host_facts = serde_json::to_value(&candidate.host_facts).map_err(json_error)?;
-    let participants =
-        serde_json::to_value(&candidate.known_external_channel_participants).map_err(json_error)?;
-    client
-        .execute(
-            "INSERT INTO project_import_candidates (
-               id, source_host_id, source_machine_id, source_import_key, owner_email,
-               latest_host_owner_email, pending_user_id, customer_org_id, status,
-               project_id, agent_runtime_id, claimed_by_user_id, host_facts,
-               known_external_channel_participants, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb,
-                     $15::text::timestamptz, $16::text::timestamptz)
-             ON CONFLICT (id) DO UPDATE SET
-               latest_host_owner_email = EXCLUDED.latest_host_owner_email,
-               status = EXCLUDED.status,
-               project_id = EXCLUDED.project_id,
-               agent_runtime_id = EXCLUDED.agent_runtime_id,
-               claimed_by_user_id = EXCLUDED.claimed_by_user_id,
-               host_facts = EXCLUDED.host_facts,
-               known_external_channel_participants = EXCLUDED.known_external_channel_participants,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &candidate.id,
-                &candidate.source_host_id,
-                &candidate.source_machine_id,
-                &candidate.source_import_key,
-                &candidate.owner_email,
-                &candidate.latest_host_owner_email,
-                &candidate.pending_user_id,
-                &candidate.customer_org_id,
-                &candidate.status.as_str(),
-                &candidate.project_id,
-                &candidate.agent_runtime_id,
-                &candidate.claimed_by_user_id,
-                &host_facts,
-                &participants,
-                &candidate.created_at,
-                &candidate.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn postgres_reconcile_existing_host_imports<C>(
-    client: &C,
-    records: &[ExistingHostProjectImport],
-    options: ReconcileExistingHostImportsOptions,
-) -> CoreResult<ReconcileExistingHostImportsReport>
-where
-    C: GenericClient + Sync,
-{
-    let now = options.now.unwrap_or(current_time_iso()?);
-    let allowlist = options
-        .allowlisted_owner_emails
-        .into_iter()
-        .filter_map(|email| normalize_owner_email(Some(&email)))
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut report = ReconcileExistingHostImportsReport {
-        created_candidates: Vec::new(),
-        updated_candidates: Vec::new(),
-        skipped_records: Vec::new(),
-    };
-
-    for record in records {
-        let source_key = source_import_key(&record.source_host_id, &record.source_machine_id);
-        let owner_email = match normalize_owner_email(record.owner_email.as_deref()) {
-            Some(email) => email,
-            None => {
-                report.skipped_records.push(crate::SkippedImportRecord {
-                    source_import_key: source_key,
-                    reason: crate::SkippedImportReason::MissingOwnerEmail,
-                });
-                continue;
-            }
-        };
-
-        // Resolve the candidate by its natural key (source_import_key UNIQUE),
-        // FOR UPDATE, instead of a deterministic-id lookup.
-        if let Some(existing) =
-            select_import_candidate_by_source_import_key(client, &source_key).await?
-        {
-            let host_facts =
-                serde_json::to_value(crate::host_facts_from_record(record)).map_err(json_error)?;
-            let participants = serde_json::to_value(&record.known_external_channel_participants)
-                .map_err(json_error)?;
-            client
-                .execute(
-                    "UPDATE project_import_candidates
-                     SET latest_host_owner_email = $2,
-                         host_facts = $3::jsonb,
-                         known_external_channel_participants = $4::jsonb,
-                         updated_at = $5::text::timestamptz
-                     WHERE id = $1",
-                    &[&existing.id, &owner_email, &host_facts, &participants, &now],
-                )
-                .await
-                .map_err(store_error)?;
-            // Keep a claimed candidate's runtime host facts in sync.
-            if let Some(runtime_id) = existing.agent_runtime_id.as_deref() {
-                client
-                    .execute(
-                        "UPDATE agent_runtimes
-                         SET host_facts = $2::jsonb, updated_at = $3::text::timestamptz
-                         WHERE id = $1",
-                        &[&runtime_id, &host_facts, &now],
-                    )
-                    .await
-                    .map_err(store_error)?;
-            }
-            report.updated_candidates.push(existing.id);
-            continue;
-        }
-
-        if !allowlist.contains(&owner_email) {
-            report.skipped_records.push(crate::SkippedImportRecord {
-                source_import_key: source_key,
-                reason: crate::SkippedImportReason::OwnerNotAllowlisted,
-            });
-            continue;
-        }
-
-        let user = ensure_pending_user_row(client, &owner_email, &now).await?;
-        let org = ensure_personal_org_row(client, &user, BillingClass::Grandfathered, &now).await?;
-        let candidate = ProjectImportCandidate {
-            id: crate::new_import_candidate_id()?,
-            source_host_id: normalize_id_part(&record.source_host_id),
-            source_machine_id: normalize_id_part(&record.source_machine_id),
-            source_import_key: source_key,
-            owner_email,
-            latest_host_owner_email: record
-                .owner_email
-                .as_deref()
-                .and_then(|email| normalize_owner_email(Some(email))),
-            pending_user_id: user.id,
-            customer_org_id: org.id,
-            status: crate::ImportCandidateStatus::Pending,
-            project_id: None,
-            agent_runtime_id: None,
-            claimed_by_user_id: None,
-            host_facts: crate::host_facts_from_record(record),
-            known_external_channel_participants: record.known_external_channel_participants.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_import_candidate_row(client, &candidate).await?;
-        report.created_candidates.push(candidate.id);
-    }
-
-    Ok(report)
-}
-
-async fn postgres_claim_project_imports<C>(
-    client: &C,
-    input: ClaimProjectImportsInput,
-) -> CoreResult<ClaimProjectImportsResult>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let verified_email = normalize_owner_email(Some(&input.verified_email))
-        .ok_or(CoreError::MissingVerifiedEmail)?;
-    let workos_user_id = input.workos_user_id.trim().to_string();
-    if workos_user_id.is_empty() {
-        return Err(CoreError::MissingWorkosUserId);
-    }
-    let user =
-        ensure_grandfathered_linked_user(client, &verified_email, &workos_user_id, &now).await?;
-    let mut result = ClaimProjectImportsResult::default();
-    let selected_candidate_ids = input
-        .selected_candidate_ids
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for candidate_id in selected_candidate_ids {
-        let Some(candidate) = select_import_candidate(client, &candidate_id).await? else {
-            result.missing_candidate_ids.push(candidate_id);
-            continue;
-        };
-        if candidate.owner_email != verified_email || candidate.pending_user_id != user.id {
-            result.denied_candidate_ids.push(candidate.id);
-            continue;
-        }
-        if candidate.status == crate::ImportCandidateStatus::Claimed {
-            if let Some(project_id) = candidate.project_id {
-                ensure_hosted_web_membership_row(client, &user, &project_id, &now).await?;
-                result.already_claimed_project_ids.push(project_id);
-            }
-            continue;
-        }
-
-        // Fresh surrogate ids for the claimed project and its runtime; the
-        // candidate is resolved by its natural key, never rederived.
-        let project_id = new_self_service_project_id()?;
-        let runtime_id = new_agent_runtime_id()?;
-        let project = Project {
-            id: project_id.clone(),
-            customer_org_id: candidate.customer_org_id.clone(),
-            owner_user_id: user.id.clone(),
-            display_name: candidate.host_facts.display_name.clone(),
-            agent_email: None,
-            import_candidate_id: Some(candidate.id.clone()),
-            hosting_tier: Some(HostingTier::Standard),
-            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_project_row(client, &project).await?;
-        let runtime = AgentRuntime {
-            id: runtime_id.clone(),
-            project_id: project_id.clone(),
-            source_host_id: candidate.source_host_id.clone(),
-            source_machine_id: candidate.source_machine_id.clone(),
-            source_import_key: candidate.source_import_key.clone(),
-            runtime_artifact_id: None,
-            state_schema_version: None,
-            placement: project.placement,
-            provider_runtime_handle: None,
-            provider_runtime_handle_history: Vec::new(),
-            contact_endpoint: None,
-            runtime_capabilities: None,
-            host_facts: candidate.host_facts.clone(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        upsert_agent_runtime_row(client, &runtime).await?;
-        activate_project_runtime_link(client, &project_id, &runtime_id, &now).await?;
-        client
-            .execute(
-                "UPDATE project_import_candidates
-                 SET status = 'claimed',
-                     project_id = $2,
-                     agent_runtime_id = $3,
-                     claimed_by_user_id = $4,
-                     updated_at = $5::text::timestamptz
-                 WHERE id = $1",
-                &[&candidate.id, &project_id, &runtime_id, &user.id, &now],
-            )
-            .await
-            .map_err(store_error)?;
-        ensure_hosted_web_membership_row(client, &user, &project_id, &now).await?;
-        result.claimed_project_ids.push(project_id);
-    }
-
-    Ok(result)
-}
-
-async fn postgres_claimable_candidates_for_email<C>(
-    client: &C,
-    email: Option<&str>,
-) -> CoreResult<Vec<ProjectImportCandidate>>
-where
-    C: GenericClient + Sync,
-{
-    let Some(normalized) = normalize_owner_email(email) else {
-        return Ok(Vec::new());
-    };
-    let sql = format!(
-        "SELECT {IMPORT_CANDIDATE_COLUMNS} FROM project_import_candidates
-         WHERE status = 'pending' AND owner_email = $1"
-    );
-    client
-        .query(&sql, &[&normalized])
-        .await
-        .map_err(store_error)?
-        .iter()
-        .map(import_candidate_from_row)
-        .collect()
-}
-
 /// RFC3339 rendering for a TIMESTAMPTZ column so stored strings round-trip
 /// through `parse_time` (the Finite Private timestamps are parsed, not just
 /// echoed).
 fn rfc3339_col(expr: &str) -> String {
-    format!("to_char({expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")
+    format!("core_rfc3339({expr})")
 }
 
 fn finite_private_limit_profile_from_row(row: &Row) -> FinitePrivateLimitProfile {
@@ -8727,7 +6631,7 @@ where
     let Some(row) = client
         .query_opt(
             "SELECT id, grant_id, project_id, agent_runtime_id, key_hash, status,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM finite_private_api_keys WHERE key_hash = $1",
             &[&key_hash],
         )
@@ -8849,8 +6753,11 @@ where
             "UPDATE finite_private_grants
              SET status = 'revoked', updated_at = $2::text::timestamptz
              WHERE id = $1
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       core_rfc3339(current_window_started_at) AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at",
             &[&grant_id, &now],
         )
         .await
@@ -8904,8 +6811,11 @@ where
                  burst_window_epoch = burst_window_epoch + 1,
                  updated_at = $2::text::timestamptz
              WHERE id = $1
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       core_rfc3339(current_window_started_at) AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       core_rfc3339(created_at) AS created_at,
+                       core_rfc3339(updated_at) AS updated_at",
             &[&grant_id, &now],
         )
         .await
@@ -8942,7 +6852,7 @@ where
     let old_row = client
         .query_opt(
             "SELECT id, grant_id, project_id, agent_runtime_id, key_hash, status,
-                    created_at::text, updated_at::text
+                    core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
              FROM finite_private_api_keys WHERE id = $1 FOR UPDATE",
             &[&key_id],
         )
@@ -8989,6 +6899,42 @@ where
     )
     .await?;
     Ok(new_key)
+}
+
+/// Approve a grant and issue its first key against one client.
+///
+/// Callers pass a transaction, so the pair is atomic: no orphaned grant on a
+/// failed key issue, and a dry run can preview both steps.
+async fn postgres_issue_finite_private_friend_key<C>(
+    client: &C,
+    input: IssueFinitePrivateFriendKeyInput,
+) -> CoreResult<IssuedFinitePrivateFriendKey>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let grant = postgres_approve_finite_private_grant(
+        client,
+        ApproveFinitePrivateGrantInput {
+            verified_email: input.verified_email,
+            workos_user_id: input.workos_user_id,
+            limit_profile_id: input.limit_profile_id,
+            now: Some(now.clone()),
+        },
+    )
+    .await?;
+    let api_key = postgres_issue_finite_private_api_key(
+        client,
+        IssueFinitePrivateApiKeyInput {
+            grant_id: grant.id.clone(),
+            raw_key: input.raw_key,
+            project_id: input.project_id,
+            agent_runtime_id: input.agent_runtime_id,
+            now: Some(now),
+        },
+    )
+    .await?;
+    Ok(IssuedFinitePrivateFriendKey { grant, api_key })
 }
 
 async fn postgres_admin_issue_finite_private_friend_key<C>(
@@ -9139,6 +7085,56 @@ where
             api_key_id: None,
             actor: Some(&admin_email),
             metadata: json!({}),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(grant)
+}
+
+async fn postgres_admin_assign_finite_private_limit_profile<C>(
+    client: &C,
+    input: AdminAssignFinitePrivateLimitProfileInput,
+) -> CoreResult<FinitePrivateGrant>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let grant_id =
+        trim_to_option(Some(&input.grant_id)).ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    let limit_profile_id = trim_to_option(Some(&input.limit_profile_id))
+        .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
+    ensure_finite_private_limit_profile_row(client, &limit_profile_id, &now).await?;
+    let previous = select_finite_private_grant(client, &grant_id, true)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    client
+        .execute(
+            "UPDATE finite_private_grants
+             SET limit_profile_id = $2, updated_at = $3::text::timestamptz
+             WHERE id = $1",
+            &[&grant_id, &limit_profile_id, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    let grant = select_finite_private_grant(client, &grant_id, false)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "finite_private.grant.admin_assign_limit_profile",
+            target_type: "grant",
+            target_id: &grant.id,
+            grant_id: Some(&grant.id),
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "previousLimitProfileId": previous.limit_profile_id,
+                "limitProfileId": grant.limit_profile_id.clone(),
+            }),
             now: &now,
         },
     )
@@ -9725,21 +7721,21 @@ where
     C: GenericClient + Sync,
 {
     let grant_sql = format!(
-        "SELECT id, user_id, limit_profile_id, status,
-                CASE WHEN current_window_started_at IS NULL THEN NULL
+        "SELECT fp_grant.id, fp_grant.user_id, fp_grant.limit_profile_id, fp_grant.status,
+                CASE WHEN fp_grant.current_window_started_at IS NULL THEN NULL
                      ELSE {started} END AS current_window_started_at,
-                current_window_used_units, burst_window_epoch,
-                {created} AS created_at, {updated} AS updated_at
-         FROM finite_private_grants
-         ORDER BY created_at, id",
-        started = rfc3339_col("current_window_started_at"),
-        created = rfc3339_col("created_at"),
-        updated = rfc3339_col("updated_at"),
+                fp_grant.current_window_used_units, fp_grant.burst_window_epoch,
+                {created} AS created_at, {updated} AS updated_at,
+                account.normalized_email
+         FROM finite_private_grants AS fp_grant
+         JOIN users AS account ON account.id = fp_grant.user_id
+         ORDER BY fp_grant.created_at, fp_grant.id",
+        started = rfc3339_col("fp_grant.current_window_started_at"),
+        created = rfc3339_col("fp_grant.created_at"),
+        updated = rfc3339_col("fp_grant.updated_at"),
     );
-    let grants = client
-        .query(&grant_sql, &[])
-        .await
-        .map_err(store_error)?
+    let grant_rows = client.query(&grant_sql, &[]).await.map_err(store_error)?;
+    let grants = grant_rows
         .iter()
         .map(finite_private_grant_from_row)
         .collect::<CoreResult<Vec<_>>>()?;
@@ -9758,8 +7754,70 @@ where
         .iter()
         .map(finite_private_api_key_from_row)
         .collect::<CoreResult<Vec<_>>>()?;
+    let profile_sql = format!(
+        "SELECT id, burst_window_seconds, burst_limit_units, weekly_limit_units,
+                {created} AS created_at, {updated} AS updated_at
+         FROM finite_private_limit_profiles
+         ORDER BY id",
+        created = rfc3339_col("created_at"),
+        updated = rfc3339_col("updated_at"),
+    );
+    let profiles = client
+        .query(&profile_sql, &[])
+        .await
+        .map_err(store_error)?
+        .iter()
+        .map(finite_private_limit_profile_from_row)
+        .collect::<Vec<_>>();
+    let project_rows = client
+        .query(
+            "SELECT project.id, project.owner_user_id, project.display_name,
+                    link.agent_runtime_id
+             FROM projects AS project
+             JOIN finite_private_grants AS fp_grant
+               ON fp_grant.user_id = project.owner_user_id
+             LEFT JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.active = TRUE
+             ORDER BY project.display_name, project.id",
+            &[],
+        )
+        .await
+        .map_err(store_error)?;
+    let mut projects_by_user = BTreeMap::<String, Vec<FinitePrivateAdminProject>>::new();
+    for row in project_rows {
+        projects_by_user
+            .entry(row.get("owner_user_id"))
+            .or_default()
+            .push(FinitePrivateAdminProject {
+                id: row.get("id"),
+                display_name: row.get("display_name"),
+                agent_runtime_id: row.get("agent_runtime_id"),
+            });
+    }
+    let mut accounts = grant_rows
+        .iter()
+        .zip(grants.iter())
+        .map(|(row, grant)| FinitePrivateAdminAccount {
+            user_id: grant.user_id.clone(),
+            email: row.get("normalized_email"),
+            grant: grant.clone(),
+            api_keys: api_keys
+                .iter()
+                .filter(|key| key.grant_id == grant.id)
+                .cloned()
+                .collect(),
+            projects: projects_by_user.remove(&grant.user_id).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by(|left, right| {
+        left.email
+            .cmp(&right.email)
+            .then_with(|| left.user_id.cmp(&right.user_id))
+    });
     let admin_audit_events = postgres_finite_private_admin_audit_events(client).await?;
     Ok(FinitePrivateAdminState {
+        accounts,
+        profiles,
         grants,
         api_keys,
         admin_audit_events,
@@ -9813,16 +7871,302 @@ fn json_error(error: serde_json::Error) -> CoreError {
     }))
 }
 
+/// Typed row reads used only by tests.
+///
+/// The production store API is task-shaped (request / lease / complete), so
+/// tests that used to inspect `BridgeCoreState`'s public maps have no reader
+/// for a bare row. These reuse the production `select_*` + `*_from_row` pair,
+/// so a test decodes a row exactly the way production does — including the
+/// column list and timestamp rendering.
+///
+/// List readers select ids and then reuse the per-id reader rather than
+/// duplicating each entity's column list, which would drift.
+#[cfg(test)]
+impl CoreStore {
+    async fn ids(&self, table: &str) -> Vec<String> {
+        self.ids_by(table, "id").await
+    }
+
+    /// Primary keys of `table`, for tables whose key column is not `id`.
+    async fn ids_by(&self, table: &str, key: &str) -> Vec<String> {
+        let client = self.connection().await.unwrap();
+        client
+            .query(
+                &format!("SELECT {key} AS id FROM {table} ORDER BY {key}"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>("id"))
+            .collect()
+    }
+
+    pub(crate) async fn agent_runtime(&self, id: &str) -> Option<AgentRuntime> {
+        let client = self.connection().await.unwrap();
+        select_agent_runtime(&**client, id).await.unwrap()
+    }
+
+    pub(crate) async fn all_agent_runtimes(&self) -> Vec<AgentRuntime> {
+        let mut out = Vec::new();
+        for id in self.ids("agent_runtimes").await {
+            out.push(self.agent_runtime(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn user_by_email(&self, email: &str) -> Option<CoreUser> {
+        let client = self.connection().await.unwrap();
+        select_user_by_email(&**client, email).await.unwrap()
+    }
+
+    pub(crate) async fn personal_org_by_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Option<CustomerOrganization> {
+        let client = self.connection().await.unwrap();
+        select_personal_org_by_owner(&**client, owner_user_id)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn project(&self, id: &str) -> Option<Project> {
+        let client = self.connection().await.unwrap();
+        select_project(&**client, id).await.unwrap()
+    }
+
+    pub(crate) async fn all_projects(&self) -> Vec<Project> {
+        let mut out = Vec::new();
+        for id in self.ids("projects").await {
+            out.push(self.project(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn finite_private_grant(&self, id: &str) -> Option<FinitePrivateGrant> {
+        let client = self.connection().await.unwrap();
+        select_finite_private_grant(&**client, id, false)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn runtime_artifact_row(&self, id: &str) -> Option<RuntimeArtifact> {
+        let client = self.connection().await.unwrap();
+        select_runtime_artifact(&**client, id).await.unwrap()
+    }
+
+    /// Column list mirrors the production lease/read queries so a test decodes
+    /// the row exactly as production does.
+    pub(crate) async fn agent_creation_request(&self, id: &str) -> Option<AgentCreationRequest> {
+        let client = self.connection().await.unwrap();
+        client
+            .query_opt(
+                "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
+                        display_name, runner_class, hosting_tier, placement_runner_class,
+                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                        target_source_host_id, relocation_spec,
+                        profile_picture_url, status, requested_launch_code, agent_runtime_id,
+                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
+                 FROM agent_creation_requests WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .map(|row| agent_creation_request_from_row(&row).unwrap())
+    }
+
+    pub(crate) async fn all_agent_creation_requests(&self) -> Vec<AgentCreationRequest> {
+        let mut out = Vec::new();
+        for id in self.ids("agent_creation_requests").await {
+            out.push(self.agent_creation_request(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn finite_private_api_key(&self, id: &str) -> Option<FinitePrivateApiKey> {
+        let client = self.connection().await.unwrap();
+        client
+            .query_opt(
+                "SELECT id, grant_id, project_id, agent_runtime_id, key_hash, status,
+                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
+                 FROM finite_private_api_keys WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .map(|row| finite_private_api_key_from_row(&row).unwrap())
+    }
+
+    pub(crate) async fn all_finite_private_api_keys(&self) -> Vec<FinitePrivateApiKey> {
+        let mut out = Vec::new();
+        for id in self.ids("finite_private_api_keys").await {
+            out.push(self.finite_private_api_key(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn all_runtime_control_requests(&self) -> Vec<RuntimeControlRequest> {
+        let mut out = Vec::new();
+        for id in self.ids("runtime_control_requests").await {
+            out.push(self.runtime_control_request(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn user(&self, id: &str) -> Option<CoreUser> {
+        let client = self.connection().await.unwrap();
+        select_user_by_id(&**client, id).await.unwrap()
+    }
+
+    pub(crate) async fn all_users(&self) -> Vec<CoreUser> {
+        let mut out = Vec::new();
+        for id in self.ids("users").await {
+            out.push(self.user(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn provider_operation(&self, id: &str) -> Option<ProviderOperationEnvelope> {
+        let client = self.connection().await.unwrap();
+        select_provider_operation(&**client, id).await.unwrap()
+    }
+
+    pub(crate) async fn finite_private_reservation(
+        &self,
+        id: &str,
+    ) -> Option<FinitePrivateReservation> {
+        let client = self.connection().await.unwrap();
+        select_finite_private_reservation(&**client, id, false)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn all_finite_private_reservations(&self) -> Vec<FinitePrivateReservation> {
+        let mut out = Vec::new();
+        for id in self.ids("finite_private_reservations").await {
+            out.push(self.finite_private_reservation(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn visible_projects_for_user(&self, user_id: &str) -> Vec<VisibleProject> {
+        let client = self.connection().await.unwrap();
+        postgres_visible_projects_for_user(&**client, user_id)
+            .await
+            .unwrap()
+    }
+
+    /// The key with this raw material, plus its grant.
+    ///
+    /// Delegates to the production lookup so a test sees the same
+    /// active-key/active-grant semantics the API enforces.
+    pub(crate) async fn finite_private_key_and_grant(
+        &self,
+        raw_key: &str,
+    ) -> Option<(FinitePrivateApiKey, FinitePrivateGrant)> {
+        let client = self.connection().await.unwrap();
+        postgres_finite_private_key_and_grant(&**client, raw_key)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn customer_org(&self, id: &str) -> Option<CustomerOrganization> {
+        let client = self.connection().await.unwrap();
+        client
+            .query_opt(
+                "SELECT id, owner_user_id, name, billing_class,
+                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
+                 FROM customer_orgs WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .map(|row| customer_org_from_row(&row).unwrap())
+    }
+
+    pub(crate) async fn all_customer_orgs(&self) -> Vec<CustomerOrganization> {
+        let mut out = Vec::new();
+        for id in self.ids("customer_orgs").await {
+            out.push(self.customer_org(&id).await.unwrap());
+        }
+        out
+    }
+
+    pub(crate) async fn customer_billing_account(
+        &self,
+        org_id: &str,
+    ) -> Option<CustomerBillingAccount> {
+        let client = self.connection().await.unwrap();
+        select_customer_billing_account(&**client, org_id, false)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn agent_creation_entitlement(
+        &self,
+        org_id: &str,
+    ) -> Option<AgentCreationEntitlement> {
+        let client = self.connection().await.unwrap();
+        select_agent_creation_entitlement_by_org(&**client, org_id)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn active_runtime_for_project(
+        &self,
+        project_id: &str,
+    ) -> Option<AgentRuntime> {
+        let client = self.connection().await.unwrap();
+        postgres_active_runtime_for_project(&**client, project_id)
+            .await
+            .unwrap()
+    }
+
+    /// Weekly reserved/settled usage for a grant at `now`.
+    ///
+    /// Mirrors the production window: `now` minus the weekly window seconds.
+    pub(crate) async fn finite_private_weekly_usage(
+        &self,
+        grant_id: &str,
+        now: time::OffsetDateTime,
+    ) -> CoreResult<(i64, Option<String>)> {
+        let window_start = (now - Duration::seconds(crate::FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
+            .format(&Rfc3339)?;
+        let now = now.format(&Rfc3339)?;
+        let client = self.connection().await?;
+        postgres_finite_private_weekly_usage(&**client, grant_id, &window_start, &now).await
+    }
+
+    /// Run a statement for tests that need to stage durable state the store
+    /// API cannot reach (an expired lease, a legacy row).
+    pub(crate) async fn exec(&self, sql: &str) {
+        let client = self.connection().await.unwrap();
+        client
+            .batch_execute(sql)
+            .await
+            .unwrap_or_else(|error| panic!("test statement failed: {error}\n{sql}"));
+    }
+
+    pub(crate) async fn table_len(&self, table: &str) -> usize {
+        let key = match table {
+            "runtime_retirement_snapshots" => "request_id",
+            "runtime_relay_credentials" => "agent_runtime_id",
+            _ => "id",
+        };
+        self.ids_by(table, key).await.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_postgres;
     use crate::{
         FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
         RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     };
-    use futures_util::FutureExt;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
         RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
@@ -9833,81 +8177,6 @@ mod tests {
             runtime_retirement: false,
         })
     }
-
-    #[tokio::test]
-    async fn memory_runtime_control_request_reads_the_exact_request() {
-        let memory = MemoryCoreStore::default();
-        let expected = RuntimeControlRequest {
-            id: "runtime_ctl_exact".to_string(),
-            project_id: "project-exact".to_string(),
-            agent_runtime_id: "runtime-exact".to_string(),
-            source_host_id: "lat1".to_string(),
-            source_machine_id: "finite-kata-exact".to_string(),
-            requested_by_user_id: "user-admin".to_string(),
-            kind: RuntimeControlKind::Upgrade,
-            target_runtime_artifact_id: Some("artifact-v2".to_string()),
-            status: RuntimeControlRequestStatus::Running,
-            runner_id: Some("runner-lat1".to_string()),
-            lease_token: Some("lease-exact".to_string()),
-            lease_expires_at: Some("2026-07-15T01:05:00Z".to_string()),
-            failure_message: None,
-            created_at: "2026-07-15T01:00:00Z".to_string(),
-            updated_at: "2026-07-15T01:00:01Z".to_string(),
-            completed_at: None,
-        };
-        memory
-            .state
-            .lock()
-            .await
-            .runtime_control_requests
-            .insert(expected.id.clone(), expected.clone());
-        let store = CoreStore::Memory(memory);
-
-        assert_eq!(
-            store
-                .runtime_control_request("runtime_ctl_exact")
-                .await
-                .unwrap(),
-            expected
-        );
-        assert!(matches!(
-            store
-                .runtime_control_request("runtime_ctl_other")
-                .await
-                .unwrap_err(),
-            CoreError::RuntimeControlRequestNotFound
-        ));
-    }
-
-    /// Ephemeral-Postgres-per-test harness.
-    ///
-    /// The Postgres-gated tests used to SHARE one database. Because the
-    /// agent-creation lease queue is still global (Phase 2 territory — the
-    /// `WHERE status = 'requested' ... ORDER BY created_at` scan in
-    /// `postgres_lease_agent_creation_request` picks the oldest row across ALL
-    /// orgs), a leftover request from one test could be leased by another,
-    /// forcing a process-wide mutex and per-test "drain the queue" cleanup.
-    ///
-    /// Instead, each test now gets its OWN freshly-created database, migrated
-    /// from the schema, and dropped afterward. `FC_CORE_POSTGRES_TEST_URL`
-    /// names the maintenance connection; the harness `CREATE DATABASE`s an
-    /// isolated database under it (the default `postgres` superuser has
-    /// CREATEDB). Tests are fully independent, run in parallel, and leak no
-    /// state — re-running the whole suite twice against the same server is
-    /// clean because the databases are torn down (and uniquely named besides).
-    struct TestDb {
-        store: CoreStore,
-        url: String,
-    }
-
-    impl std::ops::Deref for TestDb {
-        type Target = CoreStore;
-        fn deref(&self) -> &CoreStore {
-            &self.store
-        }
-    }
-
-    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     async fn issue_test_launch_code(store: &CoreStore, _now: &str) -> String {
         store
@@ -9949,107 +8218,6 @@ mod tests {
             max_sandbox_count: Some(1),
             active_sandbox_count: Some(provider_inventory_count),
             ..RunnerLeaseCapacity::default()
-        }
-    }
-
-    /// Swap the database name in a `postgres://user:pass@host:port/db?query`
-    /// URL, preserving auth, host, and any query string.
-    fn replace_database(url: &str, db_name: &str) -> String {
-        let (base, query) = match url.split_once('?') {
-            Some((base, query)) => (base, Some(query)),
-            None => (url, None),
-        };
-        let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
-        let new_base = match base[scheme_end..].find('/') {
-            Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
-            None => format!("{base}/{db_name}"),
-        };
-        match query {
-            Some(query) => format!("{new_base}?{query}"),
-            None => new_base,
-        }
-    }
-
-    /// Run `test` against an isolated, migrated Postgres database. The database
-    /// is dropped afterward even if the test body panics (the panic is
-    /// re-raised so the test still fails). `just test` supplies the required
-    /// maintenance connection through devfinity; running this suite without
-    /// that infrastructure is an error.
-    async fn with_isolated_postgres<F, Fut>(test: F)
-    where
-        F: FnOnce(TestDb) -> Fut,
-        Fut: std::future::Future<Output = ()>,
-    {
-        let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL").expect(
-            "FC_CORE_POSTGRES_TEST_URL is required for Core Postgres tests; run `just test`",
-        );
-
-        // Maintenance connection used only to CREATE/DROP the per-test database.
-        let (admin, admin_conn) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
-        let admin_conn = tokio::spawn(async move {
-            let _ = admin_conn.await;
-        });
-
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let db_name = format!(
-            "fc_test_{unique}_{}",
-            TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        admin
-            .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
-            .await
-            .unwrap();
-
-        let url = replace_database(&admin_url, &db_name);
-        let store = CoreStore::connect_postgres(&url).await.unwrap();
-        store.migrate().await.unwrap();
-        // Every creation test exercises the current Core contract: a request
-        // is bound to an exact, promoted OCI artifact before it can lease.
-        // Keep this older than test-specific promotions so focused artifact
-        // tests still select their own fixture.
-        store
-            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                id: "artifact-postgres-fixture".to_string(),
-                kind: crate::RuntimeArtifactKind::OciImage,
-                reference: format!(
-                    "ghcr.io/finitecomputer/agent-runtime:postgres-fixture@sha256:{}",
-                    "f".repeat(64)
-                ),
-                version_label: "postgres-fixture".to_string(),
-                source_git_sha: None,
-                finitec_version: None,
-                hermes_source_ref: None,
-                finite_platform_plugin_ref: None,
-                state_schema_version: "state-v1".to_string(),
-                base_image: Some("python:3.11-trixie".to_string()),
-                recover_known_good_chat: false,
-                promoted: true,
-                now: Some("2000-01-01T00:00:00Z".to_string()),
-            })
-            .await
-            .unwrap();
-
-        // Capture panics so the database is always torn down, then re-raise.
-        let outcome = std::panic::AssertUnwindSafe(test(TestDb { store, url }))
-            .catch_unwind()
-            .await;
-
-        // FORCE terminates any lingering connection (Postgres 13+), so teardown
-        // never races the store/raw clients the test opened.
-        let _ = admin
-            .execute(
-                &format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"),
-                &[],
-            )
-            .await;
-        drop(admin);
-        admin_conn.abort();
-
-        if let Err(panic) = outcome {
-            std::panic::resume_unwind(panic);
         }
     }
 
@@ -10099,7 +8267,7 @@ mod tests {
         // assert none calls the (now non-existent) full-state helpers. Bound the
         // scan to the production code (exclude this test module's own literals).
         let impl_start = source
-            .find("impl PostgresCoreStore {")
+            .find("impl CoreStore {")
             .expect("missing Postgres store impl");
         let test_start = source[impl_start..]
             .find("#[cfg(test)]")
@@ -10124,9 +8292,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_pool_does_not_head_of_line_block_independent_reads() {
         with_isolated_postgres(|database| async move {
-            let CoreStore::Postgres(store) = database.store.clone() else {
-                panic!("isolated Postgres harness returned memory store");
-            };
+            let store = database.store.clone();
             assert_eq!(store.pool.status().max_size, DEFAULT_POSTGRES_POOL_SIZE);
 
             let slow_store = store.clone();
@@ -10499,7 +8665,7 @@ mod tests {
             .await
             .unwrap();
 
-            let competing = CoreStore::connect_postgres(&store.url).await.unwrap();
+            let competing = CoreStore::connect(&store.url).await.unwrap();
             let redeem = tokio::spawn(async move {
                 competing
                     .request_agent_creation(RequestAgentCreationInput {
@@ -10549,8 +8715,8 @@ mod tests {
                 .await
                 .unwrap();
             let plaintext = issued.codes[0].code.clone();
-            let first = CoreStore::connect_postgres(&store.url).await.unwrap();
-            let second = CoreStore::connect_postgres(&store.url).await.unwrap();
+            let first = CoreStore::connect(&store.url).await.unwrap();
+            let second = CoreStore::connect(&store.url).await.unwrap();
             let (first_result, second_result) = tokio::join!(
                 first.request_agent_creation(RequestAgentCreationInput {
                     verified_email: "first@finite.vip".to_string(),
@@ -11033,6 +9199,7 @@ mod tests {
                     target_source_host_id: target_host.to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: None,
                 })
                 .await
@@ -11083,7 +9250,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: "relocation-relay-token-hash".to_string(),
                     display_name: Some("Relocation Canary".to_string()),
                     hostname: None,
                     runtime_host: Some(target_host.to_string()),
@@ -11129,6 +9295,7 @@ mod tests {
                     target_source_host_id: target_host.to_string(),
                     expected_agent_npub: format!("npub1{}", "q".repeat(58)),
                     durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
                     now: None,
                 })
                 .await
@@ -11161,7 +9328,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: "relocation-retry-relay-token-hash".to_string(),
                     display_name: Some("Relocation Canary".to_string()),
                     hostname: None,
                     runtime_host: Some(target_host.to_string()),
@@ -11771,6 +9937,112 @@ mod tests {
         .await;
     }
 
+    /// Timestamp reads do not depend on the database server's timezone.
+    ///
+    /// A bare `col::text` renders Postgres's display format in the SERVER's
+    /// zone, so the same row read on a UTC box and an Asia/Kolkata box produced
+    /// different strings -- and neither was RFC3339. `core_rfc3339` pins the
+    /// rendering to UTC. This drives the session timezone directly so the
+    /// guarantee is checked rather than assumed from wherever CI happens to run.
+    #[tokio::test]
+    async fn postgres_timestamp_reads_are_independent_of_server_timezone() {
+        with_isolated_postgres(|db| async move {
+            let written = "2026-05-25T12:00:00Z";
+            db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: "artifact-tz".to_string(),
+                kind: crate::RuntimeArtifactKind::OciImage,
+                reference: format!(
+                    "ghcr.io/finitecomputer/agent-runtime:tz@sha256:{}",
+                    "c".repeat(64)
+                ),
+                version_label: "tz".to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".to_string(),
+                base_image: None,
+                recover_known_good_chat: false,
+                promoted: false,
+                now: Some(written.to_string()),
+            })
+            .await
+            .unwrap();
+
+            for zone in ["UTC", "America/Chicago", "Asia/Kolkata"] {
+                let client = db.store.connection().await.unwrap();
+                client
+                    .batch_execute(&format!("SET TIME ZONE '{zone}'"))
+                    .await
+                    .unwrap();
+                let artifact = select_runtime_artifact(&**client, "artifact-tz")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    artifact.created_at, written,
+                    "read under TimeZone={zone} must match what was written"
+                );
+                // And Core must be able to read its own output back.
+                crate::parse_time(&artifact.created_at)
+                    .unwrap_or_else(|_| panic!("unparsable under TimeZone={zone}"));
+            }
+        })
+        .await;
+    }
+
+    /// Artifact selection orders by the TIMESTAMPTZ column, not its rendered
+    /// text.
+    ///
+    /// `SELECT core_rfc3339(promoted_at) AS promoted_at ... ORDER BY
+    /// promoted_at` binds the output column in Postgres, so a bare name sorts
+    /// lexicographically. RFC3339 only sorts correctly as text at a FIXED
+    /// precision, and `current_time_iso` trims trailing zeros, so a whole
+    /// second ("…:02Z") sorts after a fractional one ("…:02.5Z") -- 'Z' > '.'.
+    /// That would launch new agents on the older artifact.
+    #[tokio::test]
+    async fn postgres_launchable_artifact_orders_by_instant_not_rendered_text() {
+        with_isolated_postgres(|db| async move {
+            // Same second, differing fractional precision. Lexicographically
+            // "…:02Z" > "…:02.500000Z"; chronologically it is earlier.
+            for (id, promoted) in [
+                ("artifact-frac", "2030-01-01T00:00:02.5Z"),
+                ("artifact-whole", "2030-01-01T00:00:02Z"),
+            ] {
+                db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: id.to_string(),
+                    kind: crate::RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:{id}@sha256:{}",
+                        "a".repeat(64)
+                    ),
+                    version_label: id.to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: Some(promoted.to_string()),
+                })
+                .await
+                .unwrap();
+            }
+
+            let client = db.store.connection().await.unwrap();
+            let latest = select_latest_launchable_runtime_artifact(&**client)
+                .await
+                .unwrap();
+            assert_eq!(
+                latest.id, "artifact-frac",
+                "the later instant must win, even though it sorts earlier as text"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn postgres_row_native_create_lease_complete_and_visible_reads() {
         with_isolated_postgres(|store| async move {
@@ -11852,7 +10124,6 @@ mod tests {
                 FinitePrivateApiKeyStatus::Active
             );
 
-            let runtime_token = "runtime-row-native-token";
             store
                 .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                     request_id: lease.request.id.clone(),
@@ -11865,7 +10136,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: None,
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("row-native-host".to_string()),
@@ -11877,14 +10147,6 @@ mod tests {
                 })
                 .await
                 .unwrap();
-
-            let heartbeat = store.record_runtime_heartbeat(runtime_token).await.unwrap();
-            assert_eq!(heartbeat.machine_id, "row-native-agent-001");
-            let observed = store
-                .runtime_heartbeat_for_machine("row-native-agent-001")
-                .await
-                .unwrap();
-            assert_eq!(observed.machine_id, "row-native-agent-001");
 
             let completed = store
                 .complete_agent_creation_request(CompleteAgentCreationRequestInput {
@@ -11967,8 +10229,17 @@ mod tests {
                 .await
                 .unwrap()
                 .get(0);
+            let five_x_limit: i64 = raw
+                .query_one(
+                    "SELECT burst_limit_units FROM finite_private_limit_profiles WHERE id = $1",
+                    &[&crate::FINITE_PRIVATE_5X_LIMIT_PROFILE],
+                )
+                .await
+                .unwrap()
+                .get(0);
             assert_eq!(old_limit, 100_000_000);
             assert_eq!(new_limit, 100_000_000);
+            assert_eq!(five_x_limit, 500_000_000);
             let usage_index_exists: bool = raw
                 .query_one(
                     "SELECT to_regclass('finite_private_reservations_grant_status_epoch_created_idx') IS NOT NULL",
@@ -12202,6 +10473,17 @@ mod tests {
                 .unwrap()
                 .expect("admin ops request should lease");
             assert_eq!(lease.request.id, created.request.id);
+            let provisioned_owner_key = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-admin-ops-{run}"),
+                    lease_token: format!("lease-admin-ops-{run}"),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    source_machine_id: Some(machine_id.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap();
             let completed = store
                 .complete_agent_creation_request(CompleteAgentCreationRequestInput {
                     request_id: lease.request.id.clone(),
@@ -12245,6 +10527,19 @@ mod tests {
                 Some(*kata_runtime_capabilities().v1())
             );
             assert!(overview.runtime_link_active);
+            let owner_account = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .accounts
+                .into_iter()
+                .find(|account| account.email == owner_email)
+                .expect("provisioned owner should have a correlated Finite Private account");
+            assert_eq!(owner_account.grant.id, provisioned_owner_key.grant.id);
+            assert!(owner_account.projects.iter().any(|project| {
+                project.id == project_id
+                    && project.agent_runtime_id.as_deref() == Some(runtime_id.as_str())
+            }));
 
             // Admin restart persists a leasable control request.
             let restart = store
@@ -12334,6 +10629,49 @@ mod tests {
                 .unwrap();
             assert!(!repeated_reset.performed);
 
+            let before_assignment = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .accounts
+                .into_iter()
+                .find(|account| account.email == friend_email)
+                .unwrap()
+                .grant;
+            let assigned = store
+                .admin_assign_finite_private_limit_profile(
+                    AdminAssignFinitePrivateLimitProfileInput {
+                        admin_verified_email: admin_email.clone(),
+                        grant_id: issued.grant.id.clone(),
+                        limit_profile_id: crate::FINITE_PRIVATE_5X_LIMIT_PROFILE.to_string(),
+                        now: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                assigned.limit_profile_id,
+                crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+            );
+            assert_eq!(
+                assigned.current_window_used_units,
+                before_assignment.current_window_used_units
+            );
+            assert_eq!(
+                assigned.burst_window_epoch,
+                before_assignment.burst_window_epoch
+            );
+            let assigned_usage = store
+                .finite_private_usage_status_for_api_key(
+                    &raw_key,
+                    true,
+                    Some("2026-07-21T12:03:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(assigned_usage.burst_limit_units, 500_000_000);
+
             let rotated = store
                 .admin_rotate_finite_private_api_key(AdminRotateFinitePrivateApiKeyInput {
                     admin_verified_email: admin_email.clone(),
@@ -12346,6 +10684,17 @@ mod tests {
             assert_ne!(rotated.id, issued.api_key.id);
 
             let admin_state = store.finite_private_admin_state().await.unwrap();
+            let account = admin_state
+                .accounts
+                .iter()
+                .find(|account| account.email == friend_email)
+                .unwrap();
+            assert_eq!(account.grant.id, issued.grant.id);
+            assert_eq!(account.api_keys.len(), 2);
+            assert!(admin_state.profiles.iter().any(|profile| {
+                profile.id == crate::FINITE_PRIVATE_5X_LIMIT_PROFILE
+                    && profile.burst_limit_units == 500_000_000
+            }));
             let old_key = admin_state
                 .api_keys
                 .iter()
@@ -12393,6 +10742,7 @@ mod tests {
                 "finite_private.api_key.admin_rotate",
                 "finite_private.api_key.admin_revoke",
                 "finite_private.grant.admin_window_reset",
+                "finite_private.grant.admin_assign_limit_profile",
             ] {
                 assert!(
                     admin_actions.contains(&expected.to_string()),
@@ -13198,307 +11548,6 @@ mod tests {
     /// id, a re-reconcile updates the same row, and claim materializes a project +
     /// runtime (fresh surrogate ids) that the owner can then see. Re-claim is
     /// idempotent and a missing candidate id is reported, not fabricated.
-    #[tokio::test]
-    async fn postgres_reconcile_and_claim_import_row_scoped() {
-        with_isolated_postgres(|store| async move {
-            let run = "import-flow";
-            let email = format!("{run}@finite.vip");
-            let workos = format!("workos_{run}");
-
-            let record = ExistingHostProjectImport {
-                source_host_id: "imphost".to_string(),
-                source_machine_id: "imp-agent-001".to_string(),
-                owner_email: Some(email.clone()),
-                display_name: "Imported Agent".to_string(),
-                hostname: None,
-                runtime_host: Some("imphost".to_string()),
-                runtime_status: RuntimeSummaryStatus::Unknown,
-                active_inference_profile: None,
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: Vec::new(),
-            };
-            let report = store
-                .reconcile_existing_host_imports(
-                    vec![record.clone()],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(report.created_candidates.len(), 1);
-            let candidate_id = report.created_candidates[0].clone();
-            assert!(
-                candidate_id.starts_with("import_"),
-                "candidate id must be a surrogate, got {candidate_id}"
-            );
-
-            let claimable = store
-                .claimable_candidates_for_email(Some(&email))
-                .await
-                .unwrap();
-            assert_eq!(claimable.len(), 1);
-            assert_eq!(claimable[0].id, candidate_id);
-
-            // Re-reconcile updates the same row (natural-key resolution).
-            let report2 = store
-                .reconcile_existing_host_imports(
-                    vec![record],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert!(report2.created_candidates.is_empty());
-            assert_eq!(report2.updated_candidates, vec![candidate_id.clone()]);
-
-            let claim = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
-                    selected_candidate_ids: vec![
-                        candidate_id.clone(),
-                        "does-not-exist".to_string(),
-                    ],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert_eq!(claim.claimed_project_ids.len(), 1);
-            assert_eq!(
-                claim.missing_candidate_ids,
-                vec!["does-not-exist".to_string()]
-            );
-            let project_id = claim.claimed_project_ids[0].clone();
-            assert!(project_id.starts_with("project_"), "surrogate project id");
-
-            let visible = store
-                .visible_projects_for_workos_user(&workos)
-                .await
-                .unwrap();
-            assert_eq!(visible.len(), 1);
-            assert_eq!(visible[0].project.id, project_id);
-            assert_eq!(
-                visible[0].runtime.as_ref().unwrap().source_machine_id,
-                "imp-agent-001"
-            );
-
-            // Re-claim is idempotent: already-claimed, nothing newly claimed.
-            let reclaim = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
-                    selected_candidate_ids: vec![candidate_id],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert!(reclaim.claimed_project_ids.is_empty());
-            assert_eq!(reclaim.already_claimed_project_ids, vec![project_id]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn postgres_imported_runtime_does_not_consume_self_serve_launch_entitlement() {
-        with_isolated_postgres(|store| async move {
-            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
-            let email = "postgres-import-with-launch@finite.vip".to_string();
-            let workos_user_id = "workos_postgres_import_with_launch".to_string();
-            let record = ExistingHostProjectImport {
-                source_host_id: "legacy-host".to_string(),
-                source_machine_id: "legacy-agent-001".to_string(),
-                owner_email: Some(email.clone()),
-                display_name: "Imported Agent".to_string(),
-                hostname: None,
-                runtime_host: Some("legacy-host".to_string()),
-                runtime_status: RuntimeSummaryStatus::Online,
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: Vec::new(),
-            };
-            let reconciled = store
-                .reconcile_existing_host_imports(
-                    vec![record],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: None,
-                    },
-                )
-                .await
-                .unwrap();
-            let candidate_id = reconciled.created_candidates[0].clone();
-            let claimed = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    selected_candidate_ids: vec![candidate_id.clone()],
-                    now: None,
-                })
-                .await
-                .unwrap();
-            let imported_project_id = claimed.claimed_project_ids[0].clone();
-            let imported_before = store
-                .visible_projects_for_workos_user(&workos_user_id)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|visible| visible.project.id == imported_project_id)
-                .expect("claimed import must remain visible");
-            let imported_runtime_id = imported_before
-                .runtime
-                .as_ref()
-                .expect("claimed import must expose its runtime")
-                .id
-                .clone();
-
-            let created = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    display_name: "New Hosted Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "first-self-serve-submit".to_string(),
-                    now: None,
-                })
-                .await
-                .expect("an imported runtime must not consume the hosted launch");
-            assert!(created.project.import_candidate_id.is_none());
-
-            let exhausted = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    display_name: "Another Hosted Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "second-self-serve-submit".to_string(),
-                    now: None,
-                })
-                .await
-                .unwrap_err();
-            assert!(matches!(exhausted, CoreError::InvalidLaunchCode));
-
-            let requests = store
-                .agent_creation_requests_for_workos_user(&workos_user_id)
-                .await
-                .unwrap();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].id, created.request.id);
-
-            let imported_after = store
-                .visible_projects_for_workos_user(&workos_user_id)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|visible| visible.project.id == imported_project_id)
-                .expect("launch attempts must preserve the imported project");
-            assert_eq!(imported_after, imported_before);
-
-            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
-            let connection = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let candidate = raw
-                .query_one(
-                    "SELECT status, project_id, agent_runtime_id
-                     FROM project_import_candidates WHERE id = $1",
-                    &[&candidate_id],
-                )
-                .await
-                .unwrap();
-            assert_eq!(candidate.get::<_, String>("status"), "claimed");
-            assert_eq!(
-                candidate.get::<_, Option<String>>("project_id").as_deref(),
-                Some(imported_project_id.as_str())
-            );
-            assert_eq!(
-                candidate
-                    .get::<_, Option<String>>("agent_runtime_id")
-                    .as_deref(),
-                Some(imported_runtime_id.as_str())
-            );
-            let active_link_count: i64 = raw
-                .query_one(
-                    "SELECT COUNT(*) FROM project_runtime_links
-                     WHERE project_id = $1 AND agent_runtime_id = $2 AND active = TRUE",
-                    &[&imported_project_id, &imported_runtime_id],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            assert_eq!(active_link_count, 1);
-            drop(raw);
-            connection.abort();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn postgres_owner_can_archive_imported_project() {
-        with_isolated_postgres(|store| async move {
-            let email = "postgres-archive-import@finite.vip".to_string();
-            let workos_user_id = "workos_postgres_archive_import".to_string();
-            let reconciled = store
-                .reconcile_existing_host_imports(
-                    vec![ExistingHostProjectImport {
-                        source_host_id: "legacy-host".to_string(),
-                        source_machine_id: "legacy-agent-archive".to_string(),
-                        owner_email: Some(email.clone()),
-                        display_name: "Imported Agent".to_string(),
-                        hostname: None,
-                        runtime_host: Some("legacy-host".to_string()),
-                        runtime_status: RuntimeSummaryStatus::Online,
-                        active_inference_profile: Some("finite-private".to_string()),
-                        hermes_available: Some(true),
-                        published_app_urls: Vec::new(),
-                        known_external_channel_participants: Vec::new(),
-                        admin_visible_to_emails: Vec::new(),
-                    }],
-                    ReconcileExistingHostImportsOptions {
-                        allowlisted_owner_emails: vec![email.clone()],
-                        now: Some("2026-05-25T12:00:00Z".to_string()),
-                    },
-                )
-                .await
-                .unwrap();
-            let claimed = store
-                .claim_project_imports(ClaimProjectImportsInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos_user_id.clone(),
-                    selected_candidate_ids: reconciled.created_candidates,
-                    now: Some("2026-05-25T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-
-            store
-                .archive_imported_project(ArchiveImportedProjectInput {
-                    verified_email: email,
-                    workos_user_id: workos_user_id.clone(),
-                    project_id: claimed.claimed_project_ids[0].clone(),
-                    now: Some("2026-05-25T12:02:00Z".to_string()),
-                })
-                .await
-                .expect("timestamp text must serialize for Postgres archive");
-
-            assert!(
-                store
-                    .visible_projects_for_workos_user(&workos_user_id)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        })
-        .await;
-    }
-
     /// The agent-creation lease queue is partitioned by source host: two requests
     /// routed to different hosts, and a runner declaring host A leases only A's
     /// request — never B's. Proves the global claim across all rows is gone.
@@ -13934,7 +11983,6 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let runtime_token = "runtime-golden-token";
             store
                 .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                     request_id: lease.request.id.clone(),
@@ -13947,7 +11995,6 @@ mod tests {
                     provider_runtime_handle: None,
                     contact_endpoint: None,
                     runtime_capabilities: Some(kata_runtime_capabilities()),
-                    runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(source_host_id.clone()),
@@ -14245,7 +12292,7 @@ mod tests {
                     for row in raw
                         .query(
                             &format!(
-                                "SELECT {key}::text, updated_at::text FROM {table} ORDER BY 1"
+                                "SELECT {key}::text, core_rfc3339(updated_at) AS updated_at FROM {table} ORDER BY 1"
                             ),
                             &[],
                         )

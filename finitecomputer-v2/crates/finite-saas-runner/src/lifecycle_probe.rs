@@ -475,11 +475,26 @@ impl Probe<'_> {
         // The expectation is derived (runtime-id state root), but the truth
         // carried downstream is the provider-observed mount: the duplicate
         // writer scan compares against what is actually mounted.
+        //
+        // Pre-runtime-id-era runtimes (one live case remains in the fleet)
+        // keep their durable root named by the source machine id: same-volume
+        // upgrades deliberately preserve the existing host bind, so no number
+        // of upgrades ever renames it, and recreating the container would
+        // mount an EMPTY runtime-id root instead. Accept the container's OWN
+        // machine-named root — only when the runtime-id root does not exist,
+        // so the legacy path stops being valid the moment the data migrates —
+        // and carry the acceptance loudly in the evidence. A machine-named
+        // root belonging to any OTHER container is still a mismatch.
+        let legacy_state_root = self.config.work_root.join("kata").join(container_name);
+        let legacy_root_acceptable = !state_root.exists() && legacy_state_root != *state_root;
         let durable_bind = inspected.mounts.iter().find(|mount| {
             mount.destination == Path::new("/data")
-                && mount.source == state_root
                 && mount.read_write
+                && (mount.source == state_root
+                    || (legacy_root_acceptable && mount.source == legacy_state_root))
         });
+        let legacy_machine_named_root =
+            durable_bind.is_some_and(|mount| mount.source != *state_root);
         if !mismatched.is_empty() || durable_bind.is_none() {
             return Err(LifecycleProbeCheck::fail(
                 "canonical_handle",
@@ -523,6 +538,7 @@ impl Probe<'_> {
                     "status": inspected.state.status,
                     "image": inspected.config.image,
                     "state_root": observed_state_root,
+                    "legacy_machine_named_root": legacy_machine_named_root,
                 }),
             ),
             CanonicalHandle {

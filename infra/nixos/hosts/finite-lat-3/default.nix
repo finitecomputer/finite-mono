@@ -1,5 +1,6 @@
 {
   config,
+  finitePackages,
   lib,
   pkgs,
   ...
@@ -18,6 +19,8 @@ let
   # Reach the loopback Authority through lat1's peer-scoped WireGuard proxy.
   identityAuthority = "http://10.254.3.1:18790";
   identityOperatorEnvironmentFile = "/etc/finite/identity-operator.env";
+  revision =
+    if config.system.configurationRevision == null then "" else config.system.configurationRevision;
 in
 {
   imports = [
@@ -26,6 +29,7 @@ in
     ./storage-health.nix
     ../../modules/finite-saas-runner.nix
     ../../modules/kata-runner-host.nix
+    ../../modules/metrics.nix
   ];
 
   networking.hostName = "finite-lat-3";
@@ -40,6 +44,16 @@ in
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.2";
     maxSandboxes = 32;
+  };
+
+  finite.metrics = {
+    enable = true;
+    staticVersionMetrics = ''
+      finite_component_build_info{host="finite-lat-3",component="finite-saas-runner",version="${finitePackages.finite-saas-runner.version}",git_sha="${revision}",image_digest="",source="nix"} 1
+      finite_component_version_mismatch{host="finite-lat-3",component="finite-saas-runner"} 0
+      finite_component_build_info{host="finite-lat-3",component="nixos-system-profile",version="${config.system.nixos.version}",git_sha="${revision}",image_digest="",source="nix"} 1
+      finite_component_version_mismatch{host="finite-lat-3",component="nixos-system-profile"} 0
+    '';
   };
 
   assertions = [

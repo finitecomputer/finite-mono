@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
+use tokio_postgres::NoTls;
 
 const OPERATOR_UPSTREAM_KEY: &str = "fpk_live_operator_upstream";
 const LOCAL_RUNTIME_KEY: &str = "fpk_local_runtime_key";
@@ -62,11 +63,56 @@ async fn deployed_limiter_double(
     .into_response()
 }
 
+/// Create an isolated, migrated Core database and return its store.
+///
+/// Core has one store implementation, so this integration test needs a real
+/// database. Returns `None` when `FC_CORE_POSTGRES_TEST_URL` is unset, matching
+/// how the Core crate gates its own Postgres tests.
+async fn isolated_core_store() -> Option<CoreStore> {
+    let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL").ok()?;
+    let (admin, connection) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let db_name = format!(
+        "fc_local_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    admin
+        .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
+        .await
+        .unwrap();
+    drop(admin);
+    handle.abort();
+
+    let (base, query) = match admin_url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (admin_url.as_str(), None),
+    };
+    let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
+    let new_base = match base[scheme_end..].find('/') {
+        Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
+        None => format!("{base}/{db_name}"),
+    };
+    let url = match query {
+        Some(query) => format!("{new_base}?{query}"),
+        None => new_base,
+    };
+    let store = CoreStore::connect(&url).await.unwrap();
+    store.migrate().await.unwrap();
+    Some(store)
+}
+
 #[tokio::test]
 async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key() {
     // Local Core with a runtime key issued the same way runner provisioning
     // issues them.
-    let core_store = CoreStore::memory();
+    let Some(core_store) = isolated_core_store().await else {
+        return;
+    };
     let grant = core_store
         .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
             verified_email: "local-canary@finite.computer".to_string(),

@@ -4,13 +4,12 @@ use finite_saas_core::{
     FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderOperationEnvelope,
     ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
     RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
     RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
-    runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -360,8 +359,6 @@ pub struct AgentCreationRunner<Q, L, T> {
     lease_tokens: T,
     runner_id: String,
     lease_seconds: i64,
-    runtime_ready_timeout: Duration,
-    runtime_ready_interval: Duration,
     default_finite_private: Option<FinitePrivateRuntimeDefaults>,
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
@@ -391,19 +388,11 @@ where
             lease_tokens,
             runner_id,
             lease_seconds,
-            runtime_ready_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
-            runtime_ready_interval: DEFAULT_RUNTIME_READY_INTERVAL,
             default_finite_private: None,
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
         })
-    }
-
-    pub fn with_runtime_ready_polling(mut self, timeout: Duration, interval: Duration) -> Self {
-        self.runtime_ready_timeout = timeout;
-        self.runtime_ready_interval = interval;
-        self
     }
 
     pub fn with_agent_identity_authority(
@@ -535,7 +524,6 @@ where
                         state_schema_version: facts.state_schema_version.clone(),
                         provider_runtime_handle: facts.provider_runtime_handle.clone(),
                         contact_endpoint: facts.contact_endpoint.clone(),
-                        runtime_relay_token_hash: facts.runtime_relay_token_hash.clone(),
                         display_name: facts.display_name.clone(),
                         hostname: facts.hostname.clone(),
                         runtime_host: facts.runtime_host.clone(),
@@ -548,44 +536,39 @@ where
                     },
                 );
                 let launch_result = match launch_result {
-                    Ok(_) => match self.wait_for_launch_readiness(&facts.source_machine_id) {
-                        Ok(()) => match if lease.request.relocation.is_some() {
-                            // The relocation launch already proved that the
-                            // restored state exposes the existing Agent
-                            // Principal. Rebinding it after Core switches the
-                            // Runtime host would add a fallible post-commit
-                            // step to the relocation boundary.
-                            Ok(())
-                        } else {
-                            self.bind_agent_identity(&lease, &facts)
-                        } {
-                            Ok(()) => self.queue.complete_agent_creation(
-                                &request_id,
-                                CompleteAgentCreationRequestInput {
-                                    request_id: request_id.clone(),
-                                    runner_id: self.runner_id.clone(),
-                                    lease_token: lease_token.clone(),
-                                    source_host_id: facts.source_host_id.clone(),
-                                    source_machine_id: facts.source_machine_id.clone(),
-                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                    state_schema_version: facts.state_schema_version.clone(),
-                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                    contact_endpoint: facts.contact_endpoint.clone(),
-                                    display_name: facts.display_name.clone(),
-                                    hostname: facts.hostname.clone(),
-                                    runtime_host: facts.runtime_host.clone(),
-                                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                                    active_inference_profile: facts
-                                        .active_inference_profile
-                                        .clone(),
-                                    hermes_available: facts.hermes_available,
-                                    published_app_urls: facts.published_app_urls.clone(),
-                                    runtime_capabilities: Some(runtime_capabilities),
-                                    now: None,
-                                },
-                            ),
-                            Err(error) => Err(error),
-                        },
+                    Ok(_) => match if lease.request.relocation.is_some() {
+                        // The relocation launch already proved that the
+                        // restored state exposes the existing Agent
+                        // Principal. Rebinding it after Core switches the
+                        // Runtime host would add a fallible post-commit
+                        // step to the relocation boundary.
+                        Ok(())
+                    } else {
+                        self.bind_agent_identity(&lease, &facts)
+                    } {
+                        Ok(()) => self.queue.complete_agent_creation(
+                            &request_id,
+                            CompleteAgentCreationRequestInput {
+                                request_id: request_id.clone(),
+                                runner_id: self.runner_id.clone(),
+                                lease_token: lease_token.clone(),
+                                source_host_id: facts.source_host_id.clone(),
+                                source_machine_id: facts.source_machine_id.clone(),
+                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                state_schema_version: facts.state_schema_version.clone(),
+                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                contact_endpoint: facts.contact_endpoint.clone(),
+                                display_name: facts.display_name.clone(),
+                                hostname: facts.hostname.clone(),
+                                runtime_host: facts.runtime_host.clone(),
+                                runtime_status: Some(RuntimeSummaryStatus::Online),
+                                active_inference_profile: facts.active_inference_profile.clone(),
+                                hermes_available: facts.hermes_available,
+                                published_app_urls: facts.published_app_urls.clone(),
+                                runtime_capabilities: Some(runtime_capabilities),
+                                now: None,
+                            },
+                        ),
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
@@ -766,16 +749,6 @@ where
                 failure_message,
             ));
         }
-        let source_machine_id = lease.request.source_machine_id.clone();
-        let previous_heartbeat = match kind {
-            RuntimeControlKind::Restart
-            | RuntimeControlKind::RecoverKnownGoodChatRuntime
-            | RuntimeControlKind::Upgrade => self
-                .queue
-                .runtime_heartbeat_for_machine(&source_machine_id)?
-                .map(|heartbeat| heartbeat.last_seen_at),
-            RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
-        };
         let runtime_spec = control_runtime_spec(&lease, self.launcher.runner_class())?;
         let desired_environment = runtime_spec
             .map(|spec| spec.environment.clone())
@@ -838,74 +811,52 @@ where
         };
 
         match operation_result {
-            Ok(completion_facts) => match self.wait_for_runtime_control_readiness(
-                kind,
-                &source_machine_id,
-                previous_heartbeat.as_deref(),
-            ) {
-                Ok(()) => {
-                    let upgrade_facts = match &completion_facts {
-                        RuntimeControlCompletionFacts::Upgrade(facts) => Some(facts),
-                        RuntimeControlCompletionFacts::None
-                        | RuntimeControlCompletionFacts::Retirement(_) => None,
-                    };
-                    let retirement_snapshot = match &completion_facts {
-                        RuntimeControlCompletionFacts::Retirement(receipt) => {
-                            Some((**receipt).clone())
-                        }
-                        RuntimeControlCompletionFacts::None
-                        | RuntimeControlCompletionFacts::Upgrade(_) => None,
-                    };
-                    let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
-                        artifact_bounded_upgrade_runtime_capabilities(
-                            self.launcher.runtime_capabilities(),
-                            lease.target_runtime_artifact.as_ref(),
-                        )
-                    });
-                    let completed = self.queue.complete_runtime_control(
-                        &request_id,
-                        CompleteRuntimeControlRequestInput {
-                            request_id: request_id.clone(),
-                            runner_id: self.runner_id.clone(),
-                            lease_token,
-                            runtime_artifact_id: upgrade_facts
-                                .as_ref()
-                                .map(|facts| facts.runtime_artifact_id.clone()),
-                            state_schema_version: upgrade_facts
-                                .as_ref()
-                                .map(|facts| facts.state_schema_version.clone()),
-                            runtime_capabilities,
-                            runtime_host: upgrade_facts
-                                .as_ref()
-                                .map(|facts| facts.runtime_host.clone()),
-                            published_app_urls: upgrade_facts
-                                .as_ref()
-                                .map(|facts| facts.published_app_urls.clone()),
-                            retirement_snapshot,
-                            now: None,
-                        },
-                    )?;
-                    Ok(runtime_control_success_outcome(
-                        kind,
-                        request_id,
-                        completed.agent_runtime_id,
-                    ))
-                }
-                Err(error) => {
-                    let failure_message = error.to_string();
-                    self.record_runtime_control_failure(
-                        kind,
-                        &request_id,
-                        &lease_token,
-                        &failure_message,
-                    )?;
-                    Ok(runtime_control_failed_outcome(
-                        kind,
-                        request_id,
-                        failure_message,
-                    ))
-                }
-            },
+            Ok(completion_facts) => {
+                let upgrade_facts = match &completion_facts {
+                    RuntimeControlCompletionFacts::Upgrade(facts) => Some(facts),
+                    RuntimeControlCompletionFacts::None
+                    | RuntimeControlCompletionFacts::Retirement(_) => None,
+                };
+                let retirement_snapshot = match &completion_facts {
+                    RuntimeControlCompletionFacts::Retirement(receipt) => Some((**receipt).clone()),
+                    RuntimeControlCompletionFacts::None
+                    | RuntimeControlCompletionFacts::Upgrade(_) => None,
+                };
+                let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
+                    artifact_bounded_upgrade_runtime_capabilities(
+                        self.launcher.runtime_capabilities(),
+                        lease.target_runtime_artifact.as_ref(),
+                    )
+                });
+                let completed = self.queue.complete_runtime_control(
+                    &request_id,
+                    CompleteRuntimeControlRequestInput {
+                        request_id: request_id.clone(),
+                        runner_id: self.runner_id.clone(),
+                        lease_token,
+                        runtime_artifact_id: upgrade_facts
+                            .as_ref()
+                            .map(|facts| facts.runtime_artifact_id.clone()),
+                        state_schema_version: upgrade_facts
+                            .as_ref()
+                            .map(|facts| facts.state_schema_version.clone()),
+                        runtime_capabilities,
+                        runtime_host: upgrade_facts
+                            .as_ref()
+                            .map(|facts| facts.runtime_host.clone()),
+                        published_app_urls: upgrade_facts
+                            .as_ref()
+                            .map(|facts| facts.published_app_urls.clone()),
+                        retirement_snapshot,
+                        now: None,
+                    },
+                )?;
+                Ok(runtime_control_success_outcome(
+                    kind,
+                    request_id,
+                    completed.agent_runtime_id,
+                ))
+            }
             Err(error) => {
                 let failure_message = error.to_string();
                 self.record_runtime_control_failure(
@@ -954,22 +905,6 @@ where
             )?;
         }
         Ok(())
-    }
-
-    fn wait_for_runtime_control_readiness(
-        &mut self,
-        kind: RuntimeControlKind,
-        source_machine_id: &str,
-        previous_heartbeat: Option<&str>,
-    ) -> Result<(), RunnerError> {
-        match kind {
-            RuntimeControlKind::Restart
-            | RuntimeControlKind::RecoverKnownGoodChatRuntime
-            | RuntimeControlKind::Upgrade => {
-                self.wait_for_restart_readiness(source_machine_id, previous_heartbeat)
-            }
-            RuntimeControlKind::Stop | RuntimeControlKind::Destroy => Ok(()),
-        }
     }
 
     fn runtime_launch_options(
@@ -1056,61 +991,6 @@ where
         });
         Ok(options)
     }
-
-    fn wait_for_runtime_heartbeat(&mut self, source_machine_id: &str) -> Result<(), RunnerError> {
-        self.wait_for_runtime_heartbeat_after(source_machine_id, None)
-    }
-
-    fn wait_for_launch_readiness(&mut self, source_machine_id: &str) -> Result<(), RunnerError> {
-        if self.launcher.uses_core_runtime_heartbeat() {
-            self.wait_for_runtime_heartbeat(source_machine_id)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn wait_for_restart_readiness(
-        &mut self,
-        source_machine_id: &str,
-        previous_last_seen_at: Option<&str>,
-    ) -> Result<(), RunnerError> {
-        if self.launcher.uses_core_runtime_heartbeat() {
-            self.wait_for_runtime_heartbeat_after(source_machine_id, previous_last_seen_at)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn wait_for_runtime_heartbeat_after(
-        &mut self,
-        source_machine_id: &str,
-        previous_last_seen_at: Option<&str>,
-    ) -> Result<(), RunnerError> {
-        let started = Instant::now();
-        loop {
-            if let Some(heartbeat) = self
-                .queue
-                .runtime_heartbeat_for_machine(source_machine_id)?
-                && previous_last_seen_at
-                    .map(|previous| heartbeat.last_seen_at != previous)
-                    .unwrap_or(true)
-            {
-                return Ok(());
-            }
-            if started.elapsed() >= self.runtime_ready_timeout {
-                let heartbeat_description = if previous_last_seen_at.is_some() {
-                    "new relay heartbeat"
-                } else {
-                    "relay heartbeat"
-                };
-                return Err(RunnerError::RuntimeLaunch(format!(
-                    "runtime did not publish a {heartbeat_description} within {}s",
-                    self.runtime_ready_timeout.as_secs()
-                )));
-            }
-            thread::sleep(self.runtime_ready_interval);
-        }
-    }
 }
 
 pub trait AgentCreationQueue {
@@ -1173,11 +1053,6 @@ pub trait AgentCreationQueue {
         input: RecordProviderOperationTransitionRequest,
     ) -> Result<ProviderOperationEnvelope, RunnerError>;
 
-    fn runtime_heartbeat_for_machine(
-        &mut self,
-        source_machine_id: &str,
-    ) -> Result<Option<RelayHeartbeat>, RunnerError>;
-
     fn provision_finite_private_runtime_key(
         &mut self,
         request_id: &str,
@@ -1235,9 +1110,6 @@ pub trait RuntimeLauncher {
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope;
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::LocalDocker
-    }
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        true
     }
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity::default()
@@ -1326,10 +1198,6 @@ where
 
     fn runner_class(&self) -> RunnerClass {
         (**self).runner_class()
-    }
-
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        (**self).uses_core_runtime_heartbeat()
     }
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
@@ -1492,7 +1360,6 @@ pub struct RuntimeLaunchFacts {
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -2247,27 +2114,6 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         )
     }
 
-    fn runtime_heartbeat_for_machine(
-        &mut self,
-        source_machine_id: &str,
-    ) -> Result<Option<RelayHeartbeat>, RunnerError> {
-        let url = format!(
-            "{}/api/finite/v1/machines/{}/heartbeat",
-            self.base_url, source_machine_id
-        );
-        let response = ureq::get(&url)
-            .set("authorization", &format!("Bearer {}", self.api_token))
-            .call();
-        match response {
-            Ok(response) => response
-                .into_json()
-                .map(Some)
-                .map_err(|error| RunnerError::CoreJson(error.to_string())),
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(error) => decode_core_response::<RelayHeartbeat>(Err(error)).map(Some),
-        }
-    }
-
     fn provision_finite_private_runtime_key(
         &mut self,
         request_id: &str,
@@ -2550,10 +2396,6 @@ impl RuntimeLauncher for DockerLauncher {
         self.validate_pinned_local_image()
     }
 
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
-    }
-
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
             runner_classes: vec![self.runner_class()],
@@ -2702,10 +2544,6 @@ impl RuntimeLauncher for DockerLauncher {
         )?;
         self.wait_for_runtime_http(&plan)?;
 
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-
         Ok(RuntimeLaunchFacts {
             source_host_id: self.config.source_host_id.clone(),
             source_machine_id: plan.container_name,
@@ -2713,7 +2551,6 @@ impl RuntimeLauncher for DockerLauncher {
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
             contact_endpoint: Some(plan.contact_url.clone()),
-            runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
             runtime_host: Some(plan.public_base_url),
@@ -3514,10 +3351,6 @@ impl RuntimeLauncher for EnclaviaLauncher {
         self.config.validate()
     }
 
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
-    }
-
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
             runner_classes: vec![self.runner_class()],
@@ -3623,10 +3456,6 @@ impl RuntimeLauncher for EnclaviaLauncher {
         let endpoint = enclavia_endpoint_from_status(&status, &plan.enclave_id);
         self.wait_for_runtime_http(&endpoint)?;
 
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-
         Ok(RuntimeLaunchFacts {
             source_host_id: self.config.source_host_id.clone(),
             source_machine_id: endpoint.enclave_id.clone(),
@@ -3634,7 +3463,6 @@ impl RuntimeLauncher for EnclaviaLauncher {
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
             contact_endpoint: Some(endpoint.contact_url.clone()),
-            runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: Some(endpoint.hostname.clone()),
             runtime_host: Some(endpoint.public_base_url.clone()),
@@ -3827,12 +3655,6 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(())
-}
-
-pub(crate) fn random_runtime_bootstrap_token() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
 }
 
 fn source_machine_name_for_request_id(request_id: &str) -> String {
@@ -4111,12 +3933,7 @@ mod tests {
     fn run_once_restarts_runtime_control_request_before_launch_work() {
         let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
         let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control.clone()).with_next_heartbeat(
-                RelayHeartbeat {
-                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
-                    ..sample_heartbeat("oslo-agent-001")
-                },
-            ),
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
@@ -4161,10 +3978,6 @@ mod tests {
             )
         );
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
-        assert_eq!(
-            runner.queue.heartbeat_checks,
-            vec!["oslo-agent-001".to_string(), "oslo-agent-001".to_string()]
-        );
         assert!(runner.queue.failed_runtime_control.is_empty());
     }
 
@@ -4186,12 +3999,7 @@ mod tests {
             vec!["FINITE_PRIVATE_API_KEY".to_string(), "FAL_KEY".to_string()],
         ));
         let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
-                RelayHeartbeat {
-                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
-                    ..sample_heartbeat("oslo-agent-001")
-                },
-            ),
+            FakeQueue::with_runtime_control_lease(runtime_control),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()).with_runner_capacity(
                 RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
@@ -4239,12 +4047,7 @@ mod tests {
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
         );
         let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control.clone()).with_next_heartbeat(
-                RelayHeartbeat {
-                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
-                    ..sample_heartbeat("oslo-agent-001")
-                },
-            ),
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
@@ -4294,9 +4097,7 @@ mod tests {
 
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample())
-                .for_kata()
-                .without_core_heartbeat(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
             FixedLeaseTokens::new(["lease-recovery"]),
             "runner-1",
             300,
@@ -4358,9 +4159,7 @@ mod tests {
             .recover_known_good_chat = true;
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample())
-                .for_kata()
-                .without_core_heartbeat(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
             FixedLeaseTokens::new(["lease-upgrade"]),
             "runner-1",
             300,
@@ -4450,7 +4249,6 @@ mod tests {
             }
         );
         assert_eq!(runner.launcher.stopped, vec!["oslo-agent-001".to_string()]);
-        assert!(runner.queue.heartbeat_checks.is_empty());
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
         assert_eq!(
             runner.queue.completed_runtime_control[0].runtime_capabilities, None,
@@ -4483,7 +4281,6 @@ mod tests {
             }
         );
         assert!(runner.launcher.destroyed.is_empty());
-        assert!(runner.queue.heartbeat_checks.is_empty());
         assert!(runner.queue.completed_runtime_control.is_empty());
         assert_eq!(runner.queue.failed_runtime_control.len(), 1);
     }
@@ -4578,37 +4375,6 @@ mod tests {
     }
 
     #[test]
-    fn run_once_fails_restart_when_runtime_does_not_publish_new_heartbeat() {
-        let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_runtime_ready_polling(Duration::from_millis(0), Duration::from_millis(1));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(
-            outcome,
-            RunOnceOutcome::RuntimeRestartFailed { .. }
-        ));
-        assert_eq!(
-            runner.launcher.restarted,
-            vec!["oslo-agent-001".to_string()]
-        );
-        assert!(runner.queue.completed_runtime_control.is_empty());
-        assert_eq!(runner.queue.failed_runtime_control.len(), 1);
-        assert_eq!(
-            runner.queue.failed_runtime_control[0].failure_message,
-            "runtime launch failed: runtime did not publish a new relay heartbeat within 0s"
-        );
-    }
-
-    #[test]
     fn run_once_completes_only_after_launcher_returns_runtime_facts() {
         let lease = sample_lease("agent_request_123");
         let provider_runtime_handle: ProviderRuntimeHandleEnvelope =
@@ -4648,20 +4414,12 @@ mod tests {
         assert_eq!(runner.launcher.launch_count, 1);
         assert_eq!(runner.queue.registered.len(), 1);
         assert_eq!(
-            runner.queue.registered[0].runtime_relay_token_hash,
-            "hash-runtime-token"
-        );
-        assert_eq!(
             runner.queue.registered[0].provider_runtime_handle,
             Some(provider_runtime_handle.clone())
         );
         assert_eq!(
             runner.queue.registered[0].contact_endpoint.as_deref(),
             Some("http://oslo-host-1/contact")
-        );
-        assert_eq!(
-            runner.queue.heartbeat_checks,
-            vec!["finite-agent_123".to_string()]
         );
         assert_eq!(runner.queue.completed.len(), 1);
         assert_eq!(
@@ -5174,65 +4932,6 @@ mod tests {
             runner.queue.failed[0].failure_message,
             "runtime launch failed: docker run failed"
         );
-    }
-
-    #[test]
-    fn run_once_records_failure_when_runtime_never_heartbeats() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease.clone()).without_heartbeat(),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_runtime_ready_polling(Duration::from_millis(0), Duration::from_millis(1));
-
-        let outcome = runner.run_once().unwrap();
-        assert_eq!(
-            outcome,
-            RunOnceOutcome::LaunchFailed {
-                request_id: lease.request.id.clone(),
-                failure_message:
-                    "runtime launch failed: runtime did not publish a relay heartbeat within 0s"
-                        .to_string(),
-            }
-        );
-        assert_eq!(runner.queue.registered.len(), 1);
-        assert_eq!(
-            runner.queue.heartbeat_checks,
-            vec!["finite-agent_123".to_string()]
-        );
-        assert!(runner.queue.completed.is_empty());
-        assert_eq!(runner.queue.failed.len(), 1);
-    }
-
-    #[test]
-    fn run_once_allows_launcher_owned_readiness_without_core_heartbeat() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease.clone()).without_heartbeat(),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()).without_core_heartbeat(),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_runtime_ready_polling(Duration::from_millis(0), Duration::from_millis(1));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert_eq!(
-            outcome,
-            RunOnceOutcome::Launched {
-                request_id: lease.request.id,
-                runtime_id: Some("runtime-from-core".to_string()),
-            }
-        );
-        assert_eq!(runner.queue.registered.len(), 1);
-        assert!(runner.queue.heartbeat_checks.is_empty());
-        assert_eq!(runner.queue.completed.len(), 1);
     }
 
     #[test]
@@ -5977,8 +5676,6 @@ mod tests {
     struct FakeQueue {
         next_lease: Option<AgentCreationLease>,
         next_runtime_control_lease: Option<RuntimeControlLease>,
-        heartbeat: Option<RelayHeartbeat>,
-        next_heartbeat: Option<RelayHeartbeat>,
         provision_error: Option<String>,
         leases: Vec<(String, String, i64)>,
         lease_capacities: Vec<Option<RunnerLeaseCapacity>>,
@@ -5991,7 +5688,6 @@ mod tests {
         provisioned: Vec<ProvisionFinitePrivateRuntimeKeyInput>,
         registered: Vec<RegisterAgentCreationRuntimeInput>,
         provider_operation_transitions: Vec<RecordProviderOperationTransitionRequest>,
-        heartbeat_checks: Vec<String>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
     }
@@ -6001,8 +5697,6 @@ mod tests {
             Self {
                 next_lease: None,
                 next_runtime_control_lease: None,
-                heartbeat: Some(sample_heartbeat("finite-agent_123")),
-                next_heartbeat: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6015,7 +5709,6 @@ mod tests {
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 provider_operation_transitions: Vec::new(),
-                heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
             }
@@ -6025,8 +5718,6 @@ mod tests {
             Self {
                 next_lease: Some(lease),
                 next_runtime_control_lease: None,
-                heartbeat: Some(sample_heartbeat("finite-agent_123")),
-                next_heartbeat: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6039,7 +5730,6 @@ mod tests {
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 provider_operation_transitions: Vec::new(),
-                heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
             }
@@ -6049,8 +5739,6 @@ mod tests {
             Self {
                 next_lease: None,
                 next_runtime_control_lease: Some(lease),
-                heartbeat: Some(sample_heartbeat("oslo-agent-001")),
-                next_heartbeat: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6063,20 +5751,9 @@ mod tests {
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 provider_operation_transitions: Vec::new(),
-                heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
             }
-        }
-
-        fn without_heartbeat(mut self) -> Self {
-            self.heartbeat = None;
-            self
-        }
-
-        fn with_next_heartbeat(mut self, heartbeat: RelayHeartbeat) -> Self {
-            self.next_heartbeat = Some(heartbeat);
-            self
         }
 
         fn with_provision_error(mut self, message: &str) -> Self {
@@ -6188,19 +5865,6 @@ mod tests {
             ))
         }
 
-        fn runtime_heartbeat_for_machine(
-            &mut self,
-            source_machine_id: &str,
-        ) -> Result<Option<RelayHeartbeat>, RunnerError> {
-            self.heartbeat_checks.push(source_machine_id.to_string());
-            if self.heartbeat_checks.len() > 1
-                && let Some(heartbeat) = self.next_heartbeat.take()
-            {
-                self.heartbeat = Some(heartbeat);
-            }
-            Ok(self.heartbeat.clone())
-        }
-
         fn provision_finite_private_runtime_key(
             &mut self,
             _request_id: &str,
@@ -6240,7 +5904,6 @@ mod tests {
         retirement_result: Option<Result<RuntimeRetirementSnapshotReceipt, String>>,
         runner_capacity: RunnerLeaseCapacity,
         runner_class: RunnerClass,
-        uses_core_heartbeat: bool,
         planned_source: Option<RuntimeSourceIdentity>,
     }
 
@@ -6265,7 +5928,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                uses_core_heartbeat: true,
                 planned_source: Some(RuntimeSourceIdentity {
                     source_host_id: "oslo-host-1".to_string(),
                     source_machine_id: "finite-agent_123".to_string(),
@@ -6293,7 +5955,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                uses_core_heartbeat: true,
                 planned_source: Some(RuntimeSourceIdentity {
                     source_host_id: "oslo-host-1".to_string(),
                     source_machine_id: "finite-agent_123".to_string(),
@@ -6321,7 +5982,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                uses_core_heartbeat: true,
                 planned_source: Some(RuntimeSourceIdentity {
                     source_host_id: "oslo-host-1".to_string(),
                     source_machine_id: "finite-agent_123".to_string(),
@@ -6331,11 +5991,6 @@ mod tests {
 
         fn with_runner_capacity(mut self, runner_capacity: RunnerLeaseCapacity) -> Self {
             self.runner_capacity = runner_capacity;
-            self
-        }
-
-        fn without_core_heartbeat(mut self) -> Self {
-            self.uses_core_heartbeat = false;
             self
         }
 
@@ -6377,10 +6032,6 @@ mod tests {
 
         fn runner_class(&self) -> RunnerClass {
             self.runner_class
-        }
-
-        fn uses_core_runtime_heartbeat(&self) -> bool {
-            self.uses_core_heartbeat
         }
 
         fn runner_capacity(&self) -> RunnerLeaseCapacity {
@@ -6517,7 +6168,6 @@ mod tests {
                 state_schema_version: Some("state-v1".to_string()),
                 provider_runtime_handle: None,
                 contact_endpoint: Some("http://oslo-host-1/contact".to_string()),
-                runtime_relay_token_hash: "hash-runtime-token".to_string(),
                 display_name: Some("Oslo Agent".to_string()),
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6714,14 +6364,6 @@ mod tests {
             },
             runtime_spec: None,
             target_runtime_artifact: None,
-        }
-    }
-
-    fn sample_heartbeat(machine_id: &str) -> RelayHeartbeat {
-        RelayHeartbeat {
-            ok: true,
-            machine_id: machine_id.to_string(),
-            last_seen_at: "2026-05-25T13:00:05Z".to_string(),
         }
     }
 

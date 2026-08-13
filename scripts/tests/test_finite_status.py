@@ -55,17 +55,18 @@ class FiniteStatusTests(unittest.TestCase):
         output = "\n".join(
             [
                 "__FINITE_STATUS_ARTIFACTS__",
-                "artifact-v2,v2,2026-08-01T00:00:00Z,",
+                "artifact-v2,ghcr.io/finite/runtime@sha256:2222,v2,git-v2,0.2.0,2026-08-01T00:00:00Z,",
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
         with mock.patch.object(finite_status, "run_read_only", return_value=completed) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(len(result["runtimes"]), 1)
+        self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
         call = run.call_args
         sql = call.kwargs["input_text"]
         self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
@@ -165,6 +166,31 @@ class FiniteStatusTests(unittest.TestCase):
             self.assertEqual(checked, 1)
             self.assertEqual(failures, [])
 
+    def test_litestream_recovery_evidence_is_scored_in_the_recovery_boundary(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+
+        fresh = finite_status.build_recovery(raw["recovery"], now)
+        self.assertEqual(fresh["litestream"]["stamp_status"], "green")
+        self.assertEqual(fresh["litestream"]["service_status"], "green")
+        self.assertEqual(
+            fresh["litestream"]["service_unit"], "finite-litestream.service"
+        )
+
+        stale = dict(raw["recovery"])
+        stale["litestream_last_success_epoch"] = int(now.timestamp()) - 7200
+        report = finite_status.build_recovery(stale, now)
+        self.assertEqual(report["litestream"]["stamp_status"], "red")
+        self.assertEqual(report["status"], "red")
+
+        missing = dict(raw["recovery"])
+        del missing["litestream_last_success_epoch"]
+        missing["litestream_last_success_error"] = "cannot read stamp"
+        missing["litestream_service_unit"] = {"error": "unit not found"}
+        report = finite_status.build_recovery(missing, now)
+        self.assertEqual(report["litestream"]["stamp_status"], "unknown")
+        self.assertNotEqual(report["status"], "green")
+
     def test_interrupted_rollout_is_reported_without_repair(self) -> None:
         raw = {
             "exists": True,
@@ -243,7 +269,6 @@ class FiniteStatusTests(unittest.TestCase):
             "agent_name": runtime,
             "version_label": "v2",
             "link_state": link_state,
-            "last_heartbeat_at": "2026-08-01T00:00:00Z",
         }
 
     def probe_report(self, verdict: str, reason: str | None = None) -> str:

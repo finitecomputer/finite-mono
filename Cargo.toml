@@ -10,7 +10,6 @@ members = [
     "finite-brain/crates/finite-brain-store",
     "finite-identity",
     "finite-nostr",
-    "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",
     "finitecomputer-v2/crates/finite-saas-local",
@@ -99,6 +98,7 @@ walkdir = "2"
 workos = "=3.0.0"
 zip = { version = "4.6.1", default-features = false }
 zeroize = { version = "1.8", features = ["derive"] }
+zstd = "0.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

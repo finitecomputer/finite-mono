@@ -41,7 +41,6 @@ in
     # finite-computer-config (infra/hosts/lat1/k8s/).
     environment = {
       FC_CORE_BIND = "127.0.0.1:4200";
-      FC_CORE_RELAY_STATE_DIR = "/var/lib/finite-saas-core/relay";
       # Parser/schema compatibility has been live since 2026-07-10. The
       # required active-operation preflight was clean before first use; see
       # the rollback-rescue procedure in infra/runbooks/runtime-image.md.
@@ -75,13 +74,22 @@ in
     };
 
     serviceConfig = {
+      # systemd's default soft fd limit (1024) starved the hosted-device daemon
+      # of sockets during the 2026-08-12 sync burst (reqwest Client::new EMFILE
+      # -> "Chat is unavailable"). Raise it for every long-running platform
+      # service; the hard limit already allows it.
+      LimitNOFILE = 65536;
       ExecStart = "${finitePackages.finite-saas-core}/bin/finite-saas-core";
       # Type=simple considers the process started before its HTTP socket is
       # ready. ExecStartPost participates in systemd ordering, so dependents
       # wait for a successful health check instead of racing Core at deploy.
       ExecStartPost = [ "${waitForHealth}" ];
       DynamicUser = true;
-      StateDirectory = "finite-saas-core"; # relay state (was PVC finite-saas-core-relay-state)
+      # Retained for the retired legacy relay's on-disk state (SQLite ledgers,
+      # blobs, JSON tree under /var/lib/private/finite-saas-core/relay). Core
+      # no longer reads or writes it; archive or delete it deliberately before
+      # dropping this directory grant.
+      StateDirectory = "finite-saas-core";
       # Operator-created, root:root 0600. Variable NAMES only (values come
       # from k8s Secret finite-computer-secrets on old lat1 — see
       # infra/hosts/lat1/README.md secrets inventory):

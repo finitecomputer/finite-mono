@@ -134,7 +134,10 @@
     },
     "borg_last_success_epoch": 1785589200,
     "borg_job_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
-    "borg_health_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"}
+    "borg_health_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
+    "litestream_last_success_epoch": 1785592200,
+    "litestream_service_unit": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Result": "success", "ExecMainStatus": "0"},
+    "litestream_health_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"}
   },
   "rollout": {
     "exists": true,

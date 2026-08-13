@@ -48,8 +48,6 @@
     #   STRIPE_WEBHOOK_SECRET
     #   GOOGLE_WORKSPACE_CLIENT_ID        (optional in the manifest)
     #   GOOGLE_WORKSPACE_CLIENT_SECRET    (optional in the manifest)
-    #   FC_RELAY_ADMIN_TOKEN              (optional; absent from the live secret)
-    #   FC_RELAY_HOST_ENDPOINTS_JSON      (optional; absent from the live secret)
     environmentFiles = [
       "/etc/finite/dashboard.env"
       "/etc/finite/hosted-web-device.env"

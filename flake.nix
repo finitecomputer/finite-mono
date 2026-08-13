@@ -50,12 +50,23 @@
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
+      sourceRevision =
+        if self ? rev then
+          self.rev
+        else if self ? dirtyRev then
+          self.dirtyRev
+        else
+          null;
+      revisionModule = {
+        system.configurationRevision = sourceRevision;
+      };
       runnerSpecialArgs = {
         finitePackages = finitePackagesLinux;
         kataPackages = kataPackagesLinux;
       };
       lat3Modules = [
         disko.nixosModules.disko
+        revisionModule
         ./infra/nixos/hosts/finite-lat-3
       ];
 
@@ -95,7 +106,15 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        rustToolchain = pkgs.rust-bin.stable."1.91.1".default.override {
+        gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
+        # Litestream comes from the lat1 platform pin: 25.11's litestream is
+        # 0.3.x and marked insecure, and the restore drill must use the same
+        # 0.5 config format the host runs (modules/finite-litestream.nix).
+        litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
+        rustVersion = "1.93.1";
+        # Keep this in sync with the CI Rust workspace pin so cached Cargo
+        # artifacts are reusable between clippy and Nix-shell test commands.
+        rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
           extensions = [
             "clippy"
             "rust-analyzer"
@@ -107,32 +126,58 @@
             "aarch64-apple-ios-sim"
           ];
         };
+        rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
+        rustBasePackages = with pkgs; [
+          curl
+          git
+          jq
+          just
+          openssl
+          pkg-config
+          postgresql_16
+          process-compose
+          protobuf
+          python3
+        ];
+        rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
+        # CI's devfinity smoke starts the dashboard dev server, but it does not
+        # run browser tests or need local editor/tooling extras from the default shell.
+        devfinityCiPackages =
+          rustBasePackages
+          ++ (with pkgs; [
+            nodejs_24
+            pnpm
+            rustCiToolchain
+          ]);
       in
       {
         devShells.default = pkgs.mkShell {
           packages =
-            with pkgs;
-            [
-              curl
-              git
-              jq
-              just
+            rustBasePackages
+            ++ [
+              gcxCli
+              litestreamCli
+            ]
+            ++ (with pkgs; [
               nodejs_24
-              openssl
               pnpm
-              postgresql_16
-              pkg-config
-              process-compose
-              protobuf
-              python3
               rsync
+              sqlite
               xxd
               rustToolchain
-            ]
+            ])
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+        };
+
+        devShells.rust-ci = pkgs.mkShell {
+          packages = rustCiPackages;
+        };
+
+        devShells.devfinity-ci = pkgs.mkShell {
+          packages = devfinityCiPackages;
         };
 
         formatter = pkgs.nixfmt-rfc-style;
@@ -157,6 +202,7 @@
         specialArgs = runnerSpecialArgs;
         modules = [
           disko.nixosModules.disko
+          revisionModule
           ./infra/nixos/hosts/finite-lat-1
         ];
       };

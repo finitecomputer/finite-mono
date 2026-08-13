@@ -6646,7 +6646,7 @@ async fn sqlite_state_snapshot_boots_without_full_history_replay() {
         let conn = rusqlite::Connection::open(&db_path).expect("open raw");
         let snapshot_seq: i64 = conn
             .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots WHERE id = 1",
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
                 [],
                 |row| row.get(0),
             )
@@ -6687,6 +6687,197 @@ async fn sqlite_state_snapshot_boots_without_full_history_replay() {
     );
     let response = post_json(app.clone(), "/events", &typed_event_request(&replay)).await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-legacy-snapshot".to_owned();
+    let mls_group_id = "mls-legacy-snapshot".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut last_seq = 0;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("legacy message {index}").as_bytes(),
+            &format!("legacy-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("snapshot");
+    drop(app);
+    drop(state);
+
+    // Rewrite the snapshot into the legacy uncompressed table, exactly as a
+    // pre-v2 build persisted it, and remove the v2 row so boot must fall
+    // back.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        let (seq, compressed): (i64, Vec<u8>) = conn
+            .query_row(
+                "SELECT last_op_seq, snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("v2 snapshot row");
+        let json = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
+        conn.execute(
+            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
+             VALUES (1, ?1, ?2)",
+            rusqlite::params![seq, String::from_utf8(json).expect("snapshot utf8")],
+        )
+        .expect("write legacy row");
+        conn.execute("DELETE FROM http_state_snapshots_v2", [])
+            .expect("remove v2 row");
+        conn.execute(
+            "DELETE FROM http_delivery_ops WHERE seq <= ?1",
+            rusqlite::params![seq],
+        )
+        .expect("compact prefix");
+    }
+
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 0,
+            limit: 50,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), last_seq as usize);
+    assert_eq!(page.next_after_seq, last_seq);
+}
+
+#[tokio::test]
+async fn sqlite_snapshot_save_prunes_ops_covered_by_previous_snapshot() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-prune".to_owned();
+    let mls_group_id = "mls-prune".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut last_seq = 0;
+    for index in 0..2 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("prune message {index}").as_bytes(),
+            &format!("prune-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("first snapshot");
+
+    let query_seqs = |db_path: &std::path::Path| {
+        let conn = rusqlite::Connection::open(db_path).expect("open raw");
+        let snapshot_seq: i64 = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v2 snapshot row");
+        let min_op_seq: Option<i64> = conn
+            .query_row("SELECT MIN(seq) FROM http_delivery_ops", [], |row| {
+                row.get(0)
+            })
+            .expect("min op seq");
+        (snapshot_seq, min_op_seq)
+    };
+
+    // The first snapshot has no predecessor, so the full op log survives it.
+    let (first_snapshot_seq, min_op_seq) = query_seqs(&db_path);
+    assert!(first_snapshot_seq > 0);
+    assert_eq!(min_op_seq, Some(1));
+
+    for index in 2..4 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("prune message {index}").as_bytes(),
+            &format!("prune-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("second snapshot");
+    drop(app);
+    drop(state);
+
+    // The second snapshot prunes exactly the ops its predecessor covered.
+    let (second_snapshot_seq, min_op_seq) = query_seqs(&db_path);
+    assert!(second_snapshot_seq > first_snapshot_seq);
+    assert_eq!(min_op_seq.expect("tail ops remain"), first_snapshot_seq + 1);
+
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 0,
+            limit: 50,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), last_seq as usize);
+    assert_eq!(page.next_after_seq, last_seq);
 }
 
 #[tokio::test]

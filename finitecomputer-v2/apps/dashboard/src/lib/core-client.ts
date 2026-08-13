@@ -13,14 +13,6 @@ export type CoreBridgeStatus = {
 
 export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
 
-export type CoreProjectImportCandidate = {
-  id: string;
-  display_name: string;
-  status: "pending" | "claimed" | "admin_review";
-  created_at: string;
-  updated_at: string;
-};
-
 export type CoreProject = {
   id: string;
   display_name: string;
@@ -127,14 +119,6 @@ export type CoreRuntimeControlRequest = {
   completed_at?: string | null;
 };
 
-export type CoreSourceHostRelayEndpoint = {
-  source_host_id: string;
-  url: string;
-  admin_token: string;
-  created_at: string;
-  updated_at: string;
-};
-
 export type CoreFinitePrivateGrant = {
   id: string;
   user_id: string;
@@ -157,6 +141,29 @@ export type CoreFinitePrivateApiKey = {
   updated_at: string;
 };
 
+export type CoreFinitePrivateLimitProfile = {
+  id: string;
+  burst_window_seconds: number;
+  burst_limit_units: number;
+  weekly_limit_units?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreFinitePrivateAdminProject = {
+  id: string;
+  displayName: string;
+  agentRuntimeId?: string | null;
+};
+
+export type CoreFinitePrivateAdminAccount = {
+  userId: string;
+  email: string;
+  grant: CoreFinitePrivateGrant;
+  apiKeys: CoreFinitePrivateApiKey[];
+  projects: CoreFinitePrivateAdminProject[];
+};
+
 export type CoreFinitePrivateAdminAuditEvent = {
   id: string;
   action: string;
@@ -170,6 +177,10 @@ export type CoreFinitePrivateAdminAuditEvent = {
 };
 
 export type CoreFinitePrivateAdminState = {
+  /** Additive account-centric view; absent on an N-1 Core. */
+  accounts?: CoreFinitePrivateAdminAccount[];
+  /** Additive assignable-profile catalog; absent on an N-1 Core. */
+  profiles?: CoreFinitePrivateLimitProfile[];
   grants: CoreFinitePrivateGrant[];
   apiKeys: CoreFinitePrivateApiKey[];
   adminAuditEvents: CoreFinitePrivateAdminAuditEvent[];
@@ -335,7 +346,6 @@ export type CoreBillingOverviewResult = CoreBridgeStatus & {
 export type CoreMe = {
   email: string;
   workos_user_id: string;
-  claimable_candidates: CoreProjectImportCandidate[];
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
 };
@@ -381,14 +391,6 @@ export type CoreReadOptions = {
 
 export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
   const missing = REQUIRED_CORE_ENV.filter((name) => !env[name]?.trim());
-  return {
-    configured: missing.length === 0,
-    missing,
-  };
-}
-
-function coreServiceBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
-  const missing = REQUIRED_CORE_SERVICE_ENV.filter((name) => !env[name]?.trim());
   return {
     configured: missing.length === 0,
     missing,
@@ -788,37 +790,6 @@ export async function resolveCoreRuntimeRoute(identifier: string) {
   }
 }
 
-export async function loadCoreSourceHostRelayEndpoint(
-  sourceHostId: string,
-  options: CoreReadOptions = {}
-) {
-  const hostId = sourceHostId.trim().toLowerCase();
-  if (!hostId) {
-    return null;
-  }
-  const status = coreServiceBridgeStatus();
-  if (!status.configured) {
-    return null;
-  }
-
-  try {
-    const pathname = `/api/core/v1/source-host-relays/${encodeURIComponent(hostId)}`;
-    const load = () => coreServiceFetch<CoreSourceHostRelayEndpoint>(pathname);
-    return options.cacheMode === "swr"
-      ? await readThroughServerSwr(
-          `${CORE_CACHE_PREFIX}source-host-relay:${coreCacheFingerprint(coreServiceCacheParts(hostId))}`,
-          { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
-          load
-        )
-      : await load();
-  } catch (error) {
-    if (error instanceof CoreFetchError && error.status === 404) {
-      return null;
-    }
-    throw error;
-  }
-}
-
 export async function loadCoreFinitePrivateAdminState(
   options: CoreReadOptions = {}
 ): Promise<CoreFinitePrivateAdminStateResult> {
@@ -1192,6 +1163,27 @@ export async function adminResetCoreFinitePrivateWindow(grantId: string) {
       requiredString(grantId, "Grant id is required.")
     )}/window-reset`,
     { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminAssignCoreFinitePrivateLimitProfile(input: {
+  grantId: string;
+  limitProfileId: string;
+}) {
+  const grantId = requiredString(input.grantId, "Grant id is required.");
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>(
+    `/api/core/v1/admin/finite-private/grants/${encodeURIComponent(grantId)}/limit-profile`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        limitProfileId: requiredString(
+          input.limitProfileId,
+          "Limit profile is required."
+        ),
+      }),
+    }
   );
   invalidateCoreReadCache();
   return result;
@@ -1586,14 +1578,6 @@ function accountCacheParts(account: AccountAuthContext) {
     account.workosUserId ?? "",
     account.email ?? "",
     account.emailVerified ? "verified" : "unverified",
-  ];
-}
-
-function coreServiceCacheParts(...parts: string[]) {
-  return [
-    process.env.FC_CORE_BASE_URL?.trim() ?? "",
-    process.env.FC_CORE_API_TOKEN?.trim() ?? "",
-    ...parts,
   ];
 }
 

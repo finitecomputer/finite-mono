@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
@@ -98,6 +99,10 @@ const MAX_PUSH_WAKE_ATTEMPTS: u32 = 5;
 /// snapshot refreshes. Startup replays at most this many ops on top of the
 /// snapshot.
 const SNAPSHOT_INTERVAL_OPS: u64 = 4_096;
+/// zstd level for durable-state snapshots: the default level compresses the
+/// JSON several-fold at hundreds of MB/s, which is what bounds how long the
+/// background snapshot thread runs.
+const SNAPSHOT_ZSTD_LEVEL: i32 = 3;
 
 pub fn finite_delivery_limits() -> HttpDeliveryLimits {
     HttpDeliveryLimits {
@@ -130,6 +135,9 @@ pub struct HttpServerState {
     /// Request-derived hosts remain the local-development fallback only.
     public_url: Option<String>,
     ops_since_snapshot: Arc<Mutex<u64>>,
+    /// True while a snapshot persist runs on its background thread; op
+    /// triggers that land in the meantime skip instead of stacking threads.
+    snapshot_in_flight: Arc<AtomicBool>,
     /// Long-poll wake signal (/sync/wait). A single hub: every accepted publish
     /// wakes all waiters, who re-check their own predicates. Sized for the
     /// current phase (hundreds of users); per-key channels are the documented
@@ -191,6 +199,7 @@ impl HttpServerState {
             blob_objects: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
+            snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: None,
         }
@@ -273,6 +282,7 @@ impl HttpServerState {
             blob_objects: Arc::new(Mutex::new(blob_objects)),
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
+            snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: Some(store),
         })
@@ -2745,21 +2755,26 @@ impl HttpServerState {
         // Lock order matches submit_commit (service before inventory); the
         // revoked set is copied last. Holding these blocks op appends, so the
         // MAX(seq) read is consistent with the captured state.
-        let service = self.service.lock().expect("HTTP delivery service mutex");
-        let inventory = self
-            .key_package_inventory
-            .lock()
-            .expect("HTTP KeyPackage inventory mutex");
-        let revoked = self
-            .revoked_devices
-            .lock()
-            .expect("HTTP revoked device mutex");
-        let snapshot = DurableStateSnapshot {
-            service: service.clone(),
-            key_package_inventory: inventory.values().cloned().collect(),
-            revoked_devices: revoked.clone(),
+        let (snapshot, last_op_seq) = {
+            let service = self.service.lock().expect("HTTP delivery service mutex");
+            let inventory = self
+                .key_package_inventory
+                .lock()
+                .expect("HTTP KeyPackage inventory mutex");
+            let revoked = self
+                .revoked_devices
+                .lock()
+                .expect("HTTP revoked device mutex");
+            let snapshot = DurableStateSnapshot {
+                service: service.clone(),
+                key_package_inventory: inventory.values().cloned().collect(),
+                revoked_devices: revoked.clone(),
+            };
+            let last_op_seq = store.max_operation_seq()?;
+            (snapshot, last_op_seq)
         };
-        let last_op_seq = store.max_operation_seq()?;
+        // Serialization and the SQLite write run after the state locks drop,
+        // so request handlers only ever wait behind the capture clone.
         store.save_state_snapshot(last_op_seq, &snapshot)?;
         *self
             .ops_since_snapshot
@@ -2775,15 +2790,34 @@ impl HttpServerState {
                 .lock()
                 .expect("snapshot counter mutex");
             *counter += 1;
-            *counter >= SNAPSHOT_INTERVAL_OPS
-        };
-        if due {
-            // Snapshotting is an optimization; a failure here must not fail
-            // the request that triggered it.
-            if self.snapshot_now().is_err() {
-                // The next interval will retry.
+            if *counter < SNAPSHOT_INTERVAL_OPS {
+                false
+            } else {
+                // Reset at attempt start, not on success: a failing snapshot
+                // retries once per interval instead of on every following op.
+                *counter = 0;
+                true
             }
+        };
+        if !due {
+            return;
         }
+        if self
+            .snapshot_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Snapshotting is an optimization; it runs on its own thread so the
+        // triggering request neither waits for it nor fails with it.
+        let state = self.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = state.snapshot_now() {
+                eprintln!("finitechat-server: state snapshot failed: {error:?}");
+            }
+            state.snapshot_in_flight.store(false, Ordering::Release);
+        });
     }
 
     pub fn sync_inbox(
@@ -3760,6 +3794,11 @@ impl SqliteHttpDeliveryStore {
                 last_op_seq INTEGER NOT NULL,
                 snapshot_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS http_state_snapshots_v2 (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_op_seq INTEGER NOT NULL,
+                snapshot_zstd BLOB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS http_publish_idempotency (
                 idempotency_key TEXT PRIMARY KEY,
                 fingerprint_json TEXT NOT NULL,
@@ -4170,6 +4209,18 @@ impl SqliteHttpDeliveryStore {
         &self,
     ) -> Result<Option<(i64, DurableStateSnapshot)>, DurableStoreError> {
         let conn = self.connection();
+        let v2 = conn
+            .query_row(
+                "SELECT last_op_seq, snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        if let Some((seq, compressed)) = v2 {
+            let snapshot = serde_json::from_reader(zstd::Decoder::new(compressed.as_slice())?)?;
+            return Ok(Some((seq, snapshot)));
+        }
+        // Uncompressed rows written before the v2 table existed.
         let row = conn
             .query_row(
                 "SELECT last_op_seq, snapshot_json FROM http_state_snapshots WHERE id = 1",
@@ -4188,16 +4239,42 @@ impl SqliteHttpDeliveryStore {
         last_op_seq: i64,
         snapshot: &DurableStateSnapshot,
     ) -> Result<(), DurableStoreError> {
-        let json = serde_json::to_string(snapshot)?;
+        // The plain-JSON encoding outgrew SQLite's 1e9-byte value cap in
+        // production, so every save failed; compression keeps the row far
+        // under the cap, and streaming into the encoder avoids materializing
+        // the uncompressed document.
+        let mut encoder = zstd::Encoder::new(Vec::new(), SNAPSHOT_ZSTD_LEVEL)?;
+        serde_json::to_writer(&mut encoder, snapshot)?;
+        let compressed = encoder.finish()?;
         let conn = self.connection();
+        let prune_horizon: Option<i64> = conn.query_row(
+            "SELECT MIN(last_op_seq) FROM (
+                 SELECT last_op_seq FROM http_state_snapshots WHERE id = 1
+                 UNION ALL
+                 SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1
+             )",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
         conn.execute(
-            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
+            "INSERT INTO http_state_snapshots_v2 (id, last_op_seq, snapshot_zstd)
              VALUES (1, ?1, ?2)
              ON CONFLICT(id) DO UPDATE SET
                  last_op_seq = excluded.last_op_seq,
-                 snapshot_json = excluded.snapshot_json",
-            params![last_op_seq, json],
+                 snapshot_zstd = excluded.snapshot_zstd
+             WHERE excluded.last_op_seq >= http_state_snapshots_v2.last_op_seq",
+            params![last_op_seq, compressed],
         )?;
+        // Ops at or below every retained snapshot's horizon can never be
+        // replayed again. The MIN across both snapshot generations keeps a
+        // still-present legacy row (and a rollback build that boots from it)
+        // fully replayable.
+        if let Some(horizon) = prune_horizon {
+            conn.execute(
+                "DELETE FROM http_delivery_ops WHERE seq <= ?1",
+                params![horizon.min(last_op_seq)],
+            )?;
+        }
         Ok(())
     }
 
@@ -6578,6 +6655,8 @@ pub enum DurableStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("delivery store JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("delivery store I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("persisted delivery operation failed replay: {0}")]
     Replay(#[from] HttpServerError),
     #[error("persisted blob object is corrupt: {sha256}")]
