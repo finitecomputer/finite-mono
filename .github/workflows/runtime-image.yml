@@ -28,7 +28,10 @@ concurrency:
   group: agent-runtime-image-${{ inputs.version }}
 
 env:
+  CACHIX_CACHE_NAME: finite
   HERMES_AGENT_VERSION: "0.20.0"
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 jobs:
   publish:
@@ -39,6 +42,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+
+      - name: Require Cachix token
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Log in to GHCR
         env:
@@ -73,16 +98,20 @@ jobs:
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$LOCAL_IMAGE_ID"
           docker run --rm --entrypoint /bin/sh "$VERSION_REF" -ec '
-            test "$(/runtime/hermes-venv/bin/python -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
+            test -n "$HERMES_AGENT_STORE_PATH"
+            test -n "$HERMES_AGENT_PYTHON_PATH"
+            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
+            test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
+            test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
             /runtime/bin/finitechat --help >/dev/null
             /runtime/bin/finite-agentd --help >/dev/null
             /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
             /runtime/bin/fbrain --help >/dev/null
             test -x /runtime/bin/finite
-            /runtime/hermes-venv/bin/python -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
-            /runtime/hermes-venv/bin/python -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
-            /runtime/hermes-venv/bin/python -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
-            /runtime/hermes-venv/bin/python -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
+            python3 -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
+            python3 -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
+            python3 -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
+            python3 -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
             test -f /runtime/hermes-plugin/finitechat/plugin.yaml
             find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
             test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md

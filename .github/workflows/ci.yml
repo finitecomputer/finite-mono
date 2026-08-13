@@ -273,7 +273,8 @@ jobs:
       FINITE_HERMES_AGENT_VERSION: "0.20.0"
       # PyPI channel was retired upstream in v0.20.0; use the pinned upstream
       # Nix package instead of downloading GitHub archives during CI.
-      HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-python"
+      HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
+      HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
       NIX_CONFIG: |
         access-tokens = github.com=${{ github.token }}
       # The hermes scripts resolve reports and built binaries relative to the
@@ -347,16 +348,18 @@ jobs:
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
 
       - name: Hermes sidecar smoke
         run: scripts/hermes-sidecar-smoke.sh
 
-      - name: Build Hermes Agent Python environment
-        id: hermes_agent_python
+      - name: Build Hermes Agent runtime
+        id: hermes_agent_runtime
         working-directory: ${{ github.workspace }}
         env:
-          BUILD_PLAN: ${{ runner.temp }}/hermes-agent-python-build-plan
-          HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-python-output
+          BUILD_PLAN: ${{ runner.temp }}/hermes-agent-runtime-build-plan
+          HERMES_AGENT_RUNTIME_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-output
+          HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-python-output
         run: |
           set -euo pipefail
 
@@ -368,9 +371,16 @@ jobs:
           fi
 
           nix build --no-link --print-build-logs --print-out-paths --option builders '' \
-            "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
+            "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_RUNTIME_OUTPUT"
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
+            "$HERMES_AGENT_PYTHON_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
 
+          hermes_agent_runtime="$(grep -E '^/nix/store/' "$HERMES_AGENT_RUNTIME_OUTPUT" | tail -n 1)"
           hermes_agent_python="$(grep -E '^/nix/store/' "$HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
+          if [[ -z "$hermes_agent_runtime" || ! -x "$hermes_agent_runtime/bin/hermes" ]]; then
+            echo "::error::Hermes Agent Nix runtime did not produce an executable hermes"
+            exit 1
+          fi
           if [[ -z "$hermes_agent_python" || ! -x "$hermes_agent_python/bin/python3" ]]; then
             echo "::error::Hermes Agent Nix environment did not produce an executable python3"
             exit 1
@@ -382,27 +392,28 @@ jobs:
           PY
 
           {
-            echo "path=$hermes_agent_python"
+            echo "path=$hermes_agent_runtime"
             echo "python=$hermes_agent_python/bin/python3"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Push Hermes Agent Python runtime closure
-        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_python.outputs.built_paths == 'true'
+      - name: Push Hermes Agent runtime closure
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths == 'true'
         working-directory: ${{ github.workspace }}
         env:
-          HERMES_AGENT_PYTHON_PATH: ${{ steps.hermes_agent_python.outputs.path }}
+          HERMES_AGENT_RUNTIME_PATH: ${{ steps.hermes_agent_runtime.outputs.path }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
 
-          closure_paths="$RUNNER_TEMP/hermes-agent-python-runtime-closure"
-          nix path-info --recursive "$HERMES_AGENT_PYTHON_PATH" > "$closure_paths"
+          closure_paths="$RUNNER_TEMP/hermes-agent-runtime-closure"
+          nix path-info --recursive "$HERMES_AGENT_RUNTIME_PATH" > "$closure_paths"
           closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
-          echo "Pushing $closure_count Hermes Agent Python closure paths to $CACHIX_CACHE_NAME"
+          echo "Pushing $closure_count Hermes Agent runtime closure paths to $CACHIX_CACHE_NAME"
           xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
 
-      - name: Skip Cachix push for fully substituted Hermes Agent Python
-        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_python.outputs.built_paths != 'true'
-        run: echo "Nix dry-run found no Hermes Agent Python derivations to build; skipping Cachix push."
+      - name: Skip Cachix push for fully substituted Hermes Agent runtime
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths != 'true'
+        run: echo "Nix dry-run found no Hermes Agent runtime derivations to build; skipping Cachix push."
 
       - name: Ruff format
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check .
@@ -412,12 +423,12 @@ jobs:
 
       - name: BasedPyright
         env:
-          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
 
       - name: Hermes adapter regression report
         env:
-          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
             --python "$HERMES_AGENT_PYTHON" \
@@ -425,7 +436,7 @@ jobs:
 
       - name: Hermes platform adapter tests
         env:
-          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_python.outputs.python }}
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
 
@@ -532,6 +543,7 @@ jobs:
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
       - name: Build every scoped Rust package
         id: build_packages
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
@@ -570,6 +582,7 @@ jobs:
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
 

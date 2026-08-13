@@ -3,8 +3,8 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
-    # Hermes Agent's PyPI channel was retired in v0.20.0. Keep the CI adapter
-    # tests on the upstream Nix package instead of downloading GitHub archives.
+    # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
+    # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
     hermes-agent.url = "github:NousResearch/hermes-agent/v2026.8.3";
     hermes-agent.inputs.nixpkgs.follows = "hermes-nixpkgs";
@@ -105,61 +105,80 @@
           }
         ];
       };
-    in
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
-        gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
-        # Litestream comes from the lat1 platform pin: 25.11's litestream is
-        # 0.3.x and marked insecure, and the restore drill must use the same
-        # 0.5 config format the host runs (modules/finite-litestream.nix).
-        litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
-        rustVersion = "1.93.1";
-        # Keep this in sync with the CI Rust workspace pin so cached Cargo
-        # artifacts are reusable between clippy and Nix-shell test commands.
-        rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
-          extensions = [
-            "clippy"
-            "rust-analyzer"
-            "rust-src"
-            "rustfmt"
-          ];
-          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            "aarch64-apple-ios"
-            "aarch64-apple-ios-sim"
-          ];
-        };
-        rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
-        rustBasePackages = with pkgs; [
-          curl
-          git
-          jq
-          just
-          openssl
-          pkg-config
-          postgresql_16
-          process-compose
-          protobuf
-          python3
-        ];
-        rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
-        # CI's devfinity smoke starts the dashboard dev server, but it does not
-        # run browser tests or need local editor/tooling extras from the default shell.
-        devfinityCiPackages =
-          rustBasePackages
-          ++ (with pkgs; [
-            nodejs_24
-            pnpm
-            rustCiToolchain
-          ]);
-      in
-      {
-        devShells =
+
+      hermesPackagesFor =
+        system:
+        if builtins.hasAttr system hermes-agent.packages then
+          let
+            hermesAgentPackage = hermes-agent.packages.${system}.default;
+            hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
+          in
           {
+            hermes-agent = hermesAgentPackage;
+            hermes-agent-runtime = hermesAgentPackage;
+            hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
+            hermes-agent-minimal = hermesAgentMinimal;
+            hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
+          }
+        else
+          { };
+
+      systemOutputs = flake-utils.lib.eachDefaultSystem (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
+          gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
+          # Litestream comes from the lat1 platform pin: 25.11's litestream is
+          # 0.3.x and marked insecure, and the restore drill must use the same
+          # 0.5 config format the host runs (modules/finite-litestream.nix).
+          litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
+          rustVersion = "1.93.1";
+          # Keep this in sync with the CI Rust workspace pin so cached Cargo
+          # artifacts are reusable between clippy and Nix-shell test commands.
+          rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
+            extensions = [
+              "clippy"
+              "rust-analyzer"
+              "rust-src"
+              "rustfmt"
+            ];
+            targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              "aarch64-apple-ios"
+              "aarch64-apple-ios-sim"
+            ];
+          };
+          rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
+          rustBasePackages = with pkgs; [
+            curl
+            git
+            jq
+            just
+            openssl
+            pkg-config
+            postgresql_16
+            process-compose
+            protobuf
+            python3
+          ];
+          rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
+          # CI's devfinity smoke starts the dashboard dev server, but it does not
+          # run browser tests or need local editor/tooling extras from the default shell.
+          devfinityCiPackages =
+            rustBasePackages
+            ++ (with pkgs; [
+              nodejs_24
+              pnpm
+              rustCiToolchain
+            ]);
+          hermesSupported = builtins.hasAttr system hermes-agent.packages;
+        in
+        {
+          packages = hermesPackagesFor system;
+
+          devShells = {
             default = pkgs.mkShell {
               packages =
                 rustBasePackages
@@ -189,37 +208,45 @@
               packages = devfinityCiPackages;
             };
           }
-          // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+          // pkgs.lib.optionalAttrs hermesSupported (
             let
-              hermesAgentPython = hermes-agent.packages.${system}.minimal.hermesVenv;
+              hermesAgentRuntime = hermes-agent.packages.${system}.default;
+              hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
               hermesBridgePkgs = import hermes-nixpkgs { inherit system; };
             in
             {
               hermes-bridge-ci = pkgs.mkShell {
                 packages = [
-                  hermesAgentPython
+                  hermesAgentRuntime
+                  hermesAgentRuntimePython
                   hermesBridgePkgs.basedpyright
                   hermesBridgePkgs.ruff
                 ];
 
-                HERMES_AGENT_PYTHON = "${hermesAgentPython}/bin/python3";
+                HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
               };
             }
           );
 
-        formatter = pkgs.nixfmt-rfc-style;
-      }
-    )
+          formatter = pkgs.nixfmt-rfc-style;
+        }
+      );
+    in
+    systemOutputs
     // {
-      # Server binaries + CLIs built by nix from this workspace (built by CI /
-      # the lat2 runner; eval-only on darwin). See infra/nixos/packages.nix.
-      packages.x86_64-linux = finitePackagesLinux // {
-        hermes-agent-minimal = hermes-agent.packages.x86_64-linux.minimal;
-        hermes-agent-python = hermes-agent.packages.x86_64-linux.minimal.hermesVenv;
-        finite-lat-3-system = lat3.config.system.build.toplevel;
-        finite-lat-3-disko = lat3.config.system.build.diskoScript;
-        finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;
-        finite-lat-3-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+      packages = systemOutputs.packages // {
+        # Server binaries + CLIs built by nix from this workspace (built by CI /
+        # the lat2 runner; eval-only on darwin). See infra/nixos/packages.nix.
+        x86_64-linux =
+          systemOutputs.packages.x86_64-linux
+          // finitePackagesLinux
+          // {
+            finite-lat-3-system = lat3.config.system.build.toplevel;
+            finite-lat-3-disko = lat3.config.system.build.diskoScript;
+            finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-3-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+          };
       };
 
       # The single app server. Deploying a release IS pinning this flake:

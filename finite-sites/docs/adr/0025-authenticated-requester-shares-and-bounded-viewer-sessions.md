@@ -28,7 +28,7 @@ email address or completing a Magic Link flow.
   task-local session identity available and the Finite Chat adapter leases the
   authenticated sender to `fsite` for only that tool call. `fsite` accepts the
   lease only when the inherited platform shape, per-turn session key, sender,
-  and adapter-owned authenticated-turn marker all match. Hermes 0.18.2 exposes
+  and adapter-owned authenticated-turn marker all match. The pinned Hermes runtime exposes
   the Finite plugin as `local`; the platform string alone is not the marker.
   Standalone agents may still provide `requesting_user_npub` explicitly; if
   it disagrees with an active authenticated lease, Project Init fails closed.

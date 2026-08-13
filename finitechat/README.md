@@ -316,9 +316,9 @@ the lower-level runner:
 scripts/hermes-real-gateway-demo.sh
 ```
 
-The Hermes runner launches the same `hermes-agent==0.18.2` package pinned by
-CI and the runtime image through `uvx`; it does not discover ambient sibling
-checkouts. It also needs the model provider key used by the Hermes profile.
+The Hermes runner launches the same flake-pinned Nix Hermes runtime used by CI
+and the runtime image; it does not discover ambient sibling checkouts. It also
+needs the model provider key used by the Hermes profile.
 The runner loads `.env` when present, or set
 `FINITECHAT_HERMES_ENV_FILE=/path/to/provider.env`.
 
@@ -338,8 +338,9 @@ just dev up
 ```
 
 On a fresh checkout, the smoke command obtains local Launch Code admission,
-builds Hermes 0.18.2 in the canonical Runtime image, provisions a real Apple
-VM, opens the Hosted Web Device, and proves independent restart healing. It
+builds the flake-pinned Nix Hermes runtime into the canonical Runtime image,
+provisions a real Apple VM, opens the Hosted Web Device, and proves independent
+restart healing. It
 preserves the agent for the following interactive `just dev up`; skip the smoke
 on later runs with that persisted agent. Physical-phone and remote-Docker
 scripts remain historical/manual experiments until rewritten against the same
@@ -384,10 +385,11 @@ automation needs the resolved UDID and result bundle path.
 Hermes/Python checks:
 
 ```sh
-uvx --no-config ruff format --check .
-uvx --no-config ruff check .
-uvx --no-config --with hermes-agent basedpyright
-python3 -m unittest discover -s tests -p '*test*.py'
+nix develop ..#hermes-bridge-ci --command ruff format --check .
+nix develop ..#hermes-bridge-ci --command ruff check .
+nix develop ..#hermes-bridge-ci --command basedpyright --pythonpath "$HERMES_AGENT_RUNTIME_PYTHON"
+nix develop ..#hermes-bridge-ci --command bash -lc \
+  'exec "$HERMES_AGENT_RUNTIME_PYTHON" -m unittest discover -s tests -p "*test*.py"'
 ```
 
 ### Releases

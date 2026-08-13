@@ -446,8 +446,8 @@ scripts/hermes-sidecar-docker-smoke.sh
 scripts/hermes-sidecar-docker-s3-emulator-smoke.sh
 ```
 
-It builds `containers/agent/Dockerfile` with `hermes-agent==0.18.2`, starts the
-real Hermes gateway in Docker, drives `finitechat` CLI users through invite/PIN
+It builds `containers/agent/Dockerfile` with the flake-pinned Nix Hermes
+runtime, starts the real Hermes gateway in Docker, drives `finitechat` CLI users through invite/PIN
 admission before and after restore, and writes
 `target/hermes-docker-smoke/report.json`. This proves the packaged Linux image
 has the plugin files, binary, Hermes runtime dependency, real gateway command,
@@ -513,8 +513,8 @@ it to GHCR.
 
 Current CI shape:
 
-- `.github/workflows/ci.yml` pins the adapter test environment and runtime
-  image build arg to `hermes-agent==0.18.2`.
+- `.github/workflows/ci.yml` pins the adapter test environment to the root
+  flake's Nix Hermes runtime.
 - Every PR and `main`/`codex/**` push runs Rust fmt, clippy, workspace tests,
   the local Hermes sidecar smoke, Ruff, BasedPyright, and Python adapter tests.
 - The local smoke uploads `target/hermes-sidecar-smoke/report.json` as a CI

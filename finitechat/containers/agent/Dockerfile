@@ -7,11 +7,23 @@ COPY finitechat ./finitechat
 RUN cd finitechat && cargo build --release -p finitechat-cli
 
 FROM python:3.13-slim-trixie
-ARG HERMES_AGENT_VERSION=0.18.2
+ARG HERMES_AGENT_VERSION=0.20.0
+ARG HERMES_AGENT_STORE_PATH
+ARG HERMES_AGENT_PYTHON_PATH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates restic \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "hermes-agent[messaging]==${HERMES_AGENT_VERSION}"
+COPY .finite-hermes-nix-store/nix/store /nix/store
+RUN test -n "${HERMES_AGENT_STORE_PATH}" \
+    && test -n "${HERMES_AGENT_PYTHON_PATH}" \
+    && test -x "${HERMES_AGENT_STORE_PATH}/bin/hermes" \
+    && test -x "${HERMES_AGENT_PYTHON_PATH}/bin/python3" \
+    && test "$("${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')" = "${HERMES_AGENT_VERSION}" \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes" /usr/local/bin/hermes \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-agent" /usr/local/bin/hermes-agent \
+    && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
+    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python3 \
+    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python
 COPY --from=builder /build/finitechat/target/release/finitechat /usr/local/bin/finitechat
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
 COPY finitechat/containers/agent/health_server.py /opt/health_server.py
@@ -32,6 +44,9 @@ ENV FINITECHAT_HOME=/data/agent
 # the rest of the agent state.
 ENV FINITE_HOME=/data/agent
 ENV HERMES_HOME=/data/agent/hermes-home
+ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
+ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
+ENV PATH="${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
 EXPOSE 8080
 # FINITE_SERVER_URL is provided at `container run` time (the host's vmnet
 # gateway address, e.g. http://192.168.64.1:18787).

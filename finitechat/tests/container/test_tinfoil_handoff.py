@@ -37,7 +37,7 @@ def proven_smoke_report() -> dict[str, Any]:
         "recovery_scope": dict(RECOVERY_SCOPE),
         "facts": {
             "image_id": "sha256:local-image",
-            "hermes_agent_version_actual": "0.18.2",
+            "hermes_agent_version_actual": "0.20.0",
             "restic_version": "restic 0.18.0 compiled with go1.24.4 on linux/arm64",
             "restic_backend": "s3",
             "real_gateway_runtime": True,

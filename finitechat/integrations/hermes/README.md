@@ -120,7 +120,7 @@ only the ephemeral gate, so the inbox redelivers the message. Slash commands,
 pending approval responses, and pending clarification replies still reach the
 active turn immediately, and one busy session does not pause another.
 
-## Hermes 0.18.2 clarification and compaction boundary
+## Pinned Hermes clarification and compaction boundary
 
 Pinned Hermes owns clarification state in `tools.clarify_gateway`. Its gateway
 registers the pending question under the exact session key, calls the platform
@@ -140,7 +140,7 @@ returns a visible adapter failure to Hermes instead of falling back to Home or
 whichever Chat is active. Finite does not persist a second clarification state
 or add clarification request/answer protocol types.
 
-Hermes 0.18.2 does not expose a semantic compaction start/finish pair to
+The pinned Hermes runtime does not expose a semantic compaction start/finish pair to
 platform adapters. Compaction emits human-readable status strings, an internal
 post-compression `session:compress` hook, and the whole-turn
 `on_processing_complete` callback; none gives an adapter both semantic edges.
@@ -217,8 +217,8 @@ uses the contract above and appends only the durable encrypted blob reference.
 It installs an echo callback, so it is adapter transport coverage, not a real
 Hermes model or gateway acceptance gate.
 The canonical real-gateway acceptance is the monorepo
-`just dev saas-smoke` path. It packages Hermes 0.18.2 and this plugin in the
-one Runtime image and requires model-backed replies across independent
+`just dev saas-smoke` path. It packages the flake-pinned Nix Hermes runtime and
+this plugin in the one Runtime image and requires model-backed replies across independent
 chat-server, Hosted Web Device, and Runtime restarts.
 The iOS Simulator E2E writes
 `target/ios-hermes-agent-media-e2e/report.json`, drives the native app through

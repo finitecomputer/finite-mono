@@ -17,7 +17,7 @@ listen_addr="${FINITECHAT_HERMES_LISTEN_ADDR:-127.0.0.1:${port}}"
 service_port="${FINITECHAT_HERMES_SERVICE_PORT:-$((port + 1))}"
 service_addr="127.0.0.1:${service_port}"
 service_url="http://127.0.0.1:${service_port}"
-hermes_package="${FINITECHAT_HERMES_PACKAGE:-hermes-agent==0.18.2}"
+hermes_nix_shell="${FINITECHAT_HERMES_NIX_SHELL:-${repo_root}/..#hermes-bridge-ci}"
 hermes_home="${FINITECHAT_HERMES_HOME:-${state_root}/hermes-home}"
 agent_home="${FINITECHAT_HERMES_AGENT_HOME:-${state_root}/agent-home}"
 finite_home="${FINITECHAT_HERMES_FINITE_HOME:-${state_root}/finite-home}"
@@ -26,9 +26,9 @@ finitechat_bin="${repo_root}/target/debug/finitechat"
 server_bin="${repo_root}/target/debug/finitechat-server"
 model="${FINITECHAT_HERMES_MODEL:-anthropic/claude-sonnet-4.6}"
 
-uvx_bin="$(command -v uvx || true)"
-if [[ -z "${uvx_bin}" ]]; then
-  echo "uvx is required to run the pinned Hermes package." >&2
+nix_bin="$(command -v nix || true)"
+if [[ -z "${nix_bin}" ]]; then
+  echo "nix is required to run the pinned Hermes Agent runtime." >&2
   exit 1
 fi
 
@@ -172,12 +172,12 @@ cat >"${state_root}/ready.json" <<EOF
   "service_url": "${service_url}",
   "agent_home": "${agent_home}",
   "hermes_home": "${hermes_home}",
-  "hermes_package": "${hermes_package}"
+  "hermes_nix_shell": "${hermes_nix_shell}"
 }
 EOF
 
 echo "Finite Chat server: ${server_url}"
-echo "Hermes package: ${hermes_package}"
+echo "Hermes Nix shell: ${hermes_nix_shell}"
 echo "Agent home: ${agent_home}"
 echo "Running real Hermes gateway. No echo handler is installed by this script."
 
@@ -193,4 +193,4 @@ GATEWAY_ALLOW_ALL_USERS=true \
 FINITE_ALLOW_ALL_USERS=true \
 FINITE_AGENT_ID="agent_${agent_device_id}" \
 FINITE_AGENT_NAME="${agent_device_id}" \
-  "${uvx_bin}" --no-config --from "${hermes_package}" hermes gateway run --replace
+  "${nix_bin}" develop "${hermes_nix_shell}" --command hermes gateway run --replace

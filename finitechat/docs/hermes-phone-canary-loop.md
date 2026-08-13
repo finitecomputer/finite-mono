@@ -96,7 +96,7 @@ are null for that layer:
   },
   "runtime": {
     "finitechat_version": "...",
-    "hermes_agent_version": "0.18.2",
+    "hermes_nix_shell": "../#hermes-bridge-ci",
     "plugin_name": "finitechat",
     "plugin_hash": "...",
     "image_ref": null,
@@ -146,8 +146,8 @@ deployment variables.
 Recommended defaults:
 
 - Finite Chat server: `https://chat.finite.computer`.
-- Hermes: `hermes-agent==0.18.2` unless this doc is updated with a newer
-  supported version.
+- Hermes: the root flake's pinned Nix Hermes runtime through
+  `finitechat/scripts/hermes-phone-canary.py`.
 - Agent state: fresh timestamped root under
   `target/hermes-phone-canary/local/<run-id>`.
 - Phone app: normal `computer.finite.finitechat` build installed on the

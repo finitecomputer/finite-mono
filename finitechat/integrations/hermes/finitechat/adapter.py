@@ -93,7 +93,7 @@ APPROVAL_CONTROL_TEXT = frozenset(
     }
 )
 
-# Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
+# Pinned Hermes does not pass a semantic progress flag to platform adapters.
 # Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
 # pairs instead of accepting the unsafe cross-product of any tool emoji and
 # any tool-looking prose. Variation selectors are removed before matching.
@@ -405,7 +405,7 @@ def _active_finite_session() -> tuple[str | None, str | None]:
     user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
     if (
-        # Hermes 0.18.2 maps plugin platforms that are not enum members to
+        # Pinned Hermes maps plugin platforms that are not enum members to
         # LOCAL. The adapter-owned ContextVar below is the Finite marker;
         # the platform value is retained only as a fail-closed shape check.
         platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
@@ -614,7 +614,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         """Surface a claimed quota notice after Hermes' final response delivery.
 
-        Hermes 0.18.2 invokes this hook once after the final response (including
+        Pinned Hermes invokes this hook once after the final response (including
         streamed delivery), and not after each model/tool subcall. Core claims a
         threshold before returning it, so delivery is intentionally at-most-once:
         a process crash between the Core response and Finite Chat send can omit a

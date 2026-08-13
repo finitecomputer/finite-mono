@@ -147,7 +147,7 @@ does not lose it. Control inputs needed by the active turn remain immediate.
 
 - The Rust Hermes inbox already persists events by room, sequence, and message
   and redelivers them until exact-event ACK.
-- Hermes 0.18.2 has an in-memory busy-input queue, but enabling it alone is
+- The pinned Hermes runtime has an in-memory busy-input queue, but enabling it alone is
   unsafe because the adapter currently ACKs a message as soon as Hermes accepts
   it.
 - `codex/hermes-queue-ui-investigation` contains no implementation and is
