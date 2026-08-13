@@ -605,6 +605,7 @@ pub(crate) async fn execute_invitation_plan_commit(
     let invitation_expires_at = timestamp_plus_seconds(state, COMMIT_INVITATION_EXPIRY_SECONDS);
     let mut invitations = Vec::new();
     let mut skipped = Vec::new();
+    let mut superseded_invitation_ids = Vec::new();
     {
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(brain_id)?;
@@ -626,6 +627,14 @@ pub(crate) async fn execute_invitation_plan_commit(
                 });
                 continue;
             }
+            // Re-invite after expiry supersedes the stale delivery handle
+            // instead of colliding on the pending (Brain, target) singleton.
+            superseded_invitation_ids.extend(store.revoke_expired_pending_brain_invitations(
+                brain_id,
+                &target,
+                committer_npub,
+                &created_at,
+            )?);
             let index = index.to_string();
             let id = generated_link_id(
                 "invitation",
@@ -701,6 +710,7 @@ pub(crate) async fn execute_invitation_plan_commit(
         roster_revision: plan.roster_revision,
         invitations,
         skipped,
+        superseded_invitation_ids,
     }))
 }
 

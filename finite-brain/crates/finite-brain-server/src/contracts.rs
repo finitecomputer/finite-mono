@@ -756,6 +756,10 @@ pub struct InvitationCommitResponse {
     pub roster_revision: Option<i64>,
     pub invitations: Vec<CommittedPrincipalInvitation>,
     pub skipped: Vec<CommitSkippedPrincipal>,
+    /// Pending-but-expired invitations the commit revoked to supersede them
+    /// with a fresh invitation for the same (Brain, target).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_invitation_ids: Vec<String>,
 }
 
 /// Acceptance result note when the account roster narrowed the resolved set:

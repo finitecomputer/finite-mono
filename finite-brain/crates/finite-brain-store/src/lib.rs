@@ -4677,6 +4677,70 @@ mod tests {
     }
 
     #[test]
+    fn revoke_expired_pending_brain_invitations_supersedes_only_expired_rows() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-expired",
+                &target,
+                "invite-expired",
+                "/v1/brain-invitation-links/invite-expired/accept",
+                &[],
+                &admin,
+                "2026-06-20T00:00:00.000Z",
+                "2026-06-19T00:00:00.000Z",
+            )
+            .unwrap();
+
+        let revoked = store
+            .revoke_expired_pending_brain_invitations(&brain_id, &target, &admin, now)
+            .unwrap();
+        assert_eq!(revoked, vec!["invitation-expired".to_owned()]);
+        assert_eq!(
+            store.load_brain_invitation("invitation-expired").unwrap().status,
+            LinkStatus::Revoked
+        );
+
+        // A fresh live pending invitation for the same target now fits the
+        // singleton index and is left untouched by another supersede pass.
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-live",
+                &target,
+                "invite-live",
+                "/v1/brain-invitation-links/invite-live/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let revoked = store
+            .revoke_expired_pending_brain_invitations(&brain_id, &target, &admin, now)
+            .unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(
+            store.load_brain_invitation("invitation-live").unwrap().status,
+            LinkStatus::Pending
+        );
+
+        // Supersede requires brain operational authority.
+        let stranger = UserId::new("npub-stranger").unwrap();
+        assert!(
+            store
+                .revoke_expired_pending_brain_invitations(&brain_id, &target, &stranger, now)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn email_brain_invitation_claims_membership_access_and_grants_atomically() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();

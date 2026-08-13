@@ -383,6 +383,49 @@ impl BrainStore {
         self.load_brain_invitation(invitation_id)
     }
 
+    /// Supersede pending-but-expired npub Brain Invitations for one target by
+    /// revoking them, returning the revoked invitation ids. Invitation Plan
+    /// commit calls this before writing a fresh invitation so a re-invite
+    /// after expiry replaces the stale delivery handle instead of colliding
+    /// on the pending (Brain, target) singleton index. Live pending
+    /// invitations are left untouched.
+    pub fn revoke_expired_pending_brain_invitations(
+        &mut self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+        actor_npub: &UserId,
+        now: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "brain invitation supersede requires brain operational authority"
+                    .to_owned(),
+            });
+        }
+        let query = format!(
+            "{BRAIN_INVITATION_SELECT} WHERE brain_id = ?1 AND user_id = ?2 AND target_kind = 'npub' AND status = 'pending'"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(
+            params![brain_id.as_str(), user_id.as_str()],
+            brain_invitation_from_row,
+        )?;
+        let mut revoked = Vec::new();
+        for row in rows {
+            let invitation = row?;
+            if !timestamp_expired(&invitation.expires_at, now) {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE brain_invitations SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![invitation.id, now],
+            )?;
+            revoked.push(invitation.id);
+        }
+        Ok(revoked)
+    }
+
     /// Accept a pending Brain Invitation, adding the target as a member exactly once.
     pub fn accept_brain_invitation_by_code(
         &mut self,

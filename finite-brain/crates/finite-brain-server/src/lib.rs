@@ -11015,6 +11015,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invitation_commit_supersedes_expired_pending_invitation() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+
+        // The earlier invite lapsed: a pending-but-expired invitation for the
+        // same (Brain, target) still occupies the singleton index.
+        {
+            let mut store = fixture.state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(fixture.human_npub()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let plan = run_preflight(&router, &fixture).await;
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.invitations.len(), 1);
+        assert_eq!(committed.invitations[0].npub, fixture.human_npub());
+        assert_ne!(committed.invitations[0].invitation.id, "invitation-expired");
+        assert_eq!(
+            committed.superseded_invitation_ids,
+            vec!["invitation-expired".to_owned()]
+        );
+
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let old = store.load_brain_invitation("invitation-expired").unwrap();
+            assert_eq!(old.status, LinkStatus::Revoked);
+            let new = store
+                .load_brain_invitation(&committed.invitations[0].invitation.id)
+                .unwrap();
+            assert_eq!(new.status, LinkStatus::Pending);
+        }
+    }
+
+    #[tokio::test]
     async fn invitation_commit_returns_fresh_preflight_on_roster_drift() {
         let fixture = PlanFixture::new();
         let core_responses = vec![
