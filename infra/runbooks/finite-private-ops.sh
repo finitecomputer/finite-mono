@@ -33,6 +33,8 @@ Read-only commands:
   repeated-id-canary  Send two calls with one caller x-request-id.
   load-canary [N]     Run N concurrent streaming calls and report latency/throughput.
   load-sweep          Run the guarded 1,4,8,16,32,64,128,256,512,1024 maintenance sweep.
+  settlement-status SINCE_UTC
+                      Prove this canary key has no rollout-era reserved rows.
   negative-canary     Confirm an invalid Finite key is rejected.
   gate                Run status, live, health, negative-canary, and canary.
   wait-ready          Poll status and deep health until ready.
@@ -52,6 +54,7 @@ Environment:
   FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
   FINITE_PRIVATE_LOAD_MAX_TOKENS         default: 64
   FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256,512,1024 for N > 32 or load-sweep
+  FINITE_PRIVATE_CORE_HOST               default: root@64.34.82.77
   FINITE_PRIVATE_RELAUNCH_APPROVED     must equal the exact TAG for relaunch
 EOF
 }
@@ -445,6 +448,46 @@ load_sweep() {
   echo "Finite Private concurrency sweep passed through 1024"
 }
 
+settlement_status() {
+  require_command shasum
+  require_command ssh
+  if [ -z "${FINITE_PRIVATE_CANARY_API_KEY:-}" ]; then
+    echo "FINITE_PRIVATE_CANARY_API_KEY is required for settlement-status" >&2
+    exit 1
+  fi
+  local since="${1:-}"
+  if [[ ! "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    echo "settlement-status requires SINCE_UTC as YYYY-MM-DDTHH:MM:SSZ" >&2
+    exit 64
+  fi
+  local key_hash
+  key_hash="$(printf '%s' "$FINITE_PRIVATE_CANARY_API_KEY" | shasum -a 256 | awk '{print $1}')"
+  if [[ ! "$key_hash" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "could not compute the canary API key hash" >&2
+    exit 1
+  fi
+  local core_host="${FINITE_PRIVATE_CORE_HOST:-root@64.34.82.77}"
+  local result
+  result="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$core_host" \
+    "sudo -u postgres psql --no-psqlrc -d finite_core -v ON_ERROR_STOP=1 -P pager=off -Atc \"SELECT r.model, r.status, COALESCE(r.settlement_kind, 'none'), COUNT(*) FROM finite_private_reservations r JOIN finite_private_api_keys k ON k.id = r.api_key_id WHERE k.key_hash = '$key_hash' AND r.created_at >= '$since'::timestamptz GROUP BY 1,2,3 ORDER BY 1,2,3; SELECT 'preexisting_reserved', COUNT(*) FILTER (WHERE r.status = 'reserved' AND r.created_at < '$since'::timestamptz), 'rollout_reserved', COUNT(*) FILTER (WHERE r.status = 'reserved' AND r.created_at >= '$since'::timestamptz) FROM finite_private_reservations r JOIN finite_private_api_keys k ON k.id = r.api_key_id WHERE k.key_hash = '$key_hash';\"")"
+  printf '%s\n' "$result"
+  local summary preexisting_label preexisting_count rollout_label rollout_count
+  summary="$(printf '%s\n' "$result" | tail -n 1)"
+  IFS='|' read -r preexisting_label preexisting_count rollout_label rollout_count <<<"$summary"
+  if [ "$preexisting_label" != "preexisting_reserved" ] \
+    || [ "$rollout_label" != "rollout_reserved" ] \
+    || [[ ! "$preexisting_count" =~ ^[0-9]+$ ]] \
+    || [[ ! "$rollout_count" =~ ^[0-9]+$ ]]; then
+    echo "settlement-status returned an unexpected ledger summary" >&2
+    return 1
+  fi
+  if [ "$rollout_count" != "0" ]; then
+    echo "$rollout_count canary reservations created during this rollout remain reserved" >&2
+    return 1
+  fi
+  echo "Finite Private rollout-era canary settlements passed"
+}
+
 negative_canary() {
   require_command curl
   local payload
@@ -526,6 +569,10 @@ case "$command" in
     load_canary "${1:-}"
     ;;
   load-sweep) load_sweep ;;
+  settlement-status)
+    shift
+    settlement_status "${1:-}"
+    ;;
   negative-canary) negative_canary ;;
   gate) gate ;;
   relaunch)

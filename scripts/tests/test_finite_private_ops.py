@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -154,6 +155,47 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         result = self.run_ops("mixed-version-canary")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Mixed-version Finite Private compatibility passed", result.stdout)
+
+    def test_settlement_status_accepts_preexisting_but_not_rollout_reserved_rows(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            ssh = Path(temporary_directory) / "ssh"
+            ssh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'deepseek-v4-flash-0731|settled|actual|12' "
+                "'preexisting_reserved|50|rollout_reserved|0'\n",
+                encoding="utf-8",
+            )
+            ssh.chmod(0o700)
+            self.environment["PATH"] = (
+                temporary_directory + os.pathsep + self.environment["PATH"]
+            )
+            result = self.run_ops(
+                "settlement-status", "2026-08-14T04:00:00Z"
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("preexisting_reserved|50|rollout_reserved|0", result.stdout)
+        self.assertIn("rollout-era canary settlements passed", result.stdout)
+
+    def test_settlement_status_rejects_rollout_reserved_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            ssh = Path(temporary_directory) / "ssh"
+            ssh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'preexisting_reserved|50|rollout_reserved|1'\n",
+                encoding="utf-8",
+            )
+            ssh.chmod(0o700)
+            self.environment["PATH"] = (
+                temporary_directory + os.pathsep + self.environment["PATH"]
+            )
+            result = self.run_ops(
+                "settlement-status", "2026-08-14T04:00:00Z"
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("created during this rollout remain reserved", result.stderr)
 
 
 if __name__ == "__main__":

@@ -153,9 +153,22 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         "b6018f87da91d19d0ab4cf979885689b469cdd41",
         "mixed-version-canary",
         "compat/matrix.toml",
+        "pre-existing non-causal exception",
+        "Any new or worsened red or unknown",
+        "all reservations created during this rollout settle",
+        (
+            "Do not trigger a Runtime, NixOS, Litestream, storage-policy, "
+            "or host-storage"
+        ),
     ):
         if anchor not in runbook_text:
             violations.append(f"DeepSeek runbook lacks release anchor: {anchor}")
+
+    if "Any red or unresolved unknown result stops the rollout" in runbook_text:
+        violations.append(
+            "DeepSeek runbook incorrectly couples unrelated fleet repairs to the "
+            "scheduler rollout"
+        )
 
     if "deepseek-v4-release-candidate" in runbook_text:
         violations.append(
