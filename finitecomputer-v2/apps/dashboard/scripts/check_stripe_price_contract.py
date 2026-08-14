@@ -6,7 +6,7 @@ import re
 import sys
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[4]
 CONFIGS = (
     ROOT / "infra/nixos/modules/dashboard.nix",
     ROOT / "infra/nixos/modules/finite-saas-core.nix",

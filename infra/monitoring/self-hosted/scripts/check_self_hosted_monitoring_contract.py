@@ -7,8 +7,7 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-STACK = ROOT / "infra/monitoring/self-hosted"
+STACK = Path(__file__).resolve().parents[1]
 
 EXPECTED_IMAGES = {
     "grafana/grafana-oss:13.0.2@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2",

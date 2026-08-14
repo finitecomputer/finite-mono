@@ -92,7 +92,8 @@ lat1-healthcheck-contract:
 # the dedicated Ubuntu monitoring VPS.
 self-hosted-monitoring-contract:
     bash -n infra/monitoring/self-hosted/install-ubuntu infra/monitoring/self-hosted/verify
-    python3 scripts/check_self_hosted_monitoring_contract.py
+    python3 infra/monitoring/self-hosted/scripts/check_self_hosted_monitoring_contract.py
+    python3 -m unittest discover -s infra/monitoring/self-hosted/tests -p 'test_finite_runtime_metrics.py'
 
 # Anti-drift contract: both Kata Runner hosts render one shared runner-role
 # module; evaluated env and unit fragments may differ only in the declared
@@ -104,19 +105,19 @@ runner-host-contract:
 finite-status-contract:
     python3 scripts/check_finite_status_contract.py
     python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
-    python3 -m unittest discover -s scripts/tests -p 'test_finite_runtime_metrics.py'
+    python3 -m unittest discover -s infra/monitoring/self-hosted/tests -p 'test_finite_runtime_metrics.py'
 
 # Static contract: every Identity Authority route the fsite CLI calls is on
 # the service-owned public surface (public_router); the edge proxies, never
-# filters. Live probe: scripts/identity-edge-contract-gate.py [--target URL].
+# filters. Live probe: finite-identity/scripts/identity-edge-contract-gate.py [--target URL].
 identity-edge-contract:
-    python3 scripts/identity-edge-contract-gate.py --static
-    python3 -m unittest discover -s scripts/tests -p 'test_identity_edge_contract_gate.py'
+    python3 finite-identity/scripts/identity-edge-contract-gate.py --static
+    python3 -m unittest discover -s finite-identity/scripts/tests -p 'test_identity_edge_contract_gate.py'
 
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
-    python3 scripts/check_runtime_image_contract.py
-    python3 -m unittest discover -s scripts/tests -p 'test_runtime_image_contract.py'
+    python3 finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py
+    python3 -m unittest discover -s finitecomputer-v2/deploy/finite-computer/images/tests -p 'test_runtime_image_contract.py'
 
 # Measured eight-H200 DeepSeek serving identity and scheduler contract.
 finite-private-deepseek-contract:
@@ -131,7 +132,7 @@ finite-private-deepseek-release-contract:
 
 # Static production contract: Dashboard and Core must enforce the same Price.
 stripe-price-contract:
-    python3 scripts/check_stripe_price_contract.py
+    python3 finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py
 
 # Synthetic empty-target proof for the complete hosted Recovery Set contract.
 hosted-recovery-contract:

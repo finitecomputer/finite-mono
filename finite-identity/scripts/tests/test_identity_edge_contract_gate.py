@@ -4,8 +4,8 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-GATE_PATH = ROOT / "scripts" / "identity-edge-contract-gate.py"
+ROOT = Path(__file__).resolve().parents[3]
+GATE_PATH = ROOT / "finite-identity" / "scripts" / "identity-edge-contract-gate.py"
 
 spec = importlib.util.spec_from_file_location("identity_edge_contract_gate", GATE_PATH)
 assert spec is not None and spec.loader is not None
