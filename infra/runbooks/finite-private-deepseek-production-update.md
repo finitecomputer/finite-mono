@@ -196,9 +196,11 @@ the separately approved relaunch window.
 2. Confirm Tinfoil reports the production container ready on the fixed host at
    the exact rollback tag above, with eight H200s and the expected three secret
    names. Never print secret values.
-3. Run the current production gates through the real limiter/accounting path:
+3. Record the accounting boundary, then run the current production gates
+   through the real limiter/accounting path:
 
    ```bash
+   export FINITE_PRIVATE_LEDGER_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
    infra/runbooks/finite-private-ops.sh gate
    infra/runbooks/finite-private-ops.sh stream-canary
    infra/runbooks/finite-private-ops.sh responses-canary
@@ -206,8 +208,16 @@ the separately approved relaunch window.
    ```
 
 4. Capture three one-way and three 32-way baselines and retain their medians.
-   Confirm all canonical and mixed-version canary reservations settle and no
-   canary reservation remains reserved.
+   Confirm all canonical and mixed-version canary reservations created during
+   this rollout settle. The canary grant has historical `reserved` rows; record
+   their pre-window count but never rewrite them during this scheduler update.
+   Acceptance requires zero new `reserved` rows at or after the recorded
+   boundary:
+
+   ```bash
+   infra/runbooks/finite-private-ops.sh settlement-status \
+     "$FINITE_PRIVATE_LEDGER_SINCE"
+   ```
 5. Run both repository contracts:
 
    ```bash
@@ -286,7 +296,9 @@ Then:
    Repeat the self-hosted quality command from precondition 8 against the
    relaunched production target and retain it as `production-after.json`; every
    case at both `high` and `max` effort must pass before the rollout is declared
-   successful.
+   successful. Run `settlement-status "$FINITE_PRIVATE_LEDGER_SINCE"` after
+   these gates and after the load sweep; any rollout-era `reserved` row is a
+   rollback condition.
 3. As soon as readiness returns, monitor live traffic and sweep concurrency
    progressively through 1, 4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm
    all measured request shapes and DP ranks. Stop on the first failure and
@@ -305,8 +317,9 @@ Then:
 ## VERIFY
 
 Keep the update only when identity is exact, protocol and reasoning gates pass,
-all reservations settle, bounded load drains cleanly, the current-load numeric
-bounds pass, and the full observation remains healthy. The isolated result of
+all reservations created during this rollout settle, bounded load drains
+cleanly, the current-load numeric bounds pass, and the full observation remains
+healthy. The isolated result of
 8,373 aggregate output tokens/sec at 1,024 concurrent requests is not a
 production acceptance threshold.
 

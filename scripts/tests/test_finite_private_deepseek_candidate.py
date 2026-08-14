@@ -121,6 +121,21 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
             any("Any new or worsened" in item for item in violations), violations
         )
 
+    def test_runbook_scopes_settlement_to_the_rollout_boundary(self) -> None:
+        candidate = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
+        runbook = (ROOT / RUNBOOK).read_text(encoding="utf-8").replace(
+            "all reservations created during this rollout settle",
+            "all reservations settle",
+        )
+        with temporary_candidate(
+            candidate, runbook_text=runbook
+        ) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any("created during this rollout" in item for item in violations),
+            violations,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

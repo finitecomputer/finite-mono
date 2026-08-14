@@ -155,6 +155,7 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         "compat/matrix.toml",
         "pre-existing non-causal exception",
         "Any new or worsened red or unknown",
+        "all reservations created during this rollout settle",
         (
             "Do not trigger a Runtime, NixOS, Litestream, storage-policy, "
             "or host-storage"
