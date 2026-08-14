@@ -148,6 +148,16 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_stripe_price_contract_path_runs_nix_checks(self) -> None:
+        self.assertEqual(
+            selected("finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py"),
+            {"run_nix_checks"},
+        )
+        self.assertEqual(
+            selected("scripts/check_stripe_price_contract.py"),
+            {"run_nix_checks"},
+        )
+
     def test_moved_monitoring_paths_do_not_select_every_harness(self) -> None:
         self.assertEqual(
             selected(

@@ -70,7 +70,7 @@ Genuinely true this week, per the repo's own evidence:
   agents. The first training cohort ran against this.
 - **Billing is one step from live.** Customer mode is on
   (`FC_DASHBOARD_RUNTIME_MODE="customer"`), the live price is pinned and
-  CI-enforced (`scripts/check_stripe_price_contract.py`), sandbox acceptance
+  CI-enforced (`finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py`), sandbox acceptance
   is done. Outstanding: live audit + first real charge, by Paul.
 - **The monorepo consolidation worked.** lat1 is the single app server
   (core, dashboard, Postgres, chat, sites, brain, search, runner, one Caddy

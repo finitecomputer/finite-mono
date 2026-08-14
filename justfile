@@ -132,7 +132,7 @@ finite-private-deepseek-release-contract:
 
 # Static production contract: Dashboard and Core must enforce the same Price.
 stripe-price-contract:
-    python3 scripts/check_stripe_price_contract.py
+    python3 finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py
 
 # Synthetic empty-target proof for the complete hosted Recovery Set contract.
 hosted-recovery-contract:
