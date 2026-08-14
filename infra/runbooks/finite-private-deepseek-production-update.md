@@ -22,6 +22,8 @@ GLM-to-DeepSeek model cutover.
 | Context ceiling | 393,216 tokens |
 | Current scheduler | 64 sequences / 512 batched tokens |
 | Candidate scheduler | 128 sequences / 2,048 batched tokens |
+| Candidate release | `v2026-08-13-deepseek-v4-flash-0731-128-2048-1` |
+| Candidate satellite commit | `0ef8c6c07dfd56e11d936aba416e24a51e06399a` |
 | Canonical model | `deepseek-v4-flash-0731` |
 | Compatibility alias | `glm-5-2` |
 
@@ -56,7 +58,13 @@ applicable only while the candidate checksum and the byte-level identity gates
 below prove that the checkpoint, images, model settings, topology, context, and
 all other serving arguments remain unchanged.
 
-## SATELLITE RELEASE PREPARATION
+## FIXED SATELLITE RELEASE
+
+The candidate release was published and its immutable evidence was merged into
+`compat/matrix.toml`. Do not create another satellite commit, tag, or release
+for this rollout. Tonight's operation only verifies and relaunches the fixed
+candidate above. The preparation commands below remain as a provenance record,
+not as steps to repeat during the maintenance window.
 
 The satellite's `main` branch is stale and must not be the source of this
 release. Current production and the immediate rollback are commit
@@ -68,8 +76,8 @@ that exact commit, never from satellite `main`:
 export SATELLITE_REPO='finitecomputer/confidential-kimi-k2-6'
 export ROLLBACK_TAG='v2026-08-05-deepseek-v4-flash-0731-retry-2-3'
 export ROLLBACK_COMMIT='e337db3606d67c53387113700362adec7b4dfdf7'
-export SATELLITE_BRANCH='ops/deepseek-v4-128-2048-REPLACE_DATE'
-export TARGET_TAG='REPLACE_WITH_UNIQUE_DEEPSEEK_128_2048_TAG'
+export SATELLITE_BRANCH='ops/deepseek-v4-128-2048-20260813'
+export TARGET_TAG='v2026-08-13-deepseek-v4-flash-0731-128-2048-1'
 export EXPECTED_CANDIDATE_SHA256='22a3b8030aeb2a47dab8547690cf125880f630d3163bcb713534fb43bffa8907'
 export FINITE_MONO_CHECKOUT="$(pwd)"
 export SATELLITE_CHECKOUT='REPLACE_WITH_CLEAN_SATELLITE_CHECKOUT'
@@ -207,7 +215,37 @@ the separately approved relaunch window.
    infra/runbooks/finite-private-ops.sh mixed-version-canary
    ```
 
-4. Capture three one-way and three 32-way baselines and retain their medians.
+4. Capture three one-way and three 32-way baselines through the public route.
+   Use one parallel HTTP/2 client per batch and wait 15 seconds between repeated
+   samples so one sample does not pace the next at the Tinfoil edge. Retain each
+   raw log; do not transcribe metrics by hand:
+
+   ```bash
+   set -o pipefail
+   export TARGET_TAG='v2026-08-13-deepseek-v4-flash-0731-128-2048-1'
+   export LOAD_EVIDENCE_DIR=".local-state/deepseek-rollout/$TARGET_TAG"
+   mkdir -p "$LOAD_EVIDENCE_DIR"
+   chmod 700 "$LOAD_EVIDENCE_DIR"
+
+   for concurrency in 1 32; do
+     output="$LOAD_EVIDENCE_DIR/before-c${concurrency}.log"
+     : > "$output"
+     for run in 1 2 3; do
+       printf '=== run=%s ===\n' "$run" | tee -a "$output"
+       infra/runbooks/finite-private-ops.sh load-canary "$concurrency" \
+         | tee -a "$output" || exit 1
+       if [ "$run" -lt 3 ]; then sleep 15; fi
+     done
+   done
+   ```
+
+   Every public-route request must return HTTP 200, terminate with SSE `[DONE]`,
+   include usage, and keep p99 time-to-first-byte below the existing 90-second
+   safety limit. These are edge availability/auth/accounting/error gates.
+   `aggregate` remains in the logs as a diagnostic only: its batch wall clock
+   includes public-edge connection admission and is not a DeepSeek scheduler
+   acceptance metric.
+
    Confirm all canonical and mixed-version canary reservations created during
    this rollout settle. The canary grant has historical `reserved` rows; record
    their pre-window count but never rewrite them during this scheduler update.
@@ -228,11 +266,14 @@ the separately approved relaunch window.
 6. Diff the decoded candidate against the rollback deployment. Any checkpoint,
    MPK, runtime image, limiter image, secret, route, parser, context, numerical
    format, or parallelism change is a stop condition.
-7. Open a small reviewed finite-mono promotion change that records the exact
-   new satellite commit, release tag, `tinfoil-deployment.json` SHA-256,
-   `tinfoil.hash` SHA-256, and candidate-config SHA-256 in
-   `compat/matrix.toml`. That evidence cannot be filled in before publication;
-   the follow-up must merge before production approval.
+7. Confirm the merged `compat/matrix.toml` entry records satellite commit
+   `0ef8c6c07dfd56e11d936aba416e24a51e06399a`, release tag
+   `v2026-08-13-deepseek-v4-flash-0731-128-2048-1`, deployment asset SHA-256
+   `83d4d2eb23b052fafecd8a9ec2875ad0aa577842a6ffdd64812914de576463e4`,
+   Tinfoil hash SHA-256
+   `b0322ad6b2bb89f7971002c61868a9b4e53301e6d75a0762849fe06b0f0ee56b`,
+   and candidate-config SHA-256
+   `22a3b8030aeb2a47dab8547690cf125880f630d3163bcb713534fb43bffa8907`.
 8. Run the fixed scored corpus in
    `scripts/check_deepseek_v4_0731_quality.py` against the current live
    DeepSeek service before the window. Use the same approved canary credential
@@ -247,7 +288,7 @@ the separately approved relaunch window.
    both `high` and `max` effort to pass:
 
    ```bash
-   export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
+   export TARGET_TAG='v2026-08-13-deepseek-v4-flash-0731-128-2048-1'
    export CURRENT_ENDPOINT="${FINITE_PRIVATE_ENDPOINT:-https://kimi-k2-6.finite.containers.tinfoil.dev}"
    QUALITY_DIR=".local-state/deepseek-quality/$TARGET_TAG"
    mkdir -p "$QUALITY_DIR"
@@ -278,7 +319,7 @@ runbook before a later reuse.
 After the exact release has been independently measured and approved:
 
 ```bash
-export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
+export TARGET_TAG='v2026-08-13-deepseek-v4-flash-0731-128-2048-1'
 export FINITE_PRIVATE_RELAUNCH_APPROVED="$TARGET_TAG"
 infra/runbooks/finite-private-ops.sh relaunch "$TARGET_TAG"
 infra/runbooks/finite-private-ops.sh wait-ready
@@ -300,13 +341,41 @@ Then:
    these gates and after the load sweep; any rollout-era `reserved` row is a
    rollback condition.
 3. As soon as readiness returns, monitor live traffic and sweep concurrency
-   progressively through 1, 4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm
-   all measured request shapes and DP ranks. Stop on the first failure and
-   require a clean single request after each successful tier. Never issue a
-   larger tier or recovery load after a failed request tier.
-4. Repeat the one-way and 32-way baselines three times. Candidate median
-   throughput must be at least 90% of the pre-update median and median p95
-   completion latency no more than 125% of the pre-update median.
+   progressively through 1, 4, 8, 16, 32, 64, 128, and 256 to warm the bounded
+   request shapes and DP ranks approved for this rollout. Stop on the first
+   failure and require a clean single request after each successful tier. Never
+   issue a larger tier or recovery load after a failed request tier. Concurrency
+   512 and beyond is explicitly deferred to a later optimization window.
+4. Repeat the one-way and 32-way measurements three times using the same
+   15-second spacing, saving them as `after-c1.log` and `after-c32.log` in
+   `$LOAD_EVIDENCE_DIR`. Compare each pair with the checked-in gate:
+
+   ```bash
+   set -o pipefail
+   for concurrency in 1 32; do
+     output="$LOAD_EVIDENCE_DIR/after-c${concurrency}.log"
+     : > "$output"
+     for run in 1 2 3; do
+       printf '=== run=%s ===\n' "$run" | tee -a "$output"
+       infra/runbooks/finite-private-ops.sh load-canary "$concurrency" \
+         | tee -a "$output" || exit 1
+       if [ "$run" -lt 3 ]; then sleep 15; fi
+     done
+     comparison="$LOAD_EVIDENCE_DIR/comparison-c${concurrency}.json"
+     if ! scripts/check_finite_private_load_comparison.py \
+       "$LOAD_EVIDENCE_DIR/before-c${concurrency}.log" "$output" \
+       > "$comparison"; then
+       cat "$comparison"
+       exit 1
+     fi
+     cat "$comparison"
+   done
+   ```
+
+   For both concurrency levels, candidate median per-request generation rate
+   must be at least 90% of baseline and candidate median p95 completion must be
+   no more than 125% of baseline. Public-edge aggregate throughput is printed
+   as diagnostic context but does not decide promotion.
 5. Observe the target for at least 35 minutes with no worker restart, OOM,
    CUDA error, corrupt output, stuck settlement, or readiness regression.
 6. Run `scripts/finite-status --json` again and retain the result. Compare it
