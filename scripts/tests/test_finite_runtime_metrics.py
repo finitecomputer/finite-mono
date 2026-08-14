@@ -35,6 +35,16 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
                     "link_state": "active",
                 },
                 {
+                    "source_host_id": "finite-lat-1",
+                    "runtime_artifact_id": "artifact-v2",
+                    "link_state": "active",
+                },
+                {
+                    "source_host_id": "finite-lat-3",
+                    "runtime_artifact_id": "artifact-v1",
+                    "link_state": "active",
+                },
+                {
                     "source_host_id": "finite-lat-3",
                     "runtime_artifact_id": "artifact-v1",
                     "link_state": "active",
@@ -49,11 +59,27 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
             metrics,
         )
         self.assertIn(
+            'finite_runtime_artifact_active_agents{source_host_id="finite-lat-1",artifact_id="artifact-v2",version_label="v2",promoted="true"} 2',
+            metrics,
+        )
+        self.assertIn(
+            'finite_runtime_artifact_active_agents{source_host_id="finite-lat-3",artifact_id="artifact-v1",version_label="v1",promoted="false"} 2',
+            metrics,
+        )
+        self.assertIn(
             'finite_component_build_info{host="finite-lat-1",component="finite-agent-runtime",version="v2",git_sha="git-v2",image_digest="sha256:2222",source="core"} 1',
             metrics,
         )
         self.assertIn(
             'finite_component_version_mismatch{host="finite-lat-3",component="finite-agent-runtime"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-1",component="finite-agent-runtime"} 0',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-3",component="finite-agent-runtime"} 2',
             metrics,
         )
 
@@ -84,6 +110,11 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
                     "link_state": "active",
                 },
                 {
+                    "source_host_id": "finite-lat-2",
+                    "runtime_artifact_id": "",
+                    "link_state": "active",
+                },
+                {
                     "source_host_id": "",
                     "runtime_artifact_id": "artifact-unknown",
                     "link_state": "active",
@@ -94,7 +125,7 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
         metrics = finite_runtime_metrics.render(core)
 
         self.assertIn(
-            'finite_runtime_incomplete_artifact_identity{source_host_id="finite-lat-2"} 1',
+            'finite_runtime_incomplete_artifact_identity{source_host_id="finite-lat-2"} 2',
             metrics,
         )
         self.assertIn(
@@ -103,6 +134,14 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
         )
         self.assertIn(
             'finite_runtime_artifact_info{source_host_id="finite-lat-1",artifact_id="artifact-v2",version_label="v2",promoted="true"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_runtime_artifact_active_agents{source_host_id="finite-lat-1",artifact_id="artifact-v2",version_label="v2",promoted="true"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-1",component="finite-agent-runtime"} 0',
             metrics,
         )
 

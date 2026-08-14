@@ -105,9 +105,12 @@ sudo install -m 0600 -o root -g root /tmp/metrics-remote-write.env /etc/finite/m
 The password is a shared write credential for the monitoring ingest endpoint.
 It must not enter Git, shell history, logs, screenshots, or metric labels.
 
-The version tables use Prometheus sample timestamps to display an `Observed`
-time and to choose the newest row for each logical identity. Do not add changing
-timestamps as metric labels; that creates additional Prometheus series and makes
+The Running Versions table uses Prometheus sample timestamps to display an
+`Observed` time and to choose the newest row for each logical identity. Runtime
+Artifacts aggregates active agent counts by artifact/version across the fleet,
+and Version Drift shows the active agent count still off the promoted Runtime
+artifact for each affected host. Do not add changing timestamps or counts as
+metric labels; that creates additional Prometheus series and makes
 duplicate-looking rows more likely.
 
 ## Operations

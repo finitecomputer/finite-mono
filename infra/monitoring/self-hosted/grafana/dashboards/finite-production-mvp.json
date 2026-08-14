@@ -529,20 +529,7 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Observed"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeAsIso"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -568,7 +555,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000 * topk by (source_host_id, artifact_id) (1, timestamp(finite_runtime_artifact_info))",
+          "expr": "sort_desc(sum by (artifact_id, version_label, promoted) (max by (source_host_id, artifact_id, version_label, promoted) (finite_runtime_artifact_active_agents)))",
           "format": "table",
           "instant": true,
           "range": false,
@@ -593,17 +580,15 @@
               "job": true
             },
             "indexByName": {
-              "source_host_id": 0,
-              "artifact_id": 1,
-              "version_label": 2,
-              "promoted": 3,
-              "Value": 4
+              "artifact_id": 0,
+              "version_label": 1,
+              "promoted": 2,
+              "Value": 3
             },
             "renameByName": {
-              "Value": "Observed",
+              "Value": "Active agents",
               "artifact_id": "Artifact",
               "promoted": "Promoted",
-              "source_host_id": "Source host",
               "version_label": "Version"
             }
           }
@@ -636,20 +621,7 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Observed"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeAsIso"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -675,7 +647,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_version_mismatch == 1))",
+          "expr": "sort_desc(max by (component, host) (finite_component_version_mismatched_active_agents) > 0)",
           "format": "table",
           "instant": true,
           "range": false,
@@ -705,7 +677,7 @@
               "Value": 2
             },
             "renameByName": {
-              "Value": "Observed",
+              "Value": "Drifted active agents",
               "component": "Component",
               "host": "Host"
             }
