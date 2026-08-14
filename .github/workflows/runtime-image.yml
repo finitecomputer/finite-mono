@@ -49,11 +49,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
-
       - name: Require Cachix token
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
