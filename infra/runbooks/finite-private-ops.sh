@@ -283,7 +283,7 @@ load_canary() {
   export FP_LOAD_CONFIG="$curl_config" FP_LOAD_PAYLOAD="$payload_file"
   export FP_LOAD_RESULTS="$result_dir" FP_LOAD_ENDPOINT="$ENDPOINT"
   export FP_LOAD_TIMEOUT="$TIMEOUT_SECS" FP_LOAD_BATCH_ID="$batch_id"
-  batch_elapsed="$(python3 - "$concurrency" <<'PY'
+  if ! batch_elapsed="$(python3 - "$concurrency" <<'PY'
 import os
 import pathlib
 import subprocess
@@ -337,7 +337,11 @@ if result.stderr:
 print(f"{elapsed:.9f}")
 raise SystemExit(result.returncode)
 PY
-)"
+)"; then
+    unset FP_LOAD_CONFIG FP_LOAD_PAYLOAD FP_LOAD_RESULTS FP_LOAD_ENDPOINT
+    unset FP_LOAD_TIMEOUT FP_LOAD_BATCH_ID
+    return 1
+  fi
 
   if ! python3 - "$result_dir" "$LOAD_MAX_FIRST_BYTE_SECS" "$concurrency" "$batch_elapsed" <<'PY'
 import json

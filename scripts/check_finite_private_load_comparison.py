@@ -21,6 +21,9 @@ GENERATION_PATTERN = re.compile(
     r".*\bper_request_p50=(?P<generation>[0-9]+(?:\.[0-9]+)?)\b"
     r".*\baggregate=(?P<aggregate>[0-9]+(?:\.[0-9]+)?)\b"
 )
+EXPECTED_RUNS = 3
+MINIMUM_GENERATION_RATIO = 0.90
+MAXIMUM_COMPLETION_RATIO = 1.25
 
 
 class InputError(ValueError):
@@ -95,9 +98,6 @@ def parse_load_log(path: Path, *, expected_runs: int) -> LoadSamples:
 def compare(
     baseline: LoadSamples,
     candidate: LoadSamples,
-    *,
-    minimum_generation_ratio: float,
-    maximum_completion_ratio: float,
 ) -> dict[str, object]:
     baseline_generation = statistics.median(baseline.per_request_generation_p50)
     candidate_generation = statistics.median(candidate.per_request_generation_p50)
@@ -109,9 +109,9 @@ def compare(
     completion_ratio = candidate_completion / baseline_completion
 
     violations: list[str] = []
-    if generation_ratio < minimum_generation_ratio:
+    if generation_ratio < MINIMUM_GENERATION_RATIO:
         violations.append("per_request_generation_rate")
-    if completion_ratio > maximum_completion_ratio:
+    if completion_ratio > MAXIMUM_COMPLETION_RATIO:
         violations.append("completion_p95")
 
     return {
@@ -121,13 +121,13 @@ def compare(
             "baseline_median": baseline_generation,
             "candidate_median": candidate_generation,
             "candidate_to_baseline_ratio": round(generation_ratio, 6),
-            "minimum_ratio": minimum_generation_ratio,
+            "minimum_ratio": MINIMUM_GENERATION_RATIO,
         },
         "completion_p95": {
             "baseline_median": baseline_completion,
             "candidate_median": candidate_completion,
             "candidate_to_baseline_ratio": round(completion_ratio, 6),
-            "maximum_ratio": maximum_completion_ratio,
+            "maximum_ratio": MAXIMUM_COMPLETION_RATIO,
         },
         "aggregate": {
             "baseline_median": baseline_aggregate,
@@ -147,34 +147,16 @@ def main() -> int:
     )
     parser.add_argument("baseline", type=Path)
     parser.add_argument("candidate", type=Path)
-    parser.add_argument("--expected-runs", type=int, default=3)
-    parser.add_argument("--minimum-generation-ratio", type=float, default=0.90)
-    parser.add_argument("--maximum-completion-ratio", type=float, default=1.25)
     arguments = parser.parse_args()
-    if arguments.expected_runs <= 0:
-        parser.error("--expected-runs must be positive")
-    if not 0 < arguments.minimum_generation_ratio <= 1:
-        parser.error("--minimum-generation-ratio must be in (0, 1]")
-    if arguments.maximum_completion_ratio < 1:
-        parser.error("--maximum-completion-ratio must be at least 1")
 
     try:
-        baseline = parse_load_log(
-            arguments.baseline, expected_runs=arguments.expected_runs
-        )
-        candidate = parse_load_log(
-            arguments.candidate, expected_runs=arguments.expected_runs
-        )
+        baseline = parse_load_log(arguments.baseline, expected_runs=EXPECTED_RUNS)
+        candidate = parse_load_log(arguments.candidate, expected_runs=EXPECTED_RUNS)
     except InputError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 
-    report = compare(
-        baseline,
-        candidate,
-        minimum_generation_ratio=arguments.minimum_generation_ratio,
-        maximum_completion_ratio=arguments.maximum_completion_ratio,
-    )
+    report = compare(baseline, candidate)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["passed"] else 1
 

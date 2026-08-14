@@ -156,6 +156,25 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(invocations, "invoked\n")
 
+    def test_load_canary_cleans_up_after_a_transport_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            curl = root / "curl"
+            curl.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+            curl.chmod(0o700)
+            self.environment["TMPDIR"] = str(scratch)
+            self.environment["PATH"] = (
+                temporary_directory + os.pathsep + self.environment["PATH"]
+            )
+
+            result = self.run_ops("load-canary", "4")
+            remaining_temporary_files = list(scratch.iterdir())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(remaining_temporary_files, [])
+
     def test_high_concurrency_requires_exact_approval(self) -> None:
         result = self.run_ops("load-canary", "64")
         self.assertEqual(result.returncode, 64)
