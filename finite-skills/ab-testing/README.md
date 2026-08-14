@@ -43,17 +43,21 @@ root:
 just dev inference-key
 ```
 
-Then generate artifacts with the product-accurate local Finite/Hermes agent:
+Start the local Devfinity stack once:
+
+```sh
+just dev up --headless
+```
+
+Then, in another terminal, generate artifacts with the product-accurate local
+Finite/Hermes agent:
 
 ```sh
 just skills ab-test
 ```
 
-The default Devfinity runner uses the Apple Container SaaS profile, so it needs
-the same host prerequisites as `just dev saas-smoke` (`container system start`
-on a supported Apple silicon macOS host). Set
-`SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1` to use Devfinity's Docker runtime profile
-for disposable local runs.
+The default Devfinity runner is now a client of that already-running stack. The
+stack profile is whatever you started with `just dev up`.
 
 To test one custom build prompt without editing `promptfooconfig.yaml`:
 
@@ -114,24 +118,36 @@ Edited skills are saved under `runs/editable/`; the source
 `../skills/.../SKILL.md` files are not changed.
 
 For an accurate product skill test, use the browser Generate flow or
-`SKILL_AB_RUNNER=devfinity`. The Devfinity runner starts a disposable
-Devfinity SaaS stack for each variant, installs a managed-skills tree
-containing exactly one selected skill, restarts Hermes inside that local
-runtime, sends the build task through the Hosted Web chat path, and captures
-the generated single-file HTML from the agent's final response. If the runtime
-also writes the diagnostic HTML path, the harness copies that file instead.
-Each disposable run receives its own Devfinity port offset, Apple container
-name prefix, host-network probe container name, and local runtime image tag so
-parallel runs and retries do not share local ports, dashboard build state, or
-runtime container names.
-The harness records every disposable `--state-dir` under `runs/`, runs
-`devfinity --state-dir ... cleanup` in provider `finally` and signal paths,
-and sweeps previously tracked temp-root state on startup before serving or
-generating another run.
+`SKILL_AB_RUNNER=devfinity`. The default Devfinity mode calls
+`devfinity agent-run` against an already-running stack. For each variant, the
+harness stages a source skill directory with the edited `SKILL.md`, asks
+Devfinity to copy that directory into a one-skill managed bundle, restarts
+Hermes inside the local runtime, sends the build task through the Hosted Web
+chat path, and captures the generated single-file HTML from the agent's final
+response. If the runtime also writes the diagnostic HTML path, the harness
+copies that file instead.
+
+Current client mode has one important limitation: because it swaps the managed
+skill bundle in the one existing runtime, the harness serializes Devfinity
+agent-run calls with a local lock even when Promptfoo concurrency is higher.
+This is the transitional server/client shape before the parent-agent/sub-agent
+boundary exists.
+
+Set `SKILL_AB_DEVFINITY_MODE=disposable` to use the older behavior where each
+variant starts its own disposable Devfinity SaaS stack. In that mode, each run
+receives its own Devfinity port offset, Apple container name prefix,
+host-network probe container name, and local runtime image tag so parallel runs
+and retries do not share local ports, dashboard build state, or runtime
+container names. The harness records every disposable `--state-dir` under
+`runs/`, runs `devfinity --state-dir ... cleanup` in provider `finally` and
+signal paths, and sweeps previously tracked temp-root state on startup before
+serving or generating another run.
 
 The Devfinity prompt does not include either skill file, either skill path, the
-variant label, or any A/B wording. Isolation is provided by the runtime's
-managed-skills tree and disposable Devfinity state, not by prompt injection.
+variant label, or any A/B wording. In client mode, separation is provided by a
+staged one-skill managed bundle, a fresh chat topic, and the local agent-run
+lock that prevents interleaved skill swaps on the shared runtime. Disposable
+mode adds a separate Devfinity state and runtime per variant.
 
 The `Isolated Codex proxy` runner is useful when you want a faster isolated
 agent subprocess, but it is not the Finite product runtime. The
@@ -164,13 +180,21 @@ Runner settings:
   Devfinity.
 - `SKILL_AB_RUNNER=agent`: isolated Codex proxy with one configured skill.
 - `SKILL_AB_RUNNER=provider`: direct Finite Private/OpenAI model call.
-- `SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1`: use Devfinity's Docker runtime profile
-  instead of the default Apple Container profile.
+- `SKILL_AB_DEVFINITY_MODE=client`: default; reuse the already-running
+  Devfinity stack through `devfinity agent-run`.
+- `SKILL_AB_DEVFINITY_MODE=disposable`: legacy mode; start and clean up a
+  disposable Devfinity stack per variant.
+- `SKILL_AB_DEVFINITY_STATE_DIR=.local-state/devfinity`: state root for client
+  mode. A `runs/default` path from Devfinity's generated env is also accepted.
+- `SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1`: in disposable mode, use Devfinity's
+  Docker runtime profile instead of the default Apple Container profile.
 - `SKILL_AB_DEVFINITY_TIMEOUT_MS=1800000`
 - `SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS=1200000`: wait up to 20 minutes for
   the in-runtime Hermes chat turn to produce a final response.
-- `SKILL_AB_DEVFINITY_STATE_ROOT`: override the temp root used for disposable
-  per-variant Devfinity state.
+- `SKILL_AB_DEVFINITY_LOCK_TIMEOUT_MS=1800000`: maximum wait for the client-mode
+  agent-run lock.
+- `SKILL_AB_DEVFINITY_STATE_ROOT`: in disposable mode, override the temp root
+  used for per-variant Devfinity state.
 - `SKILL_AB_DEVFINITY_CLEANUP_TIMEOUT_MS=120000`: per-state-dir cleanup cap.
 - `SKILL_AB_AGENT_MODEL`: optional model override for isolated Codex agents.
 - `SKILL_AB_AGENT_TIMEOUT_MS=600000`

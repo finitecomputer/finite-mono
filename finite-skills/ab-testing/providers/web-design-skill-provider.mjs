@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,15 +79,16 @@ export default class WebDesignSkillProvider {
       promptTranscript = response.prompt;
       tokenUsage = {};
     } else if (runner === "devfinity") {
-      const key = readFinitePrivateKey({ required: true });
+      const devfinityMode = resolveDevfinityMode(this.config);
+      const key = devfinityMode === "disposable" ? readFinitePrivateKey({ required: true }) : readFinitePrivateKey({ required: false });
       model = "devfinity-local-hermes";
       modelProvider = {
         name: "devfinity-local-agent",
         baseUrl: null,
-        keySource: key.keySource,
-        label: "Devfinity local Finite agent",
+        keySource: key?.keySource ?? "already-running devfinity stack",
+        label: devfinityMode === "disposable" ? "Devfinity disposable Finite agent" : "Devfinity local Finite agent client",
       };
-      const response = await callDevfinityAgent({
+      const agentRunConfig = {
         artifactDir,
         prompt: finiteAgentPrompt.prompt,
         runtimeOutputPath: finiteAgentPrompt.runtimeOutputPath,
@@ -96,9 +97,12 @@ export default class WebDesignSkillProvider {
         skillSourcePath,
         skillText,
         timeoutMs: Number(process.env.SKILL_AB_DEVFINITY_TIMEOUT_MS || this.config.devfinityTimeoutMs || 1800000),
-        upstreamKey: key.apiKey,
         variant: this.variant,
-      });
+      };
+      const response =
+        devfinityMode === "disposable"
+          ? await callDisposableDevfinityAgent({ ...agentRunConfig, upstreamKey: key.apiKey })
+          : await callDevfinityAgent(agentRunConfig);
       output = response.output;
       promptTranscript = response.prompt;
       tokenUsage = {};
@@ -392,6 +396,17 @@ function resolveRunner(config = {}) {
   throw new Error(`Unsupported SKILL_AB_RUNNER "${runner}". Use "devfinity", "agent", or "provider".`);
 }
 
+function resolveDevfinityMode(config = {}) {
+  const mode = String(process.env.SKILL_AB_DEVFINITY_MODE || config.devfinityMode || "client").trim().toLowerCase();
+  if (["client", "existing", "reuse", "reusable", "server-client"].includes(mode)) {
+    return "client";
+  }
+  if (["disposable", "isolated", "legacy"].includes(mode)) {
+    return "disposable";
+  }
+  throw new Error(`Unsupported SKILL_AB_DEVFINITY_MODE "${mode}". Use "client" or "disposable".`);
+}
+
 function trimTrailingSlash(value) {
   return String(value).replace(/\/+$/g, "");
 }
@@ -576,6 +591,83 @@ async function callDevfinityAgent({
   skillSourcePath,
   skillText,
   timeoutMs,
+  variant,
+}) {
+  const outputDir = path.join(artifactDir, "devfinity-output");
+  mkdirSync(outputDir, { recursive: true });
+
+  const promptPath = path.join(artifactDir, "devfinity-prompt.txt");
+  const resultPath = path.join(outputDir, "result.json");
+  const logPath = path.join(artifactDir, "devfinity-agent.log");
+  const workspaceDir = path.join(outputDir, "workspace");
+  const stateDir = resolveReusableDevfinityStateDir();
+  const skillBundle = prepareDevfinitySkillBundle({
+    artifactDir,
+    skillName,
+    skillPath,
+    skillSourcePath,
+    skillText,
+  });
+  writeFileSync(promptPath, prompt, "utf8");
+  writeFileSync(path.join(artifactDir, "devfinity-state-path.txt"), `${stateDir}\n`, "utf8");
+
+  const args = [
+    "run",
+    "-p",
+    "devfinity",
+    "--",
+    "--state-dir",
+    stateDir,
+    "agent-run",
+    "--skill",
+    skillBundle.skillFile,
+    "--workspace",
+    workspaceDir,
+    "--output",
+    resultPath,
+    "--runtime-output-path",
+    runtimeOutputPath,
+    "--reply-timeout-ms",
+    String(process.env.SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS || 1200000),
+    "--label",
+    variant,
+    promptPath,
+  ];
+
+  let result;
+  try {
+    result = await withDevfinityAgentRunLock(stateDir, async () => {
+      return await runCommand(process.env.SKILL_AB_DEVFINITY_CARGO_BIN || "cargo", args, {
+        cwd: repoRoot,
+        env: devfinityClientEnv({ variant }),
+        timeoutMs,
+      });
+    });
+    writeFileSync(logPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
+  } catch (error) {
+    writeFileSync(logPath, `${error.stdout || ""}\n${error.stderr || ""}\n${error.message}`.trim(), "utf8");
+    throw error;
+  }
+
+  if (!existsSync(resultPath)) {
+    throw new Error(`Devfinity runner did not write ${displayPath(resultPath)}`);
+  }
+  const payload = JSON.parse(readFileSync(resultPath, "utf8"));
+  return {
+    output: String(payload.html || payload.finalReply || ""),
+    prompt,
+  };
+}
+
+async function callDisposableDevfinityAgent({
+  artifactDir,
+  prompt,
+  runtimeOutputPath,
+  skillName,
+  skillPath,
+  skillSourcePath,
+  skillText,
+  timeoutMs,
   upstreamKey,
   variant,
 }) {
@@ -655,6 +747,18 @@ async function callDevfinityAgent({
   };
 }
 
+function resolveReusableDevfinityStateDir() {
+  const configured = process.env.SKILL_AB_DEVFINITY_STATE_DIR || process.env.DEVFINITY_STATE_DIR || ".local-state/devfinity";
+  return normalizeDevfinityStateRoot(resolveRepoRelativePath(configured));
+}
+
+function normalizeDevfinityStateRoot(candidate) {
+  if (existsSync(path.join(candidate, "env")) && path.basename(candidate) === "default" && path.basename(path.dirname(candidate)) === "runs") {
+    return path.dirname(path.dirname(candidate));
+  }
+  return candidate;
+}
+
 function makeDevfinityStateDir({ artifactDir, variant }) {
   const stateRoot = path.resolve(process.env.SKILL_AB_DEVFINITY_STATE_ROOT || path.join(tmpdir(), "finite-skills-ab-devfinity"));
   mkdirSync(stateRoot, { recursive: true });
@@ -691,7 +795,7 @@ function prepareDevfinitySkillBundle({ artifactDir, skillName, skillPath, skillS
     ),
     "utf8",
   );
-  return { bundleRoot, relDir };
+  return { bundleRoot, relDir, skillFile: path.join(targetDir, "SKILL.md") };
 }
 
 function skillRelativeDir(skillSourcePath, skillName) {
@@ -727,6 +831,86 @@ function devfinityEnv({ promptPath, resultPath, runtimeOutputPath, skillBundleDi
   env.DEVFINITY_RUNTIME_IMAGE_REF =
     env.SKILL_AB_DEVFINITY_RUNTIME_IMAGE_REF || `finite-agent-runtime:skill-ab-${hashString(runIdentity).slice(0, 12)}`;
   return env;
+}
+
+function devfinityClientEnv({ variant }) {
+  const env = { ...process.env };
+  for (const name of [
+    "OPENAI_API_KEY",
+    "SKILL_AB_FINITE_PRIVATE_KEY",
+    "FINITE_PRIVATE_API_KEY",
+    "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE",
+  ]) {
+    delete env[name];
+  }
+  env.SKILL_AB_DEVFINITY_VARIANT = variant;
+  return env;
+}
+
+async function withDevfinityAgentRunLock(stateDir, callback) {
+  const lockDir = path.join(stateDir, "runs/default/agent-run.lock");
+  const timeoutMs = Number(process.env.SKILL_AB_DEVFINITY_LOCK_TIMEOUT_MS || process.env.SKILL_AB_DEVFINITY_TIMEOUT_MS || 1800000);
+  const deadline = Date.now() + timeoutMs;
+  await acquireDirectoryLock(lockDir, deadline);
+  try {
+    return await callback();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
+async function acquireDirectoryLock(lockDir, deadline) {
+  mkdirSync(path.dirname(lockDir), { recursive: true });
+  while (true) {
+    try {
+      mkdirSync(lockDir);
+      writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2), "utf8");
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
+      if (isStaleLock(lockDir)) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for Devfinity agent-run lock at ${displayPath(lockDir)}`);
+      }
+      await delay(500);
+    }
+  }
+}
+
+function isStaleLock(lockDir) {
+  try {
+    const owner = JSON.parse(readFileSync(path.join(lockDir, "owner.json"), "utf8"));
+    const pid = Number(owner.pid);
+    if (Number.isInteger(pid) && pid > 0 && !processIsAlive(pid)) {
+      return true;
+    }
+    const startedAt = Date.parse(owner.startedAt);
+    return Number.isFinite(startedAt) && Date.now() - startedAt > 2 * 60 * 60 * 1000;
+  } catch {
+    try {
+      return Date.now() - statSync(lockDir).mtimeMs > 30_000;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function devfinityPortOffset(runIdentity) {
