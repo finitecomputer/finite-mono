@@ -87,6 +87,17 @@ impl BrainStore {
                 params![27, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V28 backfills the denormalized Brain capacity counters and their
+        // maintenance triggers. Generated (capacity_counter_schema) because
+        // the trigger set mirrors the envelope; additive only.
+        if !migration_applied(&tx, 28)? {
+            tx.execute_batch(&capacity_counter_schema())?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![28, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -286,7 +297,7 @@ impl BrainStore {
         }
 
         if !migration_applied(&tx, 22)? {
-            tx.execute_batch(&capacity_counter_schema())?;
+            tx.execute_batch(SCHEMA_V22)?;
             tx.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                 params![22, MIGRATION_TIMESTAMP],
@@ -2275,6 +2286,21 @@ BEGIN
     );
 END;
 
+-- When a connection dies by FK cascade (source folder or destination brain
+-- deleted), its member rows cascade AFTER the connection row is gone, so the
+-- per-member trigger above can no longer resolve source_brain_id and no-ops.
+-- Settle the whole decrement here while the members still exist; explicit
+-- member deletes are unaffected because they always leave 0 members by the
+-- time the connection itself is deleted.
+CREATE TRIGGER count_connection_delegations_connection_delete
+BEFORE DELETE ON shared_folder_connections
+BEGIN
+    UPDATE brain_capacity_counts
+    SET connection_delegations = connection_delegations
+        - (SELECT COUNT(*) FROM shared_folder_connection_members WHERE connection_id = OLD.id)
+    WHERE brain_id = OLD.source_brain_id;
+END;
+
 CREATE TRIGGER capacity_folder_mounts
 BEFORE INSERT ON folder_mounts
 WHEN NOT EXISTS (SELECT 1 FROM brain_capacity_counts WHERE brain_id = NEW.source_brain_id)
@@ -2662,12 +2688,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-<<<<<<< HEAD
-        assert_eq!(latest_version, 27);
-||||||| parent of ec174f3d (fix(brain): check denormalized capacity counters instead of COUNT(*))
-        assert_eq!(latest_version, 21);
-=======
-        assert_eq!(latest_version, 22);
+        assert_eq!(latest_version, 28);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(
@@ -2686,7 +2707,6 @@ mod tests {
             capacity_count(&store, "legacy-organization", "folder_key_grants"),
             1
         );
->>>>>>> ec174f3d (fix(brain): check denormalized capacity counters instead of COUNT(*))
 
         let old_table_count: i64 = store
             .conn
@@ -2860,6 +2880,89 @@ mod tests {
         assert!(
             error.to_string().contains("finite_capacity:brain_folders:"),
             "missing counter row must fail closed: {error}"
+        );
+    }
+
+    #[test]
+    fn delegation_counter_settles_when_a_connection_dies_by_cascade() {
+        let store = BrainStore::open_in_memory().unwrap();
+        for brain in ["acme", "dest"] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                     VALUES (?1, 'organization', ?1, NULL, ?2)",
+                    params![brain, MIGRATION_TIMESTAMP],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id,
+                    parent_folder_key, path, current_key_version,
+                    shared_folder_source, setup_incomplete, created_at
+                 ) VALUES ('acme', 'ops', 'Ops', 'folder', 'restricted', NULL, '', 'ops', 1, 0, 0, ?1)",
+                params![MIGRATION_TIMESTAMP],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO shared_folder_connections (
+                    id, source_brain_id, source_folder_id, destination_brain_id,
+                    destination_admin_npub, status, created_at, updated_at
+                 ) VALUES ('conn-1', 'acme', 'ops', 'dest', 'npub-dest-admin', 'active', ?1, ?1)",
+                params![MIGRATION_TIMESTAMP],
+            )
+            .unwrap();
+        for member in ["npub-m1", "npub-m2"] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO shared_folder_connection_members (
+                        connection_id, member_npub, created_at
+                     ) VALUES ('conn-1', ?1, ?2)",
+                    params![member, MIGRATION_TIMESTAMP],
+                )
+                .unwrap();
+        }
+        assert_eq!(capacity_count(&store, "acme", "connection_delegations"), 2);
+        assert_eq!(
+            capacity_count(&store, "acme", "active_shared_connections"),
+            1
+        );
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM shared_folder_connection_members
+                 WHERE connection_id = 'conn-1' AND member_npub = 'npub-m1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            capacity_count(&store, "acme", "connection_delegations"),
+            1,
+            "explicit member removal must still decrement exactly once"
+        );
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM folders WHERE brain_id = 'acme' AND id = 'ops'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            capacity_count(&store, "acme", "active_shared_connections"),
+            0
+        );
+        assert_eq!(
+            capacity_count(&store, "acme", "connection_delegations"),
+            0,
+            "cascade through the connection must settle the remaining delegations"
         );
     }
 
