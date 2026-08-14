@@ -75,6 +75,31 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 - `just dev up` boots the full local stack (devfinity); `just dev smoke` is
   the integration gate CI runs. Keep it green.
 
+## Cursor Cloud specific instructions
+
+This VM has no systemd. If `/nix/var/nix/daemon-socket/socket` is missing,
+start `sudo determinate-nixd daemon`, then source
+`/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh` before any `nix`
+or `just` command.
+
+Host rustup (1.83) and nvm (Node 22) stay on PATH. Use `just`,
+`scripts/with-dev-env`, or `nix develop --accept-flake-config` so the flake's
+Rust 1.93.1 / Node 24 win. Do not wrap flake commands in `bash -lc`; a login
+shell can prepend rustup again.
+
+Linux cannot run `just dev up` or `just dev saas-smoke` (Apple Container).
+The portable loops are `just dev smoke` (services-only spine) and
+`just dev web-design` (dashboard + chat fixture). Both default to port 13002;
+set `FC_WEB_DESIGN_PORT=13003` if they must run together. Standard commands
+live in `CONTRIBUTING.md` and `docs/local-integration-harness.md`.
+
+Skip Cargo builds for the local stack when Cachix has the outputs. Mirror CI
+in `.github/workflows/ci.yml`: `nix build --option max-jobs 0` for
+`.#packages.x86_64-linux.{devfinity,finite-saas-core,finite-saas-local,finitechat-server,finitechat-hosted-device,finitesitesd,finite-identity,finite-brain,fsite}`,
+export the matching `DEVFINITY_*_BIN` paths, then run smoke. `rust-build`
+should log `devfinity service binaries supplied by package outputs`. Finite
+Cachix and `trusted-users = root ubuntu` live in `/etc/nix/nix.custom.conf`.
+
 ## CI and quality gates
 
 `.github/workflows/ci.yml` runs on every PR: rustfmt, clippy (`-D warnings`),
