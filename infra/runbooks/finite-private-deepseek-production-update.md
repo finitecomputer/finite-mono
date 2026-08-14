@@ -121,10 +121,58 @@ the separately approved relaunch window.
    retain the output with the mono commit SHA. Until the command is installed
    by the normal NixOS deployment, use an exact read-only checkout or install
    those two files together as described in `infra/runbooks/README.md`; do not
-   deploy NixOS merely to prepare this scheduler update. Any red or unresolved
-   unknown result stops the rollout. Before the canonical Runner role is
-   deployed, `mixed-version-compatibility` is an expected green state. After
-   that role is deployed, an operator file forcing the historical alias is
+   deploy NixOS merely to prepare this scheduler update. This fleet-wide report
+   is a before/after non-regression boundary, not authority to couple unrelated
+   repairs into the scheduler window. A pre-existing non-causal exception may
+   carry through only when it is named below, retained in the before report,
+   and independently proved not to intersect the Tinfoil container, limiter,
+   Core accounting path, or Runner route. Any new or worsened red or unknown
+   result stops the rollout; an exception that disappears is an improvement.
+
+   The only reviewed pre-existing non-causal exceptions for this promotion
+   are:
+
+   - `fleet_convergence` red solely because `Sites Canary 0715`
+     (`runtime_6633703b0a4d4de545b2`) and `Smoke Studio`
+     (`runtime_be7a5a7418409a0d6a29`) are not on the current Runtime artifact;
+     they are not part of the Tinfoil scheduler deployment, and the historical
+     request label an older Runtime may send is proved by
+     `mixed-version-canary`;
+   - `recovery_boundary` red solely because the deployed
+     `finite-litestream-health.service` measures write recency on a quiet chat
+     database. Carry this exception only while the local `litestream_txid` and
+     newest replicated LTX transaction ID are equal and the snapshot and Borg
+     subchecks remain green.
+
+   Prove that second exception immediately before relaunch from a root shell on
+   lat1. This prints transaction positions only, never credential values:
+
+   ```bash
+   set -a
+   . /etc/finite/litestream-latitude.env
+   set +a
+   FP_CHAT_DB='/var/lib/private/finite-chat/data/server.sqlite3'
+   FP_METRICS="$(curl -fsS --max-time 10 http://127.0.0.1:9351/metrics)"
+   FP_DB_TXID="$(printf '%s\n' "$FP_METRICS" | awk -v needle="db=\"$FP_CHAT_DB\"" \
+     'index($0, "litestream_txid{") == 1 && index($0, needle) > 0 {printf "%.0f", $2}')"
+   FP_REPLICA_HEX="$(litestream ltx -config /etc/litestream.yml "$FP_CHAT_DB" \
+     | tail -n +2 | awk '{print $3}' | sort | tail -1)"
+   FP_REPLICA_TXID=$(( 16#$FP_REPLICA_HEX ))
+   test -n "$FP_DB_TXID"
+   test "$FP_DB_TXID" -eq "$FP_REPLICA_TXID"
+   printf 'litestream caught up: db_txid=%s replica_txid=%s\n' \
+     "$FP_DB_TXID" "$FP_REPLICA_TXID"
+   ```
+
+   The continuing Litestream retention-delete `403 AccessDenied` is tracked as
+   a separate backup-maintenance problem and is not repaired in this window.
+   Do not trigger a Runtime, NixOS, Litestream, storage-policy, or host-storage
+   change to make this scheduler-only preflight green. Any different Runtime
+   straggler, replication lag, snapshot/Borg regression, host-health problem,
+   Runner route/model problem, or other additional finding is a stop
+   condition. Before the canonical Runner role is deployed,
+   `mixed-version-compatibility` is an expected green state. After that role is
+   deployed, an operator file forcing the historical alias is
    `stale-operator-override` and red.
 
    If the command is not yet installed, the minimal staging path during the
@@ -137,7 +185,7 @@ the separately approved relaunch window.
    ssh root@64.34.82.77 "install -d -m 0700 '$STATUS_DIR'"
    scp scripts/finite-status scripts/finite_status.py \
      "root@64.34.82.77:$STATUS_DIR/"
-   ssh root@64.34.82.77 "chmod 0500 '$STATUS_DIR/finite-status' && cd '$STATUS_DIR' && nix shell 'github:NixOS/nixpkgs/$NIXPKGS_REV#python3' --command python3 ./finite-status --json"
+   ssh root@64.34.82.77 "chmod 0500 '$STATUS_DIR/finite-status' && cd '$STATUS_DIR' && nix --extra-experimental-features 'nix-command flakes' shell 'github:NixOS/nixpkgs/$NIXPKGS_REV#python3' --command python3 ./finite-status --json"
    ```
 
    This installs only the canonical read-only collector files and does not
@@ -249,7 +297,10 @@ Then:
    completion latency no more than 125% of the pre-update median.
 5. Observe the target for at least 35 minutes with no worker restart, OOM,
    CUDA error, corrupt output, stuck settlement, or readiness regression.
-6. Run `scripts/finite-status --json` again and retain the result.
+6. Run `scripts/finite-status --json` again and retain the result. Compare it
+   with the exact before report: the two reviewed pre-existing non-causal
+   exceptions may be identical or improved, but any new or worsened red or
+   unknown result is a rollback condition.
 
 ## VERIFY
 

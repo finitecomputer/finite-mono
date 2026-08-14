@@ -107,6 +107,20 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
             any("second eight-H200" in item for item in violations), violations
         )
 
+    def test_runbook_requires_status_delta_instead_of_unrelated_repairs(self) -> None:
+        candidate = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
+        runbook = (ROOT / RUNBOOK).read_text(encoding="utf-8").replace(
+            "Any new or worsened red or unknown",
+            "Any result",
+        )
+        with temporary_candidate(
+            candidate, runbook_text=runbook
+        ) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any("Any new or worsened" in item for item in violations), violations
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
