@@ -62,6 +62,7 @@ def render(core: dict[str, Any]) -> str:
             )
         )
     by_host: dict[str, set[str]] = {}
+    drifted_by_host: Counter[str] = Counter()
     for (host, artifact_id), count in sorted(active_counts.items()):
         artifact = by_id[artifact_id]
         promoted = artifact_id == target["id"]
@@ -93,13 +94,23 @@ def render(core: dict[str, Any]) -> str:
             )
         )
         by_host.setdefault(host, set()).add(artifact_id)
+        if not promoted:
+            drifted_by_host[host] += count
 
-    for host, artifact_ids in sorted(by_host.items()):
+    for host in sorted(by_host):
+        drifted_count = drifted_by_host[host]
         lines.append(
             sample(
                 "finite_component_version_mismatch",
                 {"host": host, "component": "finite-agent-runtime"},
-                int(any(artifact_id != target["id"] for artifact_id in artifact_ids)),
+                int(drifted_count > 0),
+            )
+        )
+        lines.append(
+            sample(
+                "finite_component_version_mismatched_active_agents",
+                {"host": host, "component": "finite-agent-runtime"},
+                drifted_count,
             )
         )
     return "\n".join(lines) + "\n"

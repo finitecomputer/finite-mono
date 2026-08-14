@@ -44,6 +44,11 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
                     "runtime_artifact_id": "artifact-v1",
                     "link_state": "active",
                 },
+                {
+                    "source_host_id": "finite-lat-3",
+                    "runtime_artifact_id": "artifact-v1",
+                    "link_state": "active",
+                },
             ],
         }
 
@@ -58,7 +63,7 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
             metrics,
         )
         self.assertIn(
-            'finite_runtime_artifact_active_agents{source_host_id="finite-lat-3",artifact_id="artifact-v1",version_label="v1",promoted="false"} 1',
+            'finite_runtime_artifact_active_agents{source_host_id="finite-lat-3",artifact_id="artifact-v1",version_label="v1",promoted="false"} 2',
             metrics,
         )
         self.assertIn(
@@ -67,6 +72,14 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
         )
         self.assertIn(
             'finite_component_version_mismatch{host="finite-lat-3",component="finite-agent-runtime"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-1",component="finite-agent-runtime"} 0',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-3",component="finite-agent-runtime"} 2',
             metrics,
         )
 
@@ -125,6 +138,10 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
         )
         self.assertIn(
             'finite_runtime_artifact_active_agents{source_host_id="finite-lat-1",artifact_id="artifact-v2",version_label="v2",promoted="true"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'finite_component_version_mismatched_active_agents{host="finite-lat-1",component="finite-agent-runtime"} 0',
             metrics,
         )
 

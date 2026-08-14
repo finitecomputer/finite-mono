@@ -621,20 +621,7 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Observed"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeAsIso"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -660,7 +647,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_version_mismatch == 1))",
+          "expr": "sort_desc(max by (component, host) (finite_component_version_mismatched_active_agents) > 0)",
           "format": "table",
           "instant": true,
           "range": false,
@@ -690,7 +677,7 @@
               "Value": 2
             },
             "renameByName": {
-              "Value": "Observed",
+              "Value": "Drifted active agents",
               "component": "Component",
               "host": "Host"
             }

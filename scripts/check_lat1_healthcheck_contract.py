@@ -154,6 +154,7 @@ def main() -> None:
         '"job"         = "finite-internal-health"',
         "finite_component_build_info",
         "finite_component_version_mismatch",
+        "finite_component_version_mismatched_active_agents",
         "finite_healthcheck_success",
         "finite_runtime_artifact_active_agents",
         "finite_runtime_artifact_info",
