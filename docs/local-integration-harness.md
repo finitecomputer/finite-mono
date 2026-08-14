@@ -158,6 +158,22 @@ vector without an implicit shell. The child exit status is preserved, and
 Postgres plus the temporary state are removed on success, failure, or
 interruption.
 
+`devfinity exec -- <command> [args...]` is the client-command helper for an
+already-running stack. It does not generate process-compose config, start
+services, or clean up. It loads the selected state root's
+`runs/default/env`, then executes the exact argument vector without an implicit
+shell. Use this when Devfinity is acting as the long-lived local server and a
+harness or test suite needs to run repeated client actions against it:
+
+```sh
+just dev up --headless
+just dev exec -- scripts/devfinity-smoke
+just dev cleanup
+```
+
+The child exit status is preserved. If the env file is missing, start the stack
+first with `devfinity --state-dir <dir> up`.
+
 The repository gate is:
 
 ```sh

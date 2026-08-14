@@ -37,6 +37,8 @@ enum Command {
     Up(UpArgs),
     /// Run an arbitrary command with isolated baseline test infrastructure.
     Run(RunArgs),
+    /// Run a client command against an already-running stack.
+    Exec(ExecArgs),
     /// Print the current devfinity process and service status.
     Status,
     /// Best-effort cleanup for orphaned devfinity processes.
@@ -96,6 +98,13 @@ struct RunArgs {
     command: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+struct ExecArgs {
+    /// Command and arguments to run after loading runs/default/env.
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -142,6 +151,7 @@ fn run() -> anyhow::Result<ExitCode> {
             stack.run_process_compose_up(mode, args.dry_run)
         }
         Command::Run(args) => run_isolated_command(&cli.state_dir, &args.command),
+        Command::Exec(args) => Stack::new(cli.state_dir)?.run_client_command(&args.command),
         Command::Status => {
             let mut stack = Stack::new(cli.state_dir)?;
             let _ = stack.prepare_host_environment(true);
@@ -279,8 +289,35 @@ mod tests {
     }
 
     #[test]
+    fn exec_command_preserves_child_argv_after_delimiter() {
+        let cli = Cli::try_parse_from([
+            "devfinity",
+            "exec",
+            "--",
+            "node",
+            "scripts/test-client.mjs",
+            "--case",
+            "one",
+        ])
+        .unwrap();
+
+        let Command::Exec(args) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(
+            args.command,
+            ["node", "scripts/test-client.mjs", "--case", "one"]
+        );
+    }
+
+    #[test]
     fn run_command_requires_a_child_command() {
         assert!(Cli::try_parse_from(["devfinity", "run"]).is_err());
+    }
+
+    #[test]
+    fn exec_command_requires_a_child_command() {
+        assert!(Cli::try_parse_from(["devfinity", "exec"]).is_err());
     }
 
     #[test]

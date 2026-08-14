@@ -861,6 +861,40 @@ impl Stack {
         self.run_wrapped_command_inner(command, None)
     }
 
+    pub fn run_client_command(&self, command: &[String]) -> Result<ExitCode> {
+        if command.is_empty() {
+            bail!("client command cannot be empty");
+        }
+        let env_file = self.run_dir.join("env");
+        if !env_file.is_file() {
+            bail!(
+                "devfinity env file {} does not exist; start the stack first with `devfinity --state-dir {} up`",
+                env_file.display(),
+                self.state_dir.display()
+            );
+        }
+
+        let script = ". \"$1\"; shift; exec \"$@\"";
+        println!("running devfinity client command: {}", shell_words(command));
+        let mut child_command = Command::new("bash");
+        child_command
+            .arg("-c")
+            .arg(script)
+            .arg("devfinity-exec")
+            .arg(&env_file)
+            .args(command)
+            .current_dir(&self.repo_root)
+            .env("DEVFINITY_ENV_FILE", &env_file);
+        scrub_devfinity_secrets(&mut child_command);
+        let status = child_command.status().with_context(|| {
+            format!(
+                "failed to run devfinity client command `{}`",
+                shell_words(command)
+            )
+        })?;
+        Ok(status_to_exit_code(status))
+    }
+
     pub fn run_wrapped_command_with_postgres_port_reservation(
         &self,
         command: &[String],
@@ -4640,6 +4674,50 @@ mod tests {
                 "finite-saas-runner",
             ]
         );
+    }
+
+    #[test]
+    fn client_command_sources_existing_stack_env() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let code = stack
+            .run_client_command(&[
+                "sh".to_string(),
+                "-c".to_string(),
+                "test \"$DEVFINITY_PROFILE\" = apple-saas && test -n \"$FC_CORE_URL\" && test \"$1\" = 'two words'".to_string(),
+                "client-test".to_string(),
+                "two words".to_string(),
+            ])
+            .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn client_command_preserves_child_exit_code() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let code = stack
+            .run_client_command(&["sh".to_string(), "-c".to_string(), "exit 23".to_string()])
+            .unwrap();
+
+        assert_eq!(code, ExitCode::from(23));
+    }
+
+    #[test]
+    fn client_command_requires_existing_env_file() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+
+        let error = stack.run_client_command(&["true".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("devfinity env file"));
     }
 
     #[test]
