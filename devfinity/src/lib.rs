@@ -365,6 +365,7 @@ pub struct Stack {
     workos_mode: WorkosMode,
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
+    runtime_image_ref: String,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +377,7 @@ struct Ports {
     hosted_web_device: u16,
     finitesites: u16,
     finite_identity: u16,
+    finite_identity_public: u16,
     finite_brain: u16,
     finite_private_limiter: u16,
     workos_fixture: u16,
@@ -393,11 +395,23 @@ impl Stack {
         let pids_dir = run_dir.join("pids");
         let process_compose_control_dir = process_compose_control_dir(&run_dir);
         let port_offset = optional_env_u16("DEVFINITY_PORT_OFFSET", 0)?;
-        let runtime_agent_port = optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?;
+        let runtime_agent_port = if std::env::var("DEVFINITY_RUNTIME_AGENT_PORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?
+        } else {
+            offset_port(18080, port_offset)?
+        };
         let apple_container_name_prefix = std::env::var("DEVFINITY_APPLE_CONTAINER_NAME_PREFIX")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "finite-devfinity".to_string());
+        let runtime_image_ref = std::env::var("DEVFINITY_RUNTIME_IMAGE_REF")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| RUNTIME_IMAGE_REF.to_string());
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
@@ -415,6 +429,7 @@ impl Stack {
                 hosted_web_device: offset_port(38918, port_offset)?,
                 finitesites: offset_port(18789, port_offset)?,
                 finite_identity: offset_port(18788, port_offset)?,
+                finite_identity_public: offset_port(8791, port_offset)?,
                 finite_brain: offset_port(18790, port_offset)?,
                 finite_private_limiter: offset_port(18002, port_offset)?,
                 workos_fixture: offset_port(14199, port_offset)?,
@@ -434,6 +449,7 @@ impl Stack {
             workos_mode: WorkosMode::Fixture,
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
+            runtime_image_ref,
         })
     }
 
@@ -589,6 +605,7 @@ impl Stack {
             self.remove_secret_files();
         } else {
             self.write_secret_files()?;
+            self.write_dashboard_tsconfig()?;
         }
         self.write_env_file()?;
         self.write_postgres_script()?;
@@ -796,7 +813,7 @@ impl Stack {
                 "  host route: {} ({})",
                 self.apple_host_access.runtime_host, self.apple_host_access.source
             );
-            println!("  image:      {RUNTIME_IMAGE_REF}");
+            println!("  image:      {}", self.runtime_image_ref);
         }
         println!();
         println!("  env file:   {}", self.run_dir.join("env").display());
@@ -1669,6 +1686,7 @@ wait "$postgres_pid"
                 concat!(
                     "exec {} serve ",
                     "--data {} --external-base-url {} --listen 127.0.0.1:{} ",
+                    "--public-listen 127.0.0.1:{} ",
                     "--finite-vip-domain finite.vip ",
                     "--mailer dev --dev-print-email-tokens yes"
                 ),
@@ -1676,6 +1694,7 @@ wait "$postgres_pid"
                 shell_quote(&self.finite_identity_dir().display().to_string()),
                 shell_quote(&self.finite_identity_url()),
                 self.ports.finite_identity,
+                self.ports.finite_identity_public,
             ),
         ];
 
@@ -1704,7 +1723,7 @@ wait "$postgres_pid"
     fn write_runtime_image(&self, yaml: &mut String) {
         let process = ManagedProcess::RuntimeImage;
         let report = self.runtime_image_dir().join("build-report.json");
-        let context = self.runtime_image_dir().join("context");
+        let context = self.runtime_image_context_dir();
         let engine = self.runtime_image_engine();
         let command = format!(
             concat!(
@@ -1715,7 +1734,7 @@ wait "$postgres_pid"
                 "--report {}"
             ),
             engine,
-            shell_quote(RUNTIME_IMAGE_REF),
+            shell_quote(&self.runtime_image_ref),
             shell_quote(&context.display().to_string()),
             shell_quote(&report.display().to_string()),
         );
@@ -1794,6 +1813,7 @@ wait "$postgres_pid"
 
     fn write_apple_network_probe(&self, yaml: &mut String) {
         let process = ManagedProcess::AppleNetworkProbe;
+        let probe_container_name = self.apple_network_probe_container_name();
         let mut urls = vec![
             format!("{}/health", self.runtime_finitechat_url()),
             format!("{}/api/v1/healthz", self.finitesites_api_url()),
@@ -1813,21 +1833,27 @@ wait "$postgres_pid"
         );
         let (cleanup, command) = if self.profile == StackProfile::DockerSaas {
             (
-                "docker rm --force devfinity-host-network-probe >/dev/null 2>&1 || true"
-                    .to_string(),
                 format!(
-                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(RUNTIME_IMAGE_REF),
+                    "docker rm --force {} >/dev/null 2>&1 || true",
+                    shell_quote(&probe_container_name)
+                ),
+                format!(
+                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name {} --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(&probe_container_name),
+                    shell_quote(&self.runtime_image_ref),
                     shell_quote(&probe_script),
                 ),
             )
         } else {
             (
-                "container delete --force devfinity-host-network-probe >/dev/null 2>&1 || true"
-                    .to_string(),
                 format!(
-                    "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(RUNTIME_IMAGE_REF),
+                    "container delete --force {} >/dev/null 2>&1 || true",
+                    shell_quote(&probe_container_name)
+                ),
+                format!(
+                    "exec container run --rm --name {} --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(&probe_container_name),
+                    shell_quote(&self.runtime_image_ref),
                     shell_quote(&probe_script),
                 ),
             )
@@ -1853,6 +1879,10 @@ wait "$postgres_pid"
         }
         let _ = writeln!(yaml, "    availability:");
         let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn apple_network_probe_container_name(&self) -> String {
+        format!("{}-host-network-probe", self.apple_container_name_prefix)
     }
 
     fn write_runtime_artifact(&self, yaml: &mut String) {
@@ -1892,7 +1922,7 @@ wait "$postgres_pid"
                     shell_quote(RUNTIME_ARTIFACT_ID_PREFIX)
                 ),
                 String::from("digest=\"sha256:$digest_hex\""),
-                format!("reference={}@\"$digest\"", shell_quote(RUNTIME_IMAGE_REF)),
+                format!("reference={}@\"$digest\"", shell_quote(&self.runtime_image_ref)),
                 command,
                 String::from("umask 077"),
                 format!(
@@ -1994,7 +2024,7 @@ wait "$postgres_pid"
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE",
-                    RUNTIME_IMAGE_REF.to_string(),
+                    self.runtime_image_ref.clone(),
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
@@ -2087,7 +2117,8 @@ wait "$postgres_pid"
             // Keep the long-lived local dev server isolated from production
             // and browser-test build artifacts. Next can otherwise combine
             // incompatible manifests and serve every App Router path as 404.
-            ("NEXT_DIST_DIR", ".next-devfinity".to_string()),
+            ("NEXT_DIST_DIR", self.dashboard_next_dist_dir()),
+            ("NEXT_TSCONFIG_PATH", self.dashboard_tsconfig_name()),
             (
                 "FINITECHAT_HOSTED_API_TOKEN",
                 self.hosted_web_device_token.clone(),
@@ -2758,7 +2789,7 @@ wait "$postgres_pid"
                         } else {
                             "container"
                         }),
-                        String::from("devfinity-host-network-probe"),
+                        self.apple_network_probe_container_name(),
                     ],
                     ManagedProcess::RuntimeArtifact => vec![
                         String::from("finite-saas-core"),
@@ -3016,7 +3047,7 @@ wait "$postgres_pid"
                 "runtime=http://127.0.0.1:{}",
                 self.ports.runtime_agent
             );
-            let _ = writeln!(urls, "runtime_image={RUNTIME_IMAGE_REF}");
+            let _ = writeln!(urls, "runtime_image={}", self.runtime_image_ref);
             let _ = writeln!(urls, "runtime_artifact_prefix={RUNTIME_ARTIFACT_ID_PREFIX}");
         }
         urls
@@ -3195,6 +3226,66 @@ wait "$postgres_pid"
 
     fn runtime_image_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::RuntimeImage)
+    }
+
+    fn runtime_image_context_dir(&self) -> PathBuf {
+        if self.profile == StackProfile::AppleSaas {
+            return self
+                .repo_root
+                .join("target")
+                .join("runtime-image")
+                .join("devfinity-context");
+        }
+        self.runtime_image_dir().join("context")
+    }
+
+    fn state_hash_hex(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.state_dir.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn dashboard_next_dist_dir(&self) -> String {
+        format!(".next/devfinity-{}", self.state_hash_hex())
+    }
+
+    fn dashboard_tsconfig_name(&self) -> String {
+        format!("tsconfig.devfinity-{}.json", self.state_hash_hex())
+    }
+
+    fn dashboard_tsconfig_file(&self) -> PathBuf {
+        self.repo_root
+            .join("finitecomputer-v2/apps/dashboard")
+            .join(self.dashboard_tsconfig_name())
+    }
+
+    fn write_dashboard_tsconfig(&self) -> Result<()> {
+        let base = self
+            .repo_root
+            .join("finitecomputer-v2/apps/dashboard/tsconfig.json");
+        let contents = fs::read_to_string(&base)
+            .with_context(|| format!("failed to read {}", base.display()))?;
+        let mut config: serde_json::Value = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", base.display()))?;
+        let include = config
+            .get_mut("include")
+            .and_then(serde_json::Value::as_array_mut)
+            .with_context(|| format!("{} must contain an include array", base.display()))?;
+        for pattern in [
+            format!("{}/types/**/*.ts", self.dashboard_next_dist_dir()),
+            format!("{}/dev/types/**/*.ts", self.dashboard_next_dist_dir()),
+        ] {
+            if !include
+                .iter()
+                .any(|entry| entry.as_str() == Some(pattern.as_str()))
+            {
+                include.push(serde_json::Value::String(pattern));
+            }
+        }
+        let path = self.dashboard_tsconfig_file();
+        fs::write(&path, serde_json::to_string_pretty(&config)? + "\n")
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
     }
 
     fn runner_dir(&self) -> PathBuf {
@@ -4725,6 +4816,7 @@ mod tests {
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("finite-identity:"));
         assert!(yaml.contains("finite-identityd serve"));
+        assert!(yaml.contains("--public-listen 127.0.0.1:8791"));
         assert!(yaml.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
         assert!(yaml.contains("secrets/identity-authority.sh"));
         assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
@@ -4749,7 +4841,13 @@ mod tests {
                 "FINITE_SITES_VIEWER_SESSION_TOKEN=dededededededededededededededededededededededededededededededede"
             )
         );
-        assert!(yaml.contains("NEXT_DIST_DIR=.next-devfinity"));
+        let dashboard_dist_dir = stack.dashboard_next_dist_dir();
+        assert!(dashboard_dist_dir.starts_with(".next/devfinity-"));
+        assert!(yaml.contains(&format!("NEXT_DIST_DIR={dashboard_dist_dir}")));
+        assert!(yaml.contains(&format!(
+            "NEXT_TSCONFIG_PATH={}",
+            stack.dashboard_tsconfig_name()
+        )));
         assert!(yaml.contains("--listen 0.0.0.0:18789"));
         assert!(yaml.contains("--api-url 'http://host.container.internal:18789'"));
         assert!(yaml.contains("--git-url 'http://host.container.internal:18789'"));
@@ -4769,8 +4867,10 @@ mod tests {
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
         assert!(yaml.contains("apple-network-probe:"));
+        assert!(yaml.contains("finite-devfinity-test-host-network-probe"));
         assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));
+        assert!(yaml.contains("target/runtime-image/devfinity-context"));
         assert!(yaml.contains("runtime-artifact-upsert"));
         assert!(yaml.contains(".image_metadata.digest"));
         assert!(yaml.contains("digest_hex=$(jq"));

@@ -4,6 +4,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, sta
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { installDevfinityCleanupHandlers, sweepTrackedDevfinityStateDirsSync } from "./devfinity-cleanup.mjs";
 
 const harnessRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(harnessRoot, "../..");
@@ -32,6 +33,7 @@ const variants = [
 let currentJob = null;
 
 mkdirSync(editableDir, { recursive: true });
+installDevfinityCleanupHandlers({ handleSignals: false, sweepOnStartup: true });
 
 const server = createServer(async (request, response) => {
   try {
@@ -123,6 +125,7 @@ async function handleRegenerate(request, response) {
 
 function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
   const job = {
+    child: null,
     exitCode: null,
     finishedAt: null,
     id: randomUUID(),
@@ -144,9 +147,11 @@ function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
 
   const child = spawn(process.execPath, ["scripts/run-prompt.mjs", prompt], {
     cwd: harnessRoot,
+    detached: process.platform !== "win32",
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  job.child = child;
 
   child.stdout.on("data", (chunk) => appendLog(job, chunk));
   child.stderr.on("data", (chunk) => appendLog(job, chunk));
@@ -156,6 +161,7 @@ function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
     job.finishedAt = new Date().toISOString();
   });
   child.on("exit", (code, signal) => {
+    job.child = null;
     job.exitCode = signal ?? code;
     if (code === 0) {
       job.status = "complete";
@@ -167,6 +173,19 @@ function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
   });
 
   return job;
+}
+
+function shutdown(signal) {
+  if (currentJob?.child) {
+    killProcessGroup(currentJob.child, signal);
+  }
+  sweepTrackedDevfinityStateDirsSync({ reason: signal });
+  server.close(() => process.exit(signalExitCode(signal)));
+  setTimeout(() => process.exit(signalExitCode(signal)), 1000).unref();
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.once(signal, () => shutdown(signal));
 }
 
 function appendLog(job, chunk) {
@@ -412,6 +431,25 @@ function displayPath(filePath) {
     return relative.split(path.sep).join("/");
   }
   return filePath;
+}
+
+function killProcessGroup(child, signal) {
+  if (!child.pid) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+function signalExitCode(signal) {
+  return {
+    SIGHUP: 129,
+    SIGINT: 130,
+    SIGTERM: 143,
+  }[signal] ?? 1;
 }
 
 function parseSkillName(skillText) {

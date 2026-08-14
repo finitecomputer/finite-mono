@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import platform as host_platform
@@ -322,6 +324,20 @@ def build_image(
     return image_metadata
 
 
+@contextlib.contextmanager
+def runtime_image_build_lock(engine: str):
+    lock_dir = MONOREPO_ROOT / "target/runtime-image"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{engine}.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        print(f"waiting for runtime image build lock: {lock_path}", file=sys.stderr)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def main() -> int:
     args = parse_args()
     image_ref = args.image_ref.strip()
@@ -341,17 +357,18 @@ def main() -> int:
 
     platform = effective_build_platform(args.engine, args.platform)
     started = time.monotonic()
-    if args.context_dir:
-        context = args.context_dir.expanduser().resolve()
-        context.mkdir(parents=True, exist_ok=True)
-        image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
-    else:
-        temp_parent = MONOREPO_ROOT / "target/runtime-image"
-        temp_parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=temp_parent) as tmp_value:
-            context = Path(tmp_value) / "ctx"
-            context.mkdir()
+    with runtime_image_build_lock(args.engine):
+        if args.context_dir:
+            context = args.context_dir.expanduser().resolve()
+            context.mkdir(parents=True, exist_ok=True)
             image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+        else:
+            temp_parent = MONOREPO_ROOT / "target/runtime-image"
+            temp_parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=temp_parent) as tmp_value:
+                context = Path(tmp_value) / "ctx"
+                context.mkdir()
+                image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
 
     report = {
         "status": "built",

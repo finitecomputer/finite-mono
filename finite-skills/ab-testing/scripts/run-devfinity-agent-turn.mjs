@@ -18,6 +18,7 @@ const stateDir = requiredEnv("DEVFINITY_STATE_DIR");
 const profile = requiredEnv("DEVFINITY_PROFILE");
 const prompt = readFileSync(promptFile, "utf8");
 const variant = process.env.SKILL_AB_DEVFINITY_VARIANT || "skill";
+const replyTimeoutMs = positiveIntegerEnv("SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS", 20 * 60 * 1000);
 
 let updatesProcess = null;
 
@@ -350,7 +351,7 @@ function maxRemoteSeq(state, route) {
 
 async function waitForRemoteReplyAfter(machineId, previous, route) {
   const started = Date.now();
-  while (Date.now() - started < 360000) {
+  while (Date.now() - started < replyTimeoutMs) {
     const state = await chatState(machineId);
     const hasFinal = (state.messages || []).some(
       (message) =>
@@ -367,7 +368,7 @@ async function waitForRemoteReplyAfter(machineId, previous, route) {
     }
     await delay(500);
   }
-  throw new Error("Hermes did not answer the Devfinity skill A/B message within 360s");
+  throw new Error(`Hermes did not answer the Devfinity skill A/B message within ${Math.round(replyTimeoutMs / 1000)}s`);
 }
 
 async function waitForScopedWorkingClear(machineId, route) {
@@ -511,6 +512,18 @@ async function waitForProcess(child) {
 
 function trimTrailingSlash(value) {
   return String(value).replace(/\/+$/u, "");
+}
+
+function positiveIntegerEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer number of milliseconds`);
+  }
+  return parsed;
 }
 
 function delay(ms) {

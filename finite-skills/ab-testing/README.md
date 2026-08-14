@@ -32,6 +32,9 @@ same local key convention as devfinity:
 `FINITE_PRIVATE_API_KEY`, a cached key under `DEVFINITY_STATE_DIR`, then the
 default cache at
 `.local-state/devfinity/credentials/finite-private-upstream.key`.
+When running from a Git worktree, it also checks the same Devfinity key cache
+in the other worktrees listed by Git, which lets Codex worktrees use the key
+cached in your main local checkout.
 
 If you have not cached the key locally yet, run this once from the monorepo
 root:
@@ -114,8 +117,17 @@ For an accurate product skill test, use the browser Generate flow or
 `SKILL_AB_RUNNER=devfinity`. The Devfinity runner starts a disposable
 Devfinity SaaS stack for each variant, installs a managed-skills tree
 containing exactly one selected skill, restarts Hermes inside that local
-runtime, sends the build task through the Hosted Web chat path, and copies back
-the generated HTML from the runtime workspace.
+runtime, sends the build task through the Hosted Web chat path, and captures
+the generated single-file HTML from the agent's final response. If the runtime
+also writes the diagnostic HTML path, the harness copies that file instead.
+Each disposable run receives its own Devfinity port offset, Apple container
+name prefix, host-network probe container name, and local runtime image tag so
+parallel runs and retries do not share local ports, dashboard build state, or
+runtime container names.
+The harness records every disposable `--state-dir` under `runs/`, runs
+`devfinity --state-dir ... cleanup` in provider `finally` and signal paths,
+and sweeps previously tracked temp-root state on startup before serving or
+generating another run.
 
 The Devfinity prompt does not include either skill file, either skill path, the
 variant label, or any A/B wording. Isolation is provided by the runtime's
@@ -155,6 +167,11 @@ Runner settings:
 - `SKILL_AB_DEVFINITY_DOCKER_RUNTIME=1`: use Devfinity's Docker runtime profile
   instead of the default Apple Container profile.
 - `SKILL_AB_DEVFINITY_TIMEOUT_MS=1800000`
+- `SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS=1200000`: wait up to 20 minutes for
+  the in-runtime Hermes chat turn to produce a final response.
+- `SKILL_AB_DEVFINITY_STATE_ROOT`: override the temp root used for disposable
+  per-variant Devfinity state.
+- `SKILL_AB_DEVFINITY_CLEANUP_TIMEOUT_MS=120000`: per-state-dir cleanup cap.
 - `SKILL_AB_AGENT_MODEL`: optional model override for isolated Codex agents.
 - `SKILL_AB_AGENT_TIMEOUT_MS=600000`
 

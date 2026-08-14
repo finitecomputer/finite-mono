@@ -1,8 +1,14 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  cleanupDevfinityStateDirSync,
+  devfinityCleanupEnv,
+  installDevfinityCleanupHandlers,
+  registerDevfinityStateDir,
+} from "../scripts/devfinity-cleanup.mjs";
 
 const providerDir = path.dirname(fileURLToPath(import.meta.url));
 const harnessRoot = path.resolve(providerDir, "..");
@@ -11,6 +17,8 @@ const finitePrivateDefaultBaseUrl = "https://kimi-k2-6.finite.containers.tinfoil
 const finitePrivateDefaultModel = "glm-5-2";
 const openAIDefaultBaseUrl = "https://api.openai.com/v1";
 const openAIDefaultModel = "gpt-5-mini";
+
+installDevfinityCleanupHandlers({ sweepOnStartup: true });
 
 export default class WebDesignSkillProvider {
   constructor(options = {}) {
@@ -129,6 +137,37 @@ export default class WebDesignSkillProvider {
         extraction = repaired;
         outputKind = "repaired-html";
       }
+    }
+    if (!extraction.found) {
+      const message = `${runner} runner returned non-HTML output; no preview artifact was generated.`;
+      writeFileSync(path.join(artifactDir, "output.raw.md"), output, "utf8");
+      writeFileSync(path.join(artifactDir, "prompt.txt"), promptTranscript, "utf8");
+      writeFileSync(
+        path.join(artifactDir, "metadata.json"),
+        JSON.stringify(
+          {
+            caseId,
+            caseTitle: vars.title ?? caseId,
+            brief: prompt,
+            model,
+            modelProvider: modelProvider.name,
+            baseUrl: modelProvider.baseUrl,
+            keySource: modelProvider.keySource,
+            outputKind,
+            runner,
+            skillName,
+            skillPath: path.relative(harnessRoot, skillPath),
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            variant: this.variant,
+            error: message,
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      throw new Error(`${message} Raw output: ${truncateForError(output)}`);
     }
 
     const html = extraction.html;
@@ -291,8 +330,9 @@ function readFinitePrivateKey({ required }) {
       ? path.join(resolveRepoRelativePath(process.env.DEVFINITY_STATE_DIR), "credentials", "finite-private-upstream.key")
       : null,
     path.join(repoRoot, ".local-state/devfinity/credentials/finite-private-upstream.key"),
+    ...gitWorktreeFinitePrivateKeyFiles(),
   ].filter(Boolean);
-  for (const keyFile of keyFileCandidates) {
+  for (const keyFile of unique(keyFileCandidates)) {
     const absolutePath = path.isAbsolute(keyFile) ? keyFile : path.resolve(repoRoot, keyFile);
     if (existsSync(absolutePath)) {
       return validateFinitePrivateKey(readFileSync(absolutePath, "utf8"), `file:${displayPath(absolutePath)}`);
@@ -309,6 +349,27 @@ function readFinitePrivateKey({ required }) {
     );
   }
   return null;
+}
+
+function gitWorktreeFinitePrivateKeyFiles() {
+  const result = spawnSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  if (result.status !== 0 || !result.stdout) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter(Boolean)
+    .map((worktreePath) => path.join(worktreePath, ".local-state/devfinity/credentials/finite-private-upstream.key"));
+}
+
+function unique(values) {
+  return [...new Set(values)];
 }
 
 function validateFinitePrivateKey(value, keySource) {
@@ -423,25 +484,30 @@ When finished, reply with a short confirmation only.`;
 function buildFiniteAgentPrompt({ brief, caseTitle, runId }) {
   const runtimeOutputPath = `/data/workspace/local-web-builds/${runId}/index.html`;
   return {
-    prompt: `Build this web artifact:
+    prompt: `Use your configured local skill as design guidance for this task.
+Do not ask clarifying questions.
+
+Build this web artifact:
 
 ${brief}
 
-Write the result to this exact file path in your runtime workspace:
-${runtimeOutputPath}
+Return exactly one complete single-file HTML document in your final response.
+Start with <!doctype html>. Do not wrap the HTML in a Markdown code fence.
 
 Hard requirements:
-- Create a complete single-file HTML document at that path.
 - Inline all CSS and JavaScript.
 - Do not fetch external fonts, images, scripts, or stylesheets.
 - Use realistic copy, data, controls, and visual states.
 - Make the first viewport useful for judging the design.
 - Keep the artifact safe to open from a local file URL.
 - Do not mention these delivery instructions in the rendered UI.
+- Do not run deployment, publishing, browser automation, or extended QA flows.
 
 Case title: ${caseTitle}
 
-When finished, reply with the exact path you wrote and no code fence.`,
+If you can write files without delaying the turn, you may also write the same
+HTML to this runtime path for diagnostics:
+${runtimeOutputPath}`,
     runId,
     runtimeOutputPath,
   };
@@ -534,7 +600,15 @@ async function callDevfinityAgent({
     resultPath,
     runtimeOutputPath,
     skillBundleDir: skillBundle.bundleRoot,
+    stateDir,
     upstreamKey,
+    variant,
+  });
+  const cleanupEnv = devfinityCleanupEnv(env);
+  registerDevfinityStateDir({
+    artifactDir,
+    cleanupEnv,
+    stateDir,
     variant,
   });
   const args = [
@@ -559,11 +633,17 @@ async function callDevfinityAgent({
       env,
       timeoutMs,
     });
+    writeFileSync(logPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
   } catch (error) {
     writeFileSync(logPath, `${error.stdout || ""}\n${error.stderr || ""}\n${error.message}`.trim(), "utf8");
     throw error;
+  } finally {
+    cleanupDevfinityStateDirSync(stateDir, {
+      cleanupEnv,
+      logPath,
+      reason: "provider finally",
+    });
   }
-  writeFileSync(logPath, `${result.stdout}\n${result.stderr}`.trim(), "utf8");
 
   if (!existsSync(resultPath)) {
     throw new Error(`Devfinity runner did not write ${displayPath(resultPath)}`);
@@ -624,7 +704,7 @@ function skillRelativeDir(skillSourcePath, skillName) {
   return path.join("ab-test", sanitize(skillName || path.basename(sourceDir)));
 }
 
-function devfinityEnv({ promptPath, resultPath, runtimeOutputPath, skillBundleDir, upstreamKey, variant }) {
+function devfinityEnv({ promptPath, resultPath, runtimeOutputPath, skillBundleDir, stateDir, upstreamKey, variant }) {
   const env = { ...process.env };
   for (const name of [
     "OPENAI_API_KEY",
@@ -640,14 +720,17 @@ function devfinityEnv({ promptPath, resultPath, runtimeOutputPath, skillBundleDi
   env.SKILL_AB_DEVFINITY_RUNTIME_OUTPUT_PATH = runtimeOutputPath;
   env.SKILL_AB_DEVFINITY_SKILL_BUNDLE_DIR = skillBundleDir;
   env.SKILL_AB_DEVFINITY_VARIANT = variant;
-  env.DEVFINITY_PORT_OFFSET = env.SKILL_AB_DEVFINITY_PORT_OFFSET || String(devfinityPortOffset(variant, promptPath));
+  const runIdentity = `${variant}:${promptPath}:${stateDir}`;
+  env.DEVFINITY_PORT_OFFSET = env.SKILL_AB_DEVFINITY_PORT_OFFSET || String(devfinityPortOffset(runIdentity));
   env.DEVFINITY_APPLE_CONTAINER_NAME_PREFIX =
-    env.SKILL_AB_DEVFINITY_APPLE_CONTAINER_NAME_PREFIX || `finite-ab-${hashString(`${variant}:${promptPath}`).slice(0, 10)}`;
+    env.SKILL_AB_DEVFINITY_APPLE_CONTAINER_NAME_PREFIX || `finite-ab-${hashString(runIdentity).slice(0, 10)}`;
+  env.DEVFINITY_RUNTIME_IMAGE_REF =
+    env.SKILL_AB_DEVFINITY_RUNTIME_IMAGE_REF || `finite-agent-runtime:skill-ab-${hashString(runIdentity).slice(0, 12)}`;
   return env;
 }
 
-function devfinityPortOffset(variant, promptPath) {
-  return 1000 + (Number.parseInt(hashString(`${variant}:${promptPath}`).slice(0, 6), 16) % 30000);
+function devfinityPortOffset(runIdentity) {
+  return 1000 + (Number.parseInt(hashString(runIdentity).slice(0, 6), 16) % 20000);
 }
 
 function hashString(value) {
@@ -865,26 +948,16 @@ function extractHtml(output) {
 
   return {
     found: false,
-    html: `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Non-HTML Output</title>
-  <style>
-    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #f6f4ef; color: #181818; }
-    main { max-width: 900px; margin: 48px auto; padding: 0 24px; }
-    pre { white-space: pre-wrap; background: white; border: 1px solid #d8d2c5; padding: 20px; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Provider returned non-HTML output</h1>
-    <pre>${escapeHtml(output)}</pre>
-  </main>
-</body>
-</html>`,
+    html: null,
   };
+}
+
+function truncateForError(value, limit = 600) {
+  const text = String(value ?? "").trim().replace(/\s+/g, " ");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}...`;
 }
 
 function findHtmlStart(text) {
@@ -908,14 +981,6 @@ function sanitize(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 80) || "item";
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
 }
 
 function shouldRepairHtml(config) {
