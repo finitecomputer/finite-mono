@@ -2,15 +2,16 @@
 
 ## Scope
 
-`finite-litestream.service` on finite-lat-1 continuously replicates enrolled
-SQLite files to the Latitude.sh S3-compatible bucket `finite-lat-1-litestream`
+One `finite-litestream-<name>.service` instance per enrolled database on
+finite-lat-1 continuously replicates its SQLite file to the Latitude.sh
+S3-compatible bucket `finite-lat-1-litestream`
 (`https://objects.chi.storage.sh`, path-style; chi measured nearest to lat1
 at 29 ms vs nyc's 48 ms, 2026-08-12):
 
-| Replica name | Live path | Owning service |
-| --- | --- | --- |
-| `finite-chat-server` | `/var/lib/private/finite-chat/data/server.sqlite3` | `finitechat-server.service` |
-| `finite-brain` | `/var/lib/private/finitebrain/finite-brain.sqlite3` | `finite-brain-app.service` |
+| Replica name / unit suffix | Live path | Owning service | Metrics |
+| --- | --- | --- | --- |
+| `finite-chat-server` | `/var/lib/private/finite-chat/data/server.sqlite3` | `finitechat-server.service` | `127.0.0.1:9351` |
+| `finite-brain` | `/var/lib/private/finitebrain/finite-brain.sqlite3` | `finite-brain-app.service` | `127.0.0.1:9352` |
 
 This is a **DR-only restore lane** with seconds-of-writes RPO — NOT a warm
 standby. It is additive to the deploy-triggered Recovery Snapshot and the
@@ -18,13 +19,13 @@ nightly Borg offsite job; neither is replaced.
 
 Both databases must be in WAL mode with the owning service as the first
 opener. Brain WAL is set in `BrainStore::open`; chat already set WAL on its
-store. The replicator refuses to start unless every enrolled `$db-wal` exists
+store. Each replicator instance refuses to start unless its `$db-wal` exists
 and is owned by the same uid as the database (root-created WAL/SHM broke the
 2026-08-11 chat deploy).
 
-Stopping either owning service stops the shared replicator (`PartOf=`), so a
-Brain restart briefly pauses chat replication and vice versa. The health bound
-(900 s) absorbs that gap.
+Each instance is `PartOf=` its own owning service only: restarting Brain
+pauses Brain replication (the health bound, 900 s, absorbs it) and leaves
+chat replication running, and vice versa.
 
 **Single-writer doctrine applies** (see `deploy-finitechat-server.md` and
 `deploy-brain.md`): a restored copy must never run against production traffic
@@ -33,8 +34,12 @@ while another writer holds the same role. Restores go to a scratch path
 never next to a live server.
 
 Config: `infra/nixos/modules/finite-litestream.nix` (module),
-`infra/nixos/hosts/finite-lat-1/default.nix` (`finite.litestream.*`),
-rendered to `/etc/litestream.yml` on the host. Credentials:
+`infra/nixos/hosts/finite-lat-1/default.nix` (`finite.litestream.*`). Each
+instance runs from its own single-db config in the Nix store;
+`/etc/litestream.yml` renders the combined view of all enrolled databases
+for on-host CLI work (`litestream restore` / `litestream ltx`) — never run
+`litestream replicate` against it by hand, that would fight the per-db
+services. Credentials:
 `/etc/finite/litestream-latitude.env` (declared in
 `secret-bootstrap-contract.json`; values never in the repo).
 
@@ -46,9 +51,9 @@ rendered to `/etc/litestream.yml` on the host. Credentials:
 - `/etc/finite/litestream-latitude.env` installed on lat1, root:root 0600,
   containing `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY`.
   `sudo scripts/check-lat1-secret-bootstrap` passes.
-- `finitechat-server.service` and `finite-brain-app.service` are running (the
-  replicator refuses to be the first opener of either database — root-created
-  WAL/SHM broke the 2026-08-11 chat deploy).
+- `finitechat-server.service` and `finite-brain-app.service` are running
+  (each replicator instance refuses to be the first opener of its database —
+  root-created WAL/SHM broke the 2026-08-11 chat deploy).
 - The synthetic drill passes in CI: `just litestream-recovery-contract`.
 
 ## ACTIVATION (one-time; record evidence here when exercised)
@@ -66,8 +71,9 @@ rendered to `/etc/litestream.yml` on the host. Credentials:
    dashboard at any time.
 2. Deploy the enabling closure via the normal chain
    (`just nixos-build-lat1 REV` → `scripts/deploy-lat1 REV`).
-3. Watch the initial snapshot upload:
-   `journalctl -fu finite-litestream`. Chat (`curl -s http://127.0.0.1:8788/health`)
+3. Watch the initial snapshot uploads:
+   `journalctl -fu finite-litestream-finite-chat-server -fu finite-litestream-finite-brain`.
+   Chat (`curl -s http://127.0.0.1:8788/health`)
    and Brain (`curl -s http://127.0.0.1:3015/health`) must stay uninterrupted.
 4. Run the restore-parity VERIFY below; record its date and output here.
 5. `systemctl start finite-litestream-health` and confirm success plus the
@@ -78,14 +84,16 @@ rendered to `/etc/litestream.yml` on the host. Credentials:
 ## ROUTINE HEALTH
 
 - `finite-litestream-health.timer` runs every 5 minutes: secret names
-  present, daemon active, metrics served on `127.0.0.1:9351`, and the newest
-  replicated LTX entry younger than 900 s for every enrolled database. Any
-  failure lands in `journalctl -u finite-litestream-health` and turns
-  `scripts/finite-status` recovery red via the stale stamp.
+  present, every per-db daemon active, metrics served on each instance's
+  loopback address (see the Scope table), and the newest replicated LTX
+  entry younger than 900 s for every enrolled database. Any failure lands in
+  `journalctl -u finite-litestream-health` and turns `scripts/finite-status`
+  recovery red via the stale stamp.
 - The pre-deploy snapshot fence stops `finitechat-server`, which stops the
-  replicator (`partOf`); the chat server's start pulls it back. A deploy
-  therefore shows a short replication gap — the health bound (900 s) absorbs
-  it.
+  chat replicator instance (`partOf`); the chat server's start pulls it
+  back. Brain replication keeps running through a chat-only fence. A deploy
+  therefore shows a short per-db replication gap — the health bound (900 s)
+  absorbs it.
 
 ## VERIFY (restore-parity drill — run at activation and after any migration that swaps the database file)
 

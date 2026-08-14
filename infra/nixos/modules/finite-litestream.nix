@@ -10,6 +10,17 @@
 # Borg archives. Litestream closes that gap by shipping WAL frames
 # continuously. It is additive: the snapshot and Borg lanes stay.
 #
+# Why one replicator instance per database: the replicator must live strictly
+# inside its owning service's lifecycle (PartOf=, see the first-opener note
+# below). With a single shared process, restarting ANY owning service paused
+# replication for EVERY enrolled database — a routine Brain deploy would gap
+# chat replication. Per-db `finite-litestream-<name>.service` instances keep
+# those lifecycles independent. `/etc/litestream.yml` still renders the
+# combined view of all enrolled databases as the canonical config for on-host
+# CLI work (`litestream restore` / `litestream ltx`); never run
+# `litestream replicate` against it by hand — that would fight the per-db
+# services.
+#
 # Why root: the first consumer is finitechat-server's SQLite under
 # /var/lib/private/finite-chat (DynamicUser; parent is root 0700). A fixed
 # litestream user cannot traverse that path — which is why the upstream
@@ -31,27 +42,35 @@
 let
   cfg = config.finite.litestream;
   settingsFormat = pkgs.formats.yaml { };
-  configFile = settingsFormat.generate "litestream.yml" {
-    addr = cfg.metricsAddress;
-    snapshot = {
-      interval = "24h";
-      retention = "168h";
+  dbEntry = db: {
+    path = db.path;
+    meta-path = "/var/lib/finite-litestream/${db.name}";
+    replica = {
+      type = "s3";
+      bucket = cfg.replica.bucket;
+      path = db.name;
+      endpoint = cfg.replica.endpoint;
+      region = cfg.replica.region;
+      force-path-style = true;
+      sync-interval = "1s";
     };
-    dbs = map (db: {
-      path = db.path;
-      meta-path = "/var/lib/finite-litestream/${db.name}";
-      replica = {
-        type = "s3";
-        bucket = cfg.replica.bucket;
-        path = db.name;
-        endpoint = cfg.replica.endpoint;
-        region = cfg.replica.region;
-        force-path-style = true;
-        sync-interval = "1s";
-      };
-    }) cfg.dbs;
   };
-  owningServices = lib.unique (map (db: db.owningService) cfg.dbs);
+  # Combined view of every enrolled database. Canonical for on-host CLI use
+  # (restore/ltx) only; the replicate processes each run from their own
+  # single-db config below.
+  cliConfigFile = settingsFormat.generate "litestream.yml" {
+    dbs = map dbEntry cfg.dbs;
+  };
+  replicateConfigFor = db:
+    settingsFormat.generate "litestream-${db.name}.yml" {
+      addr = db.metricsAddress;
+      snapshot = {
+        interval = "24h";
+        retention = "168h";
+      };
+      dbs = [ (dbEntry db) ];
+    };
+  replicatorUnitFor = db: "finite-litestream-${db.name}";
   firstOpenerGuard = db: ''
     db=${lib.escapeShellArg db.path}
     if [ ! -f "$db" ]; then
@@ -83,16 +102,11 @@ in
       default = "/etc/finite/litestream-latitude.env";
       description = ''
         Operator-placed env file carrying LITESTREAM_ACCESS_KEY_ID and
-        LITESTREAM_SECRET_ACCESS_KEY. If absent the replicator unit is
-        condition-skipped (chat and Brain keep serving) and finite-litestream-health
-        fails loudly every five minutes until it exists.
+        LITESTREAM_SECRET_ACCESS_KEY. If absent every per-db replicator unit
+        is condition-skipped (the owning services keep serving) and
+        finite-litestream-health fails loudly every five minutes until it
+        exists.
       '';
-    };
-
-    metricsAddress = lib.mkOption {
-      type = lib.types.str;
-      default = "127.0.0.1:9351";
-      description = "Loopback address for litestream's Prometheus /metrics.";
     };
 
     maximumReplicaAgeSeconds = lib.mkOption {
@@ -122,12 +136,16 @@ in
 
     dbs = lib.mkOption {
       default = [ ];
-      description = "SQLite databases to replicate continuously.";
+      description = "SQLite databases to replicate continuously, one replicator instance each.";
       type = lib.types.listOf (lib.types.submodule {
         options = {
           name = lib.mkOption {
             type = lib.types.str;
-            description = "Replica path inside the bucket and meta directory name.";
+            description = ''
+              Replica path inside the bucket, meta directory name, and the
+              `finite-litestream-<name>` unit suffix. Renaming abandons the
+              existing replica generation in the bucket — don't.
+            '';
           };
           path = lib.mkOption {
             type = lib.types.path;
@@ -137,51 +155,41 @@ in
             type = lib.types.str;
             description = "systemd unit that owns and writes this database, e.g. finitechat-server.service.";
           };
+          metricsAddress = lib.mkOption {
+            type = lib.types.str;
+            description = ''
+              Loopback address for this instance's Prometheus /metrics.
+              Must be unique per database (each instance binds its own).
+            '';
+          };
         };
       });
     };
   };
 
   config = lib.mkIf cfg.enable {
-    # Canonical config path so a bare `litestream restore` works on-host.
-    environment.etc."litestream.yml".source = configFile;
+    assertions = [
+      {
+        assertion =
+          lib.length (lib.unique (map (db: db.metricsAddress) cfg.dbs))
+          == lib.length cfg.dbs;
+        message = "finite.litestream: every dbs entry needs a unique metricsAddress.";
+      }
+      {
+        assertion =
+          lib.length (lib.unique (map (db: db.name) cfg.dbs)) == lib.length cfg.dbs;
+        message = "finite.litestream: every dbs entry needs a unique name.";
+      }
+    ];
+
+    # Canonical combined config so a bare `litestream restore`/`ltx` works
+    # on-host across all enrolled databases.
+    environment.etc."litestream.yml".source = cliConfigFile;
     environment.systemPackages = [ pkgs.litestream ];
 
     systemd.services = lib.mkMerge (
       [
         {
-          finite-litestream = {
-            description = "Litestream continuous SQLite replication (DR-only, not a standby)";
-            wants = [ "network-online.target" ];
-            after = [ "network-online.target" ] ++ owningServices;
-            requires = owningServices;
-            partOf = owningServices;
-            wantedBy = [ "multi-user.target" ];
-            restartTriggers = [ configFile ];
-            # Loud-but-safe secret degrade: no crash-loop when the operator
-            # has not installed the credential file yet; the health timer
-            # reports it.
-            unitConfig.ConditionPathExists = cfg.environmentFile;
-            path = [ pkgs.coreutils ];
-            preStart = lib.concatStringsSep "\n" (map firstOpenerGuard cfg.dbs);
-            serviceConfig = {
-              ExecStart = "${pkgs.litestream}/bin/litestream replicate -config /etc/litestream.yml";
-              EnvironmentFile = cfg.environmentFile;
-              User = "root";
-              StateDirectory = "finite-litestream";
-              Restart = "on-failure";
-              RestartSec = 5;
-              NoNewPrivileges = true;
-              PrivateTmp = true;
-              ProtectSystem = "strict";
-              ProtectHome = true;
-              ProtectKernelTunables = true;
-              ProtectControlGroups = true;
-              RestrictSUIDSGID = true;
-              ReadWritePaths = lib.unique (map (db: dirOf db.path) cfg.dbs);
-            };
-          };
-
           # Backup-family health pattern: paired oneshot + short timer that
           # fails loudly into the journal; finite-status reads the success
           # stamp. This is deliberately NOT part of the contract-locked
@@ -223,11 +231,11 @@ in
               fi
               grep -q '^LITESTREAM_ACCESS_KEY_ID=' "$env_file"
               grep -q '^LITESTREAM_SECRET_ACCESS_KEY=' "$env_file"
-              systemctl is-active --quiet finite-litestream.service
-              metrics=$(curl -fsS --max-time 10 http://${cfg.metricsAddress}/metrics)
-              printf '%s\n' "$metrics" | grep -q '^litestream_'
               now=$(date +%s)
               ${lib.concatStringsSep "\n" (map (db: ''
+                systemctl is-active --quiet ${replicatorUnitFor db}.service
+                metrics=$(curl -fsS --max-time 10 http://${db.metricsAddress}/metrics)
+                printf '%s\n' "$metrics" | grep -q '^litestream_'
                 ltx_rows=$(litestream ltx -config /etc/litestream.yml ${lib.escapeShellArg db.path} | tail -n +2)
                 if [ -z "$ltx_rows" ]; then
                   echo "finite-litestream-health: no replicated LTX entries for ${db.name}" >&2
@@ -259,12 +267,45 @@ in
           };
         }
       ]
-      # The owning service's start pulls replication back after the
+      ++ map (db: {
+        ${replicatorUnitFor db} = {
+          description = "Litestream replication for ${db.name} (DR-only, not a standby)";
+          wants = [ "network-online.target" ];
+          after = [ "network-online.target" db.owningService ];
+          requires = [ db.owningService ];
+          partOf = [ db.owningService ];
+          wantedBy = [ "multi-user.target" ];
+          # Loud-but-safe secret degrade: no crash-loop when the operator
+          # has not installed the credential file yet; the health timer
+          # reports it.
+          unitConfig.ConditionPathExists = cfg.environmentFile;
+          path = [ pkgs.coreutils ];
+          preStart = firstOpenerGuard db;
+          serviceConfig = {
+            ExecStart = "${pkgs.litestream}/bin/litestream replicate -config ${replicateConfigFor db}";
+            EnvironmentFile = cfg.environmentFile;
+            User = "root";
+            StateDirectory = "finite-litestream";
+            Restart = "on-failure";
+            RestartSec = 5;
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            ProtectKernelTunables = true;
+            ProtectControlGroups = true;
+            RestrictSUIDSGID = true;
+            ReadWritePaths = [ (dirOf db.path) ];
+          };
+        };
+      }) cfg.dbs
+      # The owning service's start pulls its replicator back after the
       # pre-deploy snapshot fence stops everything and restarts services one
       # by one.
-      ++ map (unit: {
-        ${lib.removeSuffix ".service" unit}.wants = [ "finite-litestream.service" ];
-      }) owningServices
+      ++ map (db: {
+        ${lib.removeSuffix ".service" db.owningService}.wants =
+          [ "${replicatorUnitFor db}.service" ];
+      }) cfg.dbs
     );
 
     systemd.timers.finite-litestream-health = {

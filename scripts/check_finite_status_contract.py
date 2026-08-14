@@ -67,9 +67,18 @@ def main() -> None:
     require_all(
         ROOT / "infra" / "nixos" / "modules" / "finite-litestream.nix",
         [
-            recovery["litestream_service_unit"].removesuffix(".service"),
+            "finite-litestream-",
             recovery["litestream_health_unit"].removesuffix(".service"),
             recovery["litestream_success_stamp"].removeprefix("/var/lib/finite-litestream/"),
+        ],
+    )
+    # Per-db replicator unit names are finite-litestream-<db.name>; the db
+    # names are authored in the lat1 host config.
+    require_all(
+        ROOT / "infra" / "nixos" / "hosts" / "finite-lat-1" / "default.nix",
+        [
+            unit.removeprefix("finite-litestream-").removesuffix(".service")
+            for unit in recovery["litestream_service_units"]
         ],
     )
 
