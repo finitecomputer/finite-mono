@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
+import { rm } from "node:fs/promises";
 import { test } from "node:test";
 
 import { chromium, type Browser, type Page } from "playwright";
@@ -240,23 +241,14 @@ type FakeSitesState = {
   privateContentRequests: number;
 };
 
-test("dashboard agent creation browser states", { timeout: 180_000 }, async () => {
+test("dashboard agent creation browser states", { timeout: 300_000 }, async () => {
+  await resetDashboardDevDirs();
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore(() => hostedDevice.setAvailable(true));
   const brain = await startFakeBrain();
   const sites = await startFakeSites();
-  const dashboardPort = await freePort();
-  const dashboard = startDashboard(
-    dashboardPort,
-    core.url,
-    hostedDevice.url,
-    brain.url,
-    sites.apiUrl,
-    {
-      runtimeRetirement: true,
-    }
-  );
-  const dashboardOutput = collectOutput(dashboard);
+  let dashboard: ChildProcessWithoutNullStreams | null = null;
+  let dashboardOutput = () => "";
   const paidDashboardPort = await freePort();
   const paidDashboard = startDashboard(
     paidDashboardPort,
@@ -275,7 +267,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
   let browser: Browser | null = null;
 
   try {
-    await waitForDashboard(dashboardPort, dashboardOutput);
     await waitForDashboard(paidDashboardPort, paidDashboardOutput);
     browser = await chromium.launch({
       headless: true,
@@ -292,14 +283,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     });
     await withSignedInPage(browser, paidDashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?new=1`);
-      await page.getByLabel("Agent name").fill("Customer Access Proof");
-      await page.getByRole("button", { name: "Continue" }).waitFor({ state: "visible" });
+      await fillAgentNameUntilContinueEnabled(page, "Customer Access Proof");
       assert.equal(
         await page.getByRole("button", { name: "Create agent" }).count(),
         0,
         "fresh customer onboarding must never bypass Access from Profile"
       );
-      await page.getByRole("button", { name: "Continue" }).click();
+      await clickAgentCreationContinue(page);
       await page
         .getByRole("button", { name: "Continue to secure payment" })
         .waitFor({ state: "visible" });
@@ -322,7 +312,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         state: "visible",
       });
       await page.getByRole("radio", { name: /Confidential/u }).check();
-      await page.getByRole("button", { name: "Continue" }).click();
+      await clickAgentCreationContinue(page);
       await expectVisibleText(
         page,
         "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet."
@@ -335,35 +325,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page
         .getByRole("textbox", { name: "Confidential Launch Code" })
         .waitFor({ state: "visible" });
-    });
-
-    core.reset({
-      projects: [
-        visibleProject(
-          "project_non_admin_advanced",
-          "Customer Controls Bot",
-          hostedDevice.runtimeStatusUrl,
-          "customer-controls-bot",
-          true,
-          true
-        ),
-      ],
-      requests: [],
-    });
-    await withSignedInPage(browser, dashboardPort, async (page) => {
-      await page.goto(
-        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_customer-controls-bot`
-      );
-      await page.getByRole("heading", { name: "Customer Controls Bot" }).waitFor({
-        state: "visible",
-      });
-      assert.equal(
-        await page.locator("summary").filter({ hasText: /^Advanced$/u }).count(),
-        0,
-        "non-admin viewers must not see Advanced runtime controls"
-      );
-      assert.equal(await page.getByRole("button", { name: "Recover chat" }).count(), 0);
-      assert.equal(await page.getByRole("button", { name: "Retire agent" }).count(), 0);
     });
 
     core.reset({
@@ -416,29 +377,66 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     // both compilers alive makes later on-demand route compilation contend in CI.
     await stopChildProcess(paidDashboard);
 
+    const dashboardPort = await freePort();
+    dashboard = startDashboard(
+      dashboardPort,
+      core.url,
+      hostedDevice.url,
+      brain.url,
+      sites.apiUrl,
+      {
+        runtimeRetirement: true,
+      }
+    );
+    dashboardOutput = collectOutput(dashboard);
+    await waitForDashboard(dashboardPort, dashboardOutput);
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_non_admin_advanced",
+          "Customer Controls Bot",
+          hostedDevice.runtimeStatusUrl,
+          "customer-controls-bot",
+          true,
+          true
+        ),
+      ],
+      requests: [],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_customer-controls-bot`
+      );
+      await page.getByRole("heading", { name: "Customer Controls Bot" }).waitFor({
+        state: "visible",
+      });
+      assert.equal(
+        await page.locator("summary").filter({ hasText: /^Advanced$/u }).count(),
+        0,
+        "non-admin viewers must not see Advanced runtime controls"
+      );
+      assert.equal(await page.getByRole("button", { name: "Recover chat" }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Retire agent" }).count(), 0);
+    });
+
     core.reset();
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      const agentName = page.getByLabel("Agent name");
-      await agentName.waitFor({ state: "visible", timeout: 15_000 }).catch(async (error) => {
-        throw new Error(
-          `Agent creation form did not render: ${String(error)}\n${await pageText(page)}\n${dashboardOutput()}`
-        );
-      });
+      await fillAgentNameUntilContinueEnabled(page, "Oslo Bot");
       await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
       assert.equal(
         await page.getByRole("radio", { name: /Confidential/u }).count(),
         0,
         "Confidential onboarding must remain hidden from non-admin customers"
       );
-      await agentName.fill("Oslo Bot");
       await page.locator('#coreAgentPicture').setInputFiles({
         name: "oslo-bot.png",
         mimeType: "image/png",
         buffer: PNG_BYTES,
       });
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
-      await page.getByRole("button", { name: "Continue" }).click();
+      await clickAgentCreationContinue(page);
       assert.equal(
         await page.getByRole("button", { name: "Continue to secure payment" }).count(),
         0,
@@ -471,12 +469,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "agent picture did not use the authenticated Hosted Device upload"
       );
     });
-
     core.reset({ createDelayMs: 500 });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await page.getByLabel("Agent name").fill("Double Submit Bot");
-      await page.getByRole("button", { name: "Continue" }).click();
+      await fillAgentNameAndContinue(page, "Double Submit Bot");
       await page
         .getByRole("textbox", { name: "Launch Code", exact: true })
         .fill("fixture-launch-code");
@@ -490,8 +486,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     hostedDevice.failNextBindingAuthorization();
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await page.getByLabel("Agent name").fill("Authorization Retry Bot");
-      await page.getByRole("button", { name: "Continue" }).click();
+      await fillAgentNameAndContinue(page, "Authorization Retry Bot");
       await page
         .getByRole("textbox", { name: "Launch Code", exact: true })
         .fill("fixture-launch-code");
@@ -514,8 +509,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         );
       });
       await expectVisibleText(page, "binding authorization is temporarily unavailable");
-      await retryName.fill("Authorization Retry Bot");
-      await page.getByRole("button", { name: "Continue" }).click();
+      await fillAgentNameAndContinue(page, "Authorization Retry Bot");
       await page
         .getByRole("textbox", { name: "Launch Code", exact: true })
         .fill("fixture-launch-code");
@@ -546,8 +540,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
-      await page.getByLabel("Agent name").fill("Fresh Code Bot");
-      await page.getByRole("button", { name: "Continue" }).click();
+      await fillAgentNameAndContinue(page, "Fresh Code Bot");
       await page
         .getByRole("textbox", { name: "Launch Code", exact: true })
         .fill("fresh-top-up-code");
@@ -565,7 +558,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "an explicitly submitted Launch Code must win over stale entitlement capacity"
       );
     });
-
     core.reset({
       requests: [
         agentCreationRequest({
@@ -669,7 +661,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.equal(await page.getByText("operator-only relocation failed", { exact: true }).count(), 0);
       assert.equal(await page.getByRole("button", { name: "Start over" }).count(), 0);
     });
-
     core.reset({
       projects: [
         visibleProject(
@@ -839,8 +830,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         /\/dashboard\?new=1&machine=runtime_second-oslo-bot$/u
       );
       await page.getByLabel("Agent name").waitFor({ state: "visible" });
-      await page.getByLabel("Agent name").fill("Second Oslo Bot");
-      await page.getByRole("button", { name: "Continue" }).click();
+      await fillAgentNameAndContinue(page, "Second Oslo Bot");
       await page
         .getByRole("textbox", { name: "Launch Code", exact: true })
         .waitFor({ state: "visible" });
@@ -893,7 +883,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page
         .getByRole("navigation", { name: "Agent, topics, and chats" })
         .waitFor({ state: "visible" });
-
       hostedDevice.holdOwnerClaim();
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
@@ -1246,7 +1235,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("paragraph")
         .filter({ hasText: message })
         .waitFor({ state: "visible", timeout: 15_000 });
-
       await page.getByRole("button", { name: "Start audio recording" }).click();
       await page.getByRole("status").filter({ hasText: "Recording 0:00 / 10:00" }).waitFor({
         state: "visible",
@@ -1530,7 +1518,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         (await page.getByLabel("Site preview").locator("iframe").getAttribute("src")) ?? "",
         /\/_finite\/auth\?native_token=/u
       );
-
       const binding = hostedDevice.state.app.hosted_agent_binding;
       assert(binding);
       binding.associated_room_ids = ["room_browser_legacy"];
@@ -1723,6 +1710,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("link", { name: "Connections", exact: true })
         .click();
       await page.waitForURL(/\/connections$/u);
+      const completedBeforeSelectionRace =
+        hostedDevice.state.completedSelectionMutations;
       hostedDevice.holdNextNavigationAction();
       await page
         .locator(".finite-chat__folder-body")
@@ -1751,6 +1740,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.releaseNavigationAction();
       await waitFor(
         () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedBeforeSelectionRace + 1,
+        5_000,
+        () => "the daemon never persisted the Browser QA selection"
+      );
+      await waitFor(
+        () =>
           hostedDevice.state.authRequests.filter(
             (request) => request.path === "/v1/app/agent-bindings/open"
           ).length > stateFetchesBeforeSelectionRace,
@@ -1762,6 +1758,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByText("Browser QA", { exact: true })
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Selection settled checkpoint.", false, 15),
+        message_id: "message_selection_settled",
+        chat_id: "chat_browser_agent",
+      });
+      hostedDevice.emit();
+      await expectVisibleText(page, "Selection settled checkpoint.");
 
       // Cross-device tripwire: with no click in flight, a snapshot whose
       // daemon selection diverges from this browser's (for example, a scoped
@@ -1772,7 +1775,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Remembered background stream.", false, 15),
+        ...hostedMessage("Remembered background stream.", false, 16),
         message_id: "message_remembered_background",
         chat_id: "chat_browser_remembered",
       });
@@ -1905,7 +1908,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         assert.equal(request.workosUserId, "user_browser");
       }
     });
-
     core.reset({
       projects: [
         visibleProject(
@@ -1947,13 +1949,28 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     hostedDevice.close();
     brain.server.close();
     sites.server.close();
+    await resetDashboardDevDirs();
   }
 });
 
-async function stopChildProcess(process: ChildProcessWithoutNullStreams) {
+async function resetDashboardDevDirs() {
+  await Promise.all([
+    rm(".next-browser-test", { recursive: true, force: true }),
+    rm(".next-browser-stripe-test", { recursive: true, force: true }),
+  ]);
+}
+
+async function stopChildProcess(process: ChildProcessWithoutNullStreams | null) {
+  if (!process) return;
   if (process.exitCode !== null || process.signalCode !== null) return;
   const exited = once(process, "exit");
   process.kill("SIGTERM");
+  const terminated = await Promise.race([
+    exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  if (terminated) return;
+  process.kill("SIGKILL");
   await Promise.race([
     exited,
     new Promise((resolve) => setTimeout(resolve, 2_000)),
@@ -3136,6 +3153,7 @@ async function withSignedInPage(
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
+    page.setDefaultNavigationTimeout(90_000);
     await fn(page);
   } finally {
     await context.close();
@@ -3248,9 +3266,12 @@ function writeJson(response: ServerResponse, status: number, body: unknown) {
 
 async function waitForDashboard(port: number, output: () => string) {
   await waitFor(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/`, { redirect: "manual" }).catch(() => null);
+    const response = await fetch(`http://127.0.0.1:${port}/favicon.svg`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(5_000),
+    }).catch(() => null);
     return Boolean(response && response.status < 500);
-  }, 30_000, () => `dashboard did not become ready\n${output()}`);
+  }, 60_000, () => `dashboard did not become ready\n${output()}`);
 }
 
 async function expectVisibleText(page: Page, text: string) {
@@ -3263,6 +3284,51 @@ async function expectVisibleText(page: Page, text: string) {
     .getByText(text, { exact: true })
     .and(page.locator(":not(#__next-route-announcer__)"))
     .waitFor({ state: "visible", timeout: 15_000 });
+}
+
+async function fillAgentNameAndContinue(page: Page, displayName: string) {
+  await fillAgentNameUntilContinueEnabled(page, displayName);
+  await clickAgentCreationContinue(page);
+}
+
+async function fillAgentNameUntilContinueEnabled(page: Page, displayName: string) {
+  const agentName = page.getByLabel("Agent name");
+  const continueButton = agentCreationContinueButton(page);
+  await agentName.waitFor({ state: "visible", timeout: 15_000 }).catch(async (error) => {
+    throw new Error(
+      `Agent creation form did not render: ${String(error)}\n${await pageText(page)}`
+    );
+  });
+  await waitFor(
+    async () => {
+      await agentName.fill(displayName);
+      await page.waitForTimeout(100);
+      return (
+        (await agentName.inputValue().catch(() => "")) === displayName
+        && await continueButton.isEnabled().catch(() => false)
+      );
+    },
+    15_000,
+    async () => {
+      const value = await agentName.inputValue().catch((error) => `unavailable: ${String(error)}`);
+      const disabled = await continueButton.getAttribute("disabled").catch(() => null);
+      return `Agent name did not enable Continue.\nvalue: ${JSON.stringify(value)}\ndisabled: ${String(disabled)}\n${await pageText(page)}`;
+    }
+  );
+}
+
+async function clickAgentCreationContinue(page: Page) {
+  const continueButton = agentCreationContinueButton(page);
+  await waitFor(
+    async () => continueButton.isEnabled().catch(() => false),
+    5_000,
+    async () => `Continue never became clickable.\n${await pageText(page)}`
+  );
+  await continueButton.click();
+}
+
+function agentCreationContinueButton(page: Page) {
+  return page.getByRole("button", { name: "Continue", exact: true });
 }
 
 async function waitFor(
