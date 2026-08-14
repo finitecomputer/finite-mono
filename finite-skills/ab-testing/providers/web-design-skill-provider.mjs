@@ -14,7 +14,11 @@ const providerDir = path.dirname(fileURLToPath(import.meta.url));
 const harnessRoot = path.resolve(providerDir, "..");
 const repoRoot = path.resolve(harnessRoot, "../..");
 const finitePrivateDefaultBaseUrl = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-const finitePrivateDefaultModel = "glm-5-2";
+// Finite Private model rollout is intentionally moving quickly right now. This
+// is the currently working streaming chat-completions model for the deployed
+// limiter; if a later rollout changes the served model or endpoint contract,
+// update this direct-provider shim to match the product path again.
+const finitePrivateDefaultModel = "deepseek-v4-flash-0731";
 const openAIDefaultBaseUrl = "https://api.openai.com/v1";
 const openAIDefaultModel = "gpt-5-mini";
 
@@ -109,14 +113,12 @@ export default class WebDesignSkillProvider {
     } else {
       modelProvider = resolveModelProvider(this.config);
       model = modelProvider.model;
-      const response = await callResponsesApi({
-        apiKey: modelProvider.apiKey,
-        baseUrl: modelProvider.baseUrl,
+      const response = await callProviderApi({
         messages: directProviderPrompt.messages,
         model,
+        modelProvider,
         maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
-        timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
-        providerLabel: modelProvider.label,
+        timeoutMs: providerTimeoutMs(modelProvider, this.config),
       });
       output = response.output;
       tokenUsage = response.tokenUsage;
@@ -125,14 +127,12 @@ export default class WebDesignSkillProvider {
     let extraction = extractHtml(output);
     let outputKind = extraction.found ? "html" : "non-html";
     if (runner === "provider" && !extraction.found && shouldRepairHtml(this.config)) {
-      const repair = await callResponsesApi({
-        apiKey: modelProvider.apiKey,
-        baseUrl: modelProvider.baseUrl,
+      const repair = await callProviderApi({
         messages: buildHtmlRepairMessages({ agentOutput: output, brief: prompt, caseTitle: vars.title ?? caseId }),
         model,
+        modelProvider,
         maxOutputTokens: Number(process.env.SKILL_AB_REPAIR_MAX_OUTPUT_TOKENS || process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
-        timeoutMs: Number(process.env.SKILL_AB_TIMEOUT_MS || this.config.timeoutMs || 120000),
-        providerLabel: modelProvider.label,
+        timeoutMs: providerTimeoutMs(modelProvider, this.config),
       });
       const repaired = extractHtml(repair.output);
       output = `${output}\n\n--- HTML repair pass output ---\n\n${repair.output}`;
@@ -246,38 +246,20 @@ export default class WebDesignSkillProvider {
 }
 
 function resolveModelProvider(config = {}) {
-  const requestedProvider = normalizeProviderName(process.env.SKILL_AB_PROVIDER || config.provider || "auto");
+  const requestedProvider = normalizeProviderName(process.env.SKILL_AB_PROVIDER || config.provider || "finite-private");
   if (requestedProvider === "finite-private") {
     return finitePrivateProvider(config);
   }
   if (requestedProvider === "openai") {
     return openAIProvider(config);
   }
-  if (requestedProvider !== "auto") {
-    throw new Error(`Unsupported SKILL_AB_PROVIDER "${requestedProvider}". Use "auto", "finite-private", or "openai".`);
-  }
-
-  const finitePrivateKey = readFinitePrivateKey({ required: false });
-  if (finitePrivateKey) {
-    return finitePrivateProvider(config, finitePrivateKey);
-  }
-  if (process.env.OPENAI_API_KEY) {
-    return openAIProvider(config);
-  }
-
-  throw new Error(
-    [
-      "A real skill A/B run needs a model API key.",
-      "Run `just dev inference-key` to cache a Finite Private key locally, set `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`,",
-      "or use `SKILL_AB_PROVIDER=openai OPENAI_API_KEY=... pnpm run ab`.",
-      "The browser Generate flow always runs the real Devfinity local Finite agent path.",
-    ].join(" "),
-  );
+  throw new Error(`Unsupported SKILL_AB_PROVIDER "${requestedProvider}". Use "finite-private" or "openai".`);
 }
 
-function finitePrivateProvider(config = {}, preloadedKey = null) {
-  const key = preloadedKey ?? readFinitePrivateKey({ required: true });
+function finitePrivateProvider(config = {}) {
+  const key = readFinitePrivateKey({ required: true });
   return {
+    api: "chat-completions",
     name: "finite-private",
     label: "Finite Private",
     apiKey: key.apiKey,
@@ -307,6 +289,7 @@ function openAIProvider(config = {}) {
     );
   }
   return {
+    api: "responses",
     name: "openai",
     label: "OpenAI",
     apiKey,
@@ -314,6 +297,13 @@ function openAIProvider(config = {}) {
     baseUrl: trimTrailingSlash(process.env.OPENAI_BASE_URL || config.openAIBaseUrl || config.baseUrl || openAIDefaultBaseUrl),
     model: process.env.SKILL_AB_MODEL || config.model || openAIDefaultModel,
   };
+}
+
+function providerTimeoutMs(modelProvider, config = {}) {
+  if (modelProvider.name === "finite-private") {
+    return Number(process.env.SKILL_AB_FINITE_PRIVATE_TIMEOUT_MS || process.env.SKILL_AB_TIMEOUT_MS || config.timeoutMs || 20 * 60 * 1000);
+  }
+  return Number(process.env.SKILL_AB_TIMEOUT_MS || config.timeoutMs || 120000);
 }
 
 function readFinitePrivateKey({ required }) {
@@ -385,7 +375,7 @@ function validateFinitePrivateKey(value, keySource) {
 }
 
 function normalizeProviderName(value) {
-  return String(value ?? "auto").trim().toLowerCase();
+  return String(value ?? "finite-private").trim().toLowerCase();
 }
 
 function resolveRunner(config = {}) {
@@ -1061,9 +1051,87 @@ Now return only the complete single-file HTML artifact.`,
   ];
 }
 
+async function callProviderApi({ messages, model, modelProvider, maxOutputTokens, timeoutMs }) {
+  if (modelProvider.api === "chat-completions") {
+    return await callChatCompletionsApi({
+      apiKey: modelProvider.apiKey,
+      baseUrl: modelProvider.baseUrl,
+      messages,
+      model,
+      maxOutputTokens,
+      providerLabel: modelProvider.label,
+      timeoutMs,
+    });
+  }
+  if (modelProvider.api === "responses") {
+    return await callResponsesApi({
+      apiKey: modelProvider.apiKey,
+      baseUrl: modelProvider.baseUrl,
+      messages,
+      model,
+      maxOutputTokens,
+      providerLabel: modelProvider.label,
+      timeoutMs,
+    });
+  }
+  throw new Error(`Unsupported provider API "${modelProvider.api}" for ${modelProvider.name}`);
+}
+
+async function callChatCompletionsApi({ apiKey, baseUrl, messages, model, maxOutputTokens, timeoutMs, providerLabel }) {
+  return await callWithRetries(
+    async () => {
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      try {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messages,
+            model,
+            max_tokens: maxOutputTokens,
+            stream: true,
+            stream_options: { include_usage: true },
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw providerHttpError(providerLabel, response, data);
+        }
+
+        return await chatCompletionStreamOutput(response, providerLabel);
+      } catch (error) {
+        if (timedOut) {
+          throw providerTimeoutError(providerLabel, timeoutMs);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    {
+      attempts: Number(process.env.SKILL_AB_FINITE_PRIVATE_ATTEMPTS || 3),
+      providerLabel,
+    },
+  );
+}
+
 async function callResponsesApi({ apiKey, baseUrl, messages, model, maxOutputTokens, timeoutMs, providerLabel }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(`${baseUrl}/responses`, {
       method: "POST",
@@ -1081,8 +1149,7 @@ async function callResponsesApi({ apiKey, baseUrl, messages, model, maxOutputTok
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message = data?.error?.message || `${response.status} ${response.statusText}`;
-      throw new Error(`${providerLabel} request failed: ${message}`);
+      throw providerHttpError(providerLabel, response, data);
     }
 
     return {
@@ -1093,9 +1160,137 @@ async function callResponsesApi({ apiKey, baseUrl, messages, model, maxOutputTok
         completion: data?.usage?.output_tokens,
       },
     };
+  } catch (error) {
+    if (timedOut) {
+      throw providerTimeoutError(providerLabel, timeoutMs);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function callWithRetries(operation, { attempts, providerLabel }) {
+  const cappedAttempts = Math.max(1, Math.min(5, Number.isFinite(attempts) ? Math.trunc(attempts) : 1));
+  let lastError;
+  for (let attempt = 1; attempt <= cappedAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt === cappedAttempts || !isRetryableProviderError(error)) {
+        break;
+      }
+      await delay(500 * attempt);
+    }
+  }
+  throw lastError ?? new Error(`${providerLabel} request failed`);
+}
+
+function providerHttpError(providerLabel, response, data) {
+  const message = data?.error?.message || `${response.status} ${response.statusText}`;
+  const error = new Error(`${providerLabel} request failed: ${message}`);
+  error.status = response.status;
+  error.code = data?.error?.code || data?.error?.type || data?.error?.param;
+  return error;
+}
+
+function providerTimeoutError(providerLabel, timeoutMs) {
+  const error = new Error(`${providerLabel} request timed out after ${timeoutMs}ms`);
+  error.status = 504;
+  error.code = "timeout";
+  return error;
+}
+
+function isRetryableProviderError(error) {
+  const status = Number(error?.status);
+  if (status === 429 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  const code = String(error?.code || "").toLowerCase();
+  if (["rate_limit_exceeded", "upstream_unavailable", "service_unavailable"].includes(code)) {
+    return true;
+  }
+  return /upstream is unavailable|temporarily unavailable|timeout|timed out/i.test(String(error?.message || ""));
+}
+
+async function chatCompletionStreamOutput(response, providerLabel) {
+  if (!response.body) {
+    throw new Error(`${providerLabel} streaming response did not include a body`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let output = "";
+  let tokenUsage = {};
+
+  const consumeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith("data:")) {
+      return false;
+    }
+    const payload = trimmed.slice("data:".length).trim();
+    if (payload === "[DONE]") {
+      return true;
+    }
+    let data;
+    try {
+      data = JSON.parse(payload);
+    } catch {
+      return false;
+    }
+    if (data?.error?.message) {
+      throw new Error(`${providerLabel} request failed: ${data.error.message}`);
+    }
+    for (const choice of data.choices ?? []) {
+      const delta = choice?.delta?.content;
+      if (typeof delta === "string") {
+        output += delta;
+      }
+      const message = choice?.message?.content;
+      if (typeof message === "string") {
+        output += message;
+      }
+    }
+    if (data.usage) {
+      tokenUsage = {
+        total: data.usage.total_tokens,
+        prompt: data.usage.prompt_tokens,
+        completion: data.usage.completion_tokens,
+      };
+    }
+    return false;
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (consumeLine(line)) {
+        return streamResult(output, tokenUsage, providerLabel);
+      }
+    }
+  }
+  buffer += decoder.decode();
+  for (const line of buffer.split(/\r?\n/)) {
+    if (consumeLine(line)) {
+      break;
+    }
+  }
+  return streamResult(output, tokenUsage, providerLabel);
+}
+
+function streamResult(output, tokenUsage, providerLabel) {
+  const trimmed = output.trim();
+  if (!trimmed) {
+    throw new Error(`${providerLabel} streaming chat completion did not include assistant content`);
+  }
+  return { output: trimmed, tokenUsage };
 }
 
 function responseOutputText(data, providerLabel) {
@@ -1105,7 +1300,7 @@ function responseOutputText(data, providerLabel) {
   const parts = [];
   for (const item of data.output ?? []) {
     for (const content of item.content ?? []) {
-      if (typeof content.text === "string") {
+      if (content.type === "output_text" && typeof content.text === "string") {
         parts.push(content.text);
       }
     }

@@ -203,12 +203,13 @@ Runner settings:
 - `SKILL_AB_AGENT_MODEL`: optional model override for isolated Codex agents.
 - `SKILL_AB_AGENT_TIMEOUT_MS=600000`
 
-Direct-provider defaults:
+Direct-provider modes:
 
-- `SKILL_AB_PROVIDER=auto`
-- Finite Private is used when a local key is present.
-- OpenAI is used only when no Finite Private key is found and `OPENAI_API_KEY`
-  is set, or when `SKILL_AB_PROVIDER=openai` is set.
+- `SKILL_AB_PROVIDER=finite-private`: default; uses the local Finite Private
+  key and the deployed Finite Private streaming chat-completions endpoint.
+- `SKILL_AB_PROVIDER=openai`: explicit toggle for OpenAI's Responses API.
+- There is no automatic fallback between providers; choose the provider you
+  want to test.
 
 Finite Private settings:
 
@@ -219,7 +220,12 @@ Finite Private settings:
 - Base URL: `SKILL_AB_FINITE_PRIVATE_BASE_URL`, `FINITE_PRIVATE_BASE_URL`, or
   `FC_RUNNER_FINITE_PRIVATE_BASE_URL`
 - Default base URL: `https://kimi-k2-6.finite.containers.tinfoil.dev/v1`
-- Default model: `glm-5-2`
+- Default model: `deepseek-v4-flash-0731`. This tracks the currently deployed
+  Finite Private rollout and may need to change with the next model rollout.
+- `SKILL_AB_FINITE_PRIVATE_TIMEOUT_MS=1200000`: wait up to 20 minutes for the
+  current streaming model path before failing a provider call.
+- `SKILL_AB_FINITE_PRIVATE_ATTEMPTS=3`: retry transient upstream errors before
+  failing the provider run.
 
 Common settings:
 
@@ -234,10 +240,10 @@ Common settings:
 Override them as environment variables:
 
 ```sh
-SKILL_AB_MODEL=glm-5-2 SKILL_AB_MAX_CONCURRENCY=2 pnpm run ab
+SKILL_AB_MODEL=deepseek-v4-flash-0731 SKILL_AB_MAX_CONCURRENCY=2 pnpm run ab
 ```
 
-OpenAI is still available as an explicit fallback:
+OpenAI is available as an explicit mode:
 
 ```sh
 SKILL_AB_PROVIDER=openai OPENAI_API_KEY=... SKILL_AB_MODEL=gpt-5-mini pnpm run ab
