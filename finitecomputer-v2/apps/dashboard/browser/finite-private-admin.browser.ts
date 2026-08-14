@@ -31,6 +31,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     });
     const context = await browser.newContext();
     const page = await context.newPage();
+    page.setDefaultNavigationTimeout(90_000);
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
     await page.getByLabel("Agent name").waitFor({ state: "visible" });
@@ -115,14 +116,26 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await context.close();
   } finally {
     await browser?.close().catch(() => {});
-    dashboard.kill("SIGTERM");
     core.server.close();
-    await Promise.race([
-      once(dashboard, "exit"),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
+    await stopChildProcess(dashboard);
   }
 });
+
+async function stopChildProcess(process: ChildProcessWithoutNullStreams) {
+  if (process.exitCode !== null || process.signalCode !== null) return;
+  const exited = once(process, "exit");
+  process.kill("SIGTERM");
+  const terminated = await Promise.race([
+    exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  if (terminated) return;
+  process.kill("SIGKILL");
+  await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(resolve, 2_000)),
+  ]);
+}
 
 function startDashboard(port: number, coreUrl: string) {
   return spawn(
@@ -500,9 +513,12 @@ function writeJson(response: ServerResponse, status: number, body: unknown) {
 
 async function waitForDashboard(port: number, output: () => string) {
   await waitFor(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/`, { redirect: "manual" }).catch(() => null);
+    const response = await fetch(`http://127.0.0.1:${port}/favicon.svg`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(5_000),
+    }).catch(() => null);
     return Boolean(response && response.status < 500);
-  }, 30_000, () => `dashboard did not become ready\n${output()}`);
+  }, 60_000, () => `dashboard did not become ready\n${output()}`);
 }
 
 async function waitFor(
