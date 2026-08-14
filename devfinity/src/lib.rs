@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -987,6 +987,9 @@ impl Stack {
     }
 
     pub fn cleanup(&self) -> Result<ExitCode> {
+        self.cleanup_managed_service_processes();
+        self.cleanup_orphaned_processes();
+
         if self.process_compose_socket.exists() && self.process_compose_file.exists() {
             if self.process_compose_available() {
                 let mut command = self.process_compose_control_command();
@@ -1012,6 +1015,7 @@ impl Stack {
         }
 
         self.cleanup_managed_processes();
+        self.cleanup_orphaned_processes();
         self.remove_secret_files();
 
         let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
@@ -2292,7 +2296,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "      }}");
         let _ = writeln!(yaml, "      cleanup() {{");
         let _ = writeln!(yaml, "        teardown");
-        let _ = writeln!(yaml, "        kill \"$child\" >/dev/null 2>&1 || true");
+        let _ = writeln!(yaml, "        terminate_tree \"$child\"");
         let _ = writeln!(yaml, "        wait \"$child\" >/dev/null 2>&1 || true");
         let _ = writeln!(
             yaml,
@@ -2300,6 +2304,16 @@ wait "$postgres_pid"
             shell_quote(&pid_file.display().to_string())
         );
         let _ = writeln!(yaml, "        exit 143");
+        let _ = writeln!(yaml, "      }}");
+        let _ = writeln!(yaml, "      terminate_tree() {{");
+        let _ = writeln!(yaml, "        root=\"$1\"");
+        let _ = writeln!(
+            yaml,
+            "        for child_pid in $(pgrep -P \"$root\" 2>/dev/null || true); do"
+        );
+        let _ = writeln!(yaml, "          terminate_tree \"$child_pid\"");
+        let _ = writeln!(yaml, "        done");
+        let _ = writeln!(yaml, "        kill \"$root\" >/dev/null 2>&1 || true");
         let _ = writeln!(yaml, "      }}");
         let _ = writeln!(yaml, "      trap cleanup INT TERM");
         let _ = writeln!(yaml, "      set +e");
@@ -2587,7 +2601,19 @@ wait "$postgres_pid"
         Ok(status_to_exit_code(status))
     }
 
+    fn cleanup_managed_service_processes(&self) {
+        self.cleanup_processes(
+            ManagedProcess::ALL
+                .into_iter()
+                .filter(|process| *process != ManagedProcess::ProcessCompose),
+        );
+    }
+
     fn cleanup_managed_processes(&self) {
+        self.cleanup_processes(ManagedProcess::ALL);
+    }
+
+    fn cleanup_processes(&self, processes: impl IntoIterator<Item = ManagedProcess>) {
         let table = match process_table() {
             Ok(table) => table,
             Err(error) => {
@@ -2600,8 +2626,43 @@ wait "$postgres_pid"
         // current shell. A developer may unset the chained-limiter key before
         // recovering an orphaned stack, but its protected pid file still gives
         // us an exact and safely verifiable process identity.
-        for spec in self.process_specs(ManagedProcess::ALL) {
+        for spec in self.process_specs(processes) {
             self.cleanup_pid_file(&spec, &table);
+        }
+    }
+
+    fn cleanup_orphaned_processes(&self) {
+        let table = match process_table() {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("failed to inspect process table: {error}");
+                return;
+            }
+        };
+        let mut seen = BTreeSet::new();
+
+        for spec in self.orphan_process_specs() {
+            for root in table
+                .iter()
+                .filter(|process| process_matches(process, &spec.expected_fragments))
+            {
+                let mut pids = descendant_pids(&table, root.pid);
+                pids.push(root.pid);
+                pids.sort_unstable();
+                pids.dedup();
+                pids.retain(|pid| *pid != std::process::id() && seen.insert(*pid));
+
+                if pids.is_empty() {
+                    continue;
+                }
+
+                pids.reverse();
+                println!(
+                    "stopping devfinity {} orphan process tree: {:?}",
+                    spec.process, pids
+                );
+                terminate_processes(&pids);
+            }
         }
     }
 
@@ -2779,6 +2840,108 @@ wait "$postgres_pid"
                 ManagedProcessSpec::new(process, self.pid_file(process), expected_fragments)
             })
             .collect()
+    }
+
+    fn orphan_process_specs(&self) -> Vec<OrphanProcessSpec> {
+        let mut specs = Vec::new();
+        let run_dir = self.run_dir.display().to_string();
+        for process in ManagedProcess::ALL {
+            if process == ManagedProcess::ProcessCompose {
+                continue;
+            }
+            specs.push(OrphanProcessSpec::new(
+                process,
+                vec![
+                    String::from("DEVFINITY_MANAGED_PROCESS=1"),
+                    format!("DEVFINITY_PROCESS={}", shell_quote(process.as_str())),
+                    format!("DEVFINITY_RUN_DIR={}", shell_quote(&run_dir)),
+                ],
+            ));
+        }
+
+        specs.extend([
+            OrphanProcessSpec::new(
+                ManagedProcess::WorkosFixture,
+                vec![
+                    String::from("devfinity"),
+                    String::from("workos-fixture"),
+                    self.workos_fixture_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::Postgres,
+                vec![
+                    String::from("postgres"),
+                    String::from("-D"),
+                    self.postgres_data_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::FiniteChat,
+                vec![
+                    String::from("finitechat-server"),
+                    self.finitechat_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::FiniteSites,
+                vec![
+                    String::from("finitesitesd"),
+                    String::from("serve"),
+                    self.finitesites_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::FiniteIdentity,
+                vec![
+                    String::from("finite-identityd"),
+                    String::from("serve"),
+                    self.finite_identity_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::RuntimeImage,
+                vec![
+                    String::from("python3"),
+                    String::from("build_runtime_image.py"),
+                    self.runtime_image_dir().display().to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::FinitePrivateLimiter,
+                vec![
+                    String::from("finite-private-limiter-up"),
+                    format!(
+                        "{}:{}",
+                        self.service_bind_host(),
+                        self.ports.finite_private_limiter
+                    ),
+                    self.core_url(),
+                    self.dashboard_url(),
+                ],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::AppleNetworkProbe,
+                vec![String::from("devfinity-host-network-probe")],
+            ),
+            OrphanProcessSpec::new(
+                ManagedProcess::Dashboard,
+                vec![
+                    self.repo_root
+                        .join("finitecomputer-v2/apps/dashboard")
+                        .display()
+                        .to_string(),
+                    String::from("next/dist/bin/next"),
+                    String::from("dev"),
+                    String::from("--hostname"),
+                    String::from("127.0.0.1"),
+                    String::from("--port"),
+                    self.ports.dashboard.to_string(),
+                ],
+            ),
+        ]);
+
+        specs
     }
 
     fn enabled_processes(&self) -> Vec<ManagedProcess> {
@@ -3392,6 +3555,7 @@ impl ProcessComposeGuard<'_> {
             }
         }
         self.stack.cleanup_managed_processes();
+        self.stack.cleanup_orphaned_processes();
         self.stack.remove_secret_files();
         remove_file_best_effort(&self.stack.process_compose_socket);
         self.stack.remove_process_compose_control_dir();
@@ -3428,6 +3592,21 @@ impl ManagedProcessSpec {
         Self {
             process,
             pid_file,
+            expected_fragments,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OrphanProcessSpec {
+    process: ManagedProcess,
+    expected_fragments: Vec<String>,
+}
+
+impl OrphanProcessSpec {
+    fn new(process: ManagedProcess, expected_fragments: Vec<String>) -> Self {
+        Self {
+            process,
             expected_fragments,
         }
     }
@@ -4933,6 +5112,16 @@ mod tests {
     }
 
     #[test]
+    fn managed_command_cleanup_recurses_into_child_processes() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        let yaml = stack.process_compose_yaml();
+
+        assert!(yaml.contains("terminate_tree \"$child\""));
+        assert!(yaml.contains("pgrep -P \"$root\""));
+        assert!(!yaml.contains("kill \"$child\" >/dev/null 2>&1 || true"));
+    }
+
+    #[test]
     fn recovery_specs_include_optional_limiter_after_key_is_unset() {
         let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
         stack.inference_mode = InferenceMode::Missing;
@@ -5020,6 +5209,83 @@ mod tests {
         assert!(!process_matches(
             &process,
             &["cargo".to_string(), "finitesitesd".to_string()],
+        ));
+    }
+
+    #[test]
+    fn orphan_process_specs_match_wrappers_and_safe_leftover_children() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        let specs = stack.orphan_process_specs();
+        let dashboard_wrapper = specs
+            .iter()
+            .find(|spec| {
+                spec.process == ManagedProcess::Dashboard
+                    && spec
+                        .expected_fragments
+                        .iter()
+                        .any(|fragment| fragment.starts_with("DEVFINITY_RUN_DIR="))
+            })
+            .unwrap();
+        let wrapper = ProcessInfo {
+            pid: 1,
+            ppid: 0,
+            command: format!(
+                "bash -c export DEVFINITY_MANAGED_PROCESS=1; export DEVFINITY_PROCESS={}; export DEVFINITY_RUN_DIR={}",
+                shell_quote(ManagedProcess::Dashboard.as_str()),
+                shell_quote(&stack.run_dir.display().to_string())
+            ),
+        };
+        assert!(process_matches(
+            &wrapper,
+            &dashboard_wrapper.expected_fragments
+        ));
+
+        let finitechat_child = specs
+            .iter()
+            .find(|spec| {
+                spec.process == ManagedProcess::FiniteChat
+                    && spec
+                        .expected_fragments
+                        .iter()
+                        .any(|fragment| fragment == "finitechat-server")
+            })
+            .unwrap();
+        let finitechat = ProcessInfo {
+            pid: 2,
+            ppid: 1,
+            command: format!(
+                "target/debug/finitechat-server serve 0.0.0.0:{} --sqlite {}/server.sqlite3",
+                stack.ports.finitechat,
+                stack.finitechat_dir().display()
+            ),
+        };
+        assert!(process_matches(
+            &finitechat,
+            &finitechat_child.expected_fragments
+        ));
+
+        let dashboard_child = specs
+            .iter()
+            .find(|spec| {
+                spec.process == ManagedProcess::Dashboard
+                    && spec
+                        .expected_fragments
+                        .iter()
+                        .any(|fragment| fragment == "next/dist/bin/next")
+            })
+            .unwrap();
+        let dashboard = ProcessInfo {
+            pid: 3,
+            ppid: 1,
+            command: format!(
+                "node {}/finitecomputer-v2/apps/dashboard/node_modules/.bin/../next/dist/bin/next dev --hostname 127.0.0.1 --port {}",
+                stack.repo_root.display(),
+                stack.ports.dashboard
+            ),
+        };
+        assert!(process_matches(
+            &dashboard,
+            &dashboard_child.expected_fragments
         ));
     }
 
