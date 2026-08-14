@@ -132,6 +132,22 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_identity_edge_contract_paths_run_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "finite-identity/scripts/identity-edge-contract-gate.py",
+                "finite-identity/scripts/tests/test_identity_edge_contract_gate.py",
+            ),
+            {"run_nix_checks"},
+        )
+        self.assertEqual(
+            selected(
+                "scripts/identity-edge-contract-gate.py",
+                "scripts/tests/test_identity_edge_contract_gate.py",
+            ),
+            {"run_nix_checks"},
+        )
+
     def test_moved_monitoring_paths_do_not_select_every_harness(self) -> None:
         self.assertEqual(
             selected(

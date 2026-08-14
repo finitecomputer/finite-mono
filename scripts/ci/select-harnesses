@@ -63,9 +63,12 @@ RUNTIME_METRICS_SOURCE_PATHS = {
     "scripts/finite_runtime_metrics.py",
 }
 RUNTIME_IMAGE_CONTRACT_PREFIX = "finitecomputer-v2/deploy/finite-computer/images/"
+IDENTITY_EDGE_CONTRACT_PREFIX = "finite-identity/scripts/"
 MOVED_NIX_CHECK_PATHS = {
     "scripts/check_runtime_image_contract.py",
+    "scripts/identity-edge-contract-gate.py",
     "scripts/tests/test_runtime_image_contract.py",
+    "scripts/tests/test_identity_edge_contract_gate.py",
 }
 
 FINITE_STATUS_PATHS = {
@@ -79,12 +82,10 @@ FINITE_STATUS_PATHS = {
 REMAINING_NIX_CHECK_PATHS = {
     "scripts/check-brain-product-language.py",
     "scripts/check_runner_host_contract.py",
-    "scripts/identity-edge-contract-gate.py",
     "scripts/check_lat1_healthcheck_contract.py",
     "scripts/check_finite_private_deepseek_candidate.py",
     "scripts/check_stripe_price_contract.py",
     "scripts/check_lat1_secret_bootstrap.py",
-    "scripts/tests/test_identity_edge_contract_gate.py",
     "scripts/tests/test_check_deepseek_v4_0731_quality.py",
     "scripts/tests/test_finite_private_deepseek_candidate.py",
     "scripts/tests/test_finite_private_ops.py",
@@ -225,7 +226,11 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
     if is_docs_only_path(path):
         return
 
-    if path.startswith(RUNTIME_IMAGE_CONTRACT_PREFIX) or path in MOVED_NIX_CHECK_PATHS:
+    if (
+        path.startswith(RUNTIME_IMAGE_CONTRACT_PREFIX)
+        or path.startswith(IDENTITY_EDGE_CONTRACT_PREFIX)
+        or path in MOVED_NIX_CHECK_PATHS
+    ):
         selection.run_nix_checks = True
         return
 

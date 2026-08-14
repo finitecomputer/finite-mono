@@ -140,7 +140,7 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 
 The full edge contract — every Identity Authority route the fsite CLI calls
 must answer non-404 — is checked by `just identity-edge-contract` (static) and
-`scripts/identity-edge-contract-gate.py` (live probe against production or a
+`finite-identity/scripts/identity-edge-contract-gate.py` (live probe against production or a
 `--target` override).
 
 The final product acceptance is one normal managed-agent creation. The Runner

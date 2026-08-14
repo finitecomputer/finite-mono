@@ -109,10 +109,10 @@ finite-status-contract:
 
 # Static contract: every Identity Authority route the fsite CLI calls is on
 # the service-owned public surface (public_router); the edge proxies, never
-# filters. Live probe: scripts/identity-edge-contract-gate.py [--target URL].
+# filters. Live probe: finite-identity/scripts/identity-edge-contract-gate.py [--target URL].
 identity-edge-contract:
-    python3 scripts/identity-edge-contract-gate.py --static
-    python3 -m unittest discover -s scripts/tests -p 'test_identity_edge_contract_gate.py'
+    python3 finite-identity/scripts/identity-edge-contract-gate.py --static
+    python3 -m unittest discover -s finite-identity/scripts/tests -p 'test_identity_edge_contract_gate.py'
 
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:

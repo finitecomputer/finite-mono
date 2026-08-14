@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TARGET = "https://identity.finite.vip"
 CLI_API_SOURCE = REPO_ROOT / "finite-sites/crates/fsite-cli/src/api.rs"
 IDENTITY_CLIENT_SOURCE = REPO_ROOT / "finite-identity/src/client.rs"
@@ -92,7 +92,7 @@ def static_failures(
         failures.append(
             "CLI calls Identity Authority routes missing from MANIFEST: "
             f"{missing_from_manifest} (make each route public in public_router "
-            "and add it to MANIFEST in scripts/identity-edge-contract-gate.py)"
+            "and add it to MANIFEST in finite-identity/scripts/identity-edge-contract-gate.py)"
         )
     stale_manifest = sorted(set(manifest) - cli_routes)
     if stale_manifest:
