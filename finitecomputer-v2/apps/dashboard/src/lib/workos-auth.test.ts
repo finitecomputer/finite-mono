@@ -81,14 +81,7 @@ test("WorkOS proxy protects app surfaces but leaves entry and callback routes pu
   assert.equal(workosProtectedPath("/dashboard/agent-creation-requests"), true);
   assert.equal(workosProtectedPath("/dashboard"), true);
   assert.equal(workosProtectedPath("/dashboard/machines/smoke"), true);
-  assert.equal(workosProtectedPath("/client"), true);
-  assert.equal(workosProtectedPath("/client/app.css"), false);
-  assert.equal(workosProtectedPath("/client/app.js"), false);
-  assert.equal(workosProtectedPath("/client/config.json"), false);
-  assert.equal(workosProtectedPath("/client/fonts/funnel-sans-400.ttf"), false);
-  assert.equal(workosProtectedPath("/client/smoke-nip07.js"), true);
   assert.equal(workosProtectedPath("/_admin/brains"), false);
-  assert.equal(workosProtectedPath("/v1/brains"), false);
   assert.equal(workosProtectedPath("/api/pwa/manifest"), true);
   assert.equal(workosProtectedPath("/claim/token"), false);
 });
@@ -101,8 +94,6 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/signup"), true);
   assert.equal(workosProxyBypassPath("/callback"), true);
   assert.equal(workosProxyBypassPath("/logout"), true);
-  assert.equal(workosProxyBypassPath("/api/brain/identity-provider"), true);
-  assert.equal(workosProxyBypassPath("/api/brain/session-proof"), false);
   assert.equal(workosProxyBypassPath("/api/device-links/approve"), false);
   assert.equal(workosProxyBypassPath("/api/device-links/status"), false);
   assert.equal(workosProxyBypassPath("/api/device-links/enroll"), true);
@@ -111,9 +102,6 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/health"), true);
   assert.equal(workosProxyBypassPath("/_admin"), false);
   assert.equal(workosProxyBypassPath("/_admin/brains"), false);
-  assert.equal(workosProxyBypassPath("/v1"), true);
-  assert.equal(workosProxyBypassPath("/v1/brains"), true);
-  assert.equal(workosProxyBypassPath("/client"), false);
   assert.equal(workosProxyBypassPath("/api/finite/v1/heartbeat"), false);
   assert.equal(workosProxyBypassPath("/api/stripe/webhook"), true);
 });

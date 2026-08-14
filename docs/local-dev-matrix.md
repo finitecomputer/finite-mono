@@ -298,16 +298,14 @@ Friction:
 
 ### `finite-brain`
 
-Owns the encrypted Brain/Folder knowledge system, Product Client, Smoke UI,
-`fbrain` CLI, Brain Working Tree sync, and FiniteBrain-specific access, sync,
-asset, source-note, and OKF policy.
+Owns the encrypted Brain/Folder knowledge system, `fbrain` CLI, Brain Working
+Tree sync, and FiniteBrain-specific access, sync, asset, source-note, and OKF
+policy.
 
 Documented tools:
 
 - Rust/Cargo workspace for core domain, SQLite store, HTTP server, app binary,
   and CLI.
-- Static Product Client under `crates/finite-brain-server/src/product-client.*`.
-- Development Smoke UI under `crates/finite-brain-server/src/smoke-ui.*`.
 - `fbrain` CLI for trusted agent Brain Working Trees.
 - Canonical production service at `https://brain.finite.computer`; the older
   smoke service remains an explicit rollback target, not a replica.
@@ -322,13 +320,6 @@ FINITE_BRAIN_DB=.dev-data/finite-brain.sqlite3 \
 cargo run -p finite-brain-app
 ```
 
-Open:
-
-```text
-http://127.0.0.1:3015/client
-http://127.0.0.1:3015/smoke/ui
-```
-
 Documented checks:
 
 ```bash
@@ -337,15 +328,9 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
-node --check crates/finite-brain-server/src/product-client.js
-node --check crates/finite-brain-server/src/smoke-ui.js
-node crates/finite-brain-server/src/product-client.test.js
 ```
 
 Friction:
-
-- Product Client and Smoke UI are both served by the app, but only the Product
-  Client is the user workflow. Do not treat Smoke UI behavior as production UX.
 - `fbrain` uses the shared Finite identity location, so local tests that touch
   identity should avoid printing or committing signer state.
 - The canonical production FiniteBrain URL is

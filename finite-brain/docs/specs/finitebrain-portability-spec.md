@@ -2316,11 +2316,7 @@ The current implementation source of truth is spread across:
   transaction boundary, grants, sync append log, current projection,
   invitations, shares, mounts, backup/rebuild tests, and retention behavior.
 - `crates/finite-brain-server/src/lib.rs`: HTTP route catalog, request/response
-  types, server-side policy orchestration, and Product Client asset serving.
+  types, and server-side policy orchestration.
 - `crates/finite-brain-server/src/protected_routes.rs`: Nostr HTTP auth
   validation, replay rejection, protected-route rate limits, and CORS allowlist
   behavior.
-- `crates/finite-brain-server/src/product-client.js`: first-party Product
-  Client workflow, current NIP-07/NIP-44 adapter seam, local Folder Key
-  opening, decrypt/edit loop, Graph View, Graph Replay, OKF import execution,
-  and local sync merge.

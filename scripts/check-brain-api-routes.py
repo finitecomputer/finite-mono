@@ -14,8 +14,6 @@ CALLER_FILES = (
     ROOT / "finite-brain/crates/finite-brain-cli/src/lib.rs",
     ROOT / "finite-brain/crates/finite-brain-cli/src/sync_engine.rs",
     ROOT / "finite-brain/crates/finite-brain-core/src/lib.rs",
-    ROOT / "finite-brain/crates/finite-brain-server/src/product-client.js",
-    ROOT / "finite-brain/crates/finite-brain-server/src/smoke-ui.js",
     ROOT / "finite-brain/crates/finite-brain-server/src/routes/brains.rs",
     ROOT / "finite-brain/crates/finite-brain-server/src/routes/sharing.rs",
     ROOT / "finitecomputer-v2/apps/dashboard/browser/agent-creation.browser.ts",

@@ -199,15 +199,13 @@ lat2-runner-guardrails-contract:
     bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
     python3 -m unittest scripts.tests.test_lat2_runner_guardrails
 
-# Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
+# Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain acceptance matrix.
 brain-product-matrix:
     bash scripts/tests/test_devfinity_brain_readiness.sh
-    node finite-brain/crates/finite-brain-server/src/product-client.test.js
     cargo test --locked -p finite-brain-server brain_update_notification_carries_the_authoritative_cursor
     cargo test --locked -p finite-brain-cli supervisor_discovers_every_opened_brain_working_tree
     FINITE_BRAIN_COLLABORATION_SMOKE_REPORT="$PWD/target/brain-product-matrix/organization-collaboration.json" cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
     scripts/check-brain-collaboration-smoke-report.py "$PWD/target/brain-product-matrix/organization-collaboration.json"
-    scripts/devfinity-brain-product-matrix
 
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:

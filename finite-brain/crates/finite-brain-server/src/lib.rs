@@ -13,18 +13,17 @@ use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, Stat
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 #[cfg(test)]
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation,
-    BootstrapSmokeSummary, BrainId, BrainKind, CoreError, CryptoRecordError, DisplayName,
-    EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
-    FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
-    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
-    RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
+    CoreError, CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder,
+    Folder, FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
+    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
+    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
     bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
     bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
     validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
@@ -74,22 +73,9 @@ const APP_SPECIFIC_KIND: u16 = 30_078;
 const NIP05_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const NIP05_READ_TIMEOUT_SECONDS: u64 = 5;
 const FINITE_VIP_NIP05_PREFIX: &str = "https://finite.vip/";
-const SECP256K1_ORDER_HEX: &str =
-    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
 
 type Nip05Fetcher =
     Arc<dyn Fn(&Nip05WellKnownRequest) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
-
-fn normalized_smoke_nip07_secret(secret_hex: impl Into<String>) -> Result<String, String> {
-    let value = secret_hex.into().trim().to_ascii_lowercase();
-    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err("FINITE_BRAIN_SMOKE_NIP07_SECRET must be 64 hex characters".to_owned());
-    }
-    if value.chars().all(|character| character == '0') || value.as_str() >= SECP256K1_ORDER_HEX {
-        return Err("FINITE_BRAIN_SMOKE_NIP07_SECRET must be a valid secp256k1 secret".to_owned());
-    }
-    Ok(value)
-}
 
 fn normalized_smoke_email_proofs(value: impl AsRef<str>) -> Result<BTreeSet<String>, String> {
     let mut emails = BTreeSet::new();
@@ -113,16 +99,6 @@ pub struct HealthStatus {
     pub status: String,
     pub core_crate: String,
     pub store_crate: String,
-}
-
-/// Public Product Client runtime config.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProductClientConfigResponse {
-    pub public_base_url: String,
-    pub auth_scheme: String,
-    pub http_auth_kind: u16,
-    pub default_brain_id: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -156,7 +132,6 @@ pub struct ServerState {
     nip05_fetcher: Nip05Fetcher,
     email_proof_verifier: Option<EmailProofVerifier>,
     invite_mailer: Option<BrainInviteMailer>,
-    smoke_nip07_signer_secret: Option<Arc<str>>,
     agent_bootstrap_authorities: Option<AgentBootstrapAuthorities>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
@@ -248,7 +223,6 @@ impl ServerState {
             nip05_fetcher: default_nip05_fetcher(),
             email_proof_verifier: None,
             invite_mailer: None,
-            smoke_nip07_signer_secret: None,
             agent_bootstrap_authorities: None,
             brain_updates,
         }
@@ -403,17 +377,8 @@ impl ServerState {
         self
     }
 
-    /// Enable a local Product Client NIP-07 shim for browser smoke tests.
-    pub fn with_smoke_nip07_signer(
-        mut self,
-        secret_hex: impl Into<String>,
-    ) -> Result<Self, String> {
-        self.smoke_nip07_signer_secret =
-            Some(Arc::<str>::from(normalized_smoke_nip07_secret(secret_hex)?));
-        Ok(self)
-    }
-
-    /// Enable an explicit local email-proof allowlist for browser smoke tests.
+    /// Enable an explicit local email-proof allowlist for local acceptance
+    /// servers (used instead of the real identity authority).
     pub fn with_smoke_email_proofs(mut self, emails: impl AsRef<str>) -> Result<Self, String> {
         let allowed = Arc::new(normalized_smoke_email_proofs(emails)?);
         self.email_proof_verifier = Some(Arc::new(move |email, _actor| {
@@ -617,58 +582,6 @@ pub fn router_with_state(state: ServerState) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
-        .route("/smoke/bootstrap", get(bootstrap_smoke_handler))
-        .route("/smoke/ui", get(smoke_ui_handler))
-        .route("/smoke/ui.css", get(smoke_ui_css_handler))
-        .route("/smoke/ui.js", get(smoke_ui_js_handler))
-        .route("/client", get(product_client_handler))
-        .route("/client/app.css", get(product_client_css_handler))
-        .route("/client/app.js", get(product_client_js_handler))
-        .route(
-            "/client/fonts/funnel-display-500.ttf",
-            get(product_client_funnel_display_500_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-display-600.ttf",
-            get(product_client_funnel_display_600_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-display-700.ttf",
-            get(product_client_funnel_display_700_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-400.ttf",
-            get(product_client_funnel_sans_400_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-500.ttf",
-            get(product_client_funnel_sans_500_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-600.ttf",
-            get(product_client_funnel_sans_600_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-700.ttf",
-            get(product_client_funnel_sans_700_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-400.ttf",
-            get(product_client_jetbrains_mono_400_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-500.ttf",
-            get(product_client_jetbrains_mono_500_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-600.ttf",
-            get(product_client_jetbrains_mono_600_font_handler),
-        )
-        .route(
-            "/client/smoke-nip07.js",
-            get(product_client_smoke_nip07_js_handler),
-        )
-        .route("/client/config.json", get(product_client_config_handler))
         .merge(signed_routes)
         .fallback(api_route_not_found_handler)
         .layer(middleware::from_fn_with_state(
@@ -2769,8 +2682,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL,
-        CONTENT_TYPE, ORIGIN,
+        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
@@ -3051,517 +2963,6 @@ mod tests {
         let status: HealthStatus = serde_json::from_slice(&body).expect("health json");
 
         assert_eq!(status, health_status());
-    }
-
-    #[tokio::test]
-    async fn smoke_bootstrap_route_returns_core_summary() {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/bootstrap")
-                    .body(Body::empty())
-                    .expect("valid request"),
-            )
-            .await
-            .expect("bootstrap route response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = to_bytes(response.into_body(), 4096)
-            .await
-            .expect("bootstrap body");
-        let summary: BootstrapSmokeSummary = serde_json::from_slice(&body).expect("bootstrap json");
-
-        assert_eq!(
-            summary,
-            finite_brain_core::smoke_bootstrap_summary().expect("smoke bootstrap summary")
-        );
-    }
-
-    #[tokio::test]
-    async fn smoke_ui_serves_static_assets_and_sqlite_flow_works() {
-        let temp_dir = tempfile::TempDir::new().expect("temp sqlite dir");
-        let db_path = temp_dir.path().join("smoke-ui.sqlite3");
-        let router = sqlite_test_router(&db_path);
-
-        let ui_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui")
-                    .body(Body::empty())
-                    .expect("valid ui request"),
-            )
-            .await
-            .expect("ui response");
-        assert_eq!(ui_response.status(), StatusCode::OK);
-        let ui_body = to_bytes(ui_response.into_body(), 16 * 1024)
-            .await
-            .expect("ui body");
-        let ui_body = std::str::from_utf8(&ui_body).expect("ui utf8");
-        assert!(ui_body.contains("Development only"));
-        assert!(ui_body.contains("FiniteBrain Smoke UI"));
-        assert!(ui_body.contains("Brain and Folder Invitations"));
-        assert!(ui_body.contains("Connections and mounts"));
-        assert!(ui_body.contains("href=\"/client\""));
-        assert!(ui_body.contains("Open client"));
-
-        let css_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui.css")
-                    .body(Body::empty())
-                    .expect("valid css request"),
-            )
-            .await
-            .expect("css response");
-        assert_eq!(css_response.status(), StatusCode::OK);
-        let css_body = to_bytes(css_response.into_body(), 16 * 1024)
-            .await
-            .expect("css body");
-        let css_body = std::str::from_utf8(&css_body).expect("css utf8");
-        assert!(css_body.contains(".topbar"));
-
-        let js_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui.js")
-                    .body(Body::empty())
-                    .expect("valid js request"),
-            )
-            .await
-            .expect("js response");
-        assert_eq!(js_response.status(), StatusCode::OK);
-        let js_body = to_bytes(js_response.into_body(), 256 * 1024)
-            .await
-            .expect("js body");
-        let js_body = std::str::from_utf8(&js_body).expect("js utf8");
-        assert!(js_body.contains("bootstrapButton"));
-        assert!(js_body.contains("createShareLinkButton"));
-        assert!(js_body.contains("mountsButton"));
-
-        let keys = Keys::generate();
-        let create = post_brain(
-            router.clone(),
-            &keys,
-            &create_brain_body("smoke", "organization"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(create.status(), StatusCode::OK);
-
-        let reopened = sqlite_test_router(&db_path);
-        let metadata = get_metadata(reopened.clone(), &keys, "smoke", TEST_NOW).await;
-        assert_eq!(metadata.status(), StatusCode::OK);
-        let metadata: BrainMetadataResponse = read_json(metadata).await;
-        assert_eq!(metadata.brain_id, "smoke");
-        assert!(metadata.folders.is_empty());
-
-        let sync_bootstrap = authed_request(
-            reopened,
-            &keys,
-            "GET",
-            "/v1/brains/smoke/sync/bootstrap",
-            None,
-            TEST_NOW,
-        )
-        .await;
-        assert_eq!(sync_bootstrap.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn product_client_serves_spine_assets_and_config() {
-        let router = test_router();
-
-        let client_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client")
-                    .body(Body::empty())
-                    .expect("valid client request"),
-            )
-            .await
-            .expect("client response");
-        assert_eq!(client_response.status(), StatusCode::OK);
-        assert_eq!(
-            client_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let client_body = to_bytes(client_response.into_body(), 64 * 1024)
-            .await
-            .expect("client body");
-        let client_body = std::str::from_utf8(&client_body).expect("client utf8");
-        assert!(client_body.contains("obsidian-shell"));
-        assert!(!client_body.contains("obsidian-titlebar"));
-        assert!(!client_body.contains("traffic-lights"));
-        assert!(!client_body.contains("titlebarTabLabel"));
-        assert!(!client_body.contains("titlebarBrainLabel"));
-        assert!(!client_body.contains("pageTabButton"));
-        assert!(!client_body.contains("graphTabButton"));
-        assert!(!client_body.contains("titlebarNewTabButton"));
-        assert!(client_body.contains("sidebar-primary-nav"));
-        assert!(!client_body.contains("app-ribbon"));
-        assert!(client_body.contains("file-sidebar"));
-        assert!(client_body.contains("Connect securely"));
-        assert!(client_body.contains("Brain locked"));
-        assert!(!client_body.contains("Connect signer"));
-        assert!(!client_body.contains("Connect account"));
-        assert!(!client_body.contains("Session locked"));
-        assert!(client_body.contains("resumeSessionButton"));
-        assert!(client_body.contains("lockSessionButton"));
-        assert!(!client_body.contains("Open accessible brain"));
-        assert!(!client_body.contains("brainControlDetails"));
-        assert!(!client_body.contains("brainSelect"));
-        assert!(client_body.contains("sessionAccountBrainButton"));
-        assert!(client_body.contains("brainSwitcherMenu"));
-        assert!(client_body.contains("manageBrainsModal"));
-        assert!(client_body.contains("settingsManageBrainsButton"));
-        assert!(client_body.contains("readerFolderList"));
-        assert!(client_body.contains("searchSidebarPanel"));
-        assert!(client_body.contains("commandPalette"));
-        assert!(client_body.contains("Quick switcher"));
-        assert!(client_body.contains("graph-floating-controls"));
-        assert!(client_body.contains("ribbonGraphButton"));
-        assert!(!client_body.contains("editorToolbar"));
-        assert!(!client_body.contains("inline-editor-toolbar"));
-        assert!(!client_body.contains("data-editor-command"));
-        assert!(client_body.contains("readerPageContent"));
-        assert!(client_body.contains("aria-label=\"Page reader\""));
-        assert!(client_body.contains("aria-label=\"Graph View\""));
-        assert!(client_body.contains("aria-label=\"Search pages\""));
-        assert!(!client_body.contains("graphFilterInput"));
-        assert!(!client_body.contains("aria-label=\"Filter graph\""));
-        assert!(client_body.contains("accessFolderButton"));
-        assert!(client_body.contains("accessInspector"));
-        assert!(client_body.contains("accessWhoHasList"));
-        assert!(client_body.contains("accessAdvancedSection"));
-        assert!(!client_body.contains("accessChangeMode"));
-        assert!(!client_body.contains("accessBrainViewButton"));
-        assert!(!client_body.contains("accessFolderViewButton"));
-        assert!(!client_body.contains("accessBrainPanel"));
-        assert!(!client_body.contains("brainSwitchList"));
-        assert!(!client_body.contains("removeFolderAccessButton"));
-        assert!(!client_body.contains("folderKeyInput"));
-        assert!(!client_body.contains("okfBundleInput"));
-        assert!(!client_body.contains("encryptDraftButton"));
-        assert!(client_body.contains("createBrainInvitationButton"));
-        assert!(client_body.contains("acceptBrainInvitationButton"));
-        assert!(client_body.contains("revokeBrainInvitationButton"));
-        assert!(client_body.contains("brainInviteUrlOutput"));
-        assert!(client_body.contains("copyBrainInviteUrlButton"));
-        assert!(client_body.contains("Copy private invite link"));
-        assert!(client_body.contains("savePageButton"));
-        assert!(!client_body.contains("readerModeButton"));
-        assert!(client_body.contains("Edit Markdown"));
-        assert!(!client_body.contains("syncBootstrapButton"));
-        assert!(client_body.contains("Graph View"));
-        assert!(client_body.contains("Zoom in"));
-        assert!(client_body.contains("Reset zoom"));
-        assert!(client_body.contains("Enter full screen"));
-        assert!(client_body.contains("contextMenu"));
-        assert!(client_body.contains("/client/app.js"));
-        assert!(!client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
-        assert!(!client_body.contains("/client/smoke-nip07.js"));
-        assert!(!client_body.contains("Page Loop"));
-        assert!(!client_body.contains("OKF Import"));
-        assert!(!client_body.contains("Plan OKF import"));
-
-        let config_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/config.json")
-                    .body(Body::empty())
-                    .expect("valid config request"),
-            )
-            .await
-            .expect("config response");
-        assert_eq!(config_response.status(), StatusCode::OK);
-        assert_eq!(
-            config_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let config: ProductClientConfigResponse = read_json(config_response).await;
-        assert_eq!(
-            config,
-            ProductClientConfigResponse {
-                public_base_url: TEST_BASE_URL.to_owned(),
-                auth_scheme: "Nostr".to_owned(),
-                http_auth_kind: 27_235,
-                default_brain_id: "personal".to_owned(),
-            }
-        );
-
-        let css_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/app.css")
-                    .body(Body::empty())
-                    .expect("valid client css request"),
-            )
-            .await
-            .expect("client css response");
-        assert_eq!(css_response.status(), StatusCode::OK);
-        assert_eq!(
-            css_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let css_body = to_bytes(css_response.into_body(), 128 * 1024)
-            .await
-            .expect("client css body");
-        let css_body = std::str::from_utf8(&css_body).expect("client css utf8");
-        assert!(css_body.contains("font-family: \"Funnel Sans\""));
-        assert!(css_body.contains("font-family: \"Funnel Display\""));
-        assert!(css_body.contains("font-family: \"JetBrains Mono\""));
-        assert!(css_body.contains("/client/fonts/funnel-sans-400.ttf"));
-        assert!(css_body.contains("/client/fonts/funnel-display-600.ttf"));
-        assert!(css_body.contains("/client/fonts/jetbrains-mono-400.ttf"));
-        assert!(css_body.contains("@media (prefers-color-scheme: light)"));
-        assert!(css_body.contains("--font-sans:"));
-        assert!(css_body.contains("--font-display:"));
-        assert!(css_body.contains("--font-mono:"));
-        assert!(css_body.contains("--status-success:"));
-        assert!(css_body.contains("--status-warning:"));
-        assert!(css_body.contains("--status-error:"));
-        assert!(css_body.contains(".obsidian-shell"));
-        assert!(!css_body.contains(".obsidian-titlebar"));
-        assert!(!css_body.contains(".traffic-light"));
-        assert!(!css_body.contains(".titlebar-tab"));
-        assert!(css_body.contains(".sidebar-primary-nav"));
-        assert!(!css_body.contains(".app-ribbon"));
-        assert!(css_body.contains(".brain-picker"));
-        assert!(css_body.contains(".brain-create-row"));
-        assert!(css_body.contains(".folder-option-button"));
-        assert!(css_body.contains(".obsidian-folder-button"));
-        assert!(css_body.contains(".context-menu"));
-        assert!(css_body.contains(".graph-stage"));
-        assert!(css_body.contains(".graph-floating-controls"));
-        assert!(!css_body.contains(".graph-icon-button"));
-        assert!(!css_body.contains(".graph-controls"));
-        assert!(css_body.contains(".graph-canvas.is-hovering"));
-        assert!(css_body.contains(".node.hover-active"));
-        assert!(css_body.contains(".edge.hover-connected"));
-        assert!(!css_body.contains("\n.access-inspector {"));
-        assert!(css_body.contains("\n.access-inspector-new {"));
-        assert!(!css_body.contains(".access-badge"));
-        assert!(css_body.contains(".access-content-panel"));
-        assert!(css_body.contains(".brain-invite-url-output"));
-        assert!(!css_body.contains(".access-view-switch"));
-        assert!(!css_body.contains(".okf-controls"));
-        assert!(css_body.contains(".session-security-status"));
-
-        let js_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/app.js")
-                    .body(Body::empty())
-                    .expect("valid client js request"),
-            )
-            .await
-            .expect("client js response");
-        assert_eq!(js_response.status(), StatusCode::OK);
-        assert_eq!(
-            js_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let js_body = to_bytes(js_response.into_body(), 512 * 1024)
-            .await
-            .expect("client js body");
-        let js_body = std::str::from_utf8(&js_body).expect("client js utf8");
-        assert!(js_body.contains("window.FiniteBrainProductClient"));
-        assert!(js_body.contains("deriveSignerState"));
-        assert!(js_body.contains("parseOkfBundle"));
-        assert!(js_body.contains("prepareOkfImportWrites"));
-        assert!(js_body.contains("buildAuthEventTemplate"));
-        assert!(js_body.contains("buildPageWriteRequest"));
-        assert!(js_body.contains("workspaceChromeState"));
-        assert!(js_body.contains("visibleBrainOptions"));
-        assert!(js_body.contains("personalBrainIdForPubkey"));
-        assert!(js_body.contains("accessBadgesForFolder"));
-        assert!(js_body.contains("accessActionRoute"));
-        assert!(js_body.contains("openManageBrainsModal"));
-        assert!(js_body.contains("removeFolderAccessFromPanel"));
-        assert!(!js_body.contains("removeFolderAccessButton"));
-        assert!(js_body.contains("readerFolderRows"));
-        assert!(js_body.contains("readerPageRows"));
-        assert!(js_body.contains("buildGraphProjection"));
-        assert!(js_body.contains("graphLayout"));
-        assert!(js_body.contains("graphStats"));
-        assert!(js_body.contains("graphNeighborIds"));
-        assert!(js_body.contains("setGraphHover"));
-        assert!(js_body.contains("createSessionKeyring"));
-        assert!(js_body.contains("clearSessionSecretsAndPlaintext"));
-        assert!(js_body.contains("copyToClipboard"));
-        assert!(js_body.contains("copyBrainInviteUrl"));
-        assert!(js_body.contains("sessionStatusView"));
-        assert!(js_body.contains("sessionGrantOpeningAllowed"));
-        assert!(js_body.contains("extractPageLinks"));
-        assert!(js_body.contains("openFolderObject"));
-        assert!(js_body.contains("mergeSyncProjection"));
-        assert!(js_body.contains("metadataFolderRows"));
-        assert!(js_body.contains("kind: 27235"));
-        assert!(js_body.contains("kind: APP_EVENT_KIND"));
-        assert!(js_body.contains("/metadata"));
-
-        let smoke_signer_response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/client/smoke-nip07.js")
-                    .body(Body::empty())
-                    .expect("valid smoke signer request"),
-            )
-            .await
-            .expect("smoke signer response");
-        assert_eq!(smoke_signer_response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn product_client_serves_local_dashboard_fonts() {
-        let router = test_router();
-        let fonts = [
-            (
-                "/client/fonts/funnel-display-500.ttf",
-                32_880,
-                "d820e428132e2622a7d175a74a826748bff68d113e7aec79b6f3545e86ff20f2",
-            ),
-            (
-                "/client/fonts/funnel-display-600.ttf",
-                32_864,
-                "e37cbfefbb7a762fe2b69e43e12c7e840d81452d1fdc6fc3ecf0b0ec7605b3af",
-            ),
-            (
-                "/client/fonts/funnel-display-700.ttf",
-                32_812,
-                "c61b735d94ac0bcd32904da436e3003f99804d09ee81ea3bea6690b180ea7a1b",
-            ),
-            (
-                "/client/fonts/funnel-sans-400.ttf",
-                32_988,
-                "d9cd65b22ca457dee2310777973cb3b77e55d28866cc574018a77cd593d5d0d6",
-            ),
-            (
-                "/client/fonts/funnel-sans-500.ttf",
-                32_964,
-                "ed6bdb3b1d1fbe7bf38f702e64c6f99ab8b324a30bee2a4fca591da57505289c",
-            ),
-            (
-                "/client/fonts/funnel-sans-600.ttf",
-                33_004,
-                "f23f08c47901e39db4c1ae4f212c88f43ed0b6037d1252f9d589807ff6a023b5",
-            ),
-            (
-                "/client/fonts/funnel-sans-700.ttf",
-                32_892,
-                "56a1277e3f904bd9543e533e1e6656c88f2e46738e1c6d1da438709323e7e87e",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-400.ttf",
-                112_172,
-                "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-500.ttf",
-                112_204,
-                "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-600.ttf",
-                112_160,
-                "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8",
-            ),
-        ];
-
-        for (path, expected_len, expected_sha256) in fonts {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(path)
-                        .body(Body::empty())
-                        .expect("valid font request"),
-                )
-                .await
-                .expect("font response");
-            assert_eq!(response.status(), StatusCode::OK, "{path}");
-            assert_eq!(
-                response.headers().get(CONTENT_TYPE).unwrap(),
-                "font/ttf",
-                "{path}"
-            );
-            assert_eq!(
-                response.headers().get(CACHE_CONTROL).unwrap(),
-                "no-store, max-age=0",
-                "{path}"
-            );
-            let body = to_bytes(response.into_body(), 128 * 1024)
-                .await
-                .expect("font body");
-            assert_eq!(body.len(), expected_len, "{path}");
-            assert_eq!(
-                format!("{:x}", Sha256::digest(&body)),
-                expected_sha256,
-                "{path}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn product_client_smoke_nip07_signer_is_explicitly_opt_in() {
-        let router = router_with_state(
-            test_state()
-                .with_smoke_nip07_signer(
-                    "0000000000000000000000000000000000000000000000000000000000000001",
-                )
-                .expect("valid smoke signer secret"),
-        );
-
-        let client_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client")
-                    .body(Body::empty())
-                    .expect("valid client request"),
-            )
-            .await
-            .expect("client response");
-        assert_eq!(client_response.status(), StatusCode::OK);
-        let client_body = read_text_with_limit(client_response, 64 * 1024).await;
-        assert!(client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
-        assert!(client_body.contains("/client/smoke-nip07.js"));
-        assert!(client_body.contains("/client/app.js"));
-
-        let smoke_signer_response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/client/smoke-nip07.js")
-                    .body(Body::empty())
-                    .expect("valid smoke signer request"),
-            )
-            .await
-            .expect("smoke signer response");
-        assert_eq!(smoke_signer_response.status(), StatusCode::OK);
-        let smoke_signer_body = read_text_with_limit(smoke_signer_response, 32 * 1024).await;
-        assert!(smoke_signer_body.contains("createLocalNip07ProviderFromSecret"));
-        assert!(smoke_signer_body.contains("__FINITE_BRAIN_SMOKE_NIP07__"));
-        assert!(smoke_signer_body.contains("__FINITE_BRAIN_SET_SMOKE_NIP07_SECRET__"));
-        assert!(smoke_signer_body.contains("smokeNip07Secret"));
-        assert!(!smoke_signer_body.contains("sessionStorage"));
-        assert!(smoke_signer_body.contains("typeof window.history?.replaceState !== \"function\""));
-        assert!(smoke_signer_body.contains("window.history.replaceState"));
-        assert!(!smoke_signer_body.contains("history?.replaceState?."));
-        assert!(
-            smoke_signer_body
-                .contains("0000000000000000000000000000000000000000000000000000000000000001")
-        );
     }
 
     #[tokio::test]
@@ -10835,11 +10236,6 @@ mod tests {
                 .is_empty()
         );
         server.join().unwrap();
-    }
-
-    fn sqlite_test_router(path: &std::path::Path) -> Router {
-        let store = BrainStore::open(path).unwrap();
-        router_with_state(ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60))
     }
 
     async fn router_with_test_org_folders(keys: &Keys) -> Router {

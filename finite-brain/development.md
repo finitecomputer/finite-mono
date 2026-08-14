@@ -62,9 +62,6 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
-node --check crates/finite-brain-server/src/product-client.js
-node --check crates/finite-brain-server/src/smoke-ui.js
-node crates/finite-brain-server/src/product-client.test.js
 ```
 
 Run the local server:
@@ -176,8 +173,6 @@ knowledge or a Recovery Set.
   positive tests plus stale/replay/negative tests where relevant.
 - SQLite behavior should be tested through persistence/reopen paths when a
   migration or transaction invariant matters.
-- Product Client changes need `node --check` plus
-  `node crates/finite-brain-server/src/product-client.test.js`.
 - Before handoff, run `cargo fmt --all --check`, `cargo test --workspace`, and
   `cargo clippy --workspace --all-targets -- -D warnings`.
 
@@ -212,9 +207,6 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --locked --release --package finite-brain-cli --bin fbrain
-node --check crates/finite-brain-server/src/product-client.js
-node --check crates/finite-brain-server/src/smoke-ui.js
-node crates/finite-brain-server/src/product-client.test.js
 ```
 
 ## Safety And Public Repo Rules

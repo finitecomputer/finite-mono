@@ -15,7 +15,6 @@ const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 
 const PROTECTED_WORKOS_PATH_PREFIXES = [
   "/api",
-  "/client",
   "/dashboard",
   "/dev",
 ] as const;
@@ -23,9 +22,6 @@ const PROTECTED_WORKOS_PATH_PREFIXES = [
 const PUBLIC_WORKOS_PATHS = new Set([
   "/",
   "/callback",
-  "/client/app.css",
-  "/client/app.js",
-  "/client/config.json",
   "/favicon.ico",
   "/favicon.svg",
   "/login",
@@ -35,12 +31,9 @@ const PUBLIC_WORKOS_PATHS = new Set([
   "/signup",
 ]);
 
-const PUBLIC_WORKOS_PATH_PREFIXES = ["/client/fonts"] as const;
-
 const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",
   "/health",
-  "/api/brain/identity-provider",
   "/api/device-links/enroll",
   "/api/stripe/webhook",
   "/login",
@@ -53,14 +46,6 @@ const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
   "/api/device-links/status",
 ]);
 
-// Brain's product client is a WorkOS-authenticated browser surface, while
-// the opaque-frame identity provider uses its frame capability plus a fresh,
-// request-bound WorkOS session proof. /v1 uses Brain-owned route-level auth
-// (normally a Nostr signature, with narrowly scoped invitation proofs where
-// specified). Let those APIs reach Brain without replacing their authority
-// with an AuthKit session. Runtime callbacks likewise enforce their own
-// protocol boundary.
-const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1"] as const;
 
 type EnvSource = Record<string, string | undefined>;
 
@@ -100,23 +85,11 @@ export function workosProtectedPath(pathname: string) {
     return false;
   }
 
-  if (
-    PUBLIC_WORKOS_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
-  ) {
-    return false;
-  }
-
   return PROTECTED_WORKOS_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 export function workosProxyBypassPath(pathname: string) {
-  if (WORKOS_PROXY_BYPASS_PATHS.has(pathname)) {
-    return true;
-  }
-
-  return WORKOS_PROXY_BYPASS_PATH_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
+  return WORKOS_PROXY_BYPASS_PATHS.has(pathname);
 }
 
 export function workosProxyBypassRequest(

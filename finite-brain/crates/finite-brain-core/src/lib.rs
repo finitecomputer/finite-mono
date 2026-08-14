@@ -997,60 +997,7 @@ fn bootstrap_organization_brain_with_admins(
     })
 }
 
-/// Development-only deterministic bootstrap summary used by the smoke server.
-pub fn smoke_bootstrap_summary() -> Result<BootstrapSmokeSummary, CoreError> {
-    let personal =
-        bootstrap_personal_brain("personal-smoke", "Personal Smoke", "npub-smoke-owner")?;
-    let organization =
-        bootstrap_organization_brain("org-smoke", "Organization Smoke", "npub-smoke-admin")?;
-
-    Ok(BootstrapSmokeSummary {
-        personal: BootstrapBrainSummary::from_output(&personal),
-        organization: BootstrapBrainSummary::from_output(&organization),
-    })
-}
-
-/// Development smoke summary for both bootstrap shapes.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BootstrapSmokeSummary {
-    /// Personal Brain summary.
-    pub personal: BootstrapBrainSummary,
-    /// Organization Brain summary.
-    pub organization: BootstrapBrainSummary,
-}
-
-/// Compact bootstrap summary safe to return from smoke endpoints.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BootstrapBrainSummary {
-    /// Brain kind.
-    pub kind: BrainKind,
-    /// Folder ids created by bootstrap.
-    pub folder_ids: Vec<String>,
-    /// Number of current required Folder Key Grants.
-    pub required_grants: usize,
-    /// Admin count.
-    pub admin_count: usize,
-    /// Member count.
-    pub member_count: usize,
-}
-
-impl BootstrapBrainSummary {
-    fn from_output(output: &BootstrapOutput) -> Self {
-        Self {
-            kind: output.brain.kind,
-            folder_ids: output
-                .brain
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect(),
-            required_grants: output.required_key_grants.len(),
-            admin_count: output.brain.admins.len(),
-            member_count: output.brain.members.len(),
-        }
-    }
-}
-
+/// Folder Object crypto and signed-record validation errors.
 /// Folder Object crypto and signed-record validation errors.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CryptoRecordError {
@@ -3198,21 +3145,6 @@ mod tests {
                 reason: "missing parent folder: missing".to_owned()
             }
         );
-    }
-
-    #[test]
-    fn smoke_bootstrap_summary_is_stable() {
-        let summary = smoke_bootstrap_summary().unwrap();
-
-        assert_eq!(summary.personal.kind, BrainKind::Personal);
-        assert!(summary.personal.folder_ids.is_empty());
-        assert_eq!(summary.personal.required_grants, 0);
-
-        assert_eq!(summary.organization.kind, BrainKind::Organization);
-        assert!(summary.organization.folder_ids.is_empty());
-        assert_eq!(summary.organization.required_grants, 0);
-        assert_eq!(summary.organization.admin_count, 1);
-        assert_eq!(summary.organization.member_count, 1);
     }
 
     #[test]

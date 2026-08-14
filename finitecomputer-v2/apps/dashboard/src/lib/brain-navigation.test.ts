@@ -2,13 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("Brain navigation stays disabled while the direct testing route remains available", async () => {
+test("Brain navigation stays disabled until the chat-surface viewer ships", async () => {
   const source = await readFile(
     new URL("../components/agent-navigation.tsx", import.meta.url),
-    "utf8",
-  );
-  const route = await readFile(
-    new URL("../app/dashboard/machines/[machineId]/brain/page.tsx", import.meta.url),
     "utf8",
   );
 
@@ -17,6 +13,4 @@ test("Brain navigation stays disabled while the direct testing route remains ava
   assert.doesNotMatch(item, /href:/u);
   assert.match(item, /active: false,/u);
   assert.match(item, /note: "Coming soon",/u);
-  assert.match(route, /export default async function MachineBrainPage/u);
-  assert.match(route, /<BrainFrame/u);
 });

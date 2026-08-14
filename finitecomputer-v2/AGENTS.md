@@ -13,7 +13,7 @@ v2 owns:
 - BoxOne-parity dashboard web chat through a Finite Chat Hosted Web Device
 - product-owned connection UX through focused services, stable APIs, and skills;
   never through Runtime Management Pipe feature commands
-- Finite Sites publishing/list/preview and Finite Brain dashboard integration
+- Finite Sites publishing/list/preview and Finite Brain chat-surface integration (render cards; viewer components per brain-surface proposal)
 - separate, revocable product-scoped Email Access Delegations for Sites and
   Brain; never a global human-agent Principal Link
 - Core user, organization, Project, entitlement, and runtime-launch state
