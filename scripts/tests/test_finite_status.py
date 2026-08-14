@@ -221,8 +221,32 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(fresh["litestream"]["stamp_status"], "green")
         self.assertEqual(fresh["litestream"]["service_status"], "green")
         self.assertEqual(
-            fresh["litestream"]["service_unit"], "finite-litestream.service"
+            sorted(fresh["litestream"]["service_units"]),
+            [
+                "finite-litestream-finite-brain.service",
+                "finite-litestream-finite-chat-server.service",
+            ],
         )
+        self.assertEqual(
+            set(fresh["litestream"]["service_units"].values()), {"green"}
+        )
+
+        one_down = dict(raw["recovery"])
+        one_down["litestream_service_units"] = dict(
+            raw["recovery"]["litestream_service_units"],
+            **{
+                "finite-litestream-finite-brain.service": {
+                    "LoadState": "loaded",
+                    "ActiveState": "inactive",
+                    "SubState": "dead",
+                    "Result": "success",
+                    "ExecMainStatus": "0",
+                },
+            },
+        )
+        report = finite_status.build_recovery(one_down, now)
+        self.assertNotEqual(report["litestream"]["service_status"], "green")
+        self.assertNotEqual(report["status"], "green")
 
         stale = dict(raw["recovery"])
         stale["litestream_last_success_epoch"] = int(now.timestamp()) - 7200
@@ -233,7 +257,9 @@ class FiniteStatusTests(unittest.TestCase):
         missing = dict(raw["recovery"])
         del missing["litestream_last_success_epoch"]
         missing["litestream_last_success_error"] = "cannot read stamp"
-        missing["litestream_service_unit"] = {"error": "unit not found"}
+        missing["litestream_service_units"] = {
+            "finite-litestream-finite-chat-server.service": {"error": "unit not found"}
+        }
         report = finite_status.build_recovery(missing, now)
         self.assertEqual(report["litestream"]["stamp_status"], "unknown")
         self.assertNotEqual(report["status"], "green")
