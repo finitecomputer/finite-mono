@@ -116,8 +116,8 @@ identity-edge-contract:
 
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
-    python3 scripts/check_runtime_image_contract.py
-    python3 -m unittest discover -s scripts/tests -p 'test_runtime_image_contract.py'
+    python3 finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py
+    python3 -m unittest discover -s finitecomputer-v2/deploy/finite-computer/images/tests -p 'test_runtime_image_contract.py'
 
 # Measured eight-H200 DeepSeek serving identity and scheduler contract.
 finite-private-deepseek-contract:

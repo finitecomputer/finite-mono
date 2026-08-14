@@ -116,6 +116,22 @@ class CiHarnessSelectionTests(unittest.TestCase):
             },
         )
 
+    def test_runtime_image_contract_paths_run_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py",
+                "finitecomputer-v2/deploy/finite-computer/images/tests/test_runtime_image_contract.py",
+            ),
+            {"run_nix_checks"},
+        )
+        self.assertEqual(
+            selected(
+                "scripts/check_runtime_image_contract.py",
+                "scripts/tests/test_runtime_image_contract.py",
+            ),
+            {"run_nix_checks"},
+        )
+
     def test_moved_monitoring_paths_do_not_select_every_harness(self) -> None:
         self.assertEqual(
             selected(

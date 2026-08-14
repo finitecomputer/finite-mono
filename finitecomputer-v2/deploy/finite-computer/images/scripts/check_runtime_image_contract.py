@@ -110,7 +110,7 @@ def is_test_or_prose(path: Path) -> bool:
         or "/test/" in f"/{lowered}"
         or "/fixtures/" in f"/{lowered}"
         or lowered.startswith("scripts/tests/")
-        or lowered == "scripts/check_runtime_image_contract.py"
+        or lowered == "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
     )
 
 
@@ -292,7 +292,7 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--root", type=Path, default=Path(__file__).resolve().parents[1]
+        "--root", type=Path, default=Path(__file__).resolve().parents[5]
     )
     args = parser.parse_args()
     violations = check_repository(args.root.resolve())

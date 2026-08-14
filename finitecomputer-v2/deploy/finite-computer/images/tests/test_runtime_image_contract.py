@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_runtime_image_contract import (
-    CANONICAL_BUILDER,
-    CANONICAL_DOCKERFILE,
-    CANONICAL_DOCKERFILE_ANCHORS,
-    CANONICAL_WORKFLOW,
-    CANONICAL_WORKFLOW_ANCHORS,
-    PHALA_ADAPTER,
-    check_repository,
-)
+ROOT = Path(__file__).resolve().parents[5]
+CHECKER = ROOT / "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+spec = importlib.util.spec_from_file_location("check_runtime_image_contract", CHECKER)
+assert spec is not None and spec.loader is not None
+check_runtime_image_contract = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = check_runtime_image_contract
+spec.loader.exec_module(check_runtime_image_contract)
+
+CANONICAL_BUILDER = check_runtime_image_contract.CANONICAL_BUILDER
+CANONICAL_DOCKERFILE = check_runtime_image_contract.CANONICAL_DOCKERFILE
+CANONICAL_DOCKERFILE_ANCHORS = check_runtime_image_contract.CANONICAL_DOCKERFILE_ANCHORS
+CANONICAL_WORKFLOW = check_runtime_image_contract.CANONICAL_WORKFLOW
+CANONICAL_WORKFLOW_ANCHORS = check_runtime_image_contract.CANONICAL_WORKFLOW_ANCHORS
+PHALA_ADAPTER = check_runtime_image_contract.PHALA_ADAPTER
+check_repository = check_runtime_image_contract.check_repository
 
 
 class RuntimeImageContractTests(unittest.TestCase):
