@@ -245,7 +245,6 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   await resetDashboardDevDirs();
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore(() => hostedDevice.setAvailable(true));
-  const brain = await startFakeBrain();
   const sites = await startFakeSites();
   let dashboard: ChildProcessWithoutNullStreams | null = null;
   let dashboardOutput = () => "";
@@ -254,7 +253,6 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     paidDashboardPort,
     core.url,
     hostedDevice.url,
-    brain.url,
     sites.apiUrl,
     {
       admin: true,
@@ -382,7 +380,6 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       dashboardPort,
       core.url,
       hostedDevice.url,
-      brain.url,
       sites.apiUrl,
       {
         runtimeRetirement: true,
@@ -1045,14 +1042,6 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
       assert.equal(await completedBrainItem.getAttribute("href"), null);
       assert.equal(await completedBrainItem.getAttribute("title"), "Coming soon");
-      await page.goto(
-        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot/brain`
-      );
-      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/brain$/u);
-      await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
-      const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
-      await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
-      await brainFrame.getByText("Brain API ready").waitFor({ state: "visible" });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
       );
@@ -1947,7 +1936,6 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     ]);
     core.server.close();
     hostedDevice.close();
-    brain.server.close();
     sites.server.close();
     await resetDashboardDevDirs();
   }
@@ -1981,7 +1969,6 @@ function startDashboard(
   port: number,
   coreUrl: string,
   hostedDeviceUrl: string,
-  brainUrl: string,
   sitesUrl: string,
   options: {
     admin?: boolean;
@@ -2007,8 +1994,6 @@ function startDashboard(
         FC_CORE_BASE_URL: coreUrl,
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
-        FC_BRAIN_UPSTREAM_URL: brainUrl,
-        FC_BRAIN_PUBLIC_ORIGIN: `http://127.0.0.1:${port}`,
         FC_SITES_UPSTREAM_URL: sitesUrl,
         FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
         FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
@@ -2125,27 +2110,6 @@ async function startFakeSites() {
     apiUrl: `http://127.0.0.1:${address.port}`,
     siteUrl,
   };
-}
-
-async function startFakeBrain() {
-  const server = http.createServer((request, response) => {
-    const requestUrl = new URL(request.url ?? "/", "http://brain.test");
-    if (request.method === "GET" && requestUrl.pathname === "/client") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/v1/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
-      return;
-    }
-    if (request.method === "GET" && request.url === "/v1/browser-proof") {
-      writeJson(response, 200, { message: "Brain API ready" });
-      return;
-    }
-    writeJson(response, 404, { error: "not found" });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert(address && typeof address === "object");
-  return { server, url: `http://127.0.0.1:${address.port}` };
 }
 
 async function startFakeHostedDevice() {

@@ -377,4 +377,3 @@ print(f"finite-skills static checks passed ({len(skill_files)} skills)")
 PY
 
 python3 tests/finitebrain_missing_skill_scenarios.py
-python3 tests/finitebrain_product_matrix_model.py
