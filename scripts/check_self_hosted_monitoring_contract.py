@@ -109,7 +109,6 @@ def main() -> None:
     panels_by_title = {panel.get("title"): panel for panel in dashboard["panels"]}
     expected_table_queries = {
         "Running Versions": "1000 * topk by (component, host) (1, timestamp(finite_component_build_info))",
-        "Runtime Artifacts": "1000 * topk by (source_host_id, artifact_id) (1, timestamp(finite_runtime_artifact_info))",
         "Version Drift": "1000 * topk by (component, host) (1, timestamp(finite_component_version_mismatch == 1))",
     }
     for title, expected_query in expected_table_queries.items():
@@ -122,6 +121,21 @@ def main() -> None:
         rendered = json.dumps(panel, sort_keys=True)
         require(rendered, '"Value": "Observed"', title)
         require(rendered, '"dateTimeAsIso"', title)
+
+    runtime_artifacts = panels_by_title.get("Runtime Artifacts")
+    if runtime_artifacts is None:
+        raise SystemExit("dashboard is missing 'Runtime Artifacts'")
+    targets = runtime_artifacts.get("targets", [])
+    expected_runtime_query = (
+        "sort_desc(sum by (artifact_id, version_label, promoted) "
+        "(max by (source_host_id, artifact_id, version_label, promoted) "
+        "(finite_runtime_artifact_active_agents)))"
+    )
+    if not targets or targets[0].get("expr") != expected_runtime_query:
+        raise SystemExit("'Runtime Artifacts' must use the active-agent count query")
+    rendered = json.dumps(runtime_artifacts, sort_keys=True)
+    require(rendered, '"Value": "Active agents"', "Runtime Artifacts")
+    require(rendered, "finite_runtime_artifact_active_agents", "Runtime Artifacts")
 
     print("self-hosted monitoring contract: ok")
 

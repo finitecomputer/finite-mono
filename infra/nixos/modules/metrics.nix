@@ -84,7 +84,7 @@ in
             rule {
               action        = "keep"
               source_labels = ["__name__"]
-              regex         = "finite_component_build_info|finite_component_version_mismatch|finite_healthcheck_success|finite_runtime_artifact_info|finite_service_health_status|node_textfile_mtime_seconds|node_textfile_scrape_error|up"
+              regex         = "finite_component_build_info|finite_component_version_mismatch|finite_healthcheck_success|finite_runtime_artifact_active_agents|finite_runtime_artifact_info|finite_service_health_status|node_textfile_mtime_seconds|node_textfile_scrape_error|up"
             }
           }
 
