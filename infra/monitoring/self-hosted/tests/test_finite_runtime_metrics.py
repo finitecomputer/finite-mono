@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import finite_runtime_metrics
+ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+RUNTIME_METRICS = ROOT / "infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py"
+spec = importlib.util.spec_from_file_location("finite_runtime_metrics", RUNTIME_METRICS)
+assert spec is not None and spec.loader is not None
+finite_runtime_metrics = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = finite_runtime_metrics
+spec.loader.exec_module(finite_runtime_metrics)
 
 
 class FiniteRuntimeMetricsTests(unittest.TestCase):

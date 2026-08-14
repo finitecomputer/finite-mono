@@ -61,6 +61,15 @@ class CiHarnessSelectionTests(unittest.TestCase):
             else:
                 self.assertEqual(value, "true", key)
 
+    def test_unknown_root_script_selects_every_active_harness(self) -> None:
+        values = selection_for("scripts/new_domain_helper.py")
+
+        for key, value in values.items():
+            if key == "run_electron_alpha":
+                self.assertEqual(value, "false")
+            else:
+                self.assertEqual(value, "true", key)
+
     def test_dashboard_lib_change_skips_browser_e2e(self) -> None:
         self.assertEqual(
             selected("finitecomputer-v2/apps/dashboard/src/lib/hosted-web-chat.ts"),
@@ -93,8 +102,35 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_monitoring_script_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
-            selected("scripts/check_self_hosted_monitoring_contract.py"),
+            selected("infra/monitoring/self-hosted/scripts/check_self_hosted_monitoring_contract.py"),
             {"run_self_hosted_monitoring_contract"},
+        )
+
+    def test_monitoring_runtime_metrics_script_runs_focused_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py"),
+            {
+                "run_self_hosted_monitoring_contract",
+                "run_finite_status_contract",
+                "run_nix_checks",
+            },
+        )
+
+    def test_moved_monitoring_paths_do_not_select_every_harness(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/check_self_hosted_monitoring_contract.py",
+                "scripts/tests/test_finite_runtime_metrics.py",
+            ),
+            {"run_self_hosted_monitoring_contract"},
+        )
+        self.assertEqual(
+            selected("scripts/finite_runtime_metrics.py"),
+            {
+                "run_self_hosted_monitoring_contract",
+                "run_finite_status_contract",
+                "run_nix_checks",
+            },
         )
 
     def test_finite_status_script_runs_only_finite_status_contract(self) -> None:

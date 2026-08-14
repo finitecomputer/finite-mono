@@ -92,7 +92,8 @@ lat1-healthcheck-contract:
 # the dedicated Ubuntu monitoring VPS.
 self-hosted-monitoring-contract:
     bash -n infra/monitoring/self-hosted/install-ubuntu infra/monitoring/self-hosted/verify
-    python3 scripts/check_self_hosted_monitoring_contract.py
+    python3 infra/monitoring/self-hosted/scripts/check_self_hosted_monitoring_contract.py
+    python3 -m unittest discover -s infra/monitoring/self-hosted/tests -p 'test_finite_runtime_metrics.py'
 
 # Anti-drift contract: both Kata Runner hosts render one shared runner-role
 # module; evaluated env and unit fragments may differ only in the declared
@@ -104,7 +105,7 @@ runner-host-contract:
 finite-status-contract:
     python3 scripts/check_finite_status_contract.py
     python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
-    python3 -m unittest discover -s scripts/tests -p 'test_finite_runtime_metrics.py'
+    python3 -m unittest discover -s infra/monitoring/self-hosted/tests -p 'test_finite_runtime_metrics.py'
 
 # Static contract: every Identity Authority route the fsite CLI calls is on
 # the service-owned public surface (public_router); the edge proxies, never

@@ -18,7 +18,7 @@ let
     pkgs.runCommand "finite-runtime-metrics" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
       ''
         mkdir -p "$out/bin" "$out/lib/finite-runtime-metrics/scripts"
-        cp ${../../../scripts/finite_runtime_metrics.py} "$out/lib/finite-runtime-metrics/finite_runtime_metrics.py"
+        cp ${../../monitoring/self-hosted/scripts/finite_runtime_metrics.py} "$out/lib/finite-runtime-metrics/finite_runtime_metrics.py"
         cp ${../../../scripts/finite_status.py} "$out/lib/finite-runtime-metrics/scripts/finite_status.py"
         touch "$out/lib/finite-runtime-metrics/scripts/__init__.py"
         makeWrapper ${pkgs.python3}/bin/python "$out/bin/finite-runtime-metrics" \

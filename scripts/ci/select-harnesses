@@ -51,13 +51,23 @@ GLOBAL_SUFFIXES = (
 )
 
 MONITORING_PREFIX = "infra/monitoring/self-hosted/"
+# CI diffs use --no-renames, so this keeps this family move focused while the
+# deleted old paths are still visible in the PR.
+MOVED_SELF_HOSTED_MONITORING_PATHS = {
+    "scripts/check_self_hosted_monitoring_contract.py",
+    "scripts/finite_runtime_metrics.py",
+    "scripts/tests/test_finite_runtime_metrics.py",
+}
+RUNTIME_METRICS_SOURCE_PATHS = {
+    "infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py",
+    "scripts/finite_runtime_metrics.py",
+}
 
 FINITE_STATUS_PATHS = {
     "scripts/finite-status",
     "scripts/finite_status.py",
     "scripts/check_finite_status_contract.py",
     "scripts/tests/test_finite_status.py",
-    "scripts/tests/test_finite_runtime_metrics.py",
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
@@ -201,8 +211,8 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.select_all()
         return
 
-    if is_self_hosted_monitoring_path(path):
-        selection.run_self_hosted_monitoring_contract = True
+    if is_self_hosted_monitoring_path(path) or path in MOVED_SELF_HOSTED_MONITORING_PATHS:
+        apply_self_hosted_monitoring_path(selection, path)
         return
 
     if is_finite_skills_executable_doc(path):
@@ -214,10 +224,6 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path in FINITE_STATUS_PATHS:
         selection.run_finite_status_contract = True
-        return
-
-    if path == "scripts/check_self_hosted_monitoring_contract.py":
-        selection.run_self_hosted_monitoring_contract = True
         return
 
     if path.startswith("finite-skills/"):
@@ -261,6 +267,13 @@ def is_global_path(path: str) -> bool:
 
 def is_self_hosted_monitoring_path(path: str) -> bool:
     return path.startswith(MONITORING_PREFIX)
+
+
+def apply_self_hosted_monitoring_path(selection: HarnessSelection, path: str) -> None:
+    selection.run_self_hosted_monitoring_contract = True
+    if path in RUNTIME_METRICS_SOURCE_PATHS:
+        selection.run_finite_status_contract = True
+        selection.run_nix_checks = True
 
 
 def is_finite_skills_executable_doc(path: str) -> bool:
