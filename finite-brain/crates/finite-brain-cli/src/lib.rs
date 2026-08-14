@@ -2462,6 +2462,7 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
         folders,
         mounted_folders: metadata.mounted_folders,
         grant_count: metadata.grant_count,
+        collaborator_readiness: metadata.collaborator_readiness,
     })
 }
 
@@ -2478,6 +2479,13 @@ fn write_access_summary_rows<W: Write>(
         report.guests.len(),
         report.grant_count
     )?;
+    for person in &report.collaborator_readiness {
+        writeln!(
+            output,
+            "person {} role={} keys={}/{}",
+            person.target_npub, person.brain_role, person.ready_count, person.total_count
+        )?;
+    }
     if report.folders.is_empty() {
         writeln!(output, "no folders")?;
     } else {
@@ -6100,7 +6108,18 @@ mod tests {
                             "setupIncomplete": false
                         }],
                         "mountedFolders": [],
-                        "grantCount": 3
+                        "grantCount": 3,
+                        "collaboratorReadiness": [{
+                            "targetNpub": "npub-admin",
+                            "brainRole": "admin",
+                            "readyCount": 2,
+                            "totalCount": 3
+                        }, {
+                            "targetNpub": "npub-member",
+                            "brainRole": "member",
+                            "readyCount": 0,
+                            "totalCount": 2
+                        }]
                     })
                 }
                 .to_string();
@@ -8298,6 +8317,21 @@ mod tests {
             access["folders"][2]["effectiveAccessUserIds"],
             serde_json::json!(["npub-admin", "npub-member"])
         );
+        assert_eq!(
+            access["collaboratorReadiness"],
+            serde_json::json!([{
+                "targetNpub": "npub-admin",
+                "brainRole": "admin",
+                "readyCount": 2,
+                "totalCount": 3
+            }, {
+                "targetNpub": "npub-member",
+                "brainRole": "member",
+                "readyCount": 0,
+                "totalCount": 2
+            }]),
+            "access list must surface per-principal folder-key readiness"
+        );
         let mut output = Vec::new();
         run_with_env(
             ["access", "list", "--brain", "acme", "--server", &server_url],
@@ -8306,6 +8340,8 @@ mod tests {
         )
         .unwrap();
         let access_text = String::from_utf8(output).unwrap();
+        assert!(access_text.contains("person npub-admin role=admin keys=2/3"));
+        assert!(access_text.contains("person npub-member role=member keys=0/2"));
         assert!(access_text.contains(
             "folder general path=general access=all_members keyVersion=2 state=ready explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin,npub-member]"
         ));
@@ -12874,6 +12910,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
 
         assert_eq!(
@@ -12900,6 +12937,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
         assert_eq!(
             folder_required_recipients(&personal_metadata, "restricted", &[]).unwrap(),
@@ -12921,6 +12959,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
 
         let post_removal = metadata_after_member_removal(&metadata, "npub-removed");

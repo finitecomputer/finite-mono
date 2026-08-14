@@ -393,6 +393,9 @@ pub(crate) struct AccessSummaryReport {
     pub(crate) folders: Vec<FolderAccessSummary>,
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     pub(crate) grant_count: usize,
+    /// Per-principal Folder key readiness (empty for Personal Brains and
+    /// non-admin requesters).
+    pub(crate) collaborator_readiness: Vec<CollaboratorReadinessView>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -434,6 +437,21 @@ pub(crate) struct BrainMetadataView {
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     #[serde(default)]
     pub(crate) grant_count: usize,
+    /// Authoritative per-principal Folder key coverage for Organization
+    /// Brains. Only present when the requester is a Brain admin; older
+    /// servers omit it and this defaults to empty. Per-principal pending-wrap
+    /// markers from the stacked pending-wraps work can extend this view later.
+    #[serde(default)]
+    pub(crate) collaborator_readiness: Vec<CollaboratorReadinessView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CollaboratorReadinessView {
+    pub(crate) target_npub: String,
+    pub(crate) brain_role: String,
+    pub(crate) ready_count: usize,
+    pub(crate) total_count: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
