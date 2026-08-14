@@ -9,6 +9,8 @@ coverage/
 .env.*
 !.env.example
 secrets/
+!infra/nixos/secrets/
+!infra/nixos/secrets/**
 .local-state/
 /.state/
 *.log

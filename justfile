@@ -148,6 +148,55 @@ lat1-secret-bootstrap-contract:
     python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null
     python3 -m unittest scripts.tests.test_check_lat1_secret_bootstrap
 
+# Values-free NixOS secret contract shape. Host coverage gates stay separate
+# until rendered lat2 eval is wired into the migration.
+nixos-secrets-contract:
+    python3 scripts/check_nixos_secrets_contract.py
+    python3 -m unittest scripts.tests.test_nixos_secrets_contract
+    python3 -m unittest scripts.tests.test_nixos_sops_ingest
+    python3 -m unittest scripts.tests.test_nixos_sops_operator_key
+    python3 -m unittest scripts.tests.test_nixos_sops_test_decrypt
+    python3 -m unittest scripts.tests.test_nixos_sops_updatekeys
+
+# Create or inspect the local operator age key used by SOPS. Prints only the
+# public age recipient; the private key stays in SOPS_AGE_KEY_FILE or
+# ~/.config/sops/age/keys.txt.
+[positional-arguments]
+nixos-sops-operator-key *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_operator_key.py "$@"
+
+# Check whether the current operator can decrypt existing NixOS SOPS files.
+[positional-arguments]
+test-sops-decrypt *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_test_decrypt.py "$@"
+
+# Encrypt one NixOS SOPS secret from stdin into infra/nixos/secrets.
+# Example:
+#   ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
+#     | just nixos-sops-ingest shared metrics-remote-write.env --logical-name metrics-remote-write --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME --required-env-name FINITE_METRICS_REMOTE_WRITE_PASSWORD --consumer alloy.service --restart-unit alloy.service
+[positional-arguments]
+nixos-sops-ingest *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_ingest.py "$@"
+
+# Update SOPS file recipient metadata after .sops.yaml recipient changes.
+[positional-arguments]
+nixos-sops-updatekeys *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 scripts/nixos_sops_updatekeys.py "$@"
+
+# Synthetic deletion, watermark, active-job, and stale-lease safety contract
+# for finite-lat-2's operator-installed runner guardrails.
+lat2-runner-guardrails-contract:
+    bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
+    python3 -m unittest scripts.tests.test_lat2_runner_guardrails
+
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
     bash scripts/tests/test_devfinity_brain_readiness.sh

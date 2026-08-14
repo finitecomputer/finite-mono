@@ -8,6 +8,11 @@
 let
   cfg = config.finite.metrics;
   metricsDirectory = "/run/finite-monitoring";
+  metricsRemoteWriteEnvironmentFile =
+    if builtins.hasAttr "metrics-remote-write" config.finite.secrets.files then
+      config.finite.secrets.files."metrics-remote-write".path
+    else
+      "/etc/finite/metrics-remote-write.env";
   staticMetrics = pkgs.writeText "finite-version-static.prom" cfg.staticVersionMetrics;
   runtimeMetrics =
     pkgs.runCommand "finite-runtime-metrics" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
@@ -57,7 +62,7 @@ in
 
         services.alloy = {
           enable = true;
-          environmentFile = "/etc/finite/metrics-remote-write.env";
+          environmentFile = metricsRemoteWriteEnvironmentFile;
           extraFlags = [ "--disable-reporting" ];
         };
         environment.etc."alloy/config.alloy".text = ''

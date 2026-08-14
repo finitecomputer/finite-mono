@@ -30,6 +30,8 @@
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko";
     disko.inputs.nixpkgs.follows = "nixpkgs";
+    sops-nix.url = "github:Mic92/sops-nix";
+    sops-nix.inputs.nixpkgs.follows = "nixpkgs-lat3";
 
     # Exact installer sources for finite-lat-3. nixos-anywhere's default kexec
     # image is 25.11, so the install always supplies the same-pin tarball built
@@ -56,6 +58,7 @@
       flake-utils,
       rust-overlay,
       disko,
+      sops-nix,
       nixos-anywhere,
       nixos-images,
       ...
@@ -82,7 +85,9 @@
       };
       lat3Modules = [
         disko.nixosModules.disko
+        sops-nix.nixosModules.sops
         revisionModule
+        ./infra/nixos/modules/secrets.nix
         ./infra/nixos/hosts/finite-lat-3
       ];
 
@@ -193,8 +198,10 @@
               packages =
                 rustBasePackages
                 ++ [
+                  pkgs.age
                   gcxCli
                   litestreamCli
+                  pkgs.sops
                 ]
                 ++ (with pkgs; [
                   nodejs_24
@@ -268,7 +275,9 @@
         specialArgs = runnerSpecialArgs;
         modules = [
           disko.nixosModules.disko
+          sops-nix.nixosModules.sops
           revisionModule
+          ./infra/nixos/modules/secrets.nix
           ./infra/nixos/hosts/finite-lat-1
         ];
       };
