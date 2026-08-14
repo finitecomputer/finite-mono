@@ -174,6 +174,25 @@ just dev cleanup
 The child exit status is preserved. If the env file is missing, start the stack
 first with `devfinity --state-dir <dir> up`.
 
+`devfinity agent-run --skill <SKILL.md> --output <result.json> <prompt-file>`
+is the first reusable agent-client primitive. It also requires an already
+running stack. It loads `runs/default/env`, prepares a per-job workspace,
+copies the selected skill directory into a managed-skills bundle that contains
+exactly one `SKILL.md`, installs that bundle in the running Agent Runtime,
+restarts Hermes, sends the prompt through Hosted Web chat, and writes a result
+JSON with the final reply and any captured runtime output.
+
+Example:
+
+```sh
+just dev up --headless
+just dev agent-run --skill finite-skills/skills/software-development/impeccable-finite/SKILL.md \
+  --workspace /tmp/devfinity-agent-run-a \
+  --output /tmp/devfinity-agent-run-a/result.json \
+  /tmp/devfinity-agent-run-a/prompt.txt
+just dev cleanup
+```
+
 The repository gate is:
 
 ```sh

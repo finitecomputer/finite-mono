@@ -10,7 +10,8 @@ use devfinity::workos_fixture::{
     serve as serve_workos_fixture,
 };
 use devfinity::{
-    ProcessComposeMode, Stack, StackProfile, is_retryable_postgres_startup, store_inference_key,
+    AgentRunConfig, ProcessComposeMode, Stack, StackProfile, is_retryable_postgres_startup,
+    store_inference_key,
 };
 
 const MAX_POSTGRES_PORT_ATTEMPTS: usize = 5;
@@ -37,6 +38,9 @@ enum Command {
     Up(UpArgs),
     /// Run an arbitrary command with isolated baseline test infrastructure.
     Run(RunArgs),
+    /// Run one prompt through one skill on an already-running agent stack.
+    #[command(name = "agent-run")]
+    AgentRun(AgentRunArgs),
     /// Run a client command against an already-running stack.
     Exec(ExecArgs),
     /// Print the current devfinity process and service status.
@@ -99,6 +103,36 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args)]
+struct AgentRunArgs {
+    /// Label recorded on the result and used for default workspace paths.
+    #[arg(long, default_value = "agent-run")]
+    label: String,
+
+    /// JSON result file written by the agent-run driver.
+    #[arg(long)]
+    output: PathBuf,
+
+    /// Milliseconds to wait for the agent's final chat reply.
+    #[arg(long)]
+    reply_timeout_ms: Option<u64>,
+
+    /// Runtime file path to read after the turn, if the prompt asks the agent to write one.
+    #[arg(long)]
+    runtime_output_path: Option<String>,
+
+    /// Skill file to install as the only managed skill for this run.
+    #[arg(long)]
+    skill: PathBuf,
+
+    /// Host workspace for the prepared prompt and skill bundle.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Prompt file to send to the agent.
+    prompt_file: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct ExecArgs {
     /// Command and arguments to run after loading runs/default/env.
     #[arg(last = true, required = true)]
@@ -151,6 +185,15 @@ fn run() -> anyhow::Result<ExitCode> {
             stack.run_process_compose_up(mode, args.dry_run)
         }
         Command::Run(args) => run_isolated_command(&cli.state_dir, &args.command),
+        Command::AgentRun(args) => Stack::new(cli.state_dir)?.run_agent_job(AgentRunConfig {
+            label: args.label,
+            output_file: args.output,
+            prompt_file: args.prompt_file,
+            reply_timeout_ms: args.reply_timeout_ms,
+            runtime_output_path: args.runtime_output_path,
+            skill_file: args.skill,
+            workspace: args.workspace,
+        }),
         Command::Exec(args) => Stack::new(cli.state_dir)?.run_client_command(&args.command),
         Command::Status => {
             let mut stack = Stack::new(cli.state_dir)?;
@@ -262,6 +305,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::TcpStream;
+    use std::path::PathBuf;
     use std::process::ExitCode;
 
     use anyhow::anyhow;
@@ -307,6 +351,64 @@ mod tests {
         assert_eq!(
             args.command,
             ["node", "scripts/test-client.mjs", "--case", "one"]
+        );
+    }
+
+    #[test]
+    fn agent_run_command_parses_prompt_and_skill_paths() {
+        let cli = Cli::try_parse_from([
+            "devfinity",
+            "agent-run",
+            "--skill",
+            "finite-skills/skills/example/SKILL.md",
+            "--output",
+            "/tmp/result.json",
+            "--workspace",
+            "/tmp/workspace",
+            "--label",
+            "skill-a",
+            "--reply-timeout-ms",
+            "1234",
+            "prompt.txt",
+        ])
+        .unwrap();
+
+        let Command::AgentRun(args) = cli.command else {
+            panic!("expected agent-run command");
+        };
+        assert_eq!(
+            args.skill,
+            PathBuf::from("finite-skills/skills/example/SKILL.md")
+        );
+        assert_eq!(args.output, PathBuf::from("/tmp/result.json"));
+        assert_eq!(args.workspace, Some(PathBuf::from("/tmp/workspace")));
+        assert_eq!(args.label, "skill-a");
+        assert_eq!(args.reply_timeout_ms, Some(1234));
+        assert_eq!(args.prompt_file, PathBuf::from("prompt.txt"));
+    }
+
+    #[test]
+    fn agent_run_command_requires_skill_output_and_prompt() {
+        assert!(Cli::try_parse_from(["devfinity", "agent-run"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "devfinity",
+                "agent-run",
+                "--skill",
+                "SKILL.md",
+                "prompt.txt"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "devfinity",
+                "agent-run",
+                "--output",
+                "result.json",
+                "prompt.txt"
+            ])
+            .is_err()
         );
     }
 

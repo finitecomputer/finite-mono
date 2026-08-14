@@ -10,7 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -25,6 +25,26 @@ use workos_fixture::{
 pub enum ProcessComposeMode {
     Tui,
     Headless,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunConfig {
+    pub label: String,
+    pub output_file: PathBuf,
+    pub prompt_file: PathBuf,
+    pub reply_timeout_ms: Option<u64>,
+    pub runtime_output_path: Option<String>,
+    pub skill_file: PathBuf,
+    pub workspace: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PreparedAgentRun {
+    output_file: PathBuf,
+    prompt_file: PathBuf,
+    runtime_output_path: String,
+    skill_bundle_dir: PathBuf,
+    workspace: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -862,6 +882,14 @@ impl Stack {
     }
 
     pub fn run_client_command(&self, command: &[String]) -> Result<ExitCode> {
+        self.run_client_command_with_env(command, &[])
+    }
+
+    fn run_client_command_with_env(
+        &self,
+        command: &[String],
+        env: &[(&'static str, String)],
+    ) -> Result<ExitCode> {
         if command.is_empty() {
             bail!("client command cannot be empty");
         }
@@ -885,6 +913,7 @@ impl Stack {
             .args(command)
             .current_dir(&self.repo_root)
             .env("DEVFINITY_ENV_FILE", &env_file);
+        child_command.envs(env.iter().map(|(name, value)| (*name, value)));
         scrub_devfinity_secrets(&mut child_command);
         let status = child_command.status().with_context(|| {
             format!(
@@ -893,6 +922,64 @@ impl Stack {
             )
         })?;
         Ok(status_to_exit_code(status))
+    }
+
+    pub fn run_agent_job(&self, config: AgentRunConfig) -> Result<ExitCode> {
+        let driver = self.agent_run_driver_command();
+        self.run_agent_job_with_driver(config, &driver)
+    }
+
+    fn run_agent_job_with_driver(
+        &self,
+        config: AgentRunConfig,
+        driver_command: &[String],
+    ) -> Result<ExitCode> {
+        if driver_command.is_empty() {
+            bail!("agent-run driver command cannot be empty");
+        }
+        let prepared = self.prepare_agent_run(&config)?;
+        let mut env = vec![
+            (
+                "DEVFINITY_AGENT_RUN_LABEL",
+                if config.label.trim().is_empty() {
+                    "agent-run".to_string()
+                } else {
+                    config.label.clone()
+                },
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_OUTPUT_FILE",
+                prepared.output_file.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_PROMPT_FILE",
+                prepared.prompt_file.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_RUNTIME_OUTPUT_PATH",
+                prepared.runtime_output_path,
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR",
+                prepared.skill_bundle_dir.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_WORKSPACE",
+                prepared.workspace.display().to_string(),
+            ),
+        ];
+        if let Some(timeout) = config.reply_timeout_ms {
+            env.push(("DEVFINITY_AGENT_RUN_REPLY_TIMEOUT_MS", timeout.to_string()));
+        }
+
+        let code = self.run_client_command_with_env(driver_command, &env)?;
+        if code == ExitCode::SUCCESS && !prepared.output_file.is_file() {
+            bail!(
+                "devfinity agent-run driver exited successfully but did not write {}",
+                prepared.output_file.display()
+            );
+        }
+        Ok(code)
     }
 
     pub fn run_wrapped_command_with_postgres_port_reservation(
@@ -3273,6 +3360,89 @@ wait "$postgres_pid"
         self.runtime_image_dir().join("context")
     }
 
+    fn prepare_agent_run(&self, config: &AgentRunConfig) -> Result<PreparedAgentRun> {
+        let prompt_file = absolute_path(&self.repo_root, &config.prompt_file);
+        if !prompt_file.is_file() {
+            bail!(
+                "agent-run prompt file does not exist: {}",
+                prompt_file.display()
+            );
+        }
+
+        let skill_file = absolute_path(&self.repo_root, &config.skill_file);
+        if !skill_file.is_file() {
+            bail!(
+                "agent-run skill file does not exist: {}",
+                skill_file.display()
+            );
+        }
+        if skill_file.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            bail!("agent-run --skill must point at a SKILL.md file");
+        }
+
+        let label = if config.label.trim().is_empty() {
+            "agent-run"
+        } else {
+            config.label.trim()
+        };
+        let run_id = format!("{}-{}-{}", slug(label), std::process::id(), unix_millis()?);
+        let workspace = config
+            .workspace
+            .as_ref()
+            .map(|path| absolute_path(&self.repo_root, path))
+            .unwrap_or_else(|| self.run_dir.join("agent-runs").join(&run_id));
+        fs::create_dir_all(&workspace)
+            .with_context(|| format!("failed to create {}", workspace.display()))?;
+
+        let output_file = absolute_path(&self.repo_root, &config.output_file);
+        if let Some(parent) = output_file.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let skill_bundle_dir = workspace.join("skill-bundle");
+        remove_dir_all_best_effort(&skill_bundle_dir);
+        fs::create_dir_all(&skill_bundle_dir)
+            .with_context(|| format!("failed to create {}", skill_bundle_dir.display()))?;
+        let source_dir = skill_file
+            .parent()
+            .with_context(|| format!("{} has no parent directory", skill_file.display()))?;
+        let bundle_leaf = source_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(slug)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "skill".to_string());
+        copy_dir_all(source_dir, &skill_bundle_dir.join(bundle_leaf))?;
+        let skill_count = count_skill_files(&skill_bundle_dir)?;
+        if skill_count != 1 {
+            bail!(
+                "agent-run skill bundle must contain exactly one SKILL.md, found {skill_count} under {}",
+                skill_bundle_dir.display()
+            );
+        }
+
+        let runtime_output_path = config
+            .runtime_output_path
+            .clone()
+            .unwrap_or_else(|| format!("/data/workspace/devfinity-agent-runs/{run_id}/index.html"));
+
+        Ok(PreparedAgentRun {
+            output_file,
+            prompt_file,
+            runtime_output_path,
+            skill_bundle_dir,
+            workspace,
+        })
+    }
+
+    fn agent_run_driver_command(&self) -> Vec<String> {
+        let script = nonempty_env_value("DEVFINITY_AGENT_RUN_DRIVER_SCRIPT")
+            .map(|path| absolute_path(&self.repo_root, Path::new(&path)))
+            .unwrap_or_else(|| self.repo_root.join("devfinity/scripts/agent-run.mjs"));
+        vec!["node".to_string(), script.display().to_string()]
+    }
+
     fn state_hash_hex(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.state_dir.hash(&mut hasher);
@@ -3829,6 +3999,57 @@ fn remove_file_best_effort(path: &Path) {
     }
 }
 
+fn remove_dir_all_best_effort(path: &Path) {
+    if path.exists()
+        && let Err(error) = fs::remove_dir_all(path)
+    {
+        eprintln!("failed to remove {}: {error}", path.display());
+    }
+}
+
+fn copy_dir_all(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target).with_context(|| format!("failed to create {}", target.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", source_path.display()))?;
+        if file_type.is_dir() {
+            copy_dir_all(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &target_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn count_skill_files(root: &Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("failed to read {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if file_type.is_dir() {
+            count += count_skill_files(&path)?;
+        } else if file_type.is_file() && entry.file_name().to_str() == Some("SKILL.md") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn check_tcp_service(process: ManagedProcess, host: &str, port: u16) -> ServiceCheck {
     match connect_tcp(host, port) {
         Ok(_) => ServiceCheck::new(process, "open", format!("tcp {host}:{port} accepted")),
@@ -4275,6 +4496,37 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+fn slug(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for byte in value.bytes() {
+        let next = if byte.is_ascii_alphanumeric() {
+            Some(byte.to_ascii_lowercase() as char)
+        } else if !last_dash {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(character) = next {
+            last_dash = character == '-';
+            out.push(character);
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "agent-run".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unix_millis() -> Result<u128> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis())
+}
+
 fn nonempty_env(name: &str) -> bool {
     nonempty_env_value(name).is_some()
 }
@@ -4718,6 +4970,91 @@ mod tests {
         let error = stack.run_client_command(&["true".to_string()]).unwrap_err();
 
         assert!(error.to_string().contains("devfinity env file"));
+    }
+
+    #[test]
+    fn agent_job_prepares_skill_bundle_and_runs_driver_against_existing_env() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let skill_dir = files.path().join("Design Skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "name: design-test\n").unwrap();
+        fs::write(skill_dir.join("reference.txt"), "copied").unwrap();
+        let prompt_file = files.path().join("prompt.txt");
+        fs::write(&prompt_file, "Build a small page").unwrap();
+        let output_file = files.path().join("result.json");
+        let workspace = files.path().join("workspace");
+        let driver = files.path().join("driver.sh");
+        fs::write(
+            &driver,
+            r#"set -eu
+test "$DEVFINITY_PROFILE" = apple-saas
+test "$DEVFINITY_AGENT_RUN_LABEL" = skill-a
+test "$DEVFINITY_AGENT_RUN_RUNTIME_OUTPUT_PATH" = /runtime/out.html
+test -f "$DEVFINITY_AGENT_RUN_PROMPT_FILE"
+test -d "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR"
+test -d "$DEVFINITY_AGENT_RUN_WORKSPACE"
+test "$(find "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR" -name SKILL.md -type f | wc -l | tr -d ' ')" = 1
+test "$(find "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR" -name reference.txt -type f | wc -l | tr -d ' ')" = 1
+printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
+"#,
+        )
+        .unwrap();
+
+        let code = stack
+            .run_agent_job_with_driver(
+                AgentRunConfig {
+                    label: "skill-a".to_string(),
+                    output_file: output_file.clone(),
+                    prompt_file,
+                    reply_timeout_ms: Some(12_345),
+                    runtime_output_path: Some("/runtime/out.html".to_string()),
+                    skill_file: skill_dir.join("SKILL.md"),
+                    workspace: Some(workspace.clone()),
+                },
+                &["sh".to_string(), driver.display().to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(output_file.is_file());
+        assert!(workspace.join("skill-bundle").exists());
+    }
+
+    #[test]
+    fn agent_job_requires_result_file_on_success() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let skill_dir = files.path().join("skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "name: design-test\n").unwrap();
+        let prompt_file = files.path().join("prompt.txt");
+        fs::write(&prompt_file, "Build a small page").unwrap();
+
+        let error = stack
+            .run_agent_job_with_driver(
+                AgentRunConfig {
+                    label: "skill-a".to_string(),
+                    output_file: files.path().join("missing-result.json"),
+                    prompt_file,
+                    reply_timeout_ms: None,
+                    runtime_output_path: None,
+                    skill_file: skill_dir.join("SKILL.md"),
+                    workspace: Some(files.path().join("workspace")),
+                },
+                &["true".to_string()],
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not write"));
     }
 
     #[test]

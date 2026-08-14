@@ -26,6 +26,10 @@ up *args:
 exec *args:
     cd .. && cargo run -p devfinity -- exec -- {{ args }}
 
+# Runs one prompt through one skill on the already-running devfinity agent stack
+agent-run *args:
+    cd .. && cargo run -p devfinity -- agent-run {{ args }}
+
 # Securely caches one of your existing Finite Private keys for local chat.
 inference-key:
     #!/usr/bin/env bash
