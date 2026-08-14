@@ -19,19 +19,34 @@ const profile = requiredEnv("DEVFINITY_PROFILE");
 const prompt = readFileSync(promptFile, "utf8");
 const variant = process.env.SKILL_AB_DEVFINITY_VARIANT || "skill";
 const replyTimeoutMs = positiveIntegerEnv("SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS", 20 * 60 * 1000);
+const readinessTimeoutMs = positiveIntegerEnv("SKILL_AB_DEVFINITY_READINESS_TIMEOUT_MS", 180000);
 
 let updatesProcess = null;
+let runtimeContext = null;
+let primaryError = null;
+let signalExitInProgress = false;
+const trackedChildren = new Set();
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    void handleSignal(signal);
+  });
+}
 
 try {
   const driver = runtimeDriver(profile);
-  const runtime = await ensureRuntime();
+  const request = await submitAgentCreationRequest();
+  const runtime = await waitForCreatedRuntime(request);
   const containerId = await runtimeContainerId(driver, runtime.projectId);
+  runtimeContext = { containerId, driver, projectId: runtime.projectId };
   await waitHttp("Agent Runtime", `${runtime.runtimeUrl}/healthz`, 180000);
   await installSkillBundle(driver, containerId);
   await restartHermes(driver, containerId);
   await waitHttp("Agent Runtime after Hermes restart", `${runtime.runtimeUrl}/healthz`, 180000);
+  await recoverHostedChatBinding(runtime.machineId);
   startChatUpdates(runtime.machineId);
   await waitForConnectedChat(runtime.machineId);
+  await claimHostedChatOwner(runtime.machineId);
   await createTopic(runtime.machineId, `Local web build ${Date.now()}`);
   const finalReply = await sendAndCaptureReply(runtime.machineId, prompt);
   const html = await readRuntimeFile(driver, containerId, runtimeOutputPath).catch(() => finalReply);
@@ -44,6 +59,9 @@ try {
         containerId,
         finalReply,
         html,
+        projectId: runtime.projectId,
+        requestId: request.requestId,
+        runtimeId: runtime.machineId,
         runtimeOutputPath,
         variant,
       },
@@ -52,9 +70,17 @@ try {
     ),
     "utf8",
   );
+} catch (error) {
+  primaryError = error;
+  throw error;
 } finally {
-  if (updatesProcess) {
-    updatesProcess.kill("SIGTERM");
+  try {
+    await cleanupRegisteredRuntime();
+  } catch (error) {
+    if (!primaryError) {
+      throw error;
+    }
+    console.error(`failed to clean up Devfinity runtime: ${error.message}`);
   }
 }
 
@@ -76,23 +102,10 @@ function runtimeDriver(value) {
   throw new Error(`Devfinity agent turn requires apple-saas or docker-saas, got ${value}`);
 }
 
-async function ensureRuntime() {
-  let runtime = runtimeFromMe(await readCoreMe()).runtime;
-  if (runtime) {
-    return runtime;
-  }
-
-  const me = await readCoreMe();
-  const pending = (me.agent_creation_requests || []).some((request) =>
-    ["requested", "launching"].includes(request.status),
-  );
-  if (!pending) {
-    await submitAgentCreationRequest();
-  }
-
+async function waitForCreatedRuntime(request) {
   const started = Date.now();
   while (Date.now() - started < 600000) {
-    const parsed = runtimeFromMe(await readCoreMe());
+    const parsed = runtimeFromMe(await readCoreMe(), request);
     if (parsed.runtime) {
       return parsed.runtime;
     }
@@ -105,15 +118,20 @@ async function ensureRuntime() {
 }
 
 async function readCoreMe() {
-  const tokenPath = path.join(stateDir, "workos-fixture/dashboard-customer.jwt");
-  const token = readFileSync(tokenPath, "utf8").trim();
   return await fetchJson(`${coreUrl}/api/core/v1/me`, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: { authorization: `Bearer ${customerToken()}` },
   });
 }
 
-function runtimeFromMe(me) {
-  const visible = (me.projects || []).find((entry) => entry.runtime);
+function customerToken() {
+  const tokenPath = path.join(stateDir, "workos-fixture/dashboard-customer.jwt");
+  return readFileSync(tokenPath, "utf8").trim();
+}
+
+function runtimeFromMe(me, request) {
+  const visible = (me.projects || []).find(
+    (entry) => entry?.project?.id === request.projectId && entry.runtime,
+  );
   if (visible) {
     const project = visible.project;
     const runtime = visible.runtime;
@@ -128,7 +146,9 @@ function runtimeFromMe(me) {
       },
     };
   }
-  const failed = (me.agent_creation_requests || []).find((request) => request.status === "failed");
+  const failed = (me.agent_creation_requests || []).find(
+    (candidate) => candidate.id === request.requestId && candidate.status === "failed",
+  );
   return {
     failed: failed ? `Agent launch failed: ${failed.failure_message || failed.id}` : null,
     runtime: null,
@@ -142,6 +162,7 @@ async function submitAgentCreationRequest() {
     body: JSON.stringify({
       codeCount: 1,
       expiresInHours: 24,
+      hostingTier: "standard",
       name: "Local web build",
     }),
     headers: {
@@ -155,17 +176,25 @@ async function submitAgentCreationRequest() {
     throw new Error("Core did not return a Devfinity launch code");
   }
 
-  const form = new URLSearchParams();
-  form.set("displayName", `Local web build ${Date.now()}`);
-  form.set("hostingTier", "standard");
-  form.set("access", "launch-code");
-  form.set("launchCode", launchCode);
-  form.set("idempotencyKey", `skill-ab-${variant}-${Date.now()}`);
-
-  await fetchText(`${dashboardUrl}/agent-creation-requests`, {
-    body: form,
+  const created = await fetchJson(`${coreUrl}/api/core/v1/me/agent-creation-requests`, {
+    body: JSON.stringify({
+      displayName: `Local web build ${Date.now()}`,
+      hostingTier: "standard",
+      idempotencyKey: `skill-ab-${variant}-${Date.now()}-${process.pid}`,
+      launchCode,
+    }),
+    headers: {
+      authorization: `Bearer ${customerToken()}`,
+      "content-type": "application/json",
+    },
     method: "POST",
   });
+  const requestId = created?.request?.id;
+  const projectId = created?.project?.id || created?.request?.project_id;
+  if (!requestId || !projectId) {
+    throw new Error("Core did not return the created Devfinity agent request and project");
+  }
+  return { projectId, requestId };
 }
 
 async function runtimeContainerId(driver, projectId) {
@@ -252,23 +281,74 @@ exit 1
 }
 
 function startChatUpdates(machineId) {
-  updatesProcess = spawn(
+  updatesProcess = spawnTracked(
     "curl",
-    ["-fsS", "--no-buffer", `${dashboardOrigin}/api/chat/machines/${machineId}/hosted-device/updates`],
+    ["-fsS", "--no-buffer", hostedChatUrl(machineId, "/updates")],
     { cwd: repoRoot, stdio: ["ignore", "ignore", "ignore"] },
+  );
+}
+
+async function recoverHostedChatBinding(machineId) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < readinessTimeoutMs) {
+    try {
+      const state = await fetchJson(hostedChatUrl(machineId, "/recover-binding"), {
+        method: "POST",
+        timeoutMs: 60000,
+      });
+      if (hasConnectedAgentChat(state)) {
+        return state;
+      }
+      lastError = new Error("binding recovery returned without a connected agent chat");
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(2000);
+  }
+  throw new Error(
+    `Hosted Web Device did not recover the agent chat binding within ${Math.round(readinessTimeoutMs / 1000)}s: ${
+      lastError?.message || "unknown error"
+    }`,
   );
 }
 
 async function waitForConnectedChat(machineId) {
   const started = Date.now();
-  while (Date.now() - started < 180000) {
+  while (Date.now() - started < readinessTimeoutMs) {
     const state = await chatState(machineId).catch(() => null);
-    if ((state?.rooms || []).some((room) => room.is_agent_chat && room.state === "Connected")) {
+    if (hasConnectedAgentChat(state)) {
       return;
     }
     await delay(2000);
   }
-  throw new Error("Hosted Web Device did not establish the agent chat within 180s");
+  throw new Error(`Hosted Web Device did not establish the agent chat within ${Math.round(readinessTimeoutMs / 1000)}s`);
+}
+
+async function claimHostedChatOwner(machineId) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < readinessTimeoutMs) {
+    try {
+      await fetchJson(hostedChatUrl(machineId, "/claim"), {
+        method: "POST",
+        timeoutMs: 65000,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(2000);
+    }
+  }
+  throw new Error(
+    `Hosted Web Device did not confirm the owner claim within ${Math.round(readinessTimeoutMs / 1000)}s: ${
+      lastError?.message || "unknown error"
+    }`,
+  );
+}
+
+function hasConnectedAgentChat(state) {
+  return (state?.rooms || []).some((room) => room.is_agent_chat && room.state === "Connected");
 }
 
 async function createTopic(machineId, title) {
@@ -391,13 +471,13 @@ async function waitForScopedWorkingClear(machineId, route) {
 }
 
 async function chatState(machineId) {
-  return await fetchJson(`${dashboardOrigin}/api/chat/machines/${machineId}/hosted-device/state`, {
+  return await fetchJson(hostedChatUrl(machineId, "/state"), {
     timeoutMs: 30000,
   });
 }
 
 async function chatAction(machineId, action) {
-  return await fetchJson(`${dashboardOrigin}/api/chat/machines/${machineId}/hosted-device/actions`, {
+  return await fetchJson(hostedChatUrl(machineId, "/actions"), {
     body: JSON.stringify(action),
     headers: { "content-type": "application/json" },
     method: "POST",
@@ -407,6 +487,94 @@ async function chatAction(machineId, action) {
 
 async function readRuntimeFile(driver, containerId, filePath) {
   return await runtimeExec(driver, containerId, ["cat", filePath]);
+}
+
+async function cleanupRuntime(driver, containerId, projectId) {
+  try {
+    await requestRuntimeStop(projectId);
+    await waitForRuntimeOffline(projectId);
+  } catch (error) {
+    console.error(`failed to stop Devfinity runtime ${containerId} through Core: ${error.message}`);
+  }
+  await deleteRuntimeContainer(driver, containerId);
+}
+
+async function cleanupRegisteredRuntime() {
+  if (updatesProcess) {
+    updatesProcess.kill("SIGTERM");
+    updatesProcess = null;
+  }
+  if (!runtimeContext || keepRuntimeAfterRun()) {
+    return;
+  }
+  const context = runtimeContext;
+  runtimeContext = null;
+  await cleanupRuntime(context.driver, context.containerId, context.projectId);
+}
+
+async function requestRuntimeStop(projectId) {
+  await fetchJson(`${coreUrl}/api/core/v1/me/projects/${encodeURIComponent(projectId)}/runtime/stop`, {
+    body: JSON.stringify({}),
+    headers: {
+      authorization: `Bearer ${customerToken()}`,
+      "content-type": "application/json",
+    },
+    method: "POST",
+  });
+}
+
+async function waitForRuntimeOffline(projectId) {
+  const started = Date.now();
+  while (Date.now() - started < 180000) {
+    const entry = (await readCoreMe()).projects?.find((candidate) => candidate?.project?.id === projectId);
+    const status = entry?.runtime?.runtime_status;
+    const control = entry?.active_runtime_control;
+    if (!entry?.runtime || (!control && status === "offline")) {
+      return;
+    }
+    if (control?.status === "failed") {
+      throw new Error(`runtime stop failed: ${control.id}`);
+    }
+    await delay(1000);
+  }
+  throw new Error(`Core did not report runtime ${projectId} offline within 180s`);
+}
+
+async function deleteRuntimeContainer(driver, containerId) {
+  if (driver === "docker") {
+    await runCapture("docker", ["rm", "-f", containerId]);
+    return;
+  }
+  await runCapture("container", ["delete", "--force", containerId]);
+}
+
+function keepRuntimeAfterRun() {
+  return ["1", "true", "yes"].includes(String(process.env.SKILL_AB_DEVFINITY_KEEP_RUNTIME || "").toLowerCase());
+}
+
+function hostedChatUrl(machineId, suffix) {
+  return `${dashboardOrigin}/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device${suffix}`;
+}
+
+async function handleSignal(signal) {
+  if (signalExitInProgress) {
+    process.exit(signalExitCode(signal));
+  }
+  signalExitInProgress = true;
+  primaryError ||= new Error(`Received ${signal}`);
+  for (const child of trackedChildren) {
+    child.kill("SIGTERM");
+  }
+  try {
+    await cleanupRegisteredRuntime();
+  } catch (error) {
+    console.error(`failed to clean up Devfinity runtime after ${signal}: ${error.message}`);
+  }
+  process.exit(signalExitCode(signal));
+}
+
+function signalExitCode(signal) {
+  return signal === "SIGINT" ? 130 : 143;
 }
 
 async function waitHttp(name, url, timeoutMs) {
@@ -448,14 +616,18 @@ async function fetchText(url, options = {}) {
 }
 
 async function runTarIntoRuntime(driver, containerId, sourceDir, script) {
-  const tar = spawn("tar", ["-C", sourceDir, "-cf", "-", "."], {
+  const tar = spawnTracked("tar", ["-C", sourceDir, "-cf", "-", "."], {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const exec = spawn(runtimeCommand(driver), [...runtimeExecPrefix(driver, containerId, true), "/bin/bash", "-lc", script], {
-    cwd: repoRoot,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const exec = spawnTracked(
+    runtimeCommand(driver),
+    [...runtimeExecPrefix(driver, containerId, true), "/bin/bash", "-lc", script],
+    {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
   tar.stdout.pipe(exec.stdin);
   const [tarResult, execResult] = await Promise.all([waitForProcess(tar), waitForProcess(exec)]);
   if (tarResult.code !== 0) {
@@ -482,7 +654,7 @@ function runtimeExecPrefix(driver, containerId, interactive) {
 }
 
 async function runCapture(command, args) {
-  const child = spawn(command, args, {
+  const child = spawnTracked(command, args, {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -491,6 +663,15 @@ async function runCapture(command, args) {
     throw new Error(`${command} ${args.join(" ")} exited with ${result.code}: ${result.stderr || result.stdout}`);
   }
   return result.stdout;
+}
+
+function spawnTracked(command, args, options) {
+  const child = spawn(command, args, options);
+  trackedChildren.add(child);
+  const forget = () => trackedChildren.delete(child);
+  child.once("exit", forget);
+  child.once("error", forget);
+  return child;
 }
 
 async function waitForProcess(child) {

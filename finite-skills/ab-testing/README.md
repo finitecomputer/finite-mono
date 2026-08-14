@@ -121,17 +121,18 @@ For an accurate product skill test, use the browser Generate flow or
 `SKILL_AB_RUNNER=devfinity`. The default Devfinity mode calls
 `devfinity agent-run` against an already-running stack. For each variant, the
 harness stages a source skill directory with the edited `SKILL.md`, asks
-Devfinity to copy that directory into a one-skill managed bundle, restarts
-Hermes inside the local runtime, sends the build task through the Hosted Web
-chat path, and captures the generated single-file HTML from the agent's final
-response. If the runtime also writes the diagnostic HTML path, the harness
-copies that file instead.
+Devfinity to create a short-lived local runtime, copies that directory into a
+one-skill managed bundle inside that runtime, restarts Hermes, sends the build
+task through the Hosted Web chat path, and captures the generated single-file
+HTML from the agent's final response. If the runtime also writes the diagnostic
+HTML path, the harness copies that file instead. After capture, the driver asks
+Core to stop the runtime and removes the local container. Set
+`SKILL_AB_DEVFINITY_KEEP_RUNTIME=1` when debugging a generated runtime.
 
-Current client mode has one important limitation: because it swaps the managed
-skill bundle in the one existing runtime, the harness serializes Devfinity
-agent-run calls with a local lock even when Promptfoo concurrency is higher.
-This is the transitional server/client shape before the parent-agent/sub-agent
-boundary exists.
+Client mode still serializes Devfinity agent-run calls with a local lock even
+when Promptfoo concurrency is higher. The shared server stack has one local
+runtime port, so the clean-room boundary is a fresh short-lived runtime per
+variant rather than parallel runtimes in the same stack.
 
 Set `SKILL_AB_DEVFINITY_MODE=disposable` to use the older behavior where each
 variant starts its own disposable Devfinity SaaS stack. In that mode, each run
@@ -145,9 +146,8 @@ serving or generating another run.
 
 The Devfinity prompt does not include either skill file, either skill path, the
 variant label, or any A/B wording. In client mode, separation is provided by a
-staged one-skill managed bundle, a fresh chat topic, and the local agent-run
-lock that prevents interleaved skill swaps on the shared runtime. Disposable
-mode adds a separate Devfinity state and runtime per variant.
+fresh local runtime, a staged one-skill managed bundle, and a fresh chat topic
+per variant. Disposable mode adds a separate Devfinity state root per variant.
 
 The `Isolated Codex proxy` runner is useful when you want a faster isolated
 agent subprocess, but it is not the Finite product runtime. The
@@ -191,6 +191,10 @@ Runner settings:
 - `SKILL_AB_DEVFINITY_TIMEOUT_MS=1800000`
 - `SKILL_AB_DEVFINITY_REPLY_TIMEOUT_MS=1200000`: wait up to 20 minutes for
   the in-runtime Hermes chat turn to produce a final response.
+- `SKILL_AB_DEVFINITY_READINESS_TIMEOUT_MS=180000`: wait up to 3 minutes for
+  hosted chat binding recovery, connected chat state, and owner claim.
+- `SKILL_AB_DEVFINITY_KEEP_RUNTIME=1`: keep the short-lived local runtime after
+  the run for debugging instead of stopping and deleting its container.
 - `SKILL_AB_DEVFINITY_LOCK_TIMEOUT_MS=1800000`: maximum wait for the client-mode
   agent-run lock.
 - `SKILL_AB_DEVFINITY_STATE_ROOT`: in disposable mode, override the temp root

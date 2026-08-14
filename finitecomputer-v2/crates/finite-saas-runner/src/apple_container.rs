@@ -1112,15 +1112,7 @@ fn image_references_equivalent(actual: &str, expected: &str) -> bool {
 }
 
 fn active_owned_container_count(config: &AppleContainerConfig) -> Option<u32> {
-    let command = AppleContainerCommand {
-        program: config.container_bin.clone(),
-        args: vec![
-            OsString::from("list"),
-            OsString::from("--all"),
-            OsString::from("--quiet"),
-        ],
-        env: Vec::new(),
-    };
+    let command = active_owned_container_count_command(config);
     let output = execute_command(&command, config.command_timeout).ok()?;
     if !output.status.success() {
         return None;
@@ -1132,6 +1124,14 @@ fn active_owned_container_count(config: &AppleContainerConfig) -> Option<u32> {
             .filter(|line| line.trim().starts_with(&prefix))
             .count() as u32,
     )
+}
+
+fn active_owned_container_count_command(config: &AppleContainerConfig) -> AppleContainerCommand {
+    AppleContainerCommand {
+        program: config.container_bin.clone(),
+        args: vec![OsString::from("list"), OsString::from("--quiet")],
+        env: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1218,6 +1218,15 @@ mod tests {
         assert_eq!(
             AppleContainerState::from_status(payload[0].status.state.as_deref()),
             AppleContainerState::Running
+        );
+    }
+
+    #[test]
+    fn active_capacity_counts_only_running_apple_containers() {
+        let command = active_owned_container_count_command(&config());
+        assert_eq!(
+            apple_command_args(&command),
+            vec!["list".to_string(), "--quiet".to_string()]
         );
     }
 
