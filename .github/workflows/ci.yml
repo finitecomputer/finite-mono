@@ -67,10 +67,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
 
       - name: Install Rust
         # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
@@ -233,11 +229,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
-
       - name: Select Cachix push mode
         id: cachix
         env:
@@ -385,10 +376,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Skills check
         run: nix develop --command just skills check
 
@@ -400,10 +387,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Search check
         run: nix develop --command just search check
 
@@ -415,10 +398,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Self-hosted monitoring contract
         run: nix develop --command just self-hosted-monitoring-contract
 
@@ -430,10 +409,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
 
@@ -445,10 +420,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Brain product language check
         run: nix develop --command just brain-language-check
       - name: Canonical Runtime image contract
@@ -487,10 +458,6 @@ jobs:
           # path keeps their artifacts from poisoning this package checkout.
           path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Select Cachix push mode
         id: cachix
         env:
@@ -648,10 +615,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -770,10 +733,6 @@ jobs:
         with:
           oidc: true
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
-        with:
-          use-gha-cache: true
-          use-flakehub: false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
