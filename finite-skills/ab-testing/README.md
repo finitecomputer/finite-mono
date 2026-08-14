@@ -112,12 +112,17 @@ export them as JSON.
 
 When served through `pnpm run serve`, the review page lets you edit the build
 prompt, choose a different `SKILL.md` file for either variant, edit the loaded
-skill text, and click Generate. Generate always runs the real Devfinity local
-Finite agent path from the browser UI; it does not use synthetic previews.
-Edited skills are saved under `runs/editable/`; the source
-`../skills/.../SKILL.md` files are not changed.
+skill text, and click Generate. Generate runs the configured real runner from
+the browser UI; it does not use synthetic previews. The browser server defaults
+to `SKILL_AB_REVIEW_RUNNER=provider` with
+`SKILL_AB_REVIEW_PROVIDER=finite-private` so local spot checks work against
+Finite Private without starting a Devfinity stack. Start the server with
+`SKILL_AB_REVIEW_RUNNER=devfinity` when you want the product-accurate local
+Finite/Hermes agent path. Edited skills are saved under `runs/editable/`; the
+source `../skills/.../SKILL.md` files are not changed.
 
-For an accurate product skill test, use the browser Generate flow or
+For the most product-accurate skill test, run the browser server with
+`SKILL_AB_REVIEW_RUNNER=devfinity` or run the CLI with
 `SKILL_AB_RUNNER=devfinity`. The default Devfinity mode calls
 `devfinity agent-run` against an already-running stack. For each variant, the
 harness stages a source skill directory with the edited `SKILL.md`, asks
@@ -207,6 +212,8 @@ Direct-provider modes:
 
 - `SKILL_AB_PROVIDER=finite-private`: default; uses the local Finite Private
   key and the deployed Finite Private streaming chat-completions endpoint.
+  The current shim disables DeepSeek thinking for artifact generation because
+  the active rollout otherwise spends the response budget on reasoning.
 - `SKILL_AB_PROVIDER=openai`: explicit toggle for OpenAI's Responses API.
 - There is no automatic fallback between providers; choose the provider you
   want to test.

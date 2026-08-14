@@ -16,8 +16,9 @@ const repoRoot = path.resolve(harnessRoot, "../..");
 const finitePrivateDefaultBaseUrl = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
 // Finite Private model rollout is intentionally moving quickly right now. This
 // is the currently working streaming chat-completions model for the deployed
-// limiter; if a later rollout changes the served model or endpoint contract,
-// update this direct-provider shim to match the product path again.
+// limiter. The direct shim also disables DeepSeek thinking for artifact
+// generation below. If a later rollout changes the served model or endpoint
+// contract, update this shim to match the product path again.
 const finitePrivateDefaultModel = "deepseek-v4-flash-0731";
 const openAIDefaultBaseUrl = "https://api.openai.com/v1";
 const openAIDefaultModel = "gpt-5-mini";
@@ -1094,6 +1095,7 @@ async function callChatCompletionsApi({ apiKey, baseUrl, messages, model, maxOut
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            chat_template_kwargs: { enable_thinking: false },
             messages,
             model,
             max_tokens: maxOutputTokens,

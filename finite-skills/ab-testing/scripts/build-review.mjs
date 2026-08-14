@@ -229,6 +229,7 @@ function renderReview(cases, screenshotByArtifact) {
     const maxConcurrencyInput = document.getElementById("max-concurrency-input");
     const regenerateButton = document.getElementById("regenerate-button");
     const editorStatus = document.getElementById("editor-status");
+    const runnerLabel = document.getElementById("runner-label");
     const jobLog = document.getElementById("job-log");
     const results = document.getElementById("results");
     let skillCatalog = [];
@@ -286,6 +287,7 @@ function renderReview(cases, screenshotByArtifact) {
         skillCatalog = data.availableSkills || [];
         promptInput.value = data.prompt || "";
         maxConcurrencyInput.value = data.maxConcurrency || 2;
+        if (runnerLabel) runnerLabel.textContent = describeRunner(data);
         for (const variant of data.variants || []) {
           const input = document.getElementById("skill-input-" + variant.variant);
           const source = document.getElementById("skill-source-" + variant.variant);
@@ -339,6 +341,16 @@ function renderReview(cases, screenshotByArtifact) {
 
     function setEditorStatus(value) {
       editorStatus.textContent = value;
+    }
+
+    function describeRunner(data) {
+      if (data.runner === "provider") {
+        return data.provider === "openai" ? "OpenAI Responses API" : "Finite Private direct provider";
+      }
+      if (data.runner === "agent") {
+        return "Isolated Codex agent";
+      }
+      return "Devfinity local Finite agent";
     }
 
     function populateSkillSelect(variant, selectedPath) {
@@ -448,7 +460,7 @@ function renderEditor() {
       </div>
       <div class="editor-actions">
         <button class="primary" type="button" id="regenerate-button">Generate</button>
-        <span class="status-line">Devfinity local Finite agent</span>
+        <span class="status-line" id="runner-label">Loading runner...</span>
         <label>Concurrency <input id="max-concurrency-input" type="number" min="1" max="8" step="1"></label>
       </div>
     </div>

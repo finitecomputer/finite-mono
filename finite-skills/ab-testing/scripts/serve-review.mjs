@@ -16,6 +16,8 @@ const host = process.env.SKILL_AB_HOST || "127.0.0.1";
 const port = Number(process.env.SKILL_AB_PORT || process.env.PORT || 8787);
 const maxBodyBytes = 4 * 1024 * 1024;
 const defaultMaxConcurrency = 2;
+const reviewRunner = normalizeReviewRunner(process.env.SKILL_AB_REVIEW_RUNNER || process.env.SKILL_AB_RUNNER || "provider");
+const reviewProvider = normalizeReviewProvider(process.env.SKILL_AB_REVIEW_PROVIDER || process.env.SKILL_AB_PROVIDER || "finite-private");
 
 const variants = [
   {
@@ -65,6 +67,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   console.log(`Finite Skills A/B review server: http://${host}:${port}/review/index.html`);
+  console.log(`Generate runner: ${runnerLabel()}`);
 });
 
 async function handleRegenerate(request, response) {
@@ -108,7 +111,8 @@ async function handleRegenerate(request, response) {
         caseId: sanitize(title),
         maxConcurrency,
         prompt,
-        runner: "devfinity",
+        provider: reviewRunner === "provider" ? reviewProvider : undefined,
+        runner: reviewRunner,
         selectedSkills,
         title,
         updatedAt: new Date().toISOString(),
@@ -137,12 +141,15 @@ function startRegenerateJob({ maxConcurrency, prompt, selectedSkills, title }) {
     ...process.env,
     SKILL_AB_CASE_TITLE: title,
     SKILL_AB_MAX_CONCURRENCY: String(maxConcurrency),
-    SKILL_AB_RUNNER: "devfinity",
+    SKILL_AB_RUNNER: reviewRunner,
     SKILL_AB_SKILL_A_PATH: editableSkillPath("skill-a"),
     SKILL_AB_SKILL_A_SOURCE_PATH: selectedSkills["skill-a"]?.sourcePath || "",
     SKILL_AB_SKILL_B_PATH: editableSkillPath("skill-b"),
     SKILL_AB_SKILL_B_SOURCE_PATH: selectedSkills["skill-b"]?.sourcePath || "",
   };
+  if (reviewRunner === "provider") {
+    env.SKILL_AB_PROVIDER = reviewProvider;
+  }
   delete env.SKILL_AB_MOCK;
 
   const child = spawn(process.execPath, ["scripts/run-prompt.mjs", prompt], {
@@ -236,8 +243,9 @@ function readEditorState() {
     availableSkills: collectSkillCatalog(),
     maxConcurrency:
       editableState.maxConcurrency ?? normalizeMaxConcurrency(process.env.SKILL_AB_MAX_CONCURRENCY, defaultMaxConcurrency),
+    provider: reviewRunner === "provider" ? reviewProvider : undefined,
     prompt,
-    runner: "devfinity",
+    runner: reviewRunner,
     title,
     variants: variants.map((variant) => {
       const editablePath = editableSkillPath(variant.variant);
@@ -419,6 +427,32 @@ function normalizeMaxConcurrency(value, fallback = defaultMaxConcurrency) {
     return fallback;
   }
   return Math.max(1, Math.min(8, Math.floor(number)));
+}
+
+function normalizeReviewRunner(value) {
+  const runner = String(value || "provider").trim().toLowerCase();
+  if (runner === "provider" || runner === "devfinity" || runner === "agent") {
+    return runner;
+  }
+  throw new Error(`Unsupported SKILL_AB_REVIEW_RUNNER "${value}". Use "provider", "devfinity", or "agent".`);
+}
+
+function normalizeReviewProvider(value) {
+  const provider = String(value || "finite-private").trim().toLowerCase();
+  if (provider === "finite-private" || provider === "openai") {
+    return provider;
+  }
+  throw new Error(`Unsupported SKILL_AB_REVIEW_PROVIDER "${value}". Use "finite-private" or "openai".`);
+}
+
+function runnerLabel() {
+  if (reviewRunner === "provider") {
+    return reviewProvider === "openai" ? "OpenAI Responses API" : "Finite Private direct provider";
+  }
+  if (reviewRunner === "agent") {
+    return "isolated Codex agent";
+  }
+  return "Devfinity local Finite agent";
 }
 
 function displayPath(filePath) {
