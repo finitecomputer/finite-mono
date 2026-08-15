@@ -481,7 +481,11 @@ impl WorkosAuthenticator {
                     .map_err(|_| WorkosAuthError::Unavailable)?
             }
             #[cfg(test)]
-            WorkosSource::Test(source) => source.jwks.clone(),
+            WorkosSource::Test(source) => source
+                .jwks
+                .read()
+                .map_err(|_| WorkosAuthError::Unavailable)?
+                .clone(),
         };
         if set.keys.is_empty() {
             return Err(WorkosAuthError::Unavailable);
@@ -716,8 +720,8 @@ fn parse_url(name: &'static str, value: &str) -> Result<Url, AuthConfigError> {
 }
 
 #[cfg(test)]
-struct TestWorkosSource {
-    jwks: Jwks,
+pub(crate) struct TestWorkosSource {
+    jwks: std::sync::RwLock<Jwks>,
     users: std::sync::RwLock<std::collections::HashMap<String, WorkosUser>>,
 }
 
@@ -743,7 +747,7 @@ pub(crate) mod test_support {
     pub(crate) const FULL_RUNNER_TOKEN: &str = "runner-oslo-full-token";
     pub(crate) const SECOND_RUNNER_TOKEN: &str = "runner-oslo-2-token";
 
-    struct TestKey {
+    pub(crate) struct TestKey {
         kid: String,
         encoding_key: EncodingKey,
         jwk: RsaJwk,
@@ -759,16 +763,43 @@ pub(crate) mod test_support {
         SOURCE
             .get_or_init(|| {
                 Arc::new(TestWorkosSource {
-                    jwks: Jwks {
+                    jwks: std::sync::RwLock::new(Jwks {
                         keys: vec![key().jwk.clone()],
-                    },
+                    }),
                     users: std::sync::RwLock::new(std::collections::HashMap::new()),
                 })
             })
             .clone()
     }
 
-    pub(crate) fn authenticator() -> WorkosAuthenticator {
+    /// A private WorkOS source for tests that mutate the served JWKS (key
+    /// rotation, degraded endpoints). The shared `source()` registry must
+    /// never be mutated because crate tests run in parallel against it.
+    pub(crate) fn isolated_source() -> Arc<TestWorkosSource> {
+        Arc::new(TestWorkosSource {
+            jwks: std::sync::RwLock::new(Jwks {
+                keys: vec![key().jwk.clone()],
+            }),
+            users: std::sync::RwLock::new(std::collections::HashMap::new()),
+        })
+    }
+
+    pub(crate) fn standard_kid() -> String {
+        key().kid.clone()
+    }
+
+    /// Replace the JWKS served by a test source, simulating WorkOS key
+    /// rotation or a degraded (empty) key set.
+    pub(crate) fn install_jwks_keys(source: &TestWorkosSource, keys: Vec<TestKey>) {
+        *source
+            .jwks
+            .write()
+            .expect("test JWKS registry should not be poisoned") = Jwks {
+            keys: keys.into_iter().map(|key| key.jwk).collect(),
+        };
+    }
+
+    pub(crate) fn authenticator_for_source(source: Arc<TestWorkosSource>) -> WorkosAuthenticator {
         WorkosAuthenticator::for_tests(
             WorkosAuthenticatorConfig {
                 client_id: CLIENT_ID.to_string(),
@@ -778,9 +809,13 @@ pub(crate) mod test_support {
                 api_base_url: "https://api.test.invalid".to_string(),
                 jwks_url: "https://api.test.invalid/sso/jwks/client_test".to_string(),
             },
-            source(),
+            source,
         )
         .expect("test WorkOS authenticator should be valid")
+    }
+
+    pub(crate) fn authenticator() -> WorkosAuthenticator {
+        authenticator_for_source(source())
     }
 
     pub(crate) fn core_auth(
@@ -1023,13 +1058,15 @@ pub(crate) mod test_support {
             .as_secs()
     }
 
-    fn encode_claims(claims: TestClaims, key: &TestKey) -> String {
+    pub(crate) fn encode_claims(claims: TestClaims, key: &TestKey) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(key.kid.clone());
         encode(&header, &claims, &key.encoding_key).expect("test JWT should encode")
     }
 
-    fn generate_key(kid: &str) -> TestKey {
+    /// Generate an independent RSA key for JWKS-rotation tests. Passing the
+    /// standard key id simulates a same-kid key replacement.
+    pub(crate) fn generate_key(kid: &str) -> TestKey {
         let private_key =
             RsaPrivateKey::new(&mut OsRng, 2048).expect("test RSA key generation should succeed");
         let private_pem = private_key
@@ -1116,6 +1153,90 @@ mod tests {
                 .verify_access_token(&invalidly_signed_claims(claims))
                 .await,
             Err(WorkosAuthError::InvalidToken)
+        );
+    }
+
+    #[tokio::test]
+    async fn rotated_kid_triggers_jwks_refresh_and_accepts_new_key() {
+        let source = test_support::isolated_source();
+        let authenticator = test_support::authenticator_for_source(source.clone());
+        // Prime the key cache with the standard key set.
+        authenticator
+            .verify_access_token(&signed_claims(TestClaims::valid("user_cache_prime", None)))
+            .await
+            .unwrap();
+
+        // WorkOS rotates to a brand-new key id; the stale cache misses.
+        let rotated = test_support::generate_key("test-key-rotated");
+        let rotated_token =
+            test_support::encode_claims(TestClaims::valid("user_rotated_kid", None), &rotated);
+        test_support::install_jwks_keys(&source, vec![rotated]);
+        let session = authenticator
+            .verify_access_token(&rotated_token)
+            .await
+            .unwrap();
+        assert_eq!(session.subject, "user_rotated_kid");
+    }
+
+    #[tokio::test]
+    async fn same_kid_rotation_refreshes_once_and_accepts_replacement_key() {
+        let source = test_support::isolated_source();
+        let authenticator = test_support::authenticator_for_source(source.clone());
+        authenticator
+            .verify_access_token(&signed_claims(TestClaims::valid(
+                "user_same_kid_prime",
+                None,
+            )))
+            .await
+            .unwrap();
+
+        // WorkOS replaces the key material but keeps the key id: the cached
+        // key matches the kid yet fails the signature, which must trigger one
+        // refresh-and-retry instead of a final rejection.
+        let replacement = test_support::generate_key(&test_support::standard_kid());
+        let replacement_token = test_support::encode_claims(
+            TestClaims::valid("user_same_kid_rotated", None),
+            &replacement,
+        );
+        test_support::install_jwks_keys(&source, vec![replacement]);
+        let session = authenticator
+            .verify_access_token(&replacement_token)
+            .await
+            .unwrap();
+        assert_eq!(session.subject, "user_same_kid_rotated");
+    }
+
+    #[tokio::test]
+    async fn jwks_refresh_failure_fails_closed_and_keeps_last_good_keys() {
+        let source = test_support::isolated_source();
+        let authenticator = test_support::authenticator_for_source(source.clone());
+        let cached_session = signed_claims(TestClaims::valid("user_last_good", None));
+        authenticator
+            .verify_access_token(&cached_session)
+            .await
+            .unwrap();
+
+        // A degraded WorkOS serves an empty key set. An unknown-kid token
+        // must surface Unavailable (503), not InvalidToken (401).
+        test_support::install_jwks_keys(&source, Vec::new());
+        let unknown_kid = test_support::generate_key("test-key-unknown-during-outage");
+        assert_eq!(
+            authenticator
+                .verify_access_token(&test_support::encode_claims(
+                    TestClaims::valid("user_during_outage", None),
+                    &unknown_kid
+                ))
+                .await,
+            Err(WorkosAuthError::Unavailable)
+        );
+
+        // The failed refresh must not have dropped the last-good key set:
+        // the previously cached key still verifies without another fetch.
+        assert!(
+            authenticator
+                .verify_access_token(&cached_session)
+                .await
+                .is_ok()
         );
     }
 
