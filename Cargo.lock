@@ -1123,6 +1123,7 @@ dependencies = [
  "base64",
  "finite-brain-core",
  "finite-brain-store",
+ "finite-mail",
  "finite-nostr",
  "http-body-util",
  "nostr",
@@ -1157,6 +1158,7 @@ dependencies = [
  "base64",
  "bech32",
  "dirs",
+ "finite-mail",
  "fs4",
  "rusqlite",
  "secp256k1",
@@ -1168,6 +1170,17 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "finite-mail"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "ureq",
 ]
 
@@ -1618,6 +1631,7 @@ version = "0.2.16"
 dependencies = [
  "axum",
  "base64",
+ "finite-mail",
  "finitesites-blob",
  "finitesites-engine",
  "finitesites-proto",

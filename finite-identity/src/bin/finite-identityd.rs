@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use finite_identity::authority::{
-    AuthorityConfig, AuthorityState, DevMailer, HttpMailer, IdentityStore, MailProvider,
-    SystemClock, public_router, router,
+    AuthorityConfig, AuthorityState, DevMailer, HttpMailer, IdentityStore, SystemClock,
+    public_router, router,
 };
 
 #[tokio::main]
@@ -102,25 +102,24 @@ fn configure_mailer(
             }
             Ok(Arc::new(DevMailer))
         }
-        raw => {
-            let provider = MailProvider::parse(raw)
-                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend|postmark)"))?;
+        "resend" => {
             if flag_value(args, "--dev-print-email-tokens").is_some() {
                 return Err("--dev-print-email-tokens is only valid with --mailer dev".to_owned());
             }
             let from_address = flag_value(args, "--mail-from")
-                .ok_or("--mailer resend|postmark requires --mail-from ADDR")?;
-            let env_var = provider.api_key_env_var();
+                .ok_or("--mailer resend requires --mail-from ADDR")?;
+            let env_var = finite_mail::RESEND_API_KEY_ENV_VAR;
             let api_key = std::env::var(env_var).map_err(|_| {
-                format!("--mailer {raw} requires the {env_var} environment variable")
+                format!("--mailer resend requires the {env_var} environment variable")
             })?;
-            Ok(Arc::new(HttpMailer::new(provider, api_key, from_address)))
+            Ok(Arc::new(HttpMailer::new(api_key, from_address)))
         }
+        raw => Err(format!("unknown --mailer `{raw}` (dev|resend)")),
     }
 }
 
 fn usage() -> String {
-    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--public-listen 127.0.0.1:8791] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend|postmark --mail-from ADDR] (FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN enables the narrow Sites notification endpoint)".to_owned()
+    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--public-listen 127.0.0.1:8791] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend --mail-from ADDR] (FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN enables the narrow Sites notification endpoint)".to_owned()
 }
 
 #[cfg(test)]
@@ -164,11 +163,17 @@ mod tests {
         };
         assert!(error.contains("only valid with --mailer dev"));
 
-        let error = match configure_mailer(&args(&["serve", "--mailer", "postmark"])) {
+        let error = match configure_mailer(&args(&["serve", "--mailer", "resend"])) {
             Ok(_) => panic!("expected production mailer without sender to fail"),
             Err(error) => error,
         };
         assert!(error.contains("--mail-from"));
+
+        let error = match configure_mailer(&args(&["serve", "--mailer", "postmark"])) {
+            Ok(_) => panic!("expected removed provider to be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("unknown --mailer `postmark` (dev|resend)"));
     }
 
     #[test]

@@ -382,23 +382,14 @@ impl ServerState {
         self
     }
 
-    /// Deliver Brain-owned Brain invitation emails through Resend.
+    /// Deliver Brain-owned Brain invitation emails through the shared
+    /// Resend transport.
     pub fn with_resend_invite_mailer(
         mut self,
         api_key: impl Into<String>,
         from: impl Into<String>,
     ) -> Self {
         self.invite_mailer = Some(resend_invite_mailer(api_key.into(), from.into()));
-        self
-    }
-
-    /// Deliver Brain-owned Brain invitation emails through Postmark.
-    pub fn with_postmark_invite_mailer(
-        mut self,
-        server_token: impl Into<String>,
-        from: impl Into<String>,
-    ) -> Self {
-        self.invite_mailer = Some(postmark_invite_mailer(server_token.into(), from.into()));
         self
     }
 
@@ -1604,40 +1595,17 @@ fn deliver_plan_courtesy_email(
 }
 
 fn resend_invite_mailer(api_key: String, from: String) -> BrainInviteMailer {
+    let resend = finite_mail::ResendMailer::new(api_key, from);
     Arc::new(move |email| {
-        let body = serde_json::to_string(&serde_json::json!({
-            "from": from,
-            "to": [email.to],
-            "subject": email.subject,
-            "text": email.text,
-        }))
-        .map_err(|error| format!("could not encode Resend invite email: {error}"))?;
-        ureq::post("https://api.resend.com/emails")
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-            .map_err(|error| format!("Resend request failed: {error}"))?;
-        Ok(())
-    })
-}
+        use finite_mail::MailTransport as _;
 
-fn postmark_invite_mailer(server_token: String, from: String) -> BrainInviteMailer {
-    Arc::new(move |email| {
-        let body = serde_json::to_string(&serde_json::json!({
-            "From": from,
-            "To": email.to,
-            "Subject": email.subject,
-            "TextBody": email.text,
-            "TrackOpens": false,
-            "TrackLinks": "None",
-        }))
-        .map_err(|error| format!("could not encode Postmark invite email: {error}"))?;
-        ureq::post("https://api.postmarkapp.com/email")
-            .set("X-Postmark-Server-Token", &server_token)
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-            .map_err(|error| format!("Postmark request failed: {error}"))?;
-        Ok(())
+        resend
+            .send_text_email(&finite_mail::TextEmail {
+                to: email.to.as_str(),
+                subject: email.subject.as_str(),
+                text: email.text.as_str(),
+            })
+            .map_err(|error| format!("Resend request failed: {error}"))
     })
 }
 

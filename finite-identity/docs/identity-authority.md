@@ -66,8 +66,7 @@ Runtime flags:
 | `FINITE_IDENTITY_OPERATOR_TOKEN` | Enables v1 operator endpoints without exposing the credential in process arguments. If omitted, operator endpoints reject every request. |
 | `--operator-token TOKEN` | Backward-compatible local/debug override. Production services should use `FINITE_IDENTITY_OPERATOR_TOKEN`. |
 | `--mailer dev` | Development mailer. Requires `--dev-print-email-tokens yes` so token printing is explicit. |
-| `--mailer resend` | Production mailer using the Resend JSON API. Requires `--mail-from ADDR` and `RESEND_API_KEY`. |
-| `--mailer postmark` | Production mailer using the Postmark JSON API. Requires `--mail-from ADDR` and `POSTMARK_SERVER_TOKEN`. |
+| `--mailer resend` | Production mailer using the Resend JSON API via the shared `finite-mail` transport. Requires `--mail-from ADDR` and `RESEND_API_KEY`. |
 | `--mail-from ADDR` | Sender shown on production Email Challenge messages. Never put provider API keys in argv. |
 | `--dev-print-email-tokens yes` | Development-only guard that enables token printing when `--mailer dev` is selected. |
 

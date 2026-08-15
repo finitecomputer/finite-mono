@@ -67,7 +67,7 @@ pub struct ServeOptions {
     /// Omitting `--mailer` is an error; there is no implicit default.
     /// The API key for an HTTP provider comes from its environment variable,
     /// never from argv.
-    pub mail_provider: Option<mailer::MailProvider>,
+    pub mail_provider: Option<mailer::MailerKind>,
     pub mail_from: Option<String>,
     /// How tier-2 apps are isolated and run.
     pub app_runner_kind: AppRunnerKind,
@@ -127,7 +127,7 @@ fn usage() -> String {
      [--identity-authority-url http://127.0.0.1:8790] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
-     --mailer dev|resend|postmark [--mail-from ADDR] \
+     --mailer dev|resend [--mail-from ADDR] \
      [--app-runner none|systemd|kata] [--app-sudo-path PATH] \
      [--app-nerdctl-path PATH] [--app-cni-path PATH] \
      [--app-idle-timeout SECONDS]\n  \
@@ -193,17 +193,17 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
     let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
     let mail_provider = match flag_value(&flags, "mailer") {
         None => {
-            return Err("--mailer is required (dev|resend|postmark)".to_string());
+            return Err("--mailer is required (dev|resend)".to_string());
         }
         Some("dev") => None,
         Some(raw) => Some(
-            mailer::MailProvider::parse(raw)
-                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend|postmark)"))?,
+            mailer::MailerKind::parse(raw)
+                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend)"))?,
         ),
     };
     let mail_from = flag_value(&flags, "mail-from").map(str::to_string);
     if mail_provider.is_some() && mail_from.is_none() {
-        return Err("--mailer resend|postmark requires --mail-from".to_string());
+        return Err("--mailer resend requires --mail-from".to_string());
     }
     let listen: SocketAddr = flag_value(&flags, "listen")
         .unwrap_or("127.0.0.1:8787")
@@ -438,14 +438,17 @@ fn serve(options: ServeOptions) -> Result<(), String> {
                 .map_err(|error| format!("cannot open outbox: {error}"))?,
         ),
         Some(provider) => {
-            let env_var = provider.api_key_env_var();
+            let env_var = match provider {
+                mailer::MailerKind::Dev => unreachable!("dev is represented as None"),
+                mailer::MailerKind::Resend => mailer::RESEND_API_KEY_ENV_VAR,
+            };
             let api_key = std::env::var(env_var)
                 .map_err(|_| format!("--mailer requires the {env_var} environment variable"))?;
             let from_address = options
                 .mail_from
                 .clone()
                 .expect("mail_from is validated alongside mail_provider");
-            Box::new(mailer::HttpMailer::new(provider, api_key, from_address))
+            Box::new(mailer::HttpMailer::new(api_key, from_address))
         }
     };
 

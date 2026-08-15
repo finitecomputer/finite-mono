@@ -15,6 +15,7 @@ async-stream = "0.3.6"
 base64 = "0.22.1"
 finite-brain-core = { path = "../finite-brain-core" }
 finite-brain-store = { path = "../finite-brain-store" }
+finite-mail.workspace = true
 finite-nostr.workspace = true
 nostr = { version = "0.45.0-alpha.2", features = ["nip98", "os-rng"] }
 serde = { version = "1.0.228", features = ["derive"] }

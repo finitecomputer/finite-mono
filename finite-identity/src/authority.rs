@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Query, State};
@@ -18,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{hex, nip98, npub};
+use finite_mail::MailTransport as _;
 
 #[derive(Debug, Clone)]
 pub struct AuthorityConfig {
@@ -68,110 +68,30 @@ impl Mailer for DevMailer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MailProvider {
-    Resend,
-    Postmark,
-}
-
-impl MailProvider {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "resend" => Some(Self::Resend),
-            "postmark" => Some(Self::Postmark),
-            _ => None,
-        }
-    }
-
-    pub fn api_key_env_var(&self) -> &'static str {
-        match self {
-            Self::Resend => "RESEND_API_KEY",
-            Self::Postmark => "POSTMARK_SERVER_TOKEN",
-        }
-    }
-
-    fn endpoint(&self) -> &'static str {
-        match self {
-            Self::Resend => "https://api.resend.com/emails",
-            Self::Postmark => "https://api.postmarkapp.com/email",
-        }
-    }
-
-    fn auth_header(&self) -> &'static str {
-        match self {
-            Self::Resend => "Authorization",
-            Self::Postmark => "X-Postmark-Server-Token",
-        }
-    }
-}
-
+/// Production mail delivery through the shared `finite-mail` Resend
+/// transport. The API key comes from `RESEND_API_KEY`; delivery is an
+/// adapter (ADR 0012), identity semantics stay in this crate.
 pub struct HttpMailer {
-    provider: MailProvider,
-    api_key: String,
-    from_address: String,
-    agent: ureq::Agent,
+    resend: finite_mail::ResendMailer,
 }
 
 impl HttpMailer {
-    pub fn new(provider: MailProvider, api_key: String, from_address: String) -> Self {
-        assert!(!api_key.is_empty());
-        assert!(from_address.contains('@'));
+    pub fn new(api_key: String, from_address: String) -> Self {
         Self {
-            provider,
-            api_key,
-            from_address,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(10))
-                .build(),
-        }
-    }
-
-    fn send_payload(&self, payload: serde_json::Value) -> Result<(), String> {
-        self.send_payload_with_idempotency(payload, None)
-    }
-
-    fn send_payload_with_idempotency(
-        &self,
-        payload: serde_json::Value,
-        idempotency_key: Option<&str>,
-    ) -> Result<(), String> {
-        let auth_value = match self.provider {
-            MailProvider::Resend => format!("Bearer {}", self.api_key),
-            MailProvider::Postmark => self.api_key.clone(),
-        };
-        let mut request = self
-            .agent
-            .post(self.provider.endpoint())
-            .set(self.provider.auth_header(), &auth_value)
-            .set("Accept", "application/json");
-        if let Some(idempotency_key) = idempotency_key
-            && self.provider == MailProvider::Resend
-        {
-            request = request.set("Idempotency-Key", idempotency_key);
-        }
-        let result = request.send_json(payload);
-        match result {
-            Ok(_response) => Ok(()),
-            Err(ureq::Error::Status(code, response)) => {
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "unreadable body".to_owned());
-                let truncated: String = body.chars().take(500).collect();
-                Err(format!("provider returned {code}: {truncated}"))
-            }
-            Err(error) => Err(format!("transport error: {error}")),
+            resend: finite_mail::ResendMailer::new(api_key, from_address),
         }
     }
 }
 
 impl Mailer for HttpMailer {
     fn send_email_challenge(&self, email: &str, token: &str) -> Result<(), String> {
-        self.send_payload(email_challenge_payload(
-            self.provider,
-            &self.from_address,
-            email,
-            token,
-        ))
+        self.resend
+            .send_text_email(&finite_mail::TextEmail {
+                to: email,
+                subject: email_challenge_subject(),
+                text: &email_challenge_text(email, token),
+            })
+            .map_err(|error| error.to_string())
     }
 
     fn send_transactional_email(
@@ -181,22 +101,16 @@ impl Mailer for HttpMailer {
         subject: &str,
         text: &str,
     ) -> Result<(), String> {
-        let payload = match self.provider {
-            MailProvider::Resend => serde_json::json!({
-                "from": self.from_address,
-                "to": [email],
-                "subject": subject,
-                "text": text,
-            }),
-            MailProvider::Postmark => serde_json::json!({
-                "From": self.from_address,
-                "To": email,
-                "Subject": subject,
-                "TextBody": text,
-                "MessageStream": "outbound",
-            }),
-        };
-        self.send_payload_with_idempotency(payload, Some(idempotency_key))
+        self.resend
+            .send_text_email_with_idempotency_key(
+                idempotency_key,
+                &finite_mail::TextEmail {
+                    to: email,
+                    subject,
+                    text,
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -224,31 +138,6 @@ fn email_challenge_text(email: &str, token: &str) -> String {
          The token works once and expires in 15 minutes. If you did not \
          request it, you can ignore this email.\n"
     )
-}
-
-fn email_challenge_payload(
-    provider: MailProvider,
-    from_address: &str,
-    email: &str,
-    token: &str,
-) -> serde_json::Value {
-    let subject = email_challenge_subject();
-    let text = email_challenge_text(email, token);
-    match provider {
-        MailProvider::Resend => serde_json::json!({
-            "from": from_address,
-            "to": [email],
-            "subject": subject,
-            "text": text,
-        }),
-        MailProvider::Postmark => serde_json::json!({
-            "From": from_address,
-            "To": email,
-            "Subject": subject,
-            "TextBody": text,
-            "MessageStream": "outbound",
-        }),
-    }
 }
 
 pub trait Clock: Send + Sync + 'static {
@@ -2215,44 +2104,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mail_provider_parsing_and_env_names_are_stable() {
-        assert_eq!(MailProvider::parse("resend"), Some(MailProvider::Resend));
-        assert_eq!(
-            MailProvider::parse("postmark"),
-            Some(MailProvider::Postmark)
-        );
-        assert_eq!(MailProvider::parse("smtp"), None);
-        assert_eq!(MailProvider::Resend.api_key_env_var(), "RESEND_API_KEY");
-        assert_eq!(
-            MailProvider::Postmark.api_key_env_var(),
-            "POSTMARK_SERVER_TOKEN"
-        );
+    fn resend_api_key_env_name_is_stable() {
+        // Referenced by infra env files and NixOS modules; a rename would
+        // break production mail delivery at restart.
+        assert_eq!(finite_mail::RESEND_API_KEY_ENV_VAR, "RESEND_API_KEY");
     }
 
     #[test]
-    fn email_challenge_payloads_match_provider_shapes() {
-        let resend = email_challenge_payload(
-            MailProvider::Resend,
-            "Finite <identity@finite.chat>",
-            "paul@finite.vip",
-            "token-123",
-        );
-        assert_eq!(resend["from"], "Finite <identity@finite.chat>");
-        assert_eq!(resend["to"][0], "paul@finite.vip");
-        assert_eq!(resend["subject"], email_challenge_subject());
-        assert!(resend["text"].as_str().unwrap().contains("token-123"));
-        assert!(resend["text"].as_str().unwrap().contains("paul@finite.vip"));
-
-        let postmark = email_challenge_payload(
-            MailProvider::Postmark,
-            "Finite <identity@finite.chat>",
-            "paul@finite.vip",
-            "token-123",
-        );
-        assert_eq!(postmark["From"], "Finite <identity@finite.chat>");
-        assert_eq!(postmark["To"], "paul@finite.vip");
-        assert_eq!(postmark["Subject"], email_challenge_subject());
-        assert_eq!(postmark["MessageStream"], "outbound");
-        assert!(postmark["TextBody"].as_str().unwrap().contains("token-123"));
+    fn email_challenge_message_names_the_email_and_token() {
+        let subject = email_challenge_subject();
+        let text = email_challenge_text("paul@finite.vip", "token-123");
+        assert_eq!(subject, "Your Finite Identity email challenge");
+        assert!(text.contains("token-123"));
+        assert!(text.contains("paul@finite.vip"));
+        assert!(text.contains("expires in 15 minutes"));
     }
 }
