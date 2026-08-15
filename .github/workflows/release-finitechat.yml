@@ -147,6 +147,11 @@ jobs:
           grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$daemon_signature"
           grep -F 'TeamIdentifier=JBLHZ83X6T' <<<"$daemon_signature"
           grep -F 'flags=0x10000(runtime)' <<<"$daemon_signature"
+          test -f "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
+          test -f "$ELECTRON_APP_PATH/Contents/Resources/app/electron/vendor/electron-updater.cjs"
+          grep -F 'provider: generic' "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
+          grep -F 'url: https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/' \
+            "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
 
       - name: Submit to Apple and staple ticket
         env:
@@ -217,7 +222,7 @@ jobs:
               --title "$tag" --generate-notes --latest=false
           fi
 
-      - name: Generate macOS update manifest
+      - name: Generate macOS update feed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -229,16 +234,15 @@ jobs:
           node finitechat/apps/electron-chat/scripts/generate-macos-update-manifest.mjs \
             --version "$version" \
             --asset-url "$asset_url" \
+            --asset-file release-assets/finitechat-electron-macos-aarch64.zip \
             --published-at "$published_at" \
-            --output release-assets/finitechat-electron-macos-aarch64-releases.json
-          jq -e --arg version "$version" '
-            .currentRelease == $version and
-            (.releases | length == 1) and
-            (.releases[0].version == $version) and
-            (.releases[0].updateTo.version == $version)
-          ' release-assets/finitechat-electron-macos-aarch64-releases.json >/dev/null
+            --output release-assets/latest-mac.yml
+          grep -Fx "version: ${version}" release-assets/latest-mac.yml
+          grep -F "url: https://github.com/finitecomputer/finite-mono/releases/download/finitechat/v${version}/finitechat-electron-macos-aarch64.zip" \
+            release-assets/latest-mac.yml
+          grep -Ec '^    sha512: [A-Za-z0-9+/=]{80,}$' release-assets/latest-mac.yml >/dev/null
           gh release upload "$tag" \
-            release-assets/finitechat-electron-macos-aarch64-releases.json \
+            release-assets/latest-mac.yml \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
@@ -247,18 +251,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           alias=finitechat-latest
-          manifest=release-assets/finitechat-electron-macos-aarch64-releases.json
+          feed=release-assets/latest-mac.yml
           notes="Rolling alias for the newest finitechat release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
           if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$manifest" -print | sort)
+            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$feed" -print | sort)
             gh release upload "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release upload "$alias" "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$alias" "$feed" --repo "$GITHUB_REPOSITORY" --clobber
+            # nothing shipped: retire the legacy bespoke manifest asset (best-effort)
+            gh release delete-asset "$alias" finitechat-electron-macos-aarch64-releases.json \
+              --repo "$GITHUB_REPOSITORY" -y >/dev/null 2>&1 || true
             gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
             # best-effort: move the alias tag to this commit for provenance
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
           else
-            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$manifest" -print | sort)
+            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$feed" -print | sort)
             gh release create "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --title "finitechat (latest)" --notes "$notes" --latest=false
-            gh release upload "$alias" "$manifest" --repo "$GITHUB_REPOSITORY"
+            gh release upload "$alias" "$feed" --repo "$GITHUB_REPOSITORY"
           fi
