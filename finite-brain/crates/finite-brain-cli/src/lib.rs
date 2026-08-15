@@ -44,6 +44,7 @@ pub(crate) use sync_engine::*;
 pub(crate) use wiki::*;
 pub(crate) use working_tree_security::*;
 
+use backon::{BackoffBuilder, BlockingRetryable};
 use notify::{RecursiveMode, Watcher};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -905,7 +906,7 @@ fn daemon_supervise<W: Write>(
     let notifications_unsupported = Arc::new(AtomicBool::new(false));
     let stream_notifications_unsupported = Arc::clone(&notifications_unsupported);
     std::thread::spawn(move || {
-        let mut retry_delay = Duration::from_secs(1);
+        let mut reconnect_backoff = brain_update_reconnect_backoff();
         let mut unsupported_announced = false;
         loop {
             let mut stream_connected = false;
@@ -929,17 +930,27 @@ fn daemon_supervise<W: Write>(
                 Err(error) => {
                     unsupported_announced = false;
                     let _ = sender.send(Err(error.to_string()));
+                    // An established stream resets reconnect timing the same way
+                    // a clean EOF does: the next reconnect delay starts from the
+                    // 1s base again.
                     if stream_connected {
-                        retry_delay = Duration::from_secs(1);
+                        reconnect_backoff = brain_update_reconnect_backoff();
                     }
-                    std::thread::sleep(retry_delay);
-                    retry_delay = brain_update_retry_delay(retry_delay, false);
+                    std::thread::sleep(
+                        reconnect_backoff
+                            .next()
+                            .unwrap_or_else(|| Duration::from_secs(5)),
+                    );
                 }
                 Ok(()) => {
                     stream_notifications_unsupported.store(false, Ordering::SeqCst);
                     unsupported_announced = false;
-                    retry_delay = Duration::from_secs(1);
-                    std::thread::sleep(retry_delay);
+                    reconnect_backoff = brain_update_reconnect_backoff();
+                    std::thread::sleep(
+                        reconnect_backoff
+                            .next()
+                            .unwrap_or_else(|| Duration::from_secs(1)),
+                    );
                 }
             }
         }
@@ -1205,17 +1216,28 @@ fn next_supervisor_event(
     Some(event)
 }
 
-fn brain_update_retry_delay(previous: Duration, stream_connected: bool) -> Duration {
-    if stream_connected {
-        Duration::from_secs(1)
-    } else {
-        // A notification reconnect is cheap and carries no Brain contents. Keep
-        // enough backoff to protect an unavailable server, but bound the stale
-        // window: the next successful SSE connection performs an authoritative
-        // sequence catch-up, so a long transport backoff directly becomes a
-        // user-visible synchronization delay.
-        (previous * 2).min(Duration::from_secs(5))
-    }
+/// Reconnect backoff for the Brain Update Notification stream.
+///
+/// Deliberate policy (owned by `backon`): exponential from a 1s base with
+/// factor 2, capped at 5s, with additive jitter in `[delay, 2*delay)` to
+/// de-synchronize agents reconnecting after a shared outage. Retries are
+/// unbounded — a supervise daemon must keep reconnecting — but each failure is
+/// surfaced through the supervisor's `stream_error_catch_up` reconciliation
+/// rather than retried silently. A notification reconnect is cheap and carries
+/// no Brain contents, so the cap stays low on purpose: the next successful SSE
+/// connection performs an authoritative sequence catch-up, and a long
+/// transport backoff directly becomes a user-visible synchronization delay.
+fn brain_update_reconnect_backoff() -> backon::ExponentialBackoff {
+    brain_update_reconnect_backoff_builder()
+        .with_jitter()
+        .build()
+}
+
+fn brain_update_reconnect_backoff_builder() -> backon::ExponentialBuilder {
+    backon::ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(1))
+        .with_max_delay(Duration::from_secs(5))
+        .without_max_times()
 }
 
 fn retire_brain_sync_worker(worker: BrainSyncWorker) -> Result<(), CliError> {
@@ -1354,29 +1376,33 @@ fn retry_transient_notification_work_with_limit<T>(
     max_attempts: u8,
     mut work: impl FnMut() -> Result<T, CliError>,
 ) -> Result<T, CliError> {
-    let mut delay = Duration::from_millis(50);
-    let mut attempts = 0_u8;
-    loop {
-        attempts = attempts.saturating_add(1);
-        match work() {
-            Ok(value) => return Ok(value),
-            Err(error)
-                if transient_working_tree_gap(&error)
-                    && !cancelled.load(Ordering::SeqCst)
-                    && attempts < max_attempts =>
-            {
-                let deadline = Instant::now() + delay;
-                while Instant::now() < deadline {
-                    if cancelled.load(Ordering::SeqCst) {
-                        return Err(error);
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                delay = (delay * 2).min(Duration::from_secs(1));
-            }
-            Err(error) => return Err(error),
+    let work_once = || {
+        // Cancellation (supervisor retirement) must not start another sync
+        // attempt; the transient gap that triggered the pending retry is
+        // reported as the equivalent NotFound outcome, matching the previous
+        // hand-rolled loop's cancelled-during-backoff behavior.
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(CliError::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )));
         }
-    }
+        work()
+    };
+    // Only transient Working Tree gaps (a tree being created or removed
+    // concurrently) are retryable; every other failure is fatal for this
+    // notification. backon owns the attempt count, 50ms exponential base, 1s
+    // cap, and jitter. `max_times` counts retries, so the total attempt budget
+    // stays `max_attempts`.
+    work_once
+        .retry(
+            backon::ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(50))
+                .with_max_delay(Duration::from_secs(1))
+                .with_max_times(max_attempts.saturating_sub(1) as usize)
+                .with_jitter(),
+        )
+        .when(|error| !cancelled.load(Ordering::SeqCst) && transient_working_tree_gap(error))
+        .call()
 }
 
 fn transient_working_tree_gap(error: &CliError) -> bool {
@@ -1550,8 +1576,8 @@ fn daemon_watch<W: Write>(
     let mut ticks = 0_usize;
     let mut failures = 0_usize;
     let mut skipped_ticks = 0_usize;
-    let mut consecutive_failures = 0_usize;
-    let mut retry_backoff_millis: u64;
+    let mut tick_backoff = daemon_watch_tick_backoff(poll);
+    let mut retry_backoff_millis: u64 = 0;
     let mut last_status = None::<String>;
     let mut last_error: Option<String>;
     loop {
@@ -1593,7 +1619,7 @@ fn daemon_watch<W: Write>(
                     }
                     last_status = Some(report.status);
                     last_error = None;
-                    consecutive_failures = 0;
+                    tick_backoff = daemon_watch_tick_backoff(poll);
                     retry_backoff_millis = 0;
                 }
                 Err(error) => {
@@ -1605,8 +1631,8 @@ fn daemon_watch<W: Write>(
                         })?;
                     }
                     failures += 1;
-                    consecutive_failures += 1;
-                    retry_backoff_millis = daemon_retry_backoff_millis(poll, consecutive_failures);
+                    let extra_backoff = tick_backoff.next().unwrap_or(poll);
+                    retry_backoff_millis = extra_backoff.as_millis() as u64;
                     let error = error.to_string();
                     last_error = Some(error.clone());
                     mutate_agent_state(env, |state, now| {
@@ -1622,8 +1648,11 @@ fn daemon_watch<W: Write>(
             }
         } else {
             skipped_ticks += 1;
-            consecutive_failures = 0;
-            retry_backoff_millis = 0;
+            // A skipped tick performed no sync, so it neither clears nor
+            // extends the failure streak: escalating backoff from earlier
+            // failed syncs survives idle ticks (previously the reset here let
+            // a persistently failing server be retried at the base rate
+            // forever).
             last_status = Some("idle-no-local-changes".to_owned());
             last_error = None;
             mutate_agent_state(env, |state, _| {
@@ -1791,13 +1820,28 @@ fn daemon_watch_remote_poll_ticks(args: &[String]) -> Result<Option<usize>, CliE
         .unwrap_or(Ok(Some(12)))
 }
 
-fn daemon_retry_backoff_millis(poll: std::time::Duration, consecutive_failures: usize) -> u64 {
-    if consecutive_failures == 0 {
-        return 0;
-    }
-    let multiplier = 1_u128 << consecutive_failures.saturating_sub(1).min(3);
-    let millis = poll.as_millis().saturating_mul(multiplier);
-    millis.min(60_000) as u64
+/// Inter-tick failure backoff for `daemon watch`.
+///
+/// Deliberate policy (owned by `backon`): capped exponential with additive
+/// jitter — the first failed tick sleeps one extra poll interval, each further
+/// consecutive failure doubles that extra delay up to a 60s cap, and jitter in
+/// `[delay, 2*delay)` de-synchronizes agents that started failing together.
+/// Retries across ticks are unbounded (a watch daemon must keep trying), but
+/// every failed tick surfaces `blocked: <error>` into Agent State and the
+/// activity log, and each tick performs at most one sync attempt — there is no
+/// silent hot loop. The backoff is rebuilt (reset) only after a successful
+/// sync.
+fn daemon_watch_tick_backoff(poll: std::time::Duration) -> backon::ExponentialBackoff {
+    daemon_watch_tick_backoff_builder(poll)
+        .with_jitter()
+        .build()
+}
+
+fn daemon_watch_tick_backoff_builder(poll: std::time::Duration) -> backon::ExponentialBuilder {
+    backon::ExponentialBuilder::default()
+        .with_min_delay(poll)
+        .with_max_delay(Duration::from_secs(60))
+        .without_max_times()
 }
 
 fn daemon_watch_max_ticks(args: &[String]) -> Result<Option<usize>, CliError> {
@@ -12231,6 +12275,75 @@ mod tests {
     }
 
     #[test]
+    fn embedding_provider_adapter_gives_up_after_the_attempt_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut served = 0_u64;
+            while served < 3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request_with_headers(&mut stream);
+                let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                stream.write_all(response.as_bytes()).unwrap();
+                served += 1;
+            }
+            // The adapter must stop after its three attempts; a fourth
+            // connection attempt fails the test via listener shutdown below.
+            drop(listener);
+            served
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let error = adapter
+            .embed(&[EmbeddingProviderInput::query("query-1", "test query")])
+            .unwrap_err();
+
+        let served = server.join().unwrap();
+        assert_eq!(served, 3);
+        assert_eq!(
+            error.to_string(),
+            "embedding provider error: provider returned status 503"
+        );
+    }
+
+    #[test]
+    fn embedding_provider_adapter_does_not_retry_fatal_statuses() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            let response =
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            // Fatal statuses must not be retried: close the listener so a
+            // second connection attempt would error the test.
+            drop(listener);
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let error = adapter
+            .embed(&[EmbeddingProviderInput::query("query-1", "test query")])
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "embedding provider error: provider returned status 400"
+        );
+    }
+
+    #[test]
     fn embedding_provider_debug_output_never_exposes_credentials() {
         let token = "internal-beta-provider-secret";
         let config = EmbeddingProviderConfig {
@@ -12373,13 +12486,16 @@ mod tests {
         assert_eq!(json["ticks"], 1);
         assert_eq!(json["failures"], 1);
         assert_eq!(json["watchStrategy"], "working-tree-files");
-        assert_eq!(json["retryBackoffMillis"], 5000);
+        // First failed tick: one extra poll interval (5s default) of backoff
+        // with additive jitter in [5s, 10s).
+        let reported_backoff = json["retryBackoffMillis"].as_u64().unwrap();
+        assert!((5000..10000).contains(&reported_backoff));
         assert!(!json["lastError"].as_str().unwrap().is_empty());
 
         let state = read_agent_state(&tree).unwrap();
         assert_eq!(state.daemon.state, DaemonRunState::Stopped);
         assert_eq!(state.daemon.failure_count, 1);
-        assert_eq!(state.daemon.retry_backoff_millis, 5000);
+        assert_eq!(state.daemon.retry_backoff_millis, reported_backoff);
         assert!(
             state
                 .daemon
@@ -12400,7 +12516,7 @@ mod tests {
         run_with_env(["status", "--json"], env, &mut output).unwrap();
         let json: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(json["daemon"]["failureCount"], 1);
-        assert_eq!(json["daemon"]["retryBackoffMillis"], 5000);
+        assert_eq!(json["daemon"]["retryBackoffMillis"], reported_backoff);
         assert!(
             json["daemon"]["lastError"]
                 .as_str()
@@ -14214,19 +14330,50 @@ mod tests {
     }
 
     #[test]
-    fn established_brain_update_stream_resets_reconnect_backoff() {
-        assert_eq!(
-            brain_update_retry_delay(Duration::from_secs(30), true),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            brain_update_retry_delay(Duration::from_secs(8), false),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            brain_update_retry_delay(Duration::from_secs(30), false),
-            Duration::from_secs(5)
-        );
+    fn brain_update_reconnect_backoff_is_capped_exponential() {
+        let mut backoff = brain_update_reconnect_backoff_builder().build();
+        assert_eq!(backoff.next(), Some(Duration::from_secs(1)));
+        assert_eq!(backoff.next(), Some(Duration::from_secs(2)));
+        assert_eq!(backoff.next(), Some(Duration::from_secs(4)));
+        for _ in 0..8 {
+            assert_eq!(backoff.next(), Some(Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn brain_update_reconnect_backoff_jitter_stays_bounded() {
+        let mut backoff = brain_update_reconnect_backoff();
+        let mut base = Duration::from_secs(1);
+        for _ in 0..6 {
+            let delay = backoff.next().expect("reconnect backoff never exhausts");
+            assert!(delay >= base && delay < base * 2);
+            base = (base * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn daemon_watch_tick_backoff_is_capped_exponential() {
+        let poll = Duration::from_secs(5);
+        let mut backoff = daemon_watch_tick_backoff_builder(poll).build();
+        assert_eq!(backoff.next(), Some(Duration::from_secs(5)));
+        assert_eq!(backoff.next(), Some(Duration::from_secs(10)));
+        assert_eq!(backoff.next(), Some(Duration::from_secs(20)));
+        assert_eq!(backoff.next(), Some(Duration::from_secs(40)));
+        for _ in 0..8 {
+            assert_eq!(backoff.next(), Some(Duration::from_secs(60)));
+        }
+    }
+
+    #[test]
+    fn daemon_watch_tick_backoff_jitter_stays_bounded() {
+        let poll = Duration::from_secs(2);
+        let mut backoff = daemon_watch_tick_backoff(poll);
+        let mut base = poll;
+        for _ in 0..7 {
+            let delay = backoff.next().expect("tick backoff never exhausts");
+            assert!(delay >= base && delay < base * 2);
+            base = (base * 2).min(Duration::from_secs(60));
+        }
     }
 
     #[test]
