@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -132,6 +133,48 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         self.assertIn("generation_tokens_per_second", result.stdout)
         self.assertIsNotNone(re.search(r"aggregate=([0-9.]+)", result.stdout))
 
+    def test_load_canary_uses_one_parallel_curl_process(self) -> None:
+        real_curl = shutil.which("curl")
+        self.assertIsNotNone(real_curl)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            invocation_log = Path(temporary_directory) / "curl-invocations"
+            curl = Path(temporary_directory) / "curl"
+            curl.write_text(
+                "#!/bin/sh\n"
+                'printf "invoked\\n" >>"$CURL_INVOCATION_LOG"\n'
+                f'exec "{real_curl}" "$@"\n',
+                encoding="utf-8",
+            )
+            curl.chmod(0o700)
+            self.environment["CURL_INVOCATION_LOG"] = str(invocation_log)
+            self.environment["PATH"] = (
+                temporary_directory + os.pathsep + self.environment["PATH"]
+            )
+            result = self.run_ops("load-canary", "4")
+            invocations = invocation_log.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(invocations, "invoked\n")
+
+    def test_load_canary_cleans_up_after_a_transport_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            curl = root / "curl"
+            curl.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+            curl.chmod(0o700)
+            self.environment["TMPDIR"] = str(scratch)
+            self.environment["PATH"] = (
+                temporary_directory + os.pathsep + self.environment["PATH"]
+            )
+
+            result = self.run_ops("load-canary", "4")
+            remaining_temporary_files = list(scratch.iterdir())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(remaining_temporary_files, [])
+
     def test_high_concurrency_requires_exact_approval(self) -> None:
         result = self.run_ops("load-canary", "64")
         self.assertEqual(result.returncode, 64)
@@ -140,7 +183,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
     def test_load_sweep_stops_at_first_failed_tier(self) -> None:
         MockFinitePrivateHandler.fail_request_two = True
         self.environment["FINITE_PRIVATE_LOAD_SWEEP_APPROVED"] = (
-            "1,4,8,16,32,64,128,256,512,1024"
+            "1,4,8,16,32,64,128,256"
         )
         result = self.run_ops("load-sweep")
         self.assertNotEqual(result.returncode, 0)

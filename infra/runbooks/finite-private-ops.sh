@@ -15,7 +15,7 @@ READY_TIMEOUT_SECS="${FINITE_PRIVATE_READY_TIMEOUT_SECS:-4200}"
 LOAD_MAX_FIRST_BYTE_SECS="${FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS:-90}"
 LOAD_CONCURRENCY="${FINITE_PRIVATE_LOAD_CONCURRENCY:-32}"
 LOAD_MAX_TOKENS="${FINITE_PRIVATE_LOAD_MAX_TOKENS:-64}"
-LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256,512,1024"
+LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256"
 
 usage() {
   cat >&2 <<'EOF'
@@ -32,7 +32,7 @@ Read-only commands:
                       Prove older glm-5-2 requests through the current limiter.
   repeated-id-canary  Send two calls with one caller x-request-id.
   load-canary [N]     Run N concurrent streaming calls and report latency/throughput.
-  load-sweep          Run the guarded 1,4,8,16,32,64,128,256,512,1024 maintenance sweep.
+  load-sweep          Run the guarded 1,4,8,16,32,64,128,256 maintenance sweep.
   settlement-status SINCE_UTC
                       Prove this canary key has no rollout-era reserved rows.
   negative-canary     Confirm an invalid Finite key is rejected.
@@ -53,7 +53,7 @@ Environment:
   FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS default: 90
   FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
   FINITE_PRIVATE_LOAD_MAX_TOKENS         default: 64
-  FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256,512,1024 for N > 32 or load-sweep
+  FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256 for N > 32 or load-sweep
   FINITE_PRIVATE_CORE_HOST               default: root@64.34.82.77
   FINITE_PRIVATE_RELAUNCH_APPROVED     must equal the exact TAG for relaunch
 EOF
@@ -256,7 +256,6 @@ require_load_sweep_approval() {
 load_canary() {
   require_command curl
   require_command python3
-  require_command xargs
   if [ -z "${FINITE_PRIVATE_CANARY_API_KEY:-}" ]; then
     echo "FINITE_PRIVATE_CANARY_API_KEY is required for load-canary" >&2
     exit 1
@@ -284,33 +283,65 @@ load_canary() {
   export FP_LOAD_CONFIG="$curl_config" FP_LOAD_PAYLOAD="$payload_file"
   export FP_LOAD_RESULTS="$result_dir" FP_LOAD_ENDPOINT="$ENDPOINT"
   export FP_LOAD_TIMEOUT="$TIMEOUT_SECS" FP_LOAD_BATCH_ID="$batch_id"
-  batch_elapsed="$(python3 - "$concurrency" <<'PY'
+  if ! batch_elapsed="$(python3 - "$concurrency" <<'PY'
+import os
+import pathlib
 import subprocess
 import sys
 import time
 
 concurrency = int(sys.argv[1])
-worker = r'''
-    n="$1"
-    curl -sS --no-buffer --max-time "$FP_LOAD_TIMEOUT" --config "$FP_LOAD_CONFIG" \
-      -H "x-request-id: fp_load_${FP_LOAD_BATCH_ID}_${n}" \
-      --data-binary "@$FP_LOAD_PAYLOAD" \
-      --output "$FP_LOAD_RESULTS/body-${n}.json" \
-      --write-out "%{http_code}\t%{time_starttransfer}\t%{time_total}\n" \
-      "$FP_LOAD_ENDPOINT/v1/chat/completions" >"$FP_LOAD_RESULTS/metric-${n}.tsv" || true
-'''
+root = pathlib.Path(os.environ["FP_LOAD_RESULTS"])
+command = [
+    "curl",
+    "--parallel",
+    "--parallel-immediate",
+    "--parallel-max",
+    str(concurrency),
+]
+for number in range(1, concurrency + 1):
+    if number > 1:
+        command.append("--next")
+    command.extend(
+        [
+            "--silent",
+            "--show-error",
+            "--no-buffer",
+            "--http2",
+            "--max-time",
+            os.environ["FP_LOAD_TIMEOUT"],
+            "--config",
+            os.environ["FP_LOAD_CONFIG"],
+            "--header",
+            f"x-request-id: fp_load_{os.environ['FP_LOAD_BATCH_ID']}_{number}",
+            "--data-binary",
+            f"@{os.environ['FP_LOAD_PAYLOAD']}",
+            "--output",
+            str(root / f"body-{number}.json"),
+            "--write-out",
+            f"{number}\t%{{http_code}}\t%{{time_starttransfer}}\t%{{time_total}}\n",
+            f"{os.environ['FP_LOAD_ENDPOINT']}/v1/chat/completions",
+        ]
+    )
 started_at = time.monotonic()
 result = subprocess.run(
-    ["xargs", "-P", str(concurrency), "-I", "{}", "sh", "-c", worker, "sh", "{}"],
-    input="".join(f"{number}\n" for number in range(1, concurrency + 1)),
+    command,
+    capture_output=True,
     text=True,
     check=False,
 )
 elapsed = time.monotonic() - started_at
+(root / "metrics.tsv").write_text(result.stdout, encoding="utf-8")
+if result.stderr:
+    print(result.stderr, file=sys.stderr, end="")
 print(f"{elapsed:.9f}")
 raise SystemExit(result.returncode)
 PY
-)"
+)"; then
+    unset FP_LOAD_CONFIG FP_LOAD_PAYLOAD FP_LOAD_RESULTS FP_LOAD_ENDPOINT
+    unset FP_LOAD_TIMEOUT FP_LOAD_BATCH_ID
+    return 1
+  fi
 
   if ! python3 - "$result_dir" "$LOAD_MAX_FIRST_BYTE_SECS" "$concurrency" "$batch_elapsed" <<'PY'
 import json
@@ -324,18 +355,40 @@ expected = int(sys.argv[3])
 batch_elapsed = float(sys.argv[4])
 if not math.isfinite(batch_elapsed) or batch_elapsed <= 0:
     raise SystemExit(f"load canary failed: invalid batch duration {batch_elapsed!r}")
+metrics_path = root / "metrics.tsv"
+if not metrics_path.is_file():
+    raise SystemExit("load canary failed: curl metrics are missing")
+
 first_bytes = []
 totals = []
 completion_tokens = []
 prompt_tokens = []
-for path in sorted(root.glob("metric-*.tsv")):
-    parts = path.read_text(encoding="utf-8").strip().split("\t")
-    if len(parts) != 3:
-        raise SystemExit(f"load canary failed: malformed metric {path.name}: {parts!r}")
-    status, first_byte, total = parts
+seen_requests = set()
+for line in metrics_path.read_text(encoding="utf-8").splitlines():
+    parts = line.strip().split("\t")
+    if len(parts) != 4:
+        raise SystemExit(f"load canary failed: malformed metric line: {parts!r}")
+    request_number_raw, status, first_byte, total = parts
+    try:
+        request_number = int(request_number_raw)
+    except ValueError as error:
+        raise SystemExit(
+            f"load canary failed: invalid request number {request_number_raw!r}"
+        ) from error
+    if request_number < 1 or request_number > expected or request_number in seen_requests:
+        raise SystemExit(
+            f"load canary failed: unexpected request number {request_number}"
+        )
+    seen_requests.add(request_number)
     if status != "200":
-        raise SystemExit(f"load canary failed: {path.name} returned HTTP {status}")
-    body_path = root / path.name.replace("metric-", "body-").replace(".tsv", ".json")
+        raise SystemExit(
+            f"load canary failed: request {request_number} returned HTTP {status}"
+        )
+    body_path = root / f"body-{request_number}.json"
+    if not body_path.is_file():
+        raise SystemExit(
+            f"load canary failed: response body {body_path.name} is missing"
+        )
     body = body_path.read_text(encoding="utf-8")
     if "data: [DONE]" not in body:
         raise SystemExit(f"load canary failed: {body_path.name} lacks terminal [DONE]")
@@ -426,7 +479,7 @@ load_sweep() {
   require_load_sweep_approval
   local tier
   local failed_tier=""
-  for tier in 1 4 8 16 32 64 128 256 512 1024; do
+  for tier in 1 4 8 16 32 64 128 256; do
     echo "=== Finite Private concurrency tier $tier ==="
     if ! load_canary "$tier"; then
       failed_tier="$tier"
@@ -445,7 +498,7 @@ load_sweep() {
     echo "sweep stopped at tier $failed_tier; no further inference requests were issued after failure" >&2
     return 1
   fi
-  echo "Finite Private concurrency sweep passed through 1024"
+  echo "Finite Private concurrency sweep passed through 256"
 }
 
 settlement_status() {

@@ -156,6 +156,10 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         "pre-existing non-causal exception",
         "Any new or worsened red or unknown",
         "all reservations created during this rollout settle",
+        "v2026-08-13-deepseek-v4-flash-0731-128-2048-1",
+        "scripts/check_finite_private_load_comparison.py",
+        "diagnostic only",
+        "512 and beyond is explicitly deferred",
         (
             "Do not trigger a Runtime, NixOS, Litestream, storage-policy, "
             "or host-storage"
