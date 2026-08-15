@@ -10,14 +10,14 @@ providers:
       variant: skill-a
       skillPath: ../skills/software-development/website-building-finite/SKILL.md
       outputDir: ./runs/latest/artifacts
-      maxOutputTokens: 6000
+      maxOutputTokens: 5000
   - id: file://./providers/web-design-skill-provider.mjs
     label: skill-b impeccable-finite
     config:
       variant: skill-b
       skillPath: ../skills/software-development/impeccable-finite/SKILL.md
       outputDir: ./runs/latest/artifacts
-      maxOutputTokens: 6000
+      maxOutputTokens: 5000
 
 tests:
   - description: Dense operator dashboard

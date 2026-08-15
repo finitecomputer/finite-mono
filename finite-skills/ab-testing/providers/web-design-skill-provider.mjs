@@ -118,7 +118,7 @@ export default class WebDesignSkillProvider {
         messages: directProviderPrompt.messages,
         model,
         modelProvider,
-        maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
+        maxOutputTokens: Number(process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 5000),
         timeoutMs: providerTimeoutMs(modelProvider, this.config),
       });
       output = response.output;
@@ -132,7 +132,7 @@ export default class WebDesignSkillProvider {
         messages: buildHtmlRepairMessages({ agentOutput: output, brief: prompt, caseTitle: vars.title ?? caseId }),
         model,
         modelProvider,
-        maxOutputTokens: Number(process.env.SKILL_AB_REPAIR_MAX_OUTPUT_TOKENS || process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 6000),
+        maxOutputTokens: Number(process.env.SKILL_AB_REPAIR_MAX_OUTPUT_TOKENS || process.env.SKILL_AB_MAX_OUTPUT_TOKENS || this.config.maxOutputTokens || 5000),
         timeoutMs: providerTimeoutMs(modelProvider, this.config),
       });
       const repaired = extractHtml(repair.output);
@@ -431,7 +431,8 @@ ${skillText}
 
 Your response is consumed by an automated visual review harness. The only valid
 response is a complete self-contained HTML document. The first bytes of your
-response must be <!doctype html>.`;
+response must be <!doctype html>. Keep the implementation compact enough to
+finish in one response; concise CSS is better than an unfinished page.`;
 
   const user = `Build this web artifact:
 
@@ -441,6 +442,8 @@ Delivery requirements:
 - Return only a complete single-file HTML document.
 - Inline all CSS and JavaScript.
 - Do not fetch external fonts, images, scripts, or stylesheets.
+- Keep the HTML, CSS, and JavaScript concise; avoid long comments, decorative
+  code, or exhaustive component variants that risk truncating the document.
 - Use realistic copy, data, controls, and visual states.
 - Make the first viewport useful for judging the design.
 - Do not mention the skill, the test harness, variants, or this prompt inside the rendered UI.
@@ -1047,7 +1050,8 @@ Case title: ${caseTitle}
 Previous response:
 ${agentOutput}
 
-Now return only the complete single-file HTML artifact.`,
+Now return only the complete single-file HTML artifact. Keep it compact and
+make sure it includes <body>, visible content, </body>, and </html>.`,
     },
   ];
 }
@@ -1213,7 +1217,8 @@ function isRetryableProviderError(error) {
   if (["rate_limit_exceeded", "upstream_unavailable", "service_unavailable"].includes(code)) {
     return true;
   }
-  return /upstream is unavailable|temporarily unavailable|timeout|timed out/i.test(String(error?.message || ""));
+  const message = [error?.message, error?.cause?.message, error?.cause?.code].filter(Boolean).join(" ");
+  return /upstream is unavailable|temporarily unavailable|timeout|timed out|terminated|fetch failed|socket hang up|econnreset/i.test(message);
 }
 
 async function chatCompletionStreamOutput(response, providerLabel) {
@@ -1320,10 +1325,27 @@ function extractHtml(output) {
   const htmlStart = findHtmlStart(candidate);
   if (htmlStart >= 0) {
     const sliced = candidate.slice(htmlStart);
-    const end = sliced.toLowerCase().lastIndexOf("</html>");
+    const lower = sliced.toLowerCase();
+    const bodyStart = lower.search(/<body[\s>]/);
+    const bodyEnd = lower.lastIndexOf("</body>");
+    const htmlEnd = lower.lastIndexOf("</html>");
+    if (bodyStart < 0) {
+      return {
+        found: false,
+        html: null,
+      };
+    }
+    const end = htmlEnd >= 0 ? htmlEnd + "</html>".length : bodyEnd >= 0 ? bodyEnd + "</body>".length : sliced.length;
+    let html = sliced.slice(0, end).trim();
+    if (bodyEnd < 0) {
+      html += "\n</body>";
+    }
+    if (htmlEnd < 0) {
+      html += "\n</html>";
+    }
     return {
       found: true,
-      html: end >= 0 ? sliced.slice(0, end + "</html>".length).trim() : sliced.trim(),
+      html,
     };
   }
 

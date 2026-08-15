@@ -7,6 +7,7 @@ const harnessRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const latestDir = path.join(harnessRoot, "runs/latest");
 const generatedConfig = path.join(latestDir, "promptfooconfig.generated.yaml");
 const providerId = pathToFileURL(path.join(harnessRoot, "providers/web-design-skill-provider.mjs")).href;
+const maxOutputTokens = Number(process.env.SKILL_AB_CONFIG_MAX_OUTPUT_TOKENS || process.env.SKILL_AB_MAX_OUTPUT_TOKENS || 5000);
 
 const brief = await readBrief();
 const title = process.env.SKILL_AB_CASE_TITLE || titleFromBrief(brief);
@@ -62,14 +63,14 @@ providers:
       variant: skill-a
       skillPath: ../skills/software-development/website-building-finite/SKILL.md
       outputDir: ./runs/latest/artifacts
-      maxOutputTokens: 6000
+      maxOutputTokens: ${maxOutputTokens}
   - id: ${yamlScalar(providerId)}
     label: skill-b impeccable-finite
     config:
       variant: skill-b
       skillPath: ../skills/software-development/impeccable-finite/SKILL.md
       outputDir: ./runs/latest/artifacts
-      maxOutputTokens: 6000
+      maxOutputTokens: ${maxOutputTokens}
 
 tests:
   - description: ${yamlScalar(title)}

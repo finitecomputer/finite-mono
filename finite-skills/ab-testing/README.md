@@ -237,7 +237,9 @@ Finite Private settings:
 Common settings:
 
 - `SKILL_AB_MODEL`
-- `SKILL_AB_MAX_OUTPUT_TOKENS=6000`
+- `SKILL_AB_MAX_OUTPUT_TOKENS=5000`: default artifact budget. Raise it for
+  richer pages once the current Finite Private rollout is no longer hitting
+  long-stream termination under concurrent direct-provider calls.
 - `SKILL_AB_TIMEOUT_MS=120000`
 - `SKILL_AB_MAX_CONCURRENCY`: forwarded to Promptfoo as `--max-concurrency`.
   Devfinity runs default to `2`.
