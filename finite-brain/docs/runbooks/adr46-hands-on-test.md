@@ -1,11 +1,12 @@
-# ADR-0046 Hands-On Test: Browser Invite + CLI Accept, Both Directions
+# ADR-0046 Hands-On Test: Hosted-Signed Invite + CLI Accept, Both Directions
 
 Status: active runbook for the ADR-0046 principal-grants slice.
 
 Two roles, one Mac:
 
-- **Alice** drives a browser (the Brain Product Client in the devfinity
-  dashboard).
+- **Alice** drives her hosted chat signature through a terminal helper (the
+  same NIP-98 round trip the old Brain browser client drove; the web client is
+  deleted and a human Brain UI returns with the brain-surface viewer plan).
 - **Bob** drives a terminal (the `fbrain` CLI with his own identity).
 
 The automated proof of this exact flow is
@@ -33,7 +34,8 @@ When the stack is ready, the boot log prints a summary block with
 `dashboard:  http://127.0.0.1:<port>/dashboard` (plus brain, core, and other
 service URLs), and the hands-on gate prints:
 
-- the dashboard URL (Alice's browser entry point),
+- Alice's hosted-signing environment block (hosted device URL plus her
+  terminal helper — see step 2),
 - Alice's Personal Brain id and her agent's container id,
 - Bob's CLI environment block (copy it into Bob's terminal, see step 1).
 
@@ -89,41 +91,96 @@ bob_brain_curl() {
 }
 ```
 
-## 2. Alice: open her Brain in the browser
+## 2. Alice: set up the hosted-signing helper (once)
 
-1. Open the `dashboard:` URL printed at boot. The fixture stack signs you in
-   as Alice (`devfinity@finite.computer`) automatically.
-2. Open her agent's machine page and choose the **Brain** tab (the direct
-   route is `<dashboard-url>/machines/<machine-id>/brain`). Her Personal
-   Brain loads unlocked; the `shared-with-bob` Folder already contains
-   `alice-seed.md`.
+Alice's acts sign Brain HTTP with her hosted chat device (her human
+Principal key). In a third terminal, export the environment the hands-on
+gate printed (hosted device URL and API token — the token also lives in the
+boot terminal as `$FINITECHAT_HOSTED_API_TOKEN`) and define the helper:
 
-## 3. Direction 1 — Alice invites Bob from the browser
+```sh
+export ALICE_SUBJECT="user_devfinity"
+export FC_HOSTED_WEB_DEVICE_URL="http://127.0.0.1:<hosted-device-port>"
+export FINITECHAT_HOSTED_API_TOKEN="<from the boot terminal>"
+export FINITE_BRAIN_PUBLIC_BASE_URL="http://127.0.0.1:<dashboard-port>"
+export FINITE_BRAIN_SERVER_URL="http://127.0.0.1:<brain-port>"
 
-**Alice (browser):**
+alice_brain_curl() {
+  local method="$1" path="$2" body="${3:-}"
+  local url="$FINITE_BRAIN_PUBLIC_BASE_URL$path"
+  local input event auth
+  input="$(node -e '
+    const crypto = require("node:crypto");
+    const [method, url, bodyText] = process.argv.slice(1);
+    const tags = [["u", url], ["method", method.toUpperCase()],
+      ["nonce", crypto.randomBytes(16).toString("hex")]];
+    if (bodyText) tags.push(["payload", crypto.createHash("sha256").update(bodyText).digest("hex")]);
+    process.stdout.write(JSON.stringify({
+      method: method.toUpperCase(), url, bodyText,
+      eventTemplate: { kind: 27235, created_at: Math.floor(Date.now() / 1000), tags, content: "" },
+    }));
+  ' "$method" "$url" "$body")"
+  event="$(curl -fsS -H "authorization: Bearer $FINITECHAT_HOSTED_API_TOKEN" \
+    -H "x-finite-workos-user-id: $ALICE_SUBJECT" -H 'content-type: application/json' \
+    --data "$input" "$FC_HOSTED_WEB_DEVICE_URL/v1/brain/identity-provider")" || return 1
+  auth="Nostr $(node -e '
+    const signed = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    process.stdout.write(Buffer.from(JSON.stringify(signed), "utf8").toString("base64"));
+  ' <<<"$event")"
+  if [[ -n "$body" ]]; then
+    curl -fsS -X "$method" -H "authorization: $auth" \
+      -H 'content-type: application/json' --data "$body" "$FINITE_BRAIN_SERVER_URL$path"
+  else
+    curl -fsS -X "$method" -H "authorization: $auth" "$FINITE_BRAIN_SERVER_URL$path"
+  fi
+}
+```
 
-1. Open **Settings → Invitations**.
-2. Under **Invite by email**, enter `bob@finite.vip` and click
-   **Preview plan**.
-3. Observe the resolved plan: the account owner `bob@finite.vip`, his managed
+Sanity check (prints Alice's npub):
+
+```sh
+node -e 'process.stdout.write(JSON.stringify({version:"finite-brain-identity-provider-v1",operation:"identifyMember",input:null}))' |
+  curl -fsS -H "authorization: Bearer $FINITECHAT_HOSTED_API_TOKEN" \
+    -H "x-finite-workos-user-id: $ALICE_SUBJECT" -H 'content-type: application/json' \
+    --data @- "$FC_HOSTED_WEB_DEVICE_URL/v1/brain/identity-provider"
+```
+
+## 3. Direction 1 — Alice invites Bob with her hosted signature
+
+**Alice (terminal):**
+
+1. Preview the plan for Bob's account:
+
+```sh
+alice_brain_curl POST "/v1/brains/<alice-brain-id>/invitations/preflight" \
+  '{"target":"bob@finite.vip"}' | tee /tmp/alice-preflight.json
+```
+
+2. Observe the resolved plan: the account owner `bob@finite.vip`, his managed
    agent (`bob-sidekick-...@finite.vip`), and any exclusions with their
    reasons. No npubs appear anywhere in the copy.
-4. Click **Invite bob@finite.vip and 1 agent**. Inviting is member
-   administration (ADR-0046 Tier 2), so the browser signer commits the plan
-   directly — the click is the approval, no Approval Card is created. Observe
-   "Invitation sent — Invited bob@finite.vip and 1 agent". If the roster had
-   drifted since the preview, the client re-previews and shows the fresh plan
-   instead of committing the stale one.
-5. Still in **Settings → Invitations**, observe two pending invitations. Each
-   pending invitation's `publicInstructionsUrl` (`…/llms.txt`) now resolves
+3. Commit the plan directly. Inviting is member administration (ADR-0046
+   Tier 2), so Alice's signature commits the plan — the commit is the
+   approval, no Approval Card is created:
+
+```sh
+ALICE_PLAN_ID=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("/tmp/alice-preflight.json","utf8")).planId)')
+ALICE_PLAN_HASH=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("/tmp/alice-preflight.json","utf8")).planHash)')
+alice_brain_curl POST "/v1/brains/<alice-brain-id>/invitations/commit" \
+  "{"planId":"$ALICE_PLAN_ID","planHash":"$ALICE_PLAN_HASH"}"
+```
+
+If the roster drifted since the preview, the commit returns 409 with a fresh
+preflight — re-run step 3 with the new plan instead of committing the stale
+one.
+4. Each pending invitation's `publicInstructionsUrl` (`…/llms.txt`) resolves
    without auth for npub invitations too — it prints the target npub, the
    invitation id, and the exact accept command.
 
 (The Approval Card round trip remains for agent-initiated requests — an agent
-files an invite-commit Approval request and a human signs the card; the
-Access-panel **Approvals** list stays as the pending/history view. A browser
-signer without Brain admin standing gets a **Request approval from an admin**
-fallback on the same previewed plan instead of the direct-invite button.)
+files an invite-commit Approval request and a human signs the card. A signer
+without Brain admin standing falls back to requesting approval on the same
+previewed plan instead of committing directly.)
 
 **Bob (CLI):** Bob has no Working Tree yet, so `invite brain list` reads the
 invitations addressed to his own principal (`GET /v1/my-invitations`) instead
@@ -168,7 +225,7 @@ docker exec <alice-container> \
   cat /data/workspace/finitebrain/<alice-brain-id>/shared-with-bob/bob-reply.md
 ```
 
-## 4. Direction 2 — Bob invites Alice from the CLI, Alice accepts in the browser
+## 4. Direction 2 — Bob invites Alice from the CLI, Alice accepts with her hosted signature
 
 **Bob (CLI):** create his own Brain, seed a note, then preflight and commit
 the plan for Alice's account (a direct admin commit — no approval card, Bob is
@@ -204,13 +261,17 @@ Observe: `status: "committed"`, one accept-ready invitation per principal.
 Copy Alice's Invite Code (the invitation whose `ref` is
 `devfinity@finite.computer`) and hand it to Alice.
 
-**Alice (browser):**
+**Alice (terminal):**
 
-1. Open **Settings → Invitations** and expand **Join a Brain**.
-2. Paste the Invite Code and click **Join Brain**.
-3. Observe "Joined the selected Brain..." — if the roster narrowed since the
-   invite was sent, the notice names the excluded participants with reasons
-   (still no npubs). Bob's Brain becomes the selected Brain in her switcher.
+1. Accept the invitation with her hosted signature:
+
+```sh
+alice_brain_curl POST "/v1/brain-invitation-links/<invite-code>/accept"
+```
+
+2. Observe the acceptance (`status: "accepted"`, an `acceptedAt` timestamp).
+   If the roster narrowed since the invite was sent, the response names the
+   excluded participants with reasons (still no npubs).
 
 **Alice's agent accepts and Bob wraps the Folder key** (so content flows):
 
@@ -244,9 +305,9 @@ sqlite3 -readonly <state-dir>/finite-brain/finite-brain.sqlite3 \
   "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members ORDER BY brain_id, user_id"
 ```
 
-- Direction 1 (browser direct commit): Bob's principals show
+- Direction 1 (hosted-signature direct commit): Bob's principals show
   `origin_kind=invitation`, `origin_ref=<Alice's invitation plan id>`,
-  delegated by Alice's browser signer (her hosted identity).
+  delegated by Alice's hosted chat signature (her human Principal).
 - Direction 2 (CLI direct commit): Alice's principals in Bob's Brain show
   `origin_kind=invitation`, `origin_ref=<Bob's plan id>`, delegated by Bob's
   CLI principal.

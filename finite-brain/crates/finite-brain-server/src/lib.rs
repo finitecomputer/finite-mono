@@ -2742,7 +2742,8 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, ORIGIN,
+        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE,
+        ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,

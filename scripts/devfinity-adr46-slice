@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ADR-0046 principal-grants slice: Alice invites Bob's account to her Personal
-# Brain from the Brain UI (invite-by-email plan preview -> direct commit by the
-# browser signer, Tier 2 — the click is the approval), Bob's principals accept,
-# and content flows with provenance. Then the reverse: Bob bootstraps his own
-# Brain from the CLI, preflights and directly commits the plan for Alice's
-# account, Alice accepts in the browser, and Alice's agent reads Bob's seeded
-# note. The Approval Card path (agent-initiated requests) is covered by the
-# server tests.
+# Brain (invite-by-email plan preview -> direct commit under Alice's hosted
+# chat signature, Tier 2 — the commit is the approval), Bob's principals
+# accept, and content flows with provenance. Then the reverse: Bob bootstraps
+# his own Brain from the CLI, preflights and directly commits the plan for
+# Alice's account, Alice accepts with her hosted chat signature, and Alice's
+# agent reads Bob's seeded note. The Approval Card path (agent-initiated
+# requests) is covered by the server tests.
 #
 # Run it through the devfinity stack wrapper:
 #   scripts/with-dev-env scripts/devfinity-adr46-slice-up
@@ -97,7 +97,6 @@ identity_url="${FINITE_IDENTITY_AUTHORITY:?}"
 hosted_api_token="${FINITECHAT_HOSTED_API_TOKEN:?}"
 state_dir="${DEVFINITY_STATE_DIR:?}"
 core_database_url="${FC_CORE_DATABASE_URL:?}"
-dashboard_dir="$repo_root/finitecomputer-v2/apps/dashboard"
 
 ALICE_SUBJECT="user_devfinity"
 ALICE_EMAIL="devfinity@finite.computer"
@@ -321,41 +320,6 @@ curl_brain_json() {
   printf '%s' "$body"
 }
 
-brain_browser_smoke() {
-  local action="$1"
-  local expected_text="${2:-}"
-  local target_brain_id="${3:-}"
-  (
-    cd "$dashboard_dir"
-      DEVFINITY_BRAIN_MACHINE_ID="$machine_id" \
-      DEVFINITY_BRAIN_CONTAINER_ID="$alice_container_id" \
-      DEVFINITY_BRAIN_AGENT_EMAIL="$agent_email" \
-      DEVFINITY_BRAIN_EXPECTED_TEXT="$expected_text" \
-      DEVFINITY_BRAIN_TARGET_ID="$target_brain_id" \
-      node --import tsx scripts/devfinity-brain-smoke.ts "$action"
-  )
-}
-
-# Bound a single act so a wedged browser run fails loudly instead of sitting
-# forever (macOS has no `timeout` coreutil).
-run_bounded() {
-  local limit_seconds="$1"
-  shift
-  "$@" &
-  local pid=$!
-  local waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if (( waited >= limit_seconds )); then
-      kill -9 "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      return 124
-    fi
-    sleep 2
-    waited=$((waited + 2))
-  done
-  wait "$pid"
-}
-
 say "ADR-0046 slice: waiting for the devfinity stack"
 me_json="$scratch/me-alice.json"
 stack_started="$(date +%s)"
@@ -477,12 +441,50 @@ alice_agent_npub="$(curl -fsS --max-time 5 "$runtime_url/healthz" | node -e '
 note "Alice's agent runtime is live: project=$project_id agent=$agent_email"
 note "AliceAgent npub: $alice_agent_npub"
 
-say "Act 1: Alice bootstraps her Personal Brain (browser path)"
-bootstrap_output="$(run_bounded 900 brain_browser_smoke bootstrap)"
-printf '%s\n' "$bootstrap_output" >&2
-brain_id="$(sed -n 's/^BRAIN_ID=//p' <<<"$bootstrap_output" | tail -1)"
-[[ -n "$brain_id" ]] || fail "browser bootstrap did not return a Brain id"
-note "Alice's Personal Brain: $brain_id"
+say "Act 1: Alice creates her Personal Brain (user-first, hosted-device signed)"
+alice_pubkey_hex="$(node -e '
+  const charset = "qpzry9x8gf2tvdcw0s3jn54khce6mua7l";
+  const npub = process.argv[1];
+  const data = [];
+  for (const character of npub.slice(5)) {
+    const value = charset.indexOf(character);
+    if (value < 0) throw new Error("invalid npub character");
+    data.push(value);
+  }
+  const bytes = [];
+  let bits = 0;
+  let accumulator = 0;
+  for (const value of data.slice(0, -6)) {
+    accumulator = (accumulator << 5) | value;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((accumulator >> bits) & 0xff);
+    }
+  }
+  if (bytes.length !== 32) throw new Error(`unexpected pubkey length ${bytes.length}`);
+  process.stdout.write(bytes.map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+' "$alice_npub")" || fail "could not decode Alice's npub"
+personal_brain_id="personal-${alice_pubkey_hex:0:16}"
+personal_create_body="$(node -e '
+  const [brainId, agentEmail] = process.argv.slice(1);
+  process.stdout.write(JSON.stringify({
+    brainId,
+    kind: "personal",
+    name: "Personal Brain",
+    bootstrapGrants: [],
+    personalAgentEmail: agentEmail,
+  }));
+' "$personal_brain_id" "$agent_email")"
+hosted_signed_request "$ALICE_SUBJECT" POST /v1/brains "$personal_create_body" >"$scratch/alice-brain.json" \
+  || fail "user-first Personal Brain creation failed"
+brain_id="$(node -e '
+  const fs = require("node:fs");
+  const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (metadata.brainId !== process.argv[2]) throw new Error(JSON.stringify(metadata));
+  process.stdout.write(metadata.brainId);
+' "$scratch/alice-brain.json" "$personal_brain_id")"
+note "Alice's Personal Brain (user-first, Personal Agent $agent_email): $brain_id"
 
 # The runtime supervisor must discover Alice's membership before her agent can
 # administer the Brain.
@@ -641,17 +643,27 @@ JS
 note "Core account-agent-roster for $BOB_EMAIL: human + 1 agent ($bob_agent_email), rosterRevision=1"
 
 if [[ "${ADR46_HANDS_ON:-}" == "1" ]]; then
-  say "Hands-on mode: the provisioned stack waits for the two-role browser/CLI test"
-  note "dashboard (Alice's browser): $dashboard_url"
+  say "Hands-on mode: the provisioned stack waits for the CLI-side hands-on test"
+  note "Alice's acts run in this script via her hosted chat signature (the Brain browser UI is deleted)"
   commands_file="$state_dir/hands-on-commands.md"
   cat >"$commands_file" <<EOF
 # ADR-0046 hands-on commands — generated for this run (no blanks to fill)
 
 Full prose runbook: finite-brain/docs/runbooks/adr46-hands-on-test.md
-Dashboard (Alice's browser): $dashboard_url
 Alice's Personal Brain id: $brain_id
 Alice's agent container: $alice_container_id
 Brain DB (read-only provenance check at the end): $brain_db
+
+## Alice's terminal setup (once)
+
+Hosted-signature helper: see section 2 of the runbook
+(finite-brain/docs/runbooks/adr46-hands-on-test.md), then export:
+
+    export ALICE_SUBJECT="user_devfinity"
+    export FC_HOSTED_WEB_DEVICE_URL="$hosted_device_url"
+    export FINITECHAT_HOSTED_API_TOKEN="$hosted_api_token"   # local dev stack token
+    export FINITE_BRAIN_PUBLIC_BASE_URL="$dashboard_origin"
+    export FINITE_BRAIN_SERVER_URL="$brain_url"
 
 ## Bob's terminal setup (once)
 
@@ -665,9 +677,7 @@ Brain DB (read-only provenance check at the end): $brain_db
 
 ## Direction 1: Alice invites Bob
 
-Alice (browser): dashboard URL above -> machine page -> Brain tab ->
-Settings -> Invitations -> Invite by email -> bob@finite.vip -> Preview plan ->
-"Invite bob@finite.vip and 1 agent" (the browser signer commits directly —
+Alice's invite for Bob was already committed directly by Act 3 above (Tier 2,
 no approval card for an admin's own invite).
 
 Bob (CLI) — self-serve: with no Working Tree, "invite brain list" reads the
@@ -718,8 +728,8 @@ runbook section 1; paste it first):
     bob_brain_curl POST "/v1/brains/\$BOB_BRAIN/invitations/commit" "{\"planId\":\"\$BOB_PLAN_ID\",\"planHash\":\"\$BOB_PLAN_HASH\"}"
 
 Copy Alice's Invite Code from the commit output (the invitation whose ref is
-devfinity@finite.computer). Alice (browser): Settings -> Invitations ->
-Join a Brain -> paste the code -> Join Brain.
+devfinity@finite.computer). Alice's acceptance is scripted (Act 12): the
+hosted device signs the accept for her account.
 
 Alice's agent accepts + Bob grants the folder key:
 
@@ -737,8 +747,8 @@ Alice's agent accepts + Bob grants the folder key:
       "SELECT user_id, delegated_by_npub, origin_kind, origin_ref FROM brain_members ORDER BY brain_id, user_id"
 
 Expect: every invited principal origin_kind=invitation, origin_ref=the
-invitation plan id (both directions commit directly — Alice from the browser,
-Bob from the CLI).
+invitation plan id (both directions commit directly — Alice under her hosted
+chat signature, Bob from the CLI).
 
 ## Teardown
 
@@ -767,20 +777,31 @@ EOF
   exit 0
 fi
 
-say "Act 3: Alice invites Bob from the Brain UI (plan preview -> direct commit)"
-invite_browser_output="$(
-  DEVFINITY_BRAIN_INVITE_EMAIL="$BOB_EMAIL" \
-  DEVFINITY_BRAIN_INVITE_AGENT_EMAIL="$bob_agent_email" \
-  run_bounded 900 brain_browser_smoke invite-by-email "" "$brain_id"
-)"
-printf '%s\n' "$invite_browser_output" >&2
-note "Alice previewed the resolved plan and committed it directly from the browser (Tier 2: the click is the approval)"
+say "Act 3: Alice invites Bob by email (plan preview -> direct commit, hosted-device signed)"
+preflight_body="$(node -e '
+  process.stdout.write(JSON.stringify({ target: process.argv[1] }));
+' "$BOB_EMAIL")"
+hosted_signed_request "$ALICE_SUBJECT" POST "/v1/brains/$brain_id/invitations/preflight" "$preflight_body" \
+  >"$scratch/alice-plan.json" || fail "invitation plan preflight failed"
+node - "$scratch/alice-plan.json" <<'JS' || fail "preflight did not resolve Bob's account into a plan"
+const fs = require("node:fs");
+const plan = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!plan.planId || !plan.planHash) throw new Error(JSON.stringify(plan));
+JS
+commit_body="$(node -e '
+  const fs = require("node:fs");
+  const plan = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.stdout.write(JSON.stringify({ planId: plan.planId, planHash: plan.planHash }));
+' "$scratch/alice-plan.json")"
+hosted_signed_request "$ALICE_SUBJECT" POST "/v1/brains/$brain_id/invitations/commit" "$commit_body" \
+  >"$scratch/alice-commit.json" || fail "invitation plan commit failed"
+note "Alice previewed the resolved plan and committed it directly (Tier 2: the commit is the approval)"
 
-say "Act 4: browser-driven commit landed with provenance (Brain DB)"
+say "Act 4: the direct commit landed with provenance (Brain DB)"
 approval_request_count="$(sqlite3 -readonly "$brain_db" \
   "SELECT COUNT(*) FROM brain_approval_requests WHERE brain_id = '$brain_id' AND action = 'invite-commit'")"
-[[ "$approval_request_count" == "0" ]] || fail "the browser invite wrongly filed an invite-commit Approval request"
-note "no Approval request was created — the browser signer committed directly"
+[[ "$approval_request_count" == "0" ]] || fail "the direct commit wrongly filed an invite-commit Approval request"
+note "no Approval request was created — Alice committed directly with her hosted signature"
 
 alice_plan_id="$(sqlite3 -readonly "$brain_db" \
   "SELECT id FROM brain_invitation_plans WHERE brain_id = '$brain_id' AND human_email = '$BOB_EMAIL' AND status = 'committed' ORDER BY created_at DESC LIMIT 1")"
@@ -946,7 +967,7 @@ if (grant[1] !== aliceAgentNpub) throw new Error(`grant issuer_npub: ${grant}`);
 if (grant[2] !== "") throw new Error(`grant delegated_by should be empty: ${grant}`);
 if (grant[3] !== "direct") throw new Error(`grant origin_kind: ${grant}`);
 JS
-note "members: delegated_by=Alice's browser signer, origin_kind=invitation, origin_ref=invitation plan"
+note "members: delegated_by=Alice's hosted signature, origin_kind=invitation, origin_ref=invitation plan"
 note "folder_key_grants: issuer=AliceAgent, origin_kind=direct"
 
 say "Act 10: Bob bootstraps his own Brain from the CLI and seeds a note"
@@ -1039,13 +1060,15 @@ JS
 )"
 note "Alice's inviteCode: $alice_human_invite_code; AliceAgent's invitation id: $alice_agent_invitation_id"
 
-say "Act 12: Alice accepts Bob's invitation in the browser"
-accept_browser_output="$(
-  DEVFINITY_BRAIN_INVITE_CODE="$alice_human_invite_code" \
-  run_bounded 600 brain_browser_smoke accept-invite "" "$bob_brain_id"
-)"
-printf '%s\n' "$accept_browser_output" >&2
-note "Alice pasted the Invite Code in the Brain UI and joined Bob's Brain"
+say "Act 12: Alice accepts Bob's invitation with her hosted chat signature"
+hosted_signed_request "$ALICE_SUBJECT" POST "/v1/brain-invitation-links/$alice_human_invite_code/accept" \
+  >"$scratch/alice-accept.json" || fail "Alice's acceptance failed"
+node - "$scratch/alice-accept.json" <<'JS' || fail "Alice's invitation did not flip to accepted"
+const fs = require("node:fs");
+const invitation = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (invitation.status !== "accepted" || !invitation.acceptedAt) throw new Error(JSON.stringify(invitation));
+JS
+note "Alice joined Bob's Brain as the human Principal"
 
 say "Act 13: AliceAgent accepts, Bob wraps the Folder key, Alice's side reads Bob's note"
 runtime_exec "$alice_container_id" fbrain invite brain accept --id "$alice_agent_invitation_id" --json \
