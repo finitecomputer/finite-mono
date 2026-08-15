@@ -1,28 +1,19 @@
-use std::fs;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use finitechat_http::{
     AckPushWakeRequest, AckPushWakeResponse, ClaimPushWakesRequest, ClaimPushWakesResponse,
     FailPushWakeRequest, FailPushWakeResponse, PushPlatform, PushTokenRecord, PushWakeDelivery,
     PushWakePayload, RemovePushTokenRequest, RemovePushTokenResponse,
 };
-use p256::ecdsa::signature::Signer;
-use p256::ecdsa::{Signature, SigningKey};
-use p256::pkcs8::DecodePrivateKey;
 use reqwest::StatusCode;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::json;
 use thiserror::Error;
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_BATCH_LIMIT: usize = 25;
 const DEFAULT_LEASE_MS: u64 = 30_000;
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
-const APNS_TOKEN_CACHE_SECONDS: u64 = 20 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushDrainCommand {
@@ -63,12 +54,6 @@ pub enum PushDrainError {
     Http(#[from] reqwest::Error),
     #[error("push API returned {status}: {body}")]
     HttpStatus { status: StatusCode, body: String },
-    #[error("failed to read APNs private key: {0}")]
-    PrivateKeyRead(std::io::Error),
-    #[error("invalid APNs private key: {0}")]
-    PrivateKey(String),
-    #[error("failed to encode APNs provider token: {0}")]
-    ProviderToken(String),
     #[error("system clock is before unix epoch")]
     Clock,
 }
@@ -129,13 +114,10 @@ pub fn parse_push_drain_command(args: &[String]) -> Result<PushDrainCommand, Pus
     Ok(PushDrainCommand {
         server_url: server_url.unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned()),
         apns: ApnsOptions {
-            topic: require_option(topic, "apns-topic or FINITECHAT_APNS_TOPIC")?,
-            team_id: require_option(team_id, "apns-team-id or FINITECHAT_APNS_TEAM_ID")?,
-            key_id: require_option(key_id, "apns-key-id or FINITECHAT_APNS_KEY_ID")?,
-            private_key_path: require_option(
-                private_key_path,
-                "apns-private-key or FINITECHAT_APNS_PRIVATE_KEY_PATH",
-            )?,
+            topic: optional_value(topic),
+            team_id: optional_value(team_id),
+            key_id: optional_value(key_id),
+            private_key_path: optional_value(private_key_path),
             base_url,
         },
         once,
@@ -146,10 +128,12 @@ pub fn parse_push_drain_command(args: &[String]) -> Result<PushDrainCommand, Pus
 }
 
 pub fn run_push_drain(command: PushDrainCommand) -> Result<(), PushDrainError> {
-    let private_key_pem = fs::read_to_string(&command.apns.private_key_path)
-        .map_err(PushDrainError::PrivateKeyRead)?;
+    eprintln!(
+        "finitechat-server: push-drain is running with a stub APNs sender; \
+         wake-only pushes are NOT delivered to Apple"
+    );
     let mut api = HttpPushWakeApi::new(command.server_url.clone());
-    let mut sender = ApnsHttpSender::new(command.apns.clone(), private_key_pem)?;
+    let mut sender = ApnsStubSender::new(command.apns.clone());
 
     loop {
         let report = drain_push_wakes_once(
@@ -304,7 +288,13 @@ pub trait ApnsSender {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApnsSendOutcome {
+    // `Delivered` and `InvalidToken` are only produced by a real APNs
+    // sender; the stub below always reports `Retry`. They are exercised by
+    // the drain tests and by the future `a2` integration.
+    // TODO: adopt the `a2` crate before shipping push.
+    #[allow(dead_code)]
     Delivered,
+    #[allow(dead_code)]
     InvalidToken,
     Retry,
 }
@@ -375,162 +365,35 @@ impl PushWakeApi for HttpPushWakeApi {
     }
 }
 
-pub struct ApnsHttpSender {
+/// Placeholder APNs sender used while push is unshipped. It never contacts
+/// Apple: each claimed wake is logged and reported as retryable so the
+/// push-wake outbox is never falsely acked and no token is ever pruned on a
+/// delivery that did not happen.
+// TODO: adopt the `a2` crate before shipping push.
+pub struct ApnsStubSender {
+    #[allow(dead_code)]
     options: ApnsOptions,
-    signer: ApnsProviderTokenSigner,
-    client: reqwest::blocking::Client,
 }
 
-impl ApnsHttpSender {
-    pub fn new(options: ApnsOptions, private_key_pem: String) -> Result<Self, PushDrainError> {
-        Ok(Self {
-            signer: ApnsProviderTokenSigner::new(
-                options.team_id.clone(),
-                options.key_id.clone(),
-                private_key_pem,
-            )?,
-            options,
-            client: reqwest::blocking::Client::builder().build()?,
-        })
+impl ApnsStubSender {
+    pub fn new(options: ApnsOptions) -> Self {
+        Self { options }
     }
 }
 
-impl ApnsSender for ApnsHttpSender {
+impl ApnsSender for ApnsStubSender {
     fn send_push(
         &mut self,
         token: &PushTokenRecord,
         payload: &PushWakePayload,
     ) -> Result<ApnsSendOutcome, PushDrainError> {
-        let now_seconds = current_unix_seconds()?;
-        let provider_token = self.signer.provider_token(now_seconds)?;
-        let response = self
-            .client
-            .post(format!(
-                "{}/3/device/{}",
-                self.options.base_url.trim_end_matches('/'),
-                token.token
-            ))
-            .bearer_auth(provider_token)
-            .header("apns-topic", &self.options.topic)
-            .header("apns-push-type", "background")
-            .header("apns-priority", "5")
-            .header("apns-expiration", "0")
-            .json(&json!({
-                "aps": {
-                    "content-available": 1,
-                },
-                "room_id": payload.room_id,
-                "seq": payload.seq,
-            }))
-            .send()?;
-
-        let status = response.status();
-        if status.is_success() {
-            return Ok(ApnsSendOutcome::Delivered);
-        }
-
-        let body = response.text()?;
-        let reason = apns_error_reason(&body);
         eprintln!(
-            "finitechat-server: APNs push rejected status={} reason={}",
-            status,
-            reason.as_deref().unwrap_or("unknown")
+            "finitechat-server: stub APNs sender skipping wake push \
+             device={:?} platform={:?} room_id={} seq={} (push not shipped)",
+            token.device, token.platform, payload.room_id, payload.seq
         );
-        if is_invalid_apns_token(status, reason.as_deref()) {
-            return Ok(ApnsSendOutcome::InvalidToken);
-        }
         Ok(ApnsSendOutcome::Retry)
     }
-}
-
-struct ApnsProviderTokenSigner {
-    team_id: String,
-    key_id: String,
-    signing_key: SigningKey,
-    cached: Option<CachedProviderToken>,
-}
-
-struct CachedProviderToken {
-    issued_at_seconds: u64,
-    token: String,
-}
-
-impl ApnsProviderTokenSigner {
-    fn new(
-        team_id: String,
-        key_id: String,
-        private_key_pem: String,
-    ) -> Result<Self, PushDrainError> {
-        let signing_key = SigningKey::from_pkcs8_pem(&private_key_pem)
-            .map_err(|error| PushDrainError::PrivateKey(error.to_string()))?;
-        Ok(Self {
-            team_id,
-            key_id,
-            signing_key,
-            cached: None,
-        })
-    }
-
-    fn provider_token(&mut self, now_seconds: u64) -> Result<String, PushDrainError> {
-        if let Some(cached) = &self.cached
-            && now_seconds.saturating_sub(cached.issued_at_seconds) < APNS_TOKEN_CACHE_SECONDS
-        {
-            return Ok(cached.token.clone());
-        }
-
-        let header = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({
-                "alg": "ES256",
-                "kid": self.key_id,
-            }))
-            .map_err(|error| PushDrainError::ProviderToken(error.to_string()))?,
-        );
-        let claims = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({
-                "iss": self.team_id,
-                "iat": now_seconds,
-            }))
-            .map_err(|error| PushDrainError::ProviderToken(error.to_string()))?,
-        );
-        let signing_input = format!("{header}.{claims}");
-        let signature: Signature = self.signing_key.sign(signing_input.as_bytes());
-        let token = format!(
-            "{}.{}",
-            signing_input,
-            URL_SAFE_NO_PAD.encode(signature.to_bytes())
-        );
-        self.cached = Some(CachedProviderToken {
-            issued_at_seconds: now_seconds,
-            token: token.clone(),
-        });
-        Ok(token)
-    }
-}
-
-#[derive(Deserialize)]
-struct ApnsErrorBody {
-    reason: String,
-}
-
-fn apns_error_reason(body: &str) -> Option<String> {
-    serde_json::from_str::<ApnsErrorBody>(body)
-        .ok()
-        .map(|body| body.reason)
-}
-
-fn is_invalid_apns_token(status: StatusCode, reason: Option<&str>) -> bool {
-    status == StatusCode::GONE
-        || matches!(
-            reason,
-            Some("BadDeviceToken" | "DeviceTokenNotForTopic" | "Unregistered")
-        )
-}
-
-fn current_unix_seconds() -> Result<u64, PushDrainError> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| PushDrainError::Clock)?
-        .as_secs())
 }
 
 fn current_unix_millis() -> Result<u64, PushDrainError> {
@@ -551,10 +414,10 @@ fn take_value(
         .ok_or(PushDrainError::MissingOption(option))
 }
 
-fn require_option(value: Option<String>, name: &'static str) -> Result<String, PushDrainError> {
+fn optional_value(value: Option<String>) -> String {
     value
         .filter(|value| !value.trim().is_empty())
-        .ok_or(PushDrainError::MissingOption(name))
+        .unwrap_or_default()
 }
 
 fn parse_u64(name: &str, value: &str) -> Result<u64, PushDrainError> {
@@ -635,20 +498,27 @@ mod tests {
     }
 
     #[test]
-    fn provider_token_is_three_base64url_segments_and_cached() {
-        let mut signer = ApnsProviderTokenSigner::new(
-            "TEAMID1234".to_owned(),
-            "KEYID12345".to_owned(),
-            TEST_P8.to_owned(),
-        )
-        .unwrap();
+    fn stub_sender_never_reports_delivery_or_invalid_token() {
+        let bob = DeviceRef::new("bob", "phone");
+        let mut sender = ApnsStubSender::new(ApnsOptions {
+            topic: "computer.finite.finitechat".to_owned(),
+            team_id: String::new(),
+            key_id: String::new(),
+            private_key_path: String::new(),
+            base_url: "https://api.sandbox.push.apple.com".to_owned(),
+        });
 
-        let first = signer.provider_token(1_800_000_000).unwrap();
-        let second = signer.provider_token(1_800_000_100).unwrap();
+        let outcome = sender
+            .send_push(
+                &apns_token(&bob, "token-bob"),
+                &PushWakePayload {
+                    room_id: "room-main".to_owned(),
+                    seq: 42,
+                },
+            )
+            .unwrap();
 
-        assert_eq!(first, second);
-        assert_eq!(first.split('.').count(), 3);
-        assert!(!first.contains('='));
+        assert_eq!(outcome, ApnsSendOutcome::Retry);
     }
 
     fn wake(wake_id: &str, tokens: &[PushTokenRecord]) -> PushWakeDelivery {
@@ -762,10 +632,4 @@ mod tests {
             Ok(self.outcomes.remove(0))
         }
     }
-
-    const TEST_P8: &str = r#"-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg3iykXJjuhFiWUwSZ
-TfZjMF0SuiTsuQdMeyzW9M6eF+uhRANCAAQ0AtC+LJJMXAWCAwOU+J81knblk6yP
-qpVrzfDboa8rkcoCLHTyHbj7zEW4FEhAnjAIto4vX/U85oNfiYV57sve
------END PRIVATE KEY-----"#;
 }

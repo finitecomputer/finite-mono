@@ -1,5 +1,13 @@
 # Wake-Only APNs Push Runbook
 
+Status (2026-08-15): push is NOT shipped. The server's `push-drain` currently
+uses a stub APNs sender (`finitechat-server/src/push.rs`): it claims wakes,
+logs them, and reports each one as retryable — nothing is sent to Apple and no
+token is pruned. The push-wake outbox, the `/push-tokens` and `/push-wakes`
+server routes, and the configuration surface below are retained for the real
+client. Before shipping push, adopt the `a2` crate (see the `TODO` in
+`push.rs`) and re-verify this runbook end to end.
+
 This runbook is for the Friends Alpha wake-only push path. Push is only a hint:
 it never advances client state, never carries plaintext, and only causes the
 native app to run the normal sync action.
