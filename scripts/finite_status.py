@@ -77,7 +77,11 @@ CONTRACT: dict[str, Any] = {
         "borg_job_unit": "borgbackup-job-finite-hosted-web-chat-offsite.service",
         "borg_health_unit": "finite-hosted-web-chat-offsite-health.service",
         "borg_success_stamp": "/var/lib/finitecomputer/backups/hosted-web-chat-last-success",
-        "maximum_age_seconds": 180_000,
+        # The coordinated snapshot is deploy/manual-triggered because it fences
+        # live writers; its deployed health unit allows seven days. Borg ships
+        # that recovery point daily and has the separate 50-hour freshness gate.
+        "snapshot_maximum_age_seconds": 604_800,
+        "borg_maximum_age_seconds": 180_000,
         "litestream_service_unit": "finite-litestream.service",
         "litestream_health_unit": "finite-litestream-health.service",
         "litestream_success_stamp": "/var/lib/finite-litestream/health-last-success",
@@ -1156,7 +1160,8 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
         snapshot["status"] = (
             "green"
             if snapshot.get("manifest_valid")
-            and snapshot["age_seconds"] <= CONTRACT["recovery"]["maximum_age_seconds"]
+            and snapshot["age_seconds"]
+            <= CONTRACT["recovery"]["snapshot_maximum_age_seconds"]
             else "red"
         )
     statuses.append(snapshot["status"])
@@ -1166,7 +1171,7 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
         borg_age = int(now.timestamp()) - epoch
         stamp_status = (
             "green"
-            if 0 <= borg_age <= CONTRACT["recovery"]["maximum_age_seconds"]
+            if 0 <= borg_age <= CONTRACT["recovery"]["borg_maximum_age_seconds"]
             else "red"
         )
     else:

@@ -60,7 +60,8 @@ def main() -> None:
             recovery["borg_job_unit"].removeprefix("borgbackup-job-").removesuffix(".service"),
             recovery["borg_health_unit"].removesuffix(".service"),
             recovery["borg_success_stamp"].removeprefix("/var/lib/finitecomputer/backups/"),
-            str(recovery["maximum_age_seconds"]),
+            str(recovery["snapshot_maximum_age_seconds"]),
+            str(recovery["borg_maximum_age_seconds"]),
         ],
     )
     require_all(

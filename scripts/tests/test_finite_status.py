@@ -238,6 +238,19 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(report["litestream"]["stamp_status"], "unknown")
         self.assertNotEqual(report["status"], "green")
 
+    def test_snapshot_and_borg_use_their_deployed_cadences(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        raw["recovery"]["snapshot"]["created_at"] = "2026-07-30T07:00:00Z"
+        raw["recovery"]["borg_last_success_epoch"] = int(now.timestamp()) - 55 * 3600
+
+        recovery = finite_status.build_recovery(raw["recovery"], now)
+
+        self.assertEqual(recovery["snapshot"]["age_seconds"], 55 * 3600)
+        self.assertEqual(recovery["snapshot"]["status"], "green")
+        self.assertEqual(recovery["borg"]["stamp_status"], "red")
+
     def test_interrupted_rollout_is_reported_without_repair(self) -> None:
         raw = {
             "exists": True,
