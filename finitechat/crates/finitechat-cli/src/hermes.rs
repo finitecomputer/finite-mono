@@ -61,6 +61,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::CliError;
+use crate::cli::{
+    HermesArgs, HermesCommand, HermesHomeChannelCommand, HermesHomeChannelSetArgs, HermesInitArgs,
+    HermesInstallArgs, HermesRoomStatusArgs, HermesServeArgs,
+};
 
 const CONFIG_FILE: &str = "config.json";
 const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
@@ -70,7 +74,6 @@ const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
 const BACKUP_ACTIVITY_FILE: &str = ".finitechat-backup-active";
 const STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
-const HERMES_PLUGIN_INSTALL_NAME: &str = "finitechat";
 const LEGACY_HERMES_PLUGIN_NAME: &str = "finite-platform";
 const AMBIGUOUS_HERMES_PLUGIN_NAME: &str = "finite";
 const HERMES_PLATFORM_NAME: &str = "finitechat";
@@ -81,11 +84,6 @@ const HERMES_PLUGIN_ADAPTER: &str =
 const HERMES_PLUGIN_YAML: &str =
     include_str!("../../../integrations/hermes/finitechat/plugin.yaml");
 const HERMES_PLUGIN_ENV_FILE: &str = "finitechat.env";
-const DEFAULT_HERMES_SERVICE_ADDR: &str = "127.0.0.1:0";
-const DEFAULT_DEVICE_ID: &str = "agent";
-const DEFAULT_AGENT_PROFILE_NAME: &str = "Finite Agent";
-const DEFAULT_AGENT_PROFILE_ABOUT: &str = "A Finite Computer agent you can chat with.";
-const DEFAULT_AGENT_PROFILE_PICTURE: &str = "https://avatars.githubusercontent.com/u/274919006?v=4";
 const RESIDENT_BRIDGE_SYNC_INTERVAL_MILLIS: u64 = 10_000;
 const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
@@ -117,41 +115,35 @@ struct AgentHome {
     secret: NostrSecretKey,
 }
 
-pub(crate) fn run<W: Write>(args: Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let mut args = args;
-    let home_dir = resolve_home(&mut args)?;
-    let json_mode = take_flag(&mut args, "--json");
-    let request_json = crate::take_option(&mut args, "--request-json")?;
-    let Some(command) = args.first().cloned() else {
-        return Err(CliError::Usage(hermes_usage()));
-    };
-    let rest = args[1..].to_vec();
+pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliError> {
+    let home_dir = resolve_home(args.agent_home)?;
+    let json_mode = args.json;
+    let request_json = args.request_json;
 
-    match command.as_str() {
-        "init" => cmd_init(&home_dir, rest, output),
-        "install" => cmd_install(&home_dir, rest, json_mode, output),
-        "serve" => cmd_serve(&home_dir, rest, json_mode, output),
-        "home-channel" => cmd_home_channel(&home_dir, rest, output),
-        "room-status" => cmd_room_status(&home_dir, rest, json_mode, output),
-        "poll" => with_backup_activity(&home_dir, "poll", || {
+    match args.command {
+        HermesCommand::Init(args) => cmd_init(&home_dir, args, output),
+        HermesCommand::Install(args) => cmd_install(&home_dir, args, json_mode, output),
+        HermesCommand::Serve(args) => cmd_serve(&home_dir, args, json_mode, output),
+        HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
+        HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
+        HermesCommand::Poll => with_backup_activity(&home_dir, "poll", || {
             cmd_poll(&home_dir, read_request(request_json)?, output)
         }),
-        "ack" => with_backup_activity(&home_dir, "ack", || {
+        HermesCommand::Ack => with_backup_activity(&home_dir, "ack", || {
             cmd_ack(&home_dir, read_request(request_json)?, output)
         }),
-        "send" => with_backup_activity(&home_dir, "send", || {
+        HermesCommand::Send => with_backup_activity(&home_dir, "send", || {
             cmd_send(&home_dir, read_request(request_json)?, output)
         }),
-        "edit" => with_backup_activity(&home_dir, "edit", || {
+        HermesCommand::Edit => with_backup_activity(&home_dir, "edit", || {
             cmd_edit(&home_dir, read_request(request_json)?, output)
         }),
-        "recover" => with_backup_activity(&home_dir, "recover", || {
+        HermesCommand::Recover => with_backup_activity(&home_dir, "recover", || {
             cmd_recover(&home_dir, read_request(request_json)?, output)
         }),
-        "activity" => with_backup_activity(&home_dir, "activity", || {
+        HermesCommand::Activity => with_backup_activity(&home_dir, "activity", || {
             cmd_activity(&home_dir, read_request(request_json)?, output)
         }),
-        _ => Err(CliError::Usage(hermes_usage())),
     }
 }
 
@@ -185,25 +177,21 @@ struct HermesInstallLegacyConfigConflict {
 
 fn cmd_install<W: Write>(
     home_dir: &Path,
-    mut args: Vec<String>,
+    args: HermesInstallArgs,
     json_mode: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let plugin_dir_arg = crate::take_option(&mut args, "--plugin-dir")?;
-    let plugins_dir_arg = crate::take_option(&mut args, "--plugins-dir")?;
-    let plugin_name = crate::take_option(&mut args, "--plugin-name")?
-        .unwrap_or_else(|| HERMES_PLUGIN_INSTALL_NAME.to_owned());
-    let finitechat_bin_arg = crate::take_option(&mut args, "--finitechat-bin")?;
-    let service_url = crate::take_option(&mut args, "--service-url")?;
-    let force = take_flag(&mut args, "--force");
-    crate::reject_extra_args(&args)?;
+    let HermesInstallArgs {
+        plugin_dir: plugin_dir_arg,
+        plugins_dir: plugins_dir_arg,
+        plugin_name,
+        finitechat_bin: finitechat_bin_arg,
+        service_url,
+        force,
+    } = args;
 
     validate_plugin_name(&plugin_name)?;
-    if plugin_dir_arg.is_some() && plugins_dir_arg.is_some() {
-        return Err(CliError::Usage(
-            "pass either --plugin-dir or --plugins-dir, not both".to_owned(),
-        ));
-    }
+    // clap already rejects passing both --plugin-dir and --plugins-dir.
     if !home_dir.join(CONFIG_FILE).exists() {
         return Err(CliError::Hermes(format!(
             "agent home {} is not initialized (run finitechat hermes init first)",
@@ -372,16 +360,15 @@ struct PreparedHermesService {
 
 fn cmd_serve<W: Write>(
     home_dir: &Path,
-    mut args: Vec<String>,
+    args: HermesServeArgs,
     json_mode: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let addr = crate::take_option(&mut args, "--addr")?
-        .unwrap_or_else(|| DEFAULT_HERMES_SERVICE_ADDR.to_owned())
-        .parse::<SocketAddr>()
-        .map_err(|error| CliError::Usage(format!("invalid --addr: {error}")))?;
-    let ready_file = crate::take_option(&mut args, "--ready-file")?.map(PathBuf::from);
-    crate::reject_extra_args(&args)?;
+    let HermesServeArgs {
+        addr,
+        ready_file: ready_file_arg,
+    } = args;
+    let ready_file = ready_file_arg.map(PathBuf::from);
 
     let home = load_home(home_dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1219,37 +1206,20 @@ struct HermesHomeChannelSetRequest {
 
 fn cmd_home_channel<W: Write>(
     home_dir: &Path,
-    mut args: Vec<String>,
+    command: HermesHomeChannelCommand,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let Some(command) = args.first().cloned() else {
-        return Err(CliError::Usage(hermes_usage()));
-    };
-    let rest = args.split_off(1);
-    match command.as_str() {
-        "show" => {
-            crate::reject_extra_args(&rest)?;
-            write_home_channel_show(home_dir, output)
-        }
-        "set" => cmd_home_channel_set(home_dir, rest, output),
-        "clear" => {
-            crate::reject_extra_args(&rest)?;
+    match command {
+        HermesHomeChannelCommand::Show => write_home_channel_show(home_dir, output),
+        HermesHomeChannelCommand::Set(HermesHomeChannelSetArgs {
+            room_id,
+            conversation_id,
+        }) => set_home_channel(home_dir, room_id, conversation_id, output),
+        HermesHomeChannelCommand::Clear => {
             clear_home_channel(home_dir)?;
             crate::write_pretty_json(output, &json!({ "cleared": true, "home_channel": null }))
         }
-        _ => Err(CliError::Usage(hermes_usage())),
     }
-}
-
-fn cmd_home_channel_set<W: Write>(
-    home_dir: &Path,
-    mut args: Vec<String>,
-    output: &mut W,
-) -> Result<(), CliError> {
-    let room_id = crate::required_option(&mut args, "--room-id")?;
-    let conversation_id = crate::take_option(&mut args, "--conversation-id")?;
-    crate::reject_extra_args(&args)?;
-    set_home_channel(home_dir, room_id, conversation_id, output)
 }
 
 fn set_home_channel<W: Write>(
@@ -1330,20 +1300,17 @@ fn clear_home_channel(home_dir: &Path) -> Result<(), CliError> {
 
 fn cmd_init<W: Write>(
     home_dir: &Path,
-    mut args: Vec<String>,
+    args: HermesInitArgs,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let server_url = crate::required_option(&mut args, "--server")?;
-    let device_id = crate::take_option(&mut args, "--device-id")?
-        .unwrap_or_else(|| DEFAULT_DEVICE_ID.to_owned());
-    let agent_name = crate::take_option(&mut args, "--agent-name")?
-        .unwrap_or_else(|| DEFAULT_AGENT_PROFILE_NAME.to_owned());
-    let agent_about = crate::take_option(&mut args, "--agent-about")?
-        .unwrap_or_else(|| DEFAULT_AGENT_PROFILE_ABOUT.to_owned());
-    let agent_picture = crate::take_option(&mut args, "--agent-picture-url")?
-        .unwrap_or_else(|| DEFAULT_AGENT_PROFILE_PICTURE.to_owned());
-    let skip_agent_profile = take_flag(&mut args, "--skip-agent-profile");
-    crate::reject_extra_args(&args)?;
+    let HermesInitArgs {
+        server: server_url,
+        device_id,
+        agent_name,
+        agent_about,
+        agent_picture_url: agent_picture,
+        skip_agent_profile,
+    } = args;
     if home_dir.join(CONFIG_FILE).exists() {
         return Err(CliError::Hermes(format!(
             "agent home {} is already initialized",
@@ -1480,12 +1447,11 @@ struct HermesRoomStatusSummary {
 
 fn cmd_room_status<W: Write>(
     home_dir: &Path,
-    mut args: Vec<String>,
+    args: HermesRoomStatusArgs,
     json_mode: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let room_id = crate::required_option(&mut args, "--room-id")?;
-    crate::reject_extra_args(&args)?;
+    let room_id = args.room_id;
 
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
@@ -2940,37 +2906,24 @@ fn app_bridge_activity_input(
 // --- agent home plumbing ---
 
 /// Resolve the agent home (durable agent state — never the identity, whose
-/// location is fixed by the Finite Identity Contract).
-fn resolve_home(args: &mut Vec<String>) -> Result<PathBuf, CliError> {
-    resolve_home_with(
-        args,
-        |name| std::env::var_os(name).map(PathBuf::from),
-        || std::env::var_os("HOME").map(PathBuf::from),
-    )
-}
-
-fn resolve_home_with(
-    args: &mut Vec<String>,
-    env_path: impl Fn(&str) -> Option<PathBuf>,
-    home_dir: impl Fn() -> Option<PathBuf>,
-) -> Result<PathBuf, CliError> {
-    if let Some(path) = crate::take_option(args, "--agent-home")? {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = crate::take_option(args, "--home")? {
+/// location is fixed by the Finite Identity Contract). Precedence:
+/// `--agent-home`/`--home` (parsed by clap), then `$FINITE_AGENT_HOME`,
+/// then `$FINITECHAT_HOME`, then `~/.finite/agent`.
+fn resolve_home(agent_home: Option<String>) -> Result<PathBuf, CliError> {
+    if let Some(path) = agent_home {
         return Ok(PathBuf::from(path));
     }
     for name in ["FINITE_AGENT_HOME", "FINITECHAT_HOME"] {
-        if let Some(path) = env_path(name) {
-            return Ok(path);
+        if let Some(path) = std::env::var_os(name) {
+            return Ok(PathBuf::from(path));
         }
     }
-    let Some(home) = home_dir() else {
+    let Some(home) = std::env::var_os("HOME") else {
         return Err(CliError::Usage(
             "pass --agent-home DIR, set FINITE_AGENT_HOME, or set HOME".to_owned(),
         ));
     };
-    Ok(home.join(".finite").join("agent"))
+    Ok(PathBuf::from(home).join(".finite").join("agent"))
 }
 
 fn default_hermes_plugins_dir() -> Result<PathBuf, CliError> {
@@ -3409,21 +3362,10 @@ fn now_secs() -> u64 {
     now_ms() / 1000
 }
 
-fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
-    if let Some(index) = args.iter().position(|arg| arg == name) {
-        args.remove(index);
-        return true;
-    }
-    false
-}
-
-pub(crate) fn hermes_usage() -> String {
-    "hermes commands:\n  finitechat hermes [--agent-home DIR] init --server URL [--device-id ID] [--agent-name NAME] [--agent-about TEXT] [--agent-picture-url URL] [--skip-agent-profile]\n  finitechat hermes [--agent-home DIR] install [--plugins-dir DIR | --plugin-dir DIR] [--plugin-name NAME] [--finitechat-bin PATH] [--service-url URL] [--force] [--json]\n  finitechat hermes [--agent-home DIR] serve [--addr HOST:PORT] [--ready-file PATH] [--json]\n  finitechat hermes [--agent-home DIR] home-channel show|clear\n  finitechat hermes [--agent-home DIR] home-channel set --room-id ID [--conversation-id ID]\n  finitechat hermes [--agent-home DIR] room-status --room-id ID [--json]\n  finitechat hermes [--agent-home DIR] poll --json   (stdin: {room_id?, limit?, timeout_millis?})\n  finitechat hermes [--agent-home DIR] ack --json    (stdin: HermesAckRequestV1)\n  finitechat hermes [--agent-home DIR] send --json   (stdin: HermesSendRequestV1)\n  finitechat hermes [--agent-home DIR] edit --json   (stdin: HermesEditRequestV1)\n  finitechat hermes [--agent-home DIR] recover --json\n  finitechat hermes [--agent-home DIR] activity --json (stdin: HermesActivityRequestV1)\n  (--home is accepted as a compatibility alias; FINITE_AGENT_HOME, FINITECHAT_HOME, or ~/.finite/agent may replace --agent-home; the account key is the shared Finite identity under $FINITE_HOME/identity or ~/.finite/identity — see finitechat auth; --request-json JSON may replace stdin)".to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
 
@@ -3436,6 +3378,22 @@ mod tests {
             r#"{"server_url":"http://127.0.0.1:1","device_id":"agent","account_id":"00"}"#,
         )
         .unwrap();
+    }
+
+    /// Parse `hermes install` arguments exactly as the CLI would.
+    fn install_args(args: &[&str]) -> crate::cli::HermesInstallArgs {
+        crate::cli::HermesInstallArgs::try_parse_from(
+            std::iter::once("install").chain(args.iter().copied()),
+        )
+        .expect("hermes install args parse")
+    }
+
+    /// Parse `hermes init` arguments exactly as the CLI would.
+    fn init_args(args: &[&str]) -> crate::cli::HermesInitArgs {
+        crate::cli::HermesInitArgs::try_parse_from(
+            std::iter::once("init").chain(args.iter().copied()),
+        )
+        .expect("hermes init args parse")
     }
 
     #[test]
@@ -3697,14 +3655,14 @@ mod tests {
         let mut output = Vec::new();
         cmd_install(
             &home,
-            vec![
-                "--plugin-dir".to_owned(),
-                plugin_dir.display().to_string(),
-                "--finitechat-bin".to_owned(),
-                "/usr/local/bin/finitechat".to_owned(),
-                "--service-url".to_owned(),
-                "http://127.0.0.1:4321".to_owned(),
-            ],
+            install_args(&[
+                "--plugin-dir",
+                &plugin_dir.display().to_string(),
+                "--finitechat-bin",
+                "/usr/local/bin/finitechat",
+                "--service-url",
+                "http://127.0.0.1:4321",
+            ]),
             true,
             &mut output,
         )
@@ -3768,12 +3726,12 @@ mod tests {
         let mut output = Vec::new();
         cmd_install(
             &home,
-            vec![
-                "--plugins-dir".to_owned(),
-                plugins_dir.display().to_string(),
-                "--finitechat-bin".to_owned(),
-                "/usr/local/bin/finitechat".to_owned(),
-            ],
+            install_args(&[
+                "--plugins-dir",
+                &plugins_dir.display().to_string(),
+                "--finitechat-bin",
+                "/usr/local/bin/finitechat",
+            ]),
             true,
             &mut output,
         )
@@ -3839,26 +3797,29 @@ mod tests {
         let home = dir.path().join("agent-home");
         let plugin_dir = dir.path().join("finite-plugin");
         write_test_agent_config(&home);
-        let args = vec![
-            "--plugin-dir".to_owned(),
-            plugin_dir.display().to_string(),
-            "--finitechat-bin".to_owned(),
-            "/bin/finitechat".to_owned(),
+        let plugin_dir_arg = plugin_dir.display().to_string();
+        let base_args = [
+            "--plugin-dir",
+            plugin_dir_arg.as_str(),
+            "--finitechat-bin",
+            "/bin/finitechat",
         ];
 
         let mut output = Vec::new();
-        cmd_install(&home, args.clone(), true, &mut output).expect("first install");
+        cmd_install(&home, install_args(&base_args), true, &mut output).expect("first install");
         output.clear();
-        cmd_install(&home, args.clone(), true, &mut output).expect("same install is idempotent");
+        cmd_install(&home, install_args(&base_args), true, &mut output)
+            .expect("same install is idempotent");
 
         fs::write(plugin_dir.join("adapter.py"), "# local edit\n").unwrap();
-        let error = cmd_install(&home, args.clone(), true, &mut output)
+        let error = cmd_install(&home, install_args(&base_args), true, &mut output)
             .expect_err("local edit requires --force");
         assert!(error.to_string().contains("--force"));
 
-        let mut force_args = args;
-        force_args.push("--force".to_owned());
-        cmd_install(&home, force_args, true, &mut output).expect("force overwrites managed file");
+        let mut force_args = base_args.to_vec();
+        force_args.push("--force");
+        cmd_install(&home, install_args(&force_args), true, &mut output)
+            .expect("force overwrites managed file");
         let adapter = fs::read_to_string(plugin_dir.join("adapter.py")).unwrap();
         assert!(adapter.contains("Finite Chat platform plugin for Hermes"));
     }
@@ -3872,12 +3833,12 @@ mod tests {
 
         let error = cmd_install(
             &home,
-            vec![
-                "--plugin-dir".to_owned(),
-                plugin_dir.display().to_string(),
-                "--finitechat-bin".to_owned(),
-                "/bin/finitechat".to_owned(),
-            ],
+            install_args(&[
+                "--plugin-dir",
+                &plugin_dir.display().to_string(),
+                "--finitechat-bin",
+                "/bin/finitechat",
+            ]),
             true,
             &mut output,
         )
@@ -3894,22 +3855,14 @@ mod tests {
         let mut output = Vec::new();
         cmd_init(
             &home,
-            vec![
-                "--server".to_owned(),
-                "http://127.0.0.1:1".to_owned(),
-                "--skip-agent-profile".to_owned(),
-            ],
+            init_args(&["--server", "http://127.0.0.1:1", "--skip-agent-profile"]),
             &mut output,
         )
         .expect("init");
         output.clear();
 
-        let error = cmd_home_channel_set(
-            &home,
-            vec!["--room-id".to_owned(), "missing-room".to_owned()],
-            &mut output,
-        )
-        .expect_err("unknown room cannot become home channel");
+        let error = set_home_channel(&home, "missing-room".to_owned(), None, &mut output)
+            .expect_err("unknown room cannot become home channel");
         assert!(error.to_string().contains("not available"));
     }
 

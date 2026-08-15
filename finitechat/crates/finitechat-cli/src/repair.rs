@@ -35,25 +35,21 @@ use finitechat_client::rejected_entry_diagnostic::{
 use finitechat_client::{FiniteChatDeviceConfig, SqliteClientStore, SqliteClientStoreOptions};
 use serde::Serialize;
 
+use crate::cli::RepairArgs;
+use crate::cli::RepairCommand;
+use crate::cli::RepairSkipEntryArgs;
 use crate::diagnose::split_capture;
-use crate::{CliError, parse_account_secret, parse_u64, write_pretty_json};
-use crate::{reject_extra_args, required_option, take_option, take_positional};
+use crate::{CliError, parse_account_secret, write_pretty_json};
 
 /// Schema version of the stdout record and the audit-log lines. Bump on
 /// any field change.
 const REPAIR_SKIP_ENTRY_SCHEMA_VERSION: u32 = 1;
-/// Default bound on derived skips per run.
-const DEFAULT_MAX_SKIPS: u32 = 16;
 /// Hard cap on `--max-skips`; values above this are a usage error.
 const HARD_MAX_SKIPS: u32 = 64;
 
-pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let Some(command) = take_positional(&mut args) else {
-        return Err(CliError::Usage(usage()));
-    };
-    match command.as_str() {
-        "skip-entry" => cmd_skip_entry(&mut args, output),
-        _ => Err(CliError::Usage(usage())),
+pub(crate) fn run<W: Write>(args: RepairArgs, output: &mut W) -> Result<(), CliError> {
+    match args.command {
+        RepairCommand::SkipEntry(args) => cmd_skip_entry(args, output),
     }
 }
 
@@ -159,22 +155,19 @@ struct Refusal {
     refused_entry: Option<RefusedEntry>,
 }
 
-fn cmd_skip_entry<W: Write>(args: &mut Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let store = required_option(args, "--store")?;
-    let work_dir = required_option(args, "--work-dir")?;
-    let room_log = required_option(args, "--room-log")?;
-    let device_id = required_option(args, "--device-id")?;
-    let account_secret_hex = required_option(args, "--account-secret-hex")?;
-    let incident_alias = required_option(args, "--incident-alias")?;
-    let audit_log = required_option(args, "--audit-log")?;
-    let max_skips = take_option(args, "--max-skips")?
-        .map(|value| parse_u64("--max-skips", &value))
-        .transpose()?
-        .map(u32::try_from)
-        .transpose()
-        .map_err(|_| CliError::Usage("--max-skips must fit in a u32".to_owned()))?
-        .unwrap_or(DEFAULT_MAX_SKIPS);
-    reject_extra_args(args)?;
+fn cmd_skip_entry<W: Write>(
+    RepairSkipEntryArgs {
+        store,
+        work_dir,
+        room_log,
+        device_id,
+        account_secret_hex,
+        incident_alias,
+        audit_log,
+        max_skips,
+    }: RepairSkipEntryArgs,
+    output: &mut W,
+) -> Result<(), CliError> {
     if max_skips > HARD_MAX_SKIPS {
         return Err(CliError::Usage(format!(
             "--max-skips must be at most {HARD_MAX_SKIPS}"
@@ -517,8 +510,4 @@ fn check_audit_log_location(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn usage() -> String {
-    "repair commands (operator-only; phase 2 WRITES the real store; fail-closed):\n  finitechat repair skip-entry --store PATH --work-dir PATH --room-log PATH --device-id ID --account-secret-hex HEX --incident-alias ALIAS --audit-log PATH [--max-skips N]\n    the only sanctioned way to advance a durable room cursor past a rejected entry\n    phase 1 (rehearsal): replays the capture against byte copies of --store in a loop and DERIVES the skip list from the rejected-entry classification (no operator-typed seqs); only kind=application entries classified mls_application_ciphertext are skippable, anything else refuses and changes nothing\n    phase 2 (apply): runs only if the rehearsal replay reaches the capture head; advances the REAL store's cursor once per derived skip via the sanctioned monotonic cursor path; no entries are rewritten or deleted\n    --max-skips: bound on derived skips (default 16, hard cap 64)\n    --audit-log: append-only JSONL audit trail (created mode 0600), one line per skipped entry plus a summary line; must not be inside --work-dir\n    zero derived skips means already healthy: disposition applied, the store is not written\n    production procedure: stop the device service, run against the live store, restart the service".to_owned()
 }

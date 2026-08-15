@@ -3,10 +3,12 @@ use std::io::Write;
 mod app;
 mod auth;
 mod capture;
+mod cli;
 mod diagnose;
 mod hermes;
 mod repair;
 
+use clap::Parser;
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
 use finitechat_http::{
     AckWelcomeRequest, ApplicationEffectRequest, BootstrapAccountRoomRequest,
@@ -24,8 +26,8 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-const DEFAULT_SERVER_URL: &str = "https://chat.finite.computer";
-const DEFAULT_SYNC_LIMIT: usize = 50;
+pub(crate) const DEFAULT_SERVER_URL: &str = "https://chat.finite.computer";
+pub(crate) const DEFAULT_SYNC_LIMIT: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -88,14 +90,18 @@ where
     W: Write,
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    match args.first().map(String::as_str) {
+    let cli = match cli::Cli::try_parse_from(std::iter::once("finitechat".to_owned()).chain(args)) {
+        Ok(cli) => cli,
+        Err(error) => return report_clap_error(&error, output),
+    };
+    match cli.command {
         // Success paths so `finitechat --version` works as an install check
-        // and `finitechat --help` self-describes for agents (exit 0, stdout).
-        Some("--version" | "-V" | "version") => {
+        // and `finitechat --help` self-describes for agents (exit 0, stdout);
+        // `finitechat version` matches the historical subcommand form.
+        cli::Command::Version => {
             writeln!(output, "finitechat {}", env!("CARGO_PKG_VERSION")).map_err(CliError::Output)
         }
-        Some("--help" | "-h" | "help") => writeln!(output, "{}", usage()).map_err(CliError::Output),
-        Some("http-smoke") => {
+        cli::Command::HttpSmoke => {
             let ids = finitechat_delivery::prove_http_delivery_core_orders_commit_then_message()
                 .expect("HTTP delivery core smoke passes");
             writeln!(
@@ -105,17 +111,28 @@ where
             )
             .map_err(CliError::Output)
         }
-        Some("app") => app::run(args.into_iter().skip(1).collect(), output),
-        Some("auth") => auth::run(args.into_iter().skip(1).collect(), output),
-        Some("capture") => capture::run(args.into_iter().skip(1).collect(), output),
-        Some("diagnose") => diagnose::run(args.into_iter().skip(1).collect(), output),
-        Some("hermes") => hermes::run(args.into_iter().skip(1).collect(), output),
-        Some("repair") => repair::run(args.into_iter().skip(1).collect(), output),
-        Some("http") => {
-            let request = prepare_http_request(args.into_iter().skip(1))?;
+        cli::Command::Http(args) => {
+            let request = build_http_request(&args.server, &args.command)?;
             execute_http_request(&request, output)
         }
-        _ => Err(CliError::Usage(usage())),
+        cli::Command::Auth(args) => auth::run(args.command, output),
+        cli::Command::App(args) => app::run(args, output),
+        cli::Command::Capture(args) => capture::run(args, output),
+        cli::Command::Diagnose(args) => diagnose::run(args, output),
+        cli::Command::Repair(args) => repair::run(args, output),
+        cli::Command::Hermes(args) => hermes::run(args, output),
+    }
+}
+
+/// clap renders `--help`/`--version` as "errors" that must succeed through
+/// the writer (exit 0, stdout); every other parse failure is a usage error
+/// (exit 2, stderr via `CliError::Usage`).
+fn report_clap_error<W: Write>(error: &clap::Error, output: &mut W) -> Result<(), CliError> {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+            write!(output, "{}", error.render()).map_err(CliError::Output)
+        }
+        _ => Err(CliError::Usage(error.render().to_string())),
     }
 }
 
@@ -124,245 +141,11 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    let server =
-        take_option(&mut args, "--server")?.unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned());
-    let Some(command) = take_positional(&mut args) else {
-        return Err(CliError::Usage(http_usage()));
-    };
-
-    match command.as_str() {
-        "health" => {
-            reject_extra_args(&args)?;
-            Ok(PreparedHttpRequest {
-                method: HttpMethod::Get,
-                url: route_url(&server, "/health"),
-                json: None,
-            })
-        }
-        "submit-commit" => submit_commit_request(&server, args),
-        "append-event" => append_event_request(&server, args),
-        "application-effect-get" => application_effect_get_request(&server, args),
-        "application-effect-counts" => application_effect_counts_request(&server, args),
-        "append-activity" => append_activity_request(&server, args),
-        "sync-group" => sync_group_request(&server, args),
-        "sync-inbox" => sync_inbox_request(&server, args),
-        "revoke-device" => revoke_device_request(&server, args),
-        "observe-device-liveness" => observe_device_liveness_request(&server, args),
-        "get-device-liveness" => get_device_liveness_request(&server, args),
-        "publish-key-package" => publish_key_package_request(&server, args),
-        "key-package-inventory" => key_package_inventory_request(&server, args),
-        "claim-key-package" => claim_key_package_request(&server, args),
-        "claim-key-packages" => claim_key_packages_request(&server, args),
-        "expire-key-package-lease" => expire_key_package_lease_request(&server, args),
-        "account-room-bootstrap" => account_room_bootstrap_request(&server, args),
-        "account-room-save" => account_room_save_request(&server, args),
-        "account-rooms-list" => account_rooms_list_request(&server, args),
-        "room-leave" => room_leave_request(&server, args),
-        "room-admins" => room_admins_request(&server, args),
-        "report-invalid-commit" => report_invalid_commit_request(&server, args),
-        "claim-welcomes" => claim_welcomes_request(&server, args),
-        "ack-welcome" => ack_welcome_request(&server, args),
-        _ => Err(CliError::Usage(http_usage())),
-    }
-}
-
-fn submit_commit_request(server: &str, args: Vec<String>) -> Result<PreparedHttpRequest, CliError> {
-    request_json_passthrough(server, "/commits", args)
-}
-
-fn append_event_request(server: &str, args: Vec<String>) -> Result<PreparedHttpRequest, CliError> {
-    request_json_passthrough(server, "/events", args)
-}
-
-fn application_effect_get_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let message_id = required_option(&mut args, "--message-id")?;
-    reject_extra_args(&args)?;
-
-    let request = ApplicationEffectRequest { message_id };
-    post_json_request(server, "/application-effects/get", &request)
-}
-
-fn application_effect_counts_request(
-    server: &str,
-    args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    reject_extra_args(&args)?;
-    post_json_request(
-        server,
-        "/application-effects/counts",
-        &serde_json::json!({}),
-    )
-}
-
-fn append_activity_request(
-    server: &str,
-    args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    request_json_passthrough(server, "/activities", args)
-}
-
-fn sync_group_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let group_id = required_option(&mut args, "--group-id")?;
-    let after_seq = optional_u64(&mut args, "--after-seq", 0)?;
-    let limit = optional_usize(&mut args, "--limit", DEFAULT_SYNC_LIMIT)?;
-    let requester = take_option(&mut args, "--requester")?;
-    reject_extra_args(&args)?;
-
-    let request = GroupSyncRequest {
-        group_id: GroupId::new(group_id.into_bytes()),
-        after_seq,
-        limit,
-        requester: requester.map(|requester| MemberId::new(requester.into_bytes())),
-    };
-    post_json_request(server, "/sync/group", &request)
-}
-
-fn sync_inbox_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let recipient = required_option(&mut args, "--recipient")?;
-    let after_seq = optional_u64(&mut args, "--after-seq", 0)?;
-    let limit = optional_usize(&mut args, "--limit", DEFAULT_SYNC_LIMIT)?;
-    reject_extra_args(&args)?;
-
-    let request = InboxSyncRequest {
-        recipient: MemberId::new(recipient.into_bytes()),
-        after_seq,
-        limit,
-    };
-    post_json_request(server, "/sync/inbox", &request)
-}
-
-fn revoke_device_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    reject_extra_args(&args)?;
-
-    let request = RevokeDeviceRequest {
-        device: DeviceRef {
-            account_id,
-            device_id,
-        },
-    };
-    post_json_request(server, "/devices/revoke", &request)
-}
-
-fn observe_device_liveness_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    let observed_at_ms = required_option(&mut args, "--observed-at-ms")?;
-    let expires_at_ms = required_option(&mut args, "--expires-at-ms")?;
-    reject_extra_args(&args)?;
-
-    let request = ObserveDeviceLivenessRequest {
-        device: DeviceRef {
-            account_id,
-            device_id,
-        },
-        observed_at_ms: parse_u64("--observed-at-ms", &observed_at_ms)?,
-        expires_at_ms: parse_u64("--expires-at-ms", &expires_at_ms)?,
-    };
-    post_json_request(server, "/devices/liveness", &request)
-}
-
-fn get_device_liveness_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    let now_ms = required_option(&mut args, "--now-ms")?;
-    reject_extra_args(&args)?;
-
-    let request = GetDeviceLivenessRequest {
-        device: DeviceRef {
-            account_id,
-            device_id,
-        },
-        now_ms: parse_u64("--now-ms", &now_ms)?,
-    };
-    post_json_request(server, "/devices/liveness/get", &request)
-}
-
-fn publish_key_package_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let owner = required_option(&mut args, "--owner")?;
-    let key_package_id = required_option(&mut args, "--key-package-id")?;
-    let bytes = required_option(&mut args, "--bytes")?;
-    reject_extra_args(&args)?;
-
-    let request = HttpKeyPackagePublication {
-        key_package_id: HttpKeyPackageId::new(key_package_id.into_bytes()),
-        owner: raw_delivery_owner_from_cli(owner)?,
-        key_package: KeyPackage::new(bytes.into_bytes()),
-    };
-    post_json_request(server, "/key-packages", &request)
-}
-
-fn claim_key_package_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let owner = required_option(&mut args, "--owner")?;
-    reject_extra_args(&args)?;
-
-    let request = ClaimKeyPackageRequest {
-        owner: raw_delivery_owner_from_cli(owner)?,
-    };
-    post_json_request(server, "/key-packages/claim", &request)
-}
-
-fn key_package_inventory_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let owner = required_option(&mut args, "--owner")?;
-    reject_extra_args(&args)?;
-
-    let request = KeyPackageInventoryRequest {
-        owner: raw_delivery_owner_from_cli(owner)?,
-    };
-    post_json_request(server, "/key-packages/inventory", &request)
-}
-
-fn claim_key_packages_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let owners = take_repeated_option(&mut args, "--owner")?;
-    let idempotency_key = take_option(&mut args, "--idempotency-key")?;
-    reject_extra_args(&args)?;
-
-    if owners.is_empty() {
-        return Err(CliError::Usage(
-            "claim-key-packages requires at least one --owner".to_owned(),
-        ));
-    }
-
-    let request = ClaimKeyPackagesRequest {
-        owners: owners
-            .into_iter()
-            .map(raw_delivery_owner_from_cli)
-            .collect::<Result<Vec<_>, _>>()?,
-        idempotency_key,
-    };
-    post_json_request(server, "/key-packages/claims", &request)
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let parsed =
+        cli::HttpArgs::try_parse_from(std::iter::once("http".to_owned()).chain(args.into_iter()))
+            .map_err(|error| CliError::Usage(error.render().to_string()))?;
+    build_http_request(&parsed.server, &parsed.command)
 }
 
 fn raw_delivery_owner_from_cli(owner: String) -> Result<MemberId, CliError> {
@@ -374,175 +157,281 @@ fn raw_delivery_owner_from_cli(owner: String) -> Result<MemberId, CliError> {
     Ok(MemberId::new(owner.into_bytes()))
 }
 
-fn expire_key_package_lease_request(
+fn build_http_request(
     server: &str,
-    mut args: Vec<String>,
+    command: &cli::HttpCommand,
 ) -> Result<PreparedHttpRequest, CliError> {
-    let key_package_id = required_option(&mut args, "--key-package-id")?;
-    reject_extra_args(&args)?;
+    use cli::HttpCommand as Http;
 
-    let request = ExpireKeyPackageLeaseRequest {
-        key_package_id: HttpKeyPackageId::new(key_package_id.into_bytes()),
-    };
-    post_json_request(server, "/key-packages/leases/expire", &request)
-}
-
-fn account_room_save_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let account_id = required_option(&mut args, "--account-id")?;
-    let room_id = required_option(&mut args, "--room-id")?;
-    let record_json = required_option(&mut args, "--record-json")?;
-    reject_extra_args(&args)?;
-
-    let request = SaveAccountRoomRequest {
-        account_id,
-        room_id,
-        record: serde_json::from_str(&record_json).map_err(CliError::Json)?,
-    };
-    post_json_request(server, "/account-rooms", &request)
-}
-
-fn account_room_bootstrap_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let room_id = required_option(&mut args, "--room-id")?;
-    let mls_group_id = required_option(&mut args, "--mls-group-id")?;
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    reject_extra_args(&args)?;
-
-    let request = BootstrapAccountRoomRequest {
-        room_id,
-        mls_group_id,
-        creator: DeviceRef {
+    match command {
+        Http::Health => Ok(PreparedHttpRequest {
+            method: HttpMethod::Get,
+            url: route_url(server, "/health"),
+            json: None,
+        }),
+        Http::SubmitCommit { request_json } => {
+            request_json_passthrough(server, "/commits", request_json)
+        }
+        Http::AppendEvent { request_json } => {
+            request_json_passthrough(server, "/events", request_json)
+        }
+        Http::ApplicationEffectGet { message_id } => post_json_request(
+            server,
+            "/application-effects/get",
+            &ApplicationEffectRequest {
+                message_id: message_id.clone(),
+            },
+        ),
+        Http::ApplicationEffectCounts => post_json_request(
+            server,
+            "/application-effects/counts",
+            &serde_json::json!({}),
+        ),
+        Http::AppendActivity { request_json } => {
+            request_json_passthrough(server, "/activities", request_json)
+        }
+        Http::SyncGroup {
+            group_id,
+            after_seq,
+            limit,
+            requester,
+        } => post_json_request(
+            server,
+            "/sync/group",
+            &GroupSyncRequest {
+                group_id: GroupId::new(group_id.clone().into_bytes()),
+                after_seq: *after_seq,
+                limit: *limit,
+                requester: requester
+                    .clone()
+                    .map(|requester| MemberId::new(requester.into_bytes())),
+            },
+        ),
+        Http::SyncInbox {
+            recipient,
+            after_seq,
+            limit,
+        } => post_json_request(
+            server,
+            "/sync/inbox",
+            &InboxSyncRequest {
+                recipient: MemberId::new(recipient.clone().into_bytes()),
+                after_seq: *after_seq,
+                limit: *limit,
+            },
+        ),
+        Http::RevokeDevice {
             account_id,
             device_id,
-        },
-        protocol: RoomProtocol::default(),
-    };
-    post_json_request(server, "/account-rooms/bootstrap", &request)
-}
-
-fn account_rooms_list_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let account_id = required_option(&mut args, "--account-id")?;
-    let after_room_id = take_option(&mut args, "--after-room-id")?;
-    let limit = optional_usize(&mut args, "--limit", DEFAULT_SYNC_LIMIT)?;
-    reject_extra_args(&args)?;
-
-    let request = ListAccountRoomDirectoryRequest {
-        account_id,
-        after_room_id,
-        limit,
-    };
-    post_json_request(server, "/account-rooms/list", &request)
-}
-
-fn room_leave_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let room_id = required_option(&mut args, "--room-id")?;
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    reject_extra_args(&args)?;
-
-    let request = LeaveRoomRequest {
-        room_id,
-        sender: DeviceRef {
+        } => post_json_request(
+            server,
+            "/devices/revoke",
+            &RevokeDeviceRequest {
+                device: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+            },
+        ),
+        Http::ObserveDeviceLiveness {
             account_id,
             device_id,
-        },
-    };
-    post_json_request(server, "/rooms/leave", &request)
-}
-
-fn room_admins_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let room_id = required_option(&mut args, "--room-id")?;
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    let grant = take_option(&mut args, "--grant")?;
-    let revoke = take_option(&mut args, "--revoke")?;
-    reject_extra_args(&args)?;
-
-    let request = UpdateRoomAdminsRequest {
-        room_id,
-        sender: DeviceRef {
+            observed_at_ms,
+            expires_at_ms,
+        } => post_json_request(
+            server,
+            "/devices/liveness",
+            &ObserveDeviceLivenessRequest {
+                device: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                observed_at_ms: *observed_at_ms,
+                expires_at_ms: *expires_at_ms,
+            },
+        ),
+        Http::GetDeviceLiveness {
             account_id,
             device_id,
-        },
-        grant,
-        revoke,
-    };
-    post_json_request(server, "/rooms/admins", &request)
-}
-
-fn report_invalid_commit_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let room_id = required_option(&mut args, "--room-id")?;
-    let account_id = required_option(&mut args, "--account-id")?;
-    let device_id = required_option(&mut args, "--device-id")?;
-    let offending_seq = required_option(&mut args, "--offending-seq")?;
-    reject_extra_args(&args)?;
-
-    let request = ReportInvalidCommitRequest {
-        room_id,
-        reporter: DeviceRef {
+            now_ms,
+        } => post_json_request(
+            server,
+            "/devices/liveness/get",
+            &GetDeviceLivenessRequest {
+                device: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                now_ms: *now_ms,
+            },
+        ),
+        Http::PublishKeyPackage {
+            owner,
+            key_package_id,
+            bytes,
+        } => post_json_request(
+            server,
+            "/key-packages",
+            &HttpKeyPackagePublication {
+                key_package_id: HttpKeyPackageId::new(key_package_id.clone().into_bytes()),
+                owner: raw_delivery_owner_from_cli(owner.clone())?,
+                key_package: KeyPackage::new(bytes.clone().into_bytes()),
+            },
+        ),
+        Http::KeyPackageInventory { owner } => post_json_request(
+            server,
+            "/key-packages/inventory",
+            &KeyPackageInventoryRequest {
+                owner: raw_delivery_owner_from_cli(owner.clone())?,
+            },
+        ),
+        Http::ClaimKeyPackage { owner } => post_json_request(
+            server,
+            "/key-packages/claim",
+            &ClaimKeyPackageRequest {
+                owner: raw_delivery_owner_from_cli(owner.clone())?,
+            },
+        ),
+        Http::ClaimKeyPackages {
+            owners,
+            idempotency_key,
+        } => post_json_request(
+            server,
+            "/key-packages/claims",
+            &ClaimKeyPackagesRequest {
+                owners: owners
+                    .iter()
+                    .map(|owner| raw_delivery_owner_from_cli(owner.clone()))
+                    .collect::<Result<Vec<_>, _>>()?,
+                idempotency_key: idempotency_key.clone(),
+            },
+        ),
+        Http::ExpireKeyPackageLease { key_package_id } => post_json_request(
+            server,
+            "/key-packages/leases/expire",
+            &ExpireKeyPackageLeaseRequest {
+                key_package_id: HttpKeyPackageId::new(key_package_id.clone().into_bytes()),
+            },
+        ),
+        Http::AccountRoomSave {
+            account_id,
+            room_id,
+            record_json,
+        } => post_json_request(
+            server,
+            "/account-rooms",
+            &SaveAccountRoomRequest {
+                account_id: account_id.clone(),
+                room_id: room_id.clone(),
+                record: serde_json::from_str(record_json).map_err(CliError::Json)?,
+            },
+        ),
+        Http::AccountRoomBootstrap {
+            room_id,
+            mls_group_id,
             account_id,
             device_id,
-        },
-        offending_seq: parse_u64("--offending-seq", &offending_seq)?,
-    };
-    post_json_request(server, "/rooms/report-invalid-commit", &request)
-}
-
-fn claim_welcomes_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let recipient = required_option(&mut args, "--recipient")?;
-    let limit = optional_usize(&mut args, "--limit", DEFAULT_SYNC_LIMIT)?;
-    reject_extra_args(&args)?;
-
-    let request = ClaimWelcomesRequest {
-        recipient: MemberId::new(recipient.into_bytes()),
-        limit,
-    };
-    post_json_request(server, "/welcomes/claim", &request)
-}
-
-fn ack_welcome_request(
-    server: &str,
-    mut args: Vec<String>,
-) -> Result<PreparedHttpRequest, CliError> {
-    let message_id = required_option(&mut args, "--message-id")?;
-    reject_extra_args(&args)?;
-
-    let request = AckWelcomeRequest {
-        message_id: MessageId::new(message_id.into_bytes()),
-    };
-    post_json_request(server, "/welcomes/ack", &request)
+        } => post_json_request(
+            server,
+            "/account-rooms/bootstrap",
+            &BootstrapAccountRoomRequest {
+                room_id: room_id.clone(),
+                mls_group_id: mls_group_id.clone(),
+                creator: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                protocol: RoomProtocol::default(),
+            },
+        ),
+        Http::AccountRoomsList {
+            account_id,
+            after_room_id,
+            limit,
+        } => post_json_request(
+            server,
+            "/account-rooms/list",
+            &ListAccountRoomDirectoryRequest {
+                account_id: account_id.clone(),
+                after_room_id: after_room_id.clone(),
+                limit: *limit,
+            },
+        ),
+        Http::RoomLeave {
+            room_id,
+            account_id,
+            device_id,
+        } => post_json_request(
+            server,
+            "/rooms/leave",
+            &LeaveRoomRequest {
+                room_id: room_id.clone(),
+                sender: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+            },
+        ),
+        Http::RoomAdmins {
+            room_id,
+            account_id,
+            device_id,
+            grant,
+            revoke,
+        } => post_json_request(
+            server,
+            "/rooms/admins",
+            &UpdateRoomAdminsRequest {
+                room_id: room_id.clone(),
+                sender: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                grant: grant.clone(),
+                revoke: revoke.clone(),
+            },
+        ),
+        Http::ReportInvalidCommit {
+            room_id,
+            account_id,
+            device_id,
+            offending_seq,
+        } => post_json_request(
+            server,
+            "/rooms/report-invalid-commit",
+            &ReportInvalidCommitRequest {
+                room_id: room_id.clone(),
+                reporter: DeviceRef {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                offending_seq: *offending_seq,
+            },
+        ),
+        Http::ClaimWelcomes { recipient, limit } => post_json_request(
+            server,
+            "/welcomes/claim",
+            &ClaimWelcomesRequest {
+                recipient: MemberId::new(recipient.clone().into_bytes()),
+                limit: *limit,
+            },
+        ),
+        Http::AckWelcome { message_id } => post_json_request(
+            server,
+            "/welcomes/ack",
+            &AckWelcomeRequest {
+                message_id: MessageId::new(message_id.clone().into_bytes()),
+            },
+        ),
+    }
 }
 
 fn request_json_passthrough(
     server: &str,
     path: &str,
-    mut args: Vec<String>,
+    request_json: &str,
 ) -> Result<PreparedHttpRequest, CliError> {
-    let request_json = required_option(&mut args, "--request-json")?;
-    reject_extra_args(&args)?;
-
-    let request: Value = serde_json::from_str(&request_json).map_err(CliError::Json)?;
+    let request: Value = serde_json::from_str(request_json).map_err(CliError::Json)?;
     post_json_request(server, path, &request)
 }
 
@@ -594,78 +483,6 @@ fn route_url(server: &str, path: &str) -> String {
     )
 }
 
-pub(crate) fn take_positional(args: &mut Vec<String>) -> Option<String> {
-    if args.is_empty() {
-        None
-    } else {
-        Some(args.remove(0))
-    }
-}
-
-pub(crate) fn required_option(
-    args: &mut Vec<String>,
-    name: &'static str,
-) -> Result<String, CliError> {
-    take_option(args, name)?.ok_or_else(|| CliError::Usage(format!("missing required {name}")))
-}
-
-pub(crate) fn take_option(
-    args: &mut Vec<String>,
-    name: &'static str,
-) -> Result<Option<String>, CliError> {
-    let Some(index) = args.iter().position(|arg| arg == name) else {
-        return Ok(None);
-    };
-    if index + 1 >= args.len() {
-        return Err(CliError::Usage(format!("missing value for {name}")));
-    }
-    let value = args.remove(index + 1);
-    args.remove(index);
-    Ok(Some(value))
-}
-
-fn take_repeated_option(
-    args: &mut Vec<String>,
-    name: &'static str,
-) -> Result<Vec<String>, CliError> {
-    let mut values = Vec::new();
-    while let Some(index) = args.iter().position(|arg| arg == name) {
-        if index + 1 >= args.len() {
-            return Err(CliError::Usage(format!("missing value for {name}")));
-        }
-        let value = args.remove(index + 1);
-        args.remove(index);
-        values.push(value);
-    }
-    Ok(values)
-}
-
-fn optional_u64(args: &mut Vec<String>, name: &'static str, default: u64) -> Result<u64, CliError> {
-    take_option(args, name)?
-        .map(|value| parse_u64(name, &value))
-        .unwrap_or(Ok(default))
-}
-
-fn optional_usize(
-    args: &mut Vec<String>,
-    name: &'static str,
-    default: usize,
-) -> Result<usize, CliError> {
-    take_option(args, name)?
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| CliError::Usage(format!("{name} must be an unsigned integer")))
-        })
-        .unwrap_or(Ok(default))
-}
-
-pub(crate) fn parse_u64(name: &'static str, value: &str) -> Result<u64, CliError> {
-    value
-        .parse::<u64>()
-        .map_err(|_| CliError::Usage(format!("{name} must be an unsigned integer")))
-}
-
 /// Parse a 64-character lowercase hex account secret into a Nostr secret
 /// key. Callers read the hex from a file, never from a CLI argument.
 pub(crate) fn parse_account_secret(hex: &str) -> Result<NostrSecretKey, CliError> {
@@ -682,34 +499,6 @@ pub(crate) fn parse_account_secret(hex: &str) -> Result<NostrSecretKey, CliError
         *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
     }
     NostrSecretKey::from_bytes(bytes).map_err(|_| invalid())
-}
-
-pub(crate) fn reject_extra_args(args: &[String]) -> Result<(), CliError> {
-    if args.is_empty() {
-        Ok(())
-    } else {
-        Err(CliError::Usage(format!(
-            "unexpected argument '{}'",
-            args[0]
-        )))
-    }
-}
-
-fn usage() -> String {
-    format!(
-        "usage: finitechat <http-smoke|http|auth|hermes|app|capture|diagnose|repair>\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
-        auth::usage(),
-        hermes::hermes_usage(),
-        app::usage(),
-        capture::usage(),
-        diagnose::usage(),
-        repair::usage(),
-        http_usage()
-    )
-}
-
-fn http_usage() -> String {
-    "http commands:\n  finitechat http [--server URL] health\n  finitechat http [--server URL] submit-commit --request-json JSON\n  finitechat http [--server URL] append-event --request-json JSON\n  finitechat http [--server URL] application-effect-get --message-id ID\n  finitechat http [--server URL] application-effect-counts\n  finitechat http [--server URL] append-activity --request-json JSON\n  finitechat http [--server URL] sync-group --group-id ID [--after-seq N] [--limit N] [--requester ID]\n  finitechat http [--server URL] sync-inbox --recipient ID [--after-seq N] [--limit N]\n  finitechat http [--server URL] revoke-device --account-id ID --device-id ID\n  finitechat http [--server URL] observe-device-liveness --account-id ID --device-id ID --observed-at-ms N --expires-at-ms N\n  finitechat http [--server URL] get-device-liveness --account-id ID --device-id ID --now-ms N\n  finitechat http [--server URL] publish-key-package --owner ID --key-package-id ID --bytes BYTES\n  finitechat http [--server URL] key-package-inventory --owner ID\n  finitechat http [--server URL] claim-key-package --owner ID\n  finitechat http [--server URL] claim-key-packages --owner ID [--owner ID ...] [--idempotency-key KEY]\n  finitechat http [--server URL] expire-key-package-lease --key-package-id ID\n  finitechat http [--server URL] account-room-bootstrap --room-id ID --mls-group-id ID --account-id ID --device-id ID\n  finitechat http [--server URL] account-room-save --account-id ID --room-id ID --record-json JSON\n  finitechat http [--server URL] account-rooms-list --account-id ID [--after-room-id ID] [--limit N]\n  finitechat http [--server URL] room-leave --room-id ID --account-id ID --device-id ID\n  finitechat http [--server URL] room-admins --room-id ID --account-id ID --device-id ID [--grant ACCOUNT] [--revoke ACCOUNT]\n  finitechat http [--server URL] report-invalid-commit --room-id ID --account-id ID --device-id ID --offending-seq N\n  finitechat http [--server URL] claim-welcomes --recipient ID [--limit N]\n  finitechat http [--server URL] ack-welcome --message-id ID".to_owned()
 }
 
 /// Point `FINITE_HOME` at a process-wide throwaway directory so tests never
