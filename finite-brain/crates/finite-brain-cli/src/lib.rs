@@ -59,17 +59,17 @@ use finite_brain_core::portability::{
     WorkingTreeObjectManifestEntry, WorkingTreeSyncState,
 };
 use finite_brain_core::{
-    AdminAccessAction, BrainGrantIntent, BrainId, EmailInviteScopeError, EmailInviteScopeFolder,
-    FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
+    AdminAccessAction, BrainApprovalPayload, BrainGrantIntent, BrainId, EmailInviteScopeError,
+    EmailInviteScopeFolder, FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
     bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
-    derive_email_invite_scope, derive_safe_top_level_folder_path, derive_stable_resource_id,
-    open_folder_key_grant,
+    brain_approval_event_template, derive_email_invite_scope, derive_safe_top_level_folder_path,
+    derive_stable_resource_id, open_folder_key_grant,
 };
 use finite_nostr::{
     GiftWrapValidation, NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, open_gift_wrap,
     wrap_rumor,
 };
-use nostr::{Event, Keys, Kind};
+use nostr::{Event, Keys, Kind, Tag};
 use sha2::{Digest, Sha256};
 
 pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
@@ -152,6 +152,7 @@ where
         "admin" => admin(&args[1..], &env, json, output),
         "collaborator" => collaborators(&args[1..], &env, json, output),
         "invite" => invite(&args[1..], &env, json, output),
+        "approvals" => approvals(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
     }
 }
@@ -159,7 +160,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -3695,6 +3696,271 @@ fn collaborators<W: Write>(
     }
 }
 
+fn approvals<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("list") => list_approvals(args, env, json, output),
+        Some("approve") => approve_approval(args, env, json, output),
+        Some("deny") => deny_approval(args, env, json, output),
+        Some(other) => Err(CliError::InvalidCommand(format!("approvals {other}"))),
+        None => Err(CliError::MissingArgument("approvals action")),
+    }
+}
+
+/// Candidate brains whose approval requests `approvals` inspects: the
+/// `--brain` selection, or every brain the caller's principal can list.
+fn approvals_brain_ids(env: &CliEnvironment, args: &[String]) -> Result<Vec<String>, CliError> {
+    if let Some(brain_id) = option_value(args, "--brain") {
+        return Ok(vec![brain_id]);
+    }
+    let response = signed_json_request(env, args, "GET", "/v1/brains", None)?;
+    let brains = response
+        .get("brains")
+        .and_then(|brains| brains.as_array())
+        .ok_or_else(|| CliError::HttpStatus {
+            status: 200,
+            body: "brain list response has no brains array".to_owned(),
+        })?;
+    let mut ids = Vec::new();
+    for brain in brains {
+        let id = brain
+            .get("brainId")
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "brain list entry has no brainId".to_owned(),
+            })?;
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
+}
+
+fn fetch_approval_requests(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let response = signed_json_request(
+        env,
+        args,
+        "GET",
+        &format!("/v1/brains/{brain_id}/approval-requests"),
+        None,
+    )?;
+    Ok(response
+        .get("requests")
+        .and_then(|requests| requests.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn find_approval_request(
+    env: &CliEnvironment,
+    args: &[String],
+    request_id: &str,
+) -> Result<(String, serde_json::Value), CliError> {
+    for brain_id in approvals_brain_ids(env, args)? {
+        for request in fetch_approval_requests(env, args, &brain_id)? {
+            if request.get("id").and_then(|id| id.as_str()) == Some(request_id) {
+                return Ok((brain_id, request));
+            }
+        }
+    }
+    Err(CliError::InvalidInput(format!(
+        "approval request {request_id} was not found in your brains"
+    )))
+}
+
+fn list_approvals<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let include_resolved = args.iter().any(|argument| argument == "--all");
+    let mut requests = Vec::new();
+    for brain_id in approvals_brain_ids(env, args)? {
+        for mut request in fetch_approval_requests(env, args, &brain_id)? {
+            if let Some(object) = request.as_object_mut() {
+                object.insert(
+                    "brainId".to_owned(),
+                    serde_json::Value::String(brain_id.clone()),
+                );
+            }
+            requests.push(request);
+        }
+    }
+    if !include_resolved {
+        requests.retain(|request| {
+            request.get("status").and_then(|status| status.as_str()) == Some("pending")
+        });
+    }
+    if json {
+        write_json(
+            output,
+            &serde_json::json!({ "requests": requests, "count": requests.len() }),
+        )
+    } else if requests.is_empty() {
+        writeln!(output, "no pending approval requests")?;
+        Ok(())
+    } else {
+        for request in &requests {
+            let id = request.get("id").and_then(|id| id.as_str()).unwrap_or("?");
+            let action = request
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("?");
+            let brain = request
+                .get("brainId")
+                .and_then(|b| b.as_str())
+                .unwrap_or("?");
+            let requested_by = request
+                .get("requestedByNpub")
+                .and_then(|r| r.as_str())
+                .unwrap_or("?");
+            let expires = request
+                .get("expiresAt")
+                .and_then(|e| e.as_str())
+                .unwrap_or("?");
+            writeln!(
+                output,
+                "{id}  {action}  brain {brain}  by {requested_by}  expires {expires}"
+            )?;
+        }
+        writeln!(
+            output,
+            "approve with: fbrain approvals approve --id <request-id>"
+        )?;
+        Ok(())
+    }
+}
+
+fn approve_approval<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let request_id = option_value(args, "--id")
+        .ok_or_else(|| CliError::InvalidInput("approvals approve requires --id".to_owned()))?;
+    let (brain_id, request) = find_approval_request(env, args, &request_id)?;
+    if request.get("status").and_then(|status| status.as_str()) != Some("pending") {
+        return Err(CliError::InvalidInput(format!(
+            "approval request {request_id} is already resolved"
+        )));
+    }
+    let payload = request.get("payload").ok_or_else(|| CliError::HttpStatus {
+        status: 200,
+        body: "approval request has no payload".to_owned(),
+    })?;
+    let signer = load_signer(env)?;
+    let approval = BrainApprovalPayload {
+        version: payload
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        human_npub: signer.npub.clone(),
+        action: payload
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        brain_id: payload
+            .get("brainId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        plan_id: payload
+            .get("planId")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        target_npubs: payload
+            .get("targetNpubs")
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        nonce: payload
+            .get("nonce")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        expires_at: payload
+            .get("expiresAt")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default(),
+    };
+    let created_at = unix_timestamp();
+    let template = brain_approval_event_template(&approval, created_at)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let tags = template
+        .tags
+        .iter()
+        .map(|tag| Tag::parse(tag.clone()))
+        .collect::<Result<Vec<Tag>, _>>()
+        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
+    let event = sign_event(
+        &signer.keys,
+        Kind::Custom(template.kind),
+        template.content,
+        tags,
+        template.created_at,
+        None,
+    )?;
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("/v1/brains/{brain_id}/approvals"),
+        Some(serde_json::json!({
+            "approvalEventJson": event.as_json(),
+            "requestId": request_id,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        writeln!(output, "approved {request_id}")?;
+        Ok(())
+    }
+}
+
+fn deny_approval<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let request_id = option_value(args, "--id")
+        .ok_or_else(|| CliError::InvalidInput("approvals deny requires --id".to_owned()))?;
+    let (brain_id, _) = find_approval_request(env, args, &request_id)?;
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("/v1/brains/{brain_id}/approval-requests/{request_id}/deny"),
+        None,
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        writeln!(output, "denied {request_id}")?;
+        Ok(())
+    }
+}
+
 fn invite<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -3736,34 +4002,13 @@ fn brain_invites<W: Write>(
                     &folders,
                     &expires_at,
                 )
-            } else if invite_finite_vip_email(&raw_target) {
-                match resolve_identity_npub(env, args, &raw_target) {
-                    Ok(target) => write_npub_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &target,
-                        &folders,
-                        &expires_at,
-                    ),
-                    Err(CliError::HttpStatus { status: 404, .. }) => write_email_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &brain_id,
-                        &raw_target,
-                        &folders,
-                        &expires_at,
-                        false,
-                    ),
-                    Err(error) => Err(error),
-                }
             } else if invite_email_like(&raw_target) {
-                write_email_invite_create(
+                // The blessed email path: resolve the account into an
+                // invitation plan, then either commit it directly (the caller
+                // holds admin standing) or file an approval request for a
+                // human admin to sign. Emails without a Finite account fall
+                // back to the one-time email invitation.
+                write_plan_or_email_invite_create(
                     output,
                     json,
                     env,
@@ -3773,7 +4018,6 @@ fn brain_invites<W: Write>(
                     &raw_target,
                     &folders,
                     &expires_at,
-                    false,
                 )
             } else {
                 let target = resolve_identity_npub(env, args, &raw_target)?;
@@ -4308,6 +4552,152 @@ fn write_npub_invite_create<W: Write>(
     });
     let response = signed_json_request(env, args, "POST", route, Some(body))?;
     write_command_response(output, json, &response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_plan_or_email_invite_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    route: &str,
+    brain_id: &str,
+    raw_target: &str,
+    folders: &[String],
+    expires_at: &str,
+) -> Result<(), CliError> {
+    let email = canonical_invite_email(raw_target)?;
+    let preflight_route = format!("/v1/brains/{brain_id}/invitations/preflight");
+    match signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({ "target": email })),
+    ) {
+        Ok(plan) => {
+            let resolves_account = plan
+                .get("human")
+                .and_then(|human| human.get("npub"))
+                .and_then(|npub| npub.as_str())
+                .is_some_and(|npub| !npub.is_empty())
+                || plan
+                    .get("agents")
+                    .and_then(|agents| agents.as_array())
+                    .is_some_and(|agents| !agents.is_empty());
+            if !resolves_account {
+                // No Finite account for this email: the one-time invitation.
+                return write_email_invite_create(
+                    output, json, env, args, route, brain_id, raw_target, folders, expires_at,
+                    false,
+                );
+            }
+            commit_invitation_plan(output, json, env, args, brain_id, &plan)
+        }
+        Err(CliError::HttpStatus { status: 403, .. }) => {
+            // The caller lacks admin standing: request the human's approval
+            // for a server-resolved plan instead of committing directly.
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                &format!("/v1/brains/{brain_id}/approval-requests"),
+                Some(serde_json::json!({ "action": "invite-commit", "target": email })),
+            )?;
+            if json {
+                write_json(output, &response)
+            } else {
+                write_command_response(output, false, &response)?;
+                writeln!(
+                    output,
+                    "approval requested: a Brain admin must approve this invite with `fbrain approvals approve --id <request-id>` or the chat approval card"
+                )?;
+                Ok(())
+            }
+        }
+        Err(CliError::HttpStatus { status: 502, .. })
+        | Err(CliError::HttpStatus { status: 503, .. }) => {
+            // Account enrichment is unreachable: degrade to the one-time
+            // email invitation, never the cryptography.
+            write_email_invite_create(
+                output, json, env, args, route, brain_id, raw_target, folders, expires_at, false,
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn commit_invitation_plan<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    plan: &serde_json::Value,
+) -> Result<(), CliError> {
+    let commit_once = |plan: &serde_json::Value| -> Result<serde_json::Value, CliError> {
+        let plan_id = plan
+            .get("planId")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "invitation plan response has no planId".to_owned(),
+            })?;
+        let plan_hash = plan
+            .get("planHash")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "invitation plan response has no planHash".to_owned(),
+            })?;
+        signed_json_request(
+            env,
+            args,
+            "POST",
+            &format!("/v1/brains/{brain_id}/invitations/commit"),
+            Some(serde_json::json!({ "planId": plan_id, "planHash": plan_hash })),
+        )
+    };
+    let response = match commit_once(plan) {
+        Ok(response) => response,
+        Err(CliError::HttpStatus { status: 409, .. }) => {
+            // Roster drift superseded the preview: re-preflight once and
+            // commit the fresh plan instead of the stale one.
+            let fresh = signed_json_request(
+                env,
+                args,
+                "POST",
+                &format!("/v1/brains/{brain_id}/invitations/preflight"),
+                Some(serde_json::json!({ "target": plan_target_email(plan, brain_id) })),
+            )?;
+            commit_once(&fresh)?
+        }
+        Err(error) => return Err(error),
+    };
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        let invited = response
+            .get("invitations")
+            .and_then(|invitations| invitations.as_array())
+            .map(|invitations| invitations.len())
+            .unwrap_or_default();
+        writeln!(
+            output,
+            "invited {invited} principal(s); they accept with `fbrain invite brain accept`"
+        )?;
+        Ok(())
+    }
+}
+
+/// Recover the target email of a previewed plan for roster-drift re-preflight.
+fn plan_target_email(plan: &serde_json::Value, _brain_id: &str) -> String {
+    plan.get("human")
+        .and_then(|human| human.get("email"))
+        .and_then(|email| email.as_str())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5955,7 +6345,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -6210,6 +6600,45 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
             request_line
+        });
+        (url, handle)
+    }
+
+    /// Capture server returning one scripted (status, body) response per
+    /// request, in order; requests beyond the script answer 500.
+    #[allow(clippy::type_complexity)]
+    fn start_scripted_capture_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let mut responses = responses.into_iter().peekable();
+            let mut requests = Vec::new();
+            while responses.peek().is_some() {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                requests.push((request_line, body));
+                let (status, response_body) = responses.next().unwrap();
+                let reason = if (200..300).contains(&status) {
+                    "OK"
+                } else if status == 403 {
+                    "Forbidden"
+                } else {
+                    "Error"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            requests
         });
         (url, handle)
     }
@@ -8562,6 +8991,125 @@ mod tests {
     }
 
     #[test]
+    fn invite_create_without_standing_files_approval_request() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        // First response: preflight is forbidden (no admin standing). Second:
+        // the approval request is created and returned.
+        let (server_url, server) = start_scripted_capture_server(vec![
+            (
+                403,
+                r#"{"error":"approval signer does not hold brain admin standing"}"#.to_owned(),
+            ),
+            (
+                200,
+                r#"{"id":"approval-1","status":"pending","action":"invite-commit","payload":{"planId":"plan-1","nonce":"n1"}}"#
+                    .to_owned(),
+            ),
+        ]);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "acme",
+                "--target",
+                "bob@example.com",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["id"], "approval-1");
+        assert_eq!(json["status"], "pending");
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/preflight")
+        );
+        assert!(
+            requests[1]
+                .0
+                .starts_with("POST /v1/brains/acme/approval-requests")
+        );
+        let body: Value = serde_json::from_str(&requests[1].1).unwrap();
+        assert_eq!(body["action"], "invite-commit");
+        assert_eq!(body["target"], "bob@example.com");
+    }
+
+    #[test]
+    fn approvals_approve_signs_and_submits_the_stored_payload() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000001");
+        // Brain list, then the request listing, then the artifact submission.
+        let (server_url, server) = start_scripted_capture_server(vec![
+            (200, r#"{"brains":[{"brainId":"acme"}]}"#.to_owned()),
+            (
+                200,
+                r#"{"requests":[{"id":"approval-1","status":"pending","payload":{"version":"finite-brain-approval-v1","action":"invite-commit","brainId":"acme","planId":"plan-1","targetNpubs":[],"nonce":"00112233445566778899aabbccddeeff","expiresAt":9999999999}}]}"#
+                    .to_owned(),
+            ),
+            (200, r#"{"status":"applied"}"#.to_owned()),
+        ]);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "approvals",
+                "approve",
+                "--id",
+                "approval-1",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["status"], "applied");
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1]
+                .0
+                .starts_with("GET /v1/brains/acme/approval-requests")
+        );
+        assert!(requests[2].0.starts_with("POST /v1/brains/acme/approvals"));
+        let body: Value = serde_json::from_str(&requests[2].1).unwrap();
+        assert_eq!(body["requestId"], "approval-1");
+        let event: Value =
+            serde_json::from_str(body["approvalEventJson"].as_str().unwrap()).unwrap();
+        assert_eq!(event["kind"], 30078);
+        assert_eq!(
+            event["pubkey"],
+            NostrPublicKey::parse(&npub).unwrap().to_hex()
+        );
+        let payload: Value = serde_json::from_str(event["content"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["humanNpub"], npub);
+        assert_eq!(payload["nonce"], "00112233445566778899aabbccddeeff");
+        assert_eq!(payload["planId"], "plan-1");
+    }
+
+    #[test]
     fn invites_create_posts_initial_folder_access() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -8661,10 +9209,17 @@ mod tests {
         );
 
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].0.contains("/v1/brains/acme/metadata"));
-        assert!(requests[1].0.contains("/v1/brains/acme/export"));
-        let (request, body) = &requests[2];
+        assert_eq!(requests.len(), 4);
+        // The email path preflights the account first; the unregistered
+        // mailbox falls through to the classic one-time invitation.
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/preflight")
+        );
+        assert!(requests[1].0.contains("/v1/brains/acme/metadata"));
+        assert!(requests[2].0.contains("/v1/brains/acme/export"));
+        let (request, body) = &requests[3];
         assert!(request.starts_with("POST /v1/brains/acme/invitations"));
         assert!(
             !body.contains(invite_secret),

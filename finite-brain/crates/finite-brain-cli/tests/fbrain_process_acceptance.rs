@@ -108,6 +108,73 @@ impl Drop for CollaborationSmokeReport {
     }
 }
 
+fn spawn_real_brain_server_with_authorities(
+    owner_npub: &str,
+    personal_agent_npub: &str,
+    identity_authority_url: String,
+    core_authority_url: String,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let (url_tx, url_rx) = mpsc::channel();
+    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
+    let owner_npub = owner_npub.to_owned();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = nip05_listener.accept() {
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = r#"{"names":{"beta":"02b3c1..."}}"#.to_owned();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let mut store = finite_brain_store::BrainStore::open_in_memory().unwrap();
+            let organization = finite_brain_core::bootstrap_organization_brain(
+                "roundtrip-org",
+                "Roundtrip Org",
+                &owner_npub,
+            )
+            .unwrap();
+            store.create_brain_bootstrap(&organization, &[]).unwrap();
+            let state = finite_brain_server::ServerState::new(store, url.clone())
+                .with_identity_authority_url(nip05_url)
+                .with_agent_bootstrap_authorities(
+                    core_authority_url,
+                    "process-core-token",
+                    identity_authority_url,
+                    "process-identity-token",
+                );
+            url_tx.send(url).unwrap();
+            let router = finite_brain_server::router_with_state(state);
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+        });
+    });
+    let url = url_rx.recv().unwrap();
+    let _ = personal_agent_npub;
+    (url, shutdown_tx, thread)
+}
+
 fn spawn_real_brain_server(
     target_npub: &str,
     personal_agent_npub: &str,
@@ -281,6 +348,129 @@ fn spawn_requester_authorities(
                     "status": "active",
                 }),
             ),
+            _ => (404, json!({ "error": "not_found" })),
+        }
+    });
+    (identity_url, core_url)
+}
+
+/// Authorities for the CLI invite/approval roundtrip: Bob's account resolves
+/// to his human Principal plus one active managed agent; the agent npub is the
+/// CLI home the test drives.
+fn spawn_card_roundtrip_authorities(
+    bob_email: &str,
+    bob_agent_email: &str,
+    bob_workos_id: &str,
+    bob_human_npub: String,
+    bob_agent_npub: String,
+) -> (String, String) {
+    fn serve(listener: TcpListener, responder: impl Fn(&str) -> (u16, Value) + Send + 'static) {
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut stream) = incoming else {
+                    break;
+                };
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 4096];
+                    let bytes = stream.read(&mut chunk).unwrap_or(0);
+                    if bytes == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..bytes]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let (status, body) = responder(&request);
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                let body = body.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+    }
+
+    let identity = TcpListener::bind("127.0.0.1:0").unwrap();
+    let identity_url = format!("http://{}", identity.local_addr().unwrap());
+    let identity_agent = bob_agent_npub.clone();
+    let identity_agent_email = bob_agent_email.to_owned();
+    let identity_workos = bob_workos_id.to_owned();
+    let identity_human = bob_human_npub.clone();
+    serve(identity, move |request| {
+        match request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/")
+        {
+            "/api/v1/operator/brain/agent-resolution" if request.contains(&identity_agent) => (
+                200,
+                json!({
+                    "agentNpub": identity_agent,
+                    "managedAgentEmail": identity_agent_email,
+                }),
+            ),
+            "/api/v1/operator/brain/user-resolution" if request.contains(&identity_workos) => (
+                200,
+                json!({
+                    "workosUserId": identity_workos,
+                    "userNpub": identity_human,
+                }),
+            ),
+            _ => (404, json!({ "error": "not_found" })),
+        }
+    });
+
+    let core = TcpListener::bind("127.0.0.1:0").unwrap();
+    let core_url = format!("http://{}", core.local_addr().unwrap());
+    let core_email = bob_email.to_owned();
+    let core_workos = bob_workos_id.to_owned();
+    let core_agent = bob_agent_npub.clone();
+    let core_agent_email = bob_agent_email.to_owned();
+    serve(core, move |request| {
+        match request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/")
+        {
+            "/api/core/v1/brain/account-agent-roster"
+                if request.contains(&core_email) || request.contains(&core_workos) =>
+            {
+                (
+                    200,
+                    json!({
+                        "workosUserId": core_workos,
+                        "humanMailbox": core_email,
+                        "rosterRevision": 1,
+                        "agents": [
+                            {
+                                "managedAgentEmail": core_agent_email,
+                                "agentNpub": core_agent,
+                                "status": "active",
+                            }
+                        ],
+                    }),
+                )
+            }
             _ => (404, json!({ "error": "not_found" })),
         }
     });
@@ -1054,6 +1244,251 @@ fn supervisor_quiesces_after_catch_up_when_nothing_changes() {
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn built_fbrain_process_cli_invite_approval_roundtrip() {
+    // The blessed invite story, CLI end to end: a member without admin
+    // standing asks to invite an account, the server files an approval
+    // request with a freshly resolved plan, the admin approves from the CLI
+    // (the chat approval card drives the identical submit route), and the
+    // invitee accepts from the CLI. No secrets, keys, or plaintext cross the
+    // server boundary.
+    let scratch = TempDir::new().unwrap();
+    let home_alice = scratch.path().join("home-alice");
+    let home_member = scratch.path().join("home-member");
+    let home_bob = scratch.path().join("home-bob");
+    for home in [&home_alice, &home_member, &home_bob] {
+        fs::create_dir_all(home).unwrap();
+    }
+    for (home, secret) in [
+        (
+            &home_alice,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ),
+        (
+            &home_bob,
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        ),
+        (
+            &home_member,
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        ),
+    ] {
+        let secret_file = scratch
+            .path()
+            .join(format!("secret-{}", secret[..2].to_owned()));
+        fs::write(&secret_file, format!("{secret}\n")).unwrap();
+        assert!(
+            run(
+                home,
+                home,
+                &[
+                    "auth",
+                    "import",
+                    "--file",
+                    secret_file.to_str().unwrap(),
+                    "--json"
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let bob_human_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000005")
+            .unwrap();
+    let bob_human_npub = NostrPublicKey::from_protocol(bob_human_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let npub_of = |home: &Path| -> String {
+        let output = run(home, home, &["signer", "public-key", "--json"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["npub"].as_str().unwrap().to_owned()
+    };
+    let alice_npub = npub_of(&home_alice);
+    let member_npub = npub_of(&home_member);
+    let bob_agent_npub = npub_of(&home_bob);
+
+    let (identity_url, core_url) = spawn_card_roundtrip_authorities(
+        "bob@example.com",
+        "bob-agent@example.com",
+        "process-bob",
+        bob_human_npub,
+        bob_agent_npub.clone(),
+    );
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server_with_authorities(&alice_npub, &member_npub, identity_url, core_url);
+    let run_server = |home: &Path, args: &[&str]| {
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        command(home, home)
+            .env("FBRAIN_NOW", now)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let json_of = |label: &str, output: &Output| -> Value {
+        assert!(
+            output.status.success(),
+            "{label} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // The member belongs to the organization brain but holds no admin
+    // standing: their invite must become an approval request, not a commit.
+    let member_added = run_server(
+        &home_alice,
+        &[
+            "admin",
+            "member",
+            "add",
+            "--brain",
+            "roundtrip-org",
+            "--target",
+            &member_npub,
+            "--json",
+        ],
+    );
+    assert!(
+        member_added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&member_added.stderr)
+    );
+
+    let requested = json_of(
+        "member invite brain create",
+        &run_server(
+            &home_member,
+            &[
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                "bob@example.com",
+                "--json",
+            ],
+        ),
+    );
+    assert_eq!(requested["status"], "pending");
+    assert_eq!(requested["action"], "invite-commit");
+    let request_id = requested["id"].as_str().unwrap().to_owned();
+    let plan_id = requested["payload"]["planId"].as_str().unwrap().to_owned();
+    assert!(!plan_id.is_empty());
+
+    // The admin sees the pending request and approves it from the CLI; the
+    // chat approval card submits the identical artifact route.
+    let listed = json_of(
+        "approvals list",
+        &run_server(&home_alice, &["approvals", "list", "--json"]),
+    );
+    let pending_ids: Vec<&str> = listed["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|request| request["id"].as_str())
+        .collect();
+    assert!(pending_ids.contains(&request_id.as_str()));
+
+    let approved = json_of(
+        "approvals approve",
+        &run_server(
+            &home_alice,
+            &["approvals", "approve", "--id", &request_id, "--json"],
+        ),
+    );
+    assert_eq!(approved["status"], "applied");
+
+    // Bob's principal discovers and accepts its per-principal invitation.
+    let bob_invitations = json_of(
+        "bob invite brain list",
+        &run_server(&home_bob, &["invite", "brain", "list", "--json"]),
+    );
+    let invitation_id = bob_invitations["invitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|invitation| {
+            let id = invitation["id"].as_str()?;
+            (invitation["brainId"].as_str() == Some("roundtrip-org")).then_some(id.to_owned())
+        })
+        .expect("bob's agent principal has an invitation for roundtrip-org");
+    let accepted = json_of(
+        "bob invite brain accept",
+        &run_server(
+            &home_bob,
+            &[
+                "invite",
+                "brain",
+                "accept",
+                "--id",
+                &invitation_id,
+                "--json",
+            ],
+        ),
+    );
+    assert_eq!(accepted["status"], "accepted");
+
+    let bob_brains = json_of(
+        "bob brain list",
+        &run_server(&home_bob, &["brain", "list", "--json"]),
+    );
+    assert!(
+        bob_brains["brains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|brain| brain["brainId"].as_str() == Some("roundtrip-org"))
+    );
+
+    // Deny closes the door: a second request is denied and never reaches the
+    // invitee.
+    let second = json_of(
+        "second member invite",
+        &run_server(
+            &home_member,
+            &[
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                "bob@example.com",
+                "--json",
+            ],
+        ),
+    );
+    let second_id = second["id"].as_str().unwrap().to_owned();
+    let denied = json_of(
+        "approvals deny",
+        &run_server(
+            &home_alice,
+            &["approvals", "deny", "--id", &second_id, "--json"],
+        ),
+    );
+    assert_eq!(denied["status"], "denied");
+    // Bob's earlier invitation is accepted (no longer pending) and the denied
+    // request never produced one: his pending list is empty.
+    let bob_after = json_of(
+        "bob invite brain list after deny",
+        &run_server(&home_bob, &["invite", "brain", "list", "--json"]),
+    );
+    assert_eq!(bob_after["invitations"].as_array().unwrap().len(), 0);
+
+    drop(shutdown);
+    server_thread.join().unwrap();
 }
 
 #[test]

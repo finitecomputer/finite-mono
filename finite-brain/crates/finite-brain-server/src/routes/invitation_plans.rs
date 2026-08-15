@@ -27,7 +27,8 @@ struct CoreRosterAgentEntry {
 
 /// Fully resolved invite set for one invited email: human Principal, grant-ready
 /// agent Principals, and explicit exclusions for everything not grant-ready.
-struct PlanResolution {
+#[derive(Clone)]
+pub(crate) struct PlanResolution {
     workos_user_id: Option<String>,
     human_email: String,
     human_npub: Option<String>,
@@ -39,7 +40,7 @@ struct PlanResolution {
 /// Resolve the invited email through Finite Identity and, when it binds to a
 /// Finite account, the Core account agent roster. Roster agents that are not
 /// grant-ready become explicit exclusions, never silent drops.
-async fn resolve_invitation_plan(
+pub(crate) async fn resolve_invitation_plan(
     state: &ServerState,
     email: &str,
 ) -> Result<PlanResolution, ApiError> {
@@ -302,26 +303,40 @@ fn timestamp_plus_seconds(state: &ServerState, seconds: u64) -> String {
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
 }
 
-fn persist_invitation_plan(
+pub(crate) fn persist_invitation_plan(
     state: &ServerState,
     brain_id: &BrainId,
     inviter_npub: &UserId,
     resolution: PlanResolution,
 ) -> Result<StoredInvitationPlan, ApiError> {
+    persist_invitation_plan_with_salt(state, brain_id, inviter_npub, resolution, None)
+}
+
+/// `unique_salt` separates otherwise identical plans created within the same
+/// second (deterministic ids collide there); approval-request filing retries
+/// with an attempt suffix, mirroring the approval-request id retry.
+pub(crate) fn persist_invitation_plan_with_salt(
+    state: &ServerState,
+    brain_id: &BrainId,
+    inviter_npub: &UserId,
+    resolution: PlanResolution,
+    unique_salt: Option<&str>,
+) -> Result<StoredInvitationPlan, ApiError> {
     let created_at = server_timestamp(state);
     let expires_at = timestamp_plus_seconds(state, PLAN_COMMIT_WINDOW_SECONDS);
     let plan_hash = resolution_plan_hash(brain_id, inviter_npub, &resolution);
-    let id = generated_link_id(
-        "plan",
-        &[
-            brain_id.as_str(),
-            inviter_npub.as_str(),
-            resolution.human_email.as_str(),
-            plan_hash.as_str(),
-            created_at.as_str(),
-        ],
-        16,
-    );
+    let mut id_parts = [
+        brain_id.as_str(),
+        inviter_npub.as_str(),
+        resolution.human_email.as_str(),
+        plan_hash.as_str(),
+        created_at.as_str(),
+    ]
+    .to_vec();
+    if let Some(salt) = unique_salt {
+        id_parts.push(salt);
+    }
+    let id = generated_link_id("plan", &id_parts, 16);
     let human_npub = resolution
         .human_npub
         .as_deref()

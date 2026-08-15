@@ -877,6 +877,11 @@ pub struct ApprovalRequestCreateRequest {
     pub action: String,
     #[serde(default)]
     pub plan_id: Option<String>,
+    /// Invite-commit shorthand for requesters without admin standing: the
+    /// server resolves this account email into a fresh invitation plan and
+    /// files the request against it. Mutually exclusive with `plan_id`.
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default)]
     pub target_npubs: Vec<String>,
 }

@@ -235,10 +235,59 @@ pub(crate) async fn create_approval_request_handler(
     body: Bytes,
 ) -> Result<Json<ApprovalRequestResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: ApprovalRequestCreateRequest = serde_json::from_slice(&body)
+    let mut request: ApprovalRequestCreateRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let actor_user_id = UserId::new(actor)?;
+    // Invite-commit shorthand: a requester without admin standing names the
+    // account email instead of an admin-preflighted plan; resolve and persist
+    // the plan here so the human's later signature commits exactly this plan.
+    if request.action == finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT {
+        let target = request
+            .target
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        match (request.plan_id.as_deref(), target) {
+            (None, Some(email)) => {
+                let email = canonical_email(&email)?;
+                let resolution =
+                    crate::routes::invitation_plans::resolve_invitation_plan(&state, &email)
+                        .await?;
+                // Identical requests filed within the same second derive the
+                // same deterministic plan id; retry with a salt instead of
+                // surfacing the unique constraint as a 409.
+                let mut plan_error = None;
+                for attempt in 0..3_u8 {
+                    let salt = (attempt > 0).then(|| format!("approval-filing-{attempt}"));
+                    match crate::routes::invitation_plans::persist_invitation_plan_with_salt(
+                        &state,
+                        &brain_id,
+                        &actor_user_id,
+                        resolution.clone(),
+                        salt.as_deref(),
+                    ) {
+                        Ok(plan) => {
+                            request.plan_id = Some(plan.id.to_string());
+                            plan_error = None;
+                            break;
+                        }
+                        Err(error) => plan_error = Some(error),
+                    }
+                }
+                if let Some(error) = plan_error {
+                    return Err(error);
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invite-commit approval requests name a plan id or a target email, not both",
+                ));
+            }
+            _ => {}
+        }
+    }
     let target_npubs = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
