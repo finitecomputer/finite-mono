@@ -124,6 +124,7 @@ fn run() -> anyhow::Result<ExitCode> {
             if args.workos_staging {
                 stack = stack.with_workos_staging()?;
             }
+            stack.ensure_service_binaries_available()?;
             stack.prepare_host_environment(args.dry_run)?;
             stack.write_files()?;
             stack.print_summary();

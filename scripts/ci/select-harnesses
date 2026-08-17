@@ -208,7 +208,13 @@ def select_for_paths(paths: list[str]) -> HarnessSelection:
     selection = HarnessSelection()
     for path in paths:
         apply_path(selection, path)
+    apply_harness_dependencies(selection)
     return selection
+
+
+def apply_harness_dependencies(selection: HarnessSelection) -> None:
+    if selection.run_devfinity_smoke or selection.run_brain_product_matrix:
+        selection.run_nix_service_packages = True
 
 
 def apply_path(selection: HarnessSelection, path: str) -> None:

@@ -145,6 +145,10 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
+          finitePackages = import ./infra/nixos/packages.nix {
+            pkgs = import nixpkgs { inherit system; };
+            sourceRoot = ./.;
+          };
           gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
           # Litestream comes from the lat1 platform pin: 25.11's litestream is
           # 0.3.x and marked insecure, and the restore drill must use the same
@@ -191,7 +195,7 @@
           hermesSupported = builtins.hasAttr system hermes-agent.packages;
         in
         {
-          packages = hermesPackagesFor system;
+          packages = (hermesPackagesFor system) // finitePackages;
 
           devShells = {
             default = pkgs.mkShell {

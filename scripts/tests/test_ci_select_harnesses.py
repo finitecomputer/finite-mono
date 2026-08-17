@@ -181,6 +181,20 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_finite_status_contract"},
         )
 
+    def test_devfinity_smoke_depends_on_nix_service_packages(self) -> None:
+        selection = select_harnesses.HarnessSelection(run_devfinity_smoke=True)
+
+        select_harnesses.apply_harness_dependencies(selection)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_brain_product_matrix_depends_on_nix_service_packages(self) -> None:
+        selection = select_harnesses.HarnessSelection(run_brain_product_matrix=True)
+
+        select_harnesses.apply_harness_dependencies(selection)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
     def test_merge_group_selects_every_active_harness(self) -> None:
         args = argparse.Namespace(changed_files=None, event="merge_group")
         selection, _reason, _paths = select_harnesses.select_harnesses(args)

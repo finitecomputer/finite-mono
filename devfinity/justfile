@@ -20,7 +20,7 @@ web-design-reset:
 
 # Starts devfinity harness. `just dev up` or `just dev up --headless`
 up *args:
-    cd .. && cargo run -p devfinity -- up {{ args }}
+    cd .. && nix run .#devfinity -- up {{ args }}
 
 # Securely caches one of your existing Finite Private keys for local chat.
 inference-key:
@@ -29,17 +29,17 @@ inference-key:
     printf 'Paste an existing Finite Private key: ' >&2
     IFS= read -r -s finite_private_key
     printf '\n' >&2
-    printf '%s\n' "${finite_private_key}" | (cd .. && cargo run --quiet -p devfinity -- inference-key)
+    printf '%s\n' "${finite_private_key}" | (cd .. && nix run .#devfinity-unwrapped -- inference-key)
 
 # Starts an isolated, fresh services-only stack, runs its smoke test, and tears it down.
 
 # This portable profile is the Linux CI gate; it does not claim to launch an Agent Runtime.
 smoke:
-    cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
+    cd .. && nix run .#devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
 
 # Starts the real Apple Container SaaS stack and proves dashboard -> Core -> Runner -> Runtime.
 saas-smoke:
-    cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-saas-smoke
+    cd .. && nix run .#devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
 # Starts the local encrypted-chat stack, pairs the iOS app, and launches Simulator.
 
@@ -57,11 +57,11 @@ electron-local-agent:
 
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:
-    cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
+    cd .. && nix run .#devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
 
 # Prints running devfinity infra status
 status:
-    cd .. && cargo run -p devfinity -- status
+    cd .. && nix run .#devfinity-unwrapped -- status
 
 # Restarts one running devfinity process through the default process-compose socket
 restart process:
@@ -69,4 +69,4 @@ restart process:
 
 # Kills running devfinity processes
 cleanup:
-    cd .. && cargo run -p devfinity -- cleanup
+    cd .. && nix run .#devfinity-unwrapped -- cleanup

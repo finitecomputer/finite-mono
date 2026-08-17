@@ -141,7 +141,7 @@ claim to provision an Agent Runtime:
 
 ```sh
 just dev smoke
-cargo run -p devfinity -- up --services-only
+nix run .#devfinity -- up --services-only
 ```
 
 `just dev smoke` uses the isolated state root
@@ -149,6 +149,10 @@ cargo run -p devfinity -- up --services-only
 limit), requests `--fresh` explicitly, verifies
 the service spine, and tears it down. `--fresh` is rejected for the default SaaS
 profile so a routine start can never erase agent data.
+
+Stack-starting Devfinity commands run through the Nix `devfinity` wrapper,
+which puts the Nix-built service binaries on `PATH`. Devfinity no longer builds
+or launches host services through per-service Cargo fallbacks.
 
 ## Managed test commands
 
@@ -289,8 +293,9 @@ The default SaaS profile requires:
   absent builder with 8 CPUs and 8 GiB; it does not reconfigure an existing
   builder.
 - One of the inference credentials described above.
-- The normal Nix development shell (`direnv allow`), which supplies Rust,
-  Postgres, Node, and process-compose.
+- The normal Nix development shell (`direnv allow`) plus the Nix `devfinity`
+  wrapper, which supplies the host service binaries, Postgres, Node, and
+  process-compose for stack startup.
 
 The services-only profile is portable and does not require Apple Container or
 an inference credential.
