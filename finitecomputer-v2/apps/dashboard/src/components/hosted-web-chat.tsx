@@ -65,7 +65,16 @@ import type {
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
-import { BrainActionCards } from "@/components/brain-action-cards";
+import {
+  BrainApprovalCards,
+  BrainInvitationCards,
+  useBrainApprovalDetails,
+} from "@/components/brain-action-cards";
+import {
+  parseApproveQuestion,
+  parseApproveResponse,
+  type BrainApproveChoice,
+} from "@/lib/brain-approval-metadata";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
@@ -272,6 +281,32 @@ export function HostedWebChat({
     () => transcriptItems(messages, state?.identity.account_id ?? null),
     [messages, state?.identity.account_id]
   );
+  // Approval questions anchor to the agent messages carrying them; the
+  // referenced request ids are the only server fetch trigger (no polling).
+  const approvalRequestIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          messages.flatMap((message) =>
+            (parseApproveQuestion(message)?.requests ?? []).map((reference) => reference.requestId)
+          )
+        )
+      ),
+    [messages]
+  );
+  const approvalDetails = useBrainApprovalDetails(approvalRequestIds);
+  const approvalResolutions = useMemo(() => {
+    const resolved = new Map<string, BrainApproveChoice>();
+    for (const message of messages) {
+      if (!message.is_mine) continue;
+      const response = parseApproveResponse(message);
+      if (!response) continue;
+      for (const reference of response.requests) {
+        resolved.set(reference.requestId, response.choice);
+      }
+    }
+    return resolved;
+  }, [messages]);
   const liveMembers = useMemo(
     () => {
       if (!selectedRoom || !selectedTopic || !selectedChat) return [];
@@ -951,12 +986,32 @@ export function HostedWebChat({
                     ) : null}
                     {transcript.map((item) =>
                       item.type === "message" ? (
-                        <MessageRow
-                          key={item.message.message_id}
-                          attachmentUrl={attachmentUrl}
-                          message={item.message}
-                          ownAccountId={state?.identity.account_id ?? ""}
-                        />
+                        <div key={item.message.message_id}>
+                          <MessageRow
+                            attachmentUrl={attachmentUrl}
+                            message={item.message}
+                            ownAccountId={state?.identity.account_id ?? ""}
+                          />
+                          {selectedRoom ? (
+                            <BrainApprovalCards
+                              message={item.message}
+                              details={approvalDetails}
+                              resolution={approvalResolutions}
+                              onSendChoice={
+                                (text, metadataJson) =>
+                                  dispatch(
+                                    messageAction(
+                                      selectedRoom.room_id,
+                                      text,
+                                      selectedTopic,
+                                      selectedChat,
+                                      metadataJson
+                                    )
+                                  ).then(() => undefined)
+                              }
+                            />
+                          ) : null}
+                        </div>
                       ) : (
                         <ToolRollup
                           key={item.id}
@@ -969,7 +1024,7 @@ export function HostedWebChat({
                     {activityLabel && !waitingToolRollupId
                       ? <LiveActivity label={activityLabel} />
                       : null}
-                    <BrainActionCards
+                    <BrainInvitationCards
                       className="finite-chat__brain-cards"
                       revision={messages.length}
                       onSendMessage={
@@ -1537,10 +1592,10 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
-  if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
-  if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
-  return { SendMessage: { room_id: roomId, text } };
+function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null, metadataJson?: string): HostedChatAction {
+  if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text, metadata_json: metadataJson ?? null } };
+  if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text, metadata_json: metadataJson ?? null } };
+  return { SendMessage: { room_id: roomId, text, metadata_json: metadataJson ?? null } };
 }
 
 function sitesFromMessages(messages: HostedChatMessage[]) {
