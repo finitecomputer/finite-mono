@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Boot a disposable devfinity services-only stack and stage the chat Brain
+# card demo (scripts/devfinity-brain-card-hands-on) against it, then wait
+# for the operator to drive the dashboard.
+#
+#   scripts/with-dev-env scripts/devfinity-brain-card-hands-on-up
+#
+# Services-only: no Agent Runtime container, so the aarch64-linux runtime
+# image never builds. State and logs land in .local-state/brain-cards-<ts>/.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo_root"
+
+state_dir="$repo_root/.local-state/brain-cards-$(date +%s)"
+mkdir -p "$state_dir"
+
+read -r port_offset agent_port <<<"$(python3 - <<'PY'
+import socket
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+bases = [14200, 13002, 15432, 18787, 38918, 18789, 18788, 18790, 18002, 14199]
+offset = None
+for candidate in range(1000, 20000):
+    probes = []
+    try:
+        for base in bases:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", base + candidate))
+            probes.append(probe)
+        offset = candidate
+        break
+    except OSError:
+        continue
+    finally:
+        for probe in probes:
+            probe.close()
+if offset is None:
+    raise SystemExit("could not reserve a collision-free devfinity port offset")
+print(offset, free_port())
+PY
+)"
+
+echo "devfinity Brain card demo state: $state_dir (port offset $port_offset)"
+
+cleanup() {
+  rm -rf -- "$state_dir/runs" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# The host-side fbrain identities need the built CLI before the stack boots.
+cargo build -p finite-brain-cli
+
+export DEVFINITY_STATE_DIR="$state_dir"
+export DEVFINITY_PORT_OFFSET="$port_offset"
+export DEVFINITY_RUNTIME_AGENT_PORT="$agent_port"
+export DEVFINITY_READY_TIMEOUT_SECS="${DEVFINITY_READY_TIMEOUT_SECS:-3600}"
+# No chat turn is driven by the staging script.
+export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE="finite-brain-cards-non-secret"
+export FC_RUNNER_FINITE_PRIVATE_BASE_URL="http://127.0.0.1:9/v1"
+export FC_RUNNER_FINITE_PRIVATE_MODEL="finite-brain-cards"
+
+cargo run -p devfinity -- \
+  --state-dir "$state_dir" \
+  up --services-only --headless -- \
+  "$repo_root/scripts/devfinity-brain-card-hands-on"
