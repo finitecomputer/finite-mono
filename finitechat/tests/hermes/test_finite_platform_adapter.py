@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from dataclasses import dataclass, field
@@ -2752,6 +2753,81 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
         self.assertIn("serve", calls[0])
         self.assertTrue(fake_process.terminated)
+
+    def test_final_send_carries_brain_approval_metadata_and_drains_outbox(self):
+        with tempfile.TemporaryDirectory() as config_dir:
+            outbox = Path(config_dir) / "approval-outbox.jsonl"
+            fresh = json.dumps(
+                {
+                    "version": 1,
+                    "kind": "brain-approval-filed",
+                    "brainId": "brain-1",
+                    "requestId": "approval-1",
+                    "filedAtUnix": time.time(),
+                }
+            )
+            stale = json.dumps(
+                {
+                    "version": 1,
+                    "kind": "brain-approval-filed",
+                    "brainId": "brain-2",
+                    "requestId": "approval-2",
+                    "filedAtUnix": time.time() - 3600,
+                }
+            )
+            outbox.write_text(f"{fresh}\n{stale}\n", encoding="utf-8")
+            with patch.dict(os.environ, {"FBRAIN_CONFIG_DIR": config_dir}):
+                adapter = self.adapter()
+                calls = []
+
+                async def fake_json(action, payload, *, timeout):
+                    calls.append((action, payload))
+                    return self.module._FiniteChatResult(True, {"message_id": "m-1"}, None, False)
+
+                adapter._finitechat_json = fake_json
+                result = asyncio.run(adapter.send("room-agent-1", "Asked Alice to approve."))
+
+            self.assertTrue(result.success)
+            self.assertEqual(calls[0][0], "send")
+            approve = calls[0][1]["metadata"]["approve"]
+            self.assertEqual(approve["service"], "brain")
+            self.assertEqual(
+                approve["requests"],
+                [{"brainId": "brain-1", "requestId": "approval-1"}],
+            )
+            # The drained filing is gone; the stale one remains (never rides).
+            remaining = outbox.read_text(encoding="utf-8")
+            self.assertNotIn("approval-1", remaining)
+            self.assertIn("approval-2", remaining)
+
+    def test_non_final_deliveries_never_carry_brain_approvals(self):
+        with tempfile.TemporaryDirectory() as config_dir:
+            outbox = Path(config_dir) / "approval-outbox.jsonl"
+            outbox.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "kind": "brain-approval-filed",
+                        "brainId": "brain-1",
+                        "requestId": "approval-1",
+                        "filedAtUnix": time.time(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"FBRAIN_CONFIG_DIR": config_dir}):
+                adapter = self.adapter()
+                for payload in (
+                    {"kind": "tool", "status": "complete", "metadata": {}},
+                    {"kind": "message", "status": "running", "metadata": {}},
+                    {"kind": "status", "status": "complete", "metadata": {}},
+                ):
+                    drained = adapter._attach_brain_approval_metadata(payload)
+                    self.assertEqual(drained, [])
+                    self.assertNotIn("approve", payload)
+                # The filing is untouched and still waiting for a final send.
+                self.assertIn("approval-1", outbox.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

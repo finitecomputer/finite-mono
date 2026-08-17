@@ -480,6 +480,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         super().__init__(config, _finite_platform())
         extra = getattr(config, "extra", {}) or {}
         self.home = str(extra.get("home") or os.getenv("FINITECHAT_HOME") or "").strip()
+        # fbrain files approval requests into this Runtime's config dir; the
+        # next final delivery carries them as metadata.approve (chat cards).
+        self._brain_approval_outbox = _brain_approval_outbox_path()
         # Optional room filter; by default the adapter serves every room the
         # Agent Principal has joined through MLS Add + Welcome.
         self.room_id = str(extra.get("room_id") or os.getenv("FINITECHAT_ROOM_ID") or "").strip()
@@ -655,9 +658,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         payload = self._send_payload(chat_id, content, reply_to, metadata)
+        drained = self._attach_brain_approval_metadata(payload)
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
+        self._finish_brain_approval_drain(drained)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
         if message_id:
             self._remember_outbound_message_route(
@@ -736,9 +741,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             "finalize": bool(finalize),
             "metadata": {},
         }
+        drained = (
+            self._attach_brain_approval_metadata(payload) if finalize and kind == "message" else []
+        )
         result = await self._finitechat_json("edit", payload, timeout=30)
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
+        self._finish_brain_approval_drain(drained)
         edited_message_id = str(result.data.get("message_id") or message_id)
         self._remember_outbound_message_route(str(message_id), conversation_id, segment_id, kind)
         if edited_message_id:
@@ -1390,6 +1399,40 @@ class FiniteChatAdapter(BasePlatformAdapter):
         meta["_finitechat_kind"] = "media"
         return await self.send(chat_id=chat_id, content=body, reply_to=reply_to, metadata=meta)
 
+    def _attach_brain_approval_metadata(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Ride unreported brain approval filings on a final user-visible
+        delivery, as the reference-only `metadata.approve` envelope.
+
+        Only final deliveries (kind message, status complete) carry the
+        question: commentary, tool progress, and streaming partials never do.
+        Returns the drained filings; the caller marks them reported once the
+        delivery is accepted.
+        """
+        if str(payload.get("kind")) != "message" or str(payload.get("status")) != "complete":
+            return []
+        outbox = self._brain_approval_outbox
+        if outbox is None or not outbox.exists():
+            return []
+        filings = _brain_approval_filings(outbox)
+        if not filings:
+            return []
+        meta = payload.setdefault("metadata", {})
+        if not isinstance(meta, dict) or "approve" in meta:
+            return []
+        meta["approve"] = _brain_approval_metadata(filings)
+        return filings
+
+    def _finish_brain_approval_drain(self, drained: list[dict[str, Any]]) -> None:
+        if not drained:
+            return
+        outbox = self._brain_approval_outbox
+        if outbox is None:
+            return
+        with contextlib.suppress(OSError):
+            _mark_brain_approval_filings_reported(
+                outbox, {filing["requestId"] for filing in drained}
+            )
+
     def _send_payload(
         self,
         chat_id: str,
@@ -2009,6 +2052,99 @@ def _infer_finitechat_kind(content: str) -> str:
 
 def _infer_finitechat_status(content: str) -> str:
     return "running" if "▉" in str(content or "") else "complete"
+
+
+BRAIN_APPROVAL_OUTBOX_NAME = "approval-outbox.jsonl"
+# fbrain's approval requests expire after 15 minutes; a stale unattached
+# filing should not ride a much later delivery.
+BRAIN_APPROVAL_OUTBOX_MAX_AGE_SECS = 20 * 60
+
+
+def _brain_approval_outbox_path() -> Path | None:
+    """Mirror fbrain's config-dir precedence exactly (environment.rs)."""
+    explicit = os.getenv("FBRAIN_CONFIG_DIR", "").strip()
+    if explicit:
+        return Path(explicit) / BRAIN_APPROVAL_OUTBOX_NAME
+    finite_home = os.getenv("FINITE_HOME", "").strip()
+    if finite_home:
+        return Path(finite_home) / "fbrain" / BRAIN_APPROVAL_OUTBOX_NAME
+    home = os.getenv("HOME", "").strip()
+    if home:
+        return Path(home) / ".finitebrain" / "fbrain" / BRAIN_APPROVAL_OUTBOX_NAME
+    return None
+
+
+def _brain_approval_filings(path: Path) -> list[dict[str, Any]]:
+    """Fresh brain-approval-filed notices awaiting a delivery to ride."""
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    now = time.time()
+    pending: list[dict[str, Any]] = []
+    for raw in raw_lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            notice = json.loads(stripped)
+        except ValueError:
+            continue
+        if not isinstance(notice, dict) or notice.get("kind") != "brain-approval-filed":
+            continue
+        brain_id = _string_or_none(notice.get("brainId"))
+        request_id = _string_or_none(notice.get("requestId"))
+        filed_at = notice.get("filedAtUnix")
+        if not brain_id or not request_id:
+            continue
+        if (
+            isinstance(filed_at, int | float)
+            and now - float(filed_at) > BRAIN_APPROVAL_OUTBOX_MAX_AGE_SECS
+        ):
+            continue
+        pending.append({"brainId": brain_id, "requestId": request_id})
+    return pending
+
+
+def _mark_brain_approval_filings_reported(path: Path, request_ids: set[str]) -> None:
+    """Drop the drained notices, preserving lines appended meanwhile."""
+    try:
+        current = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    survivors: list[str] = []
+    drained = False
+    for raw in current:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        request_id: str | None = None
+        try:
+            notice = json.loads(stripped)
+        except ValueError:
+            notice = None
+        if isinstance(notice, dict) and notice.get("kind") == "brain-approval-filed":
+            request_id = _string_or_none(notice.get("requestId"))
+        if request_id is not None and request_id in request_ids:
+            drained = True
+            continue
+        survivors.append(stripped)
+    if not drained:
+        return
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text("\n".join(survivors) + ("\n" if survivors else ""), encoding="utf-8")
+    temp.replace(path)
+
+
+def _brain_approval_metadata(requests: list[dict[str, Any]]) -> dict[str, Any]:
+    """The reference-only approve envelope: no approval payload ever rides."""
+    return {
+        "service": "brain",
+        "requests": [
+            {"brainId": request["brainId"], "requestId": request["requestId"]}
+            for request in requests
+        ],
+    }
 
 
 def _local_attachment(path: str, kind: str) -> dict[str, Any]:
