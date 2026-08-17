@@ -118,10 +118,14 @@ export async function hostedSignedBrainRequest(
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new BrainHostedClientError(
-      text || `Brain ${method} ${path} returned HTTP ${response.status}`,
-      response.status
-    );
+    let message = text || `Brain ${method} ${path} returned HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown };
+      if (typeof parsed.error === "string") message = parsed.error;
+    } catch {
+      // Non-JSON body: show it as-is.
+    }
+    throw new BrainHostedClientError(message, response.status);
   }
   if (!text.trim()) return { status: "ok" };
   try {

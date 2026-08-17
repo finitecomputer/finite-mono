@@ -151,16 +151,23 @@ export function BrainActionCards({
       {approvals.map((card) => {
         const key = `approval:${card.id}`;
         const state = cardState[key] ?? "idle";
+        const expired = card.expiresAt * 1000 <= Date.now();
         return (
-          <article key={key} className="finite-brain-card" data-kind="approval">
+          <article
+            key={key}
+            className="finite-brain-card"
+            data-kind="approval"
+            data-expired={expired || undefined}
+          >
             <header className="finite-brain-card__head">
               <BrainIcon aria-hidden className="size-4" />
               <strong>{approvalLabel(card)}</strong>
               <span className="finite-brain-card__brain">{card.brainName}</span>
             </header>
             <p className="finite-brain-card__body">
-              Your agent requested this action. Approving signs it with your
-              account key.
+              {expired
+                ? "This request expired. Ask your agent to file it again."
+                : "Your agent requested this action. Approving signs it with your account key."}
             </p>
             {state === "error" ? (
               <p className="finite-brain-card__error" role="alert">
@@ -170,7 +177,7 @@ export function BrainActionCards({
             <footer className="finite-brain-card__actions">
               <button
                 type="button"
-                disabled={state === "working" || state === "done"}
+                disabled={state === "working" || state === "done" || expired}
                 onClick={() =>
                   act(
                     key,
@@ -194,7 +201,7 @@ export function BrainActionCards({
               </button>
               <button
                 type="button"
-                disabled={state === "working" || state === "done"}
+                disabled={state === "working" || state === "done" || expired}
                 onClick={() =>
                   act(
                     key,
