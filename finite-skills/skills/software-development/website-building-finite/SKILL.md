@@ -5,7 +5,8 @@ description: Build and ship websites, landing pages, dashboards, documents, and 
 
 # Website Building
 
-Use this skill for the concrete delivery workflow: scaffold, build, run locally, inspect in-browser, and publish through finite.
+Use this skill for the concrete delivery workflow: establish direction, scaffold,
+build, reveal early, inspect in-browser, and publish through finite.
 
 Read this skill when:
 - the task is to build or ship a website, landing page, dashboard, internal tool UI, or browser game
@@ -28,6 +29,39 @@ rules override anything else:
 - for interactive or data-heavy sites, use Playwright QA before publishing
 - initialize git in new projects and commit after each meaningful milestone
 
+## Fast First Reveal
+
+Optimize for a fast, useful first reveal. Do not spend a long hidden turn polishing
+an aesthetic direction the human has not seen or approved.
+
+For a new site or substantial redesign:
+
+1. Infer a credible initial direction from the prompt and existing brand context.
+   When using `impeccable-finite`, form its compact direction card and carry that
+   premise into the draft. Ask a question first only when the answer is truly blocking.
+2. Build the smallest coherent draft that makes the direction tangible. Prefer a
+   strong above-the-fold experience plus one representative section or state over
+   a complete but generic site.
+3. Run reveal QA only: confirm that the page starts, the primary view renders, and
+   there are no fatal browser errors. Make at most one automatic correction pass.
+4. Reveal the draft before exhaustive Playwright work. Include a screenshot or
+   private preview when available, label what is provisional, and name 2-3
+   meaningfully different aesthetic options. Recommend one and explain each option
+   in concrete terms such as subject cues, signature, type, density, color, imagery,
+   and motion—not vague labels alone.
+5. Ask the human to choose a direction or react in their own words. Make the cost
+   of the next step legible: distinguish a quick visual revision from completing
+   the build and running full QA.
+
+If the human already supplied precise art direction, still reveal the first coherent
+draft early, but do not manufacture an unnecessary choice. If the task is a small,
+well-specified edit, skip this checkpoint.
+
+Do not silently turn the first reveal into a 10-30 minute visual self-critique loop.
+The feeling of rapid creation is part of the product. Early human taste is more
+valuable than repeated agent guesses, and revision gets more expensive as the site
+becomes complete.
+
 Read the sibling `finite-sites-publishing-finite` skill before creating,
 updating, previewing, listing, or sharing any Project Output.
 
@@ -44,16 +78,21 @@ Choose one route, then load the matching references.
 
 ## Core Workflow
 
-1. Clarify the site type, product goal, and art direction.
-2. If the design direction is unclear or weak, read `impeccable-finite` before implementing.
-3. Research references first. Collect examples before designing.
-4. Scaffold the project in its own folder.
-5. Run `git init` if needed and commit after each major milestone.
-6. Build the experience with real assets and a custom SVG logo.
-7. For complex sites, run Playwright QA and iterate until the site actually looks good.
-8. Declare the correct `finite.toml` output kind, validate it with
+1. Identify the site type, product goal, known constraints, and initial art direction.
+2. If design quality or direction is central to the request, read
+   `impeccable-finite` and choose a coherent first lane without prolonged upfront
+   questioning.
+3. Research only what is needed to avoid a generic first direction.
+4. Scaffold the project in its own folder and run `git init` if needed.
+5. Build and reveal the smallest coherent draft using the Fast First Reveal rules.
+6. Incorporate the human's aesthetic guidance, then complete the experience with
+   real assets and a custom SVG logo when appropriate.
+7. Commit after each meaningful milestone.
+8. For complex sites, run progressive Playwright QA. Bound automatic correction
+   loops and surface decisions or stubborn issues instead of polishing indefinitely.
+9. Declare the correct `finite.toml` output kind, validate it with
    `fsite project init --dry-run`, then commit and push the Deploy Branch.
-9. Verify the private served preview before sharing. Only switch to public
+10. Verify the private served preview before sharing. Only switch to public
    after explaining the exposure and receiving explicit human agreement.
 
 ## Design Standards
@@ -63,6 +102,8 @@ Choose one route, then load the matching references.
 - Create visual rhythm with real imagery, diagrams, or illustration.
 - Make dashboards feel like products, not admin templates.
 - Treat screenshots as product review, not just bug checks.
+- Use screenshots to align with the human early, not only as private evidence at
+  the end of a long agent loop.
 
 ## Operational Rules
 

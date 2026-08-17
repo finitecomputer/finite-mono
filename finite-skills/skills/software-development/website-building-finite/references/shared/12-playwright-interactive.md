@@ -2,6 +2,9 @@
 
 Use Playwright for complex sites: dashboards, multi-step flows, data-heavy apps, and anything where the agent needs to see the result and iterate.
 
+Playwright depth should grow with product certainty. It is a quality tool, not a
+reason to hide the first result while the agent repeatedly debates its own taste.
+
 ## Rules
 
 - Use Playwright for real browser QA, not just DOM inspection.
@@ -65,7 +68,26 @@ On Finite:
 - Pass `--no-sandbox` when launching Chromium inside the runtime container.
 - Treat `npx playwright install chromium` as optional, not the primary path.
 
-## QA Loop
+## Progressive QA
+
+### Stage 1: First reveal
+
+Before the human has seen or approved the direction:
+
+1. Confirm the preview server responds.
+2. Open the primary desktop view.
+3. Confirm the intended content renders and no fatal console or page errors block it.
+4. Capture one representative screenshot or preview.
+5. Make at most one automatic correction pass, then reveal the draft and request
+   aesthetic guidance.
+
+Do not install a large new QA setup, exhaustively test secondary flows, tune every
+breakpoint, or repeat screenshot-fix cycles merely to improve an unapproved visual
+direction. State what remains untested so the human understands the draft's maturity.
+
+### Stage 2: Direction approved
+
+After the human confirms the direction, complete the build and expand QA:
 
 1. Write a short QA inventory: key flows, important states, and the claims you expect to make.
 2. Open the app in Playwright at desktop width first.
@@ -80,6 +102,11 @@ On Finite:
 kill "$(cat /tmp/project-qa.pid)"
 ```
 
+Keep correction loops bounded. After two unsuccessful attempts at the same visual or
+functional issue, report the issue and the available choices instead of continuing
+silently. A newly discovered product or aesthetic decision goes back to the human;
+a clear implementation defect can be fixed autonomously.
+
 ## Minimum Checks
 
 - Desktop screenshot at 1280px or wider
@@ -88,7 +115,7 @@ kill "$(cat /tmp/project-qa.pid)"
 - One off-happy-path or error-state check
 - One visual pass specifically looking for clipping, weak contrast, ugly spacing, and broken hierarchy
 
-## Publishing Gate
+### Stage 3: Pre-publish completion gate
 
 Do not publish until:
 
