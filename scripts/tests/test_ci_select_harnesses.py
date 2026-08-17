@@ -33,8 +33,8 @@ def selected(*paths: str) -> set[str]:
 class CiHarnessSelectionTests(unittest.TestCase):
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
-            selected("infra/monitoring/self-hosted/README.md"),
-            {"run_self_hosted_monitoring_contract"},
+            selected("infra/monitoring/README.md"),
+            {"run_monitoring_nixos_contract"},
         )
 
     def test_dashboard_readme_is_docs_only(self) -> None:
@@ -102,15 +102,25 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_monitoring_script_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
-            selected("infra/monitoring/self-hosted/scripts/check_self_hosted_monitoring_contract.py"),
-            {"run_self_hosted_monitoring_contract"},
+            selected("scripts/check_monitoring_nixos_contract.py"),
+            {"run_monitoring_nixos_contract"},
+        )
+
+    def test_monitoring_nixos_module_runs_monitoring_and_nix_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/nixos/modules/monitoring-vps.nix"),
+            {
+                "run_monitoring_nixos_contract",
+                "run_nix_checks",
+                "run_nix_service_packages",
+            },
         )
 
     def test_monitoring_runtime_metrics_script_runs_focused_contracts(self) -> None:
         self.assertEqual(
-            selected("infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py"),
+            selected("infra/nixos/scripts/finite_runtime_metrics.py"),
             {
-                "run_self_hosted_monitoring_contract",
+                "run_monitoring_nixos_contract",
                 "run_finite_status_contract",
                 "run_nix_checks",
             },
@@ -164,12 +174,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 "scripts/check_self_hosted_monitoring_contract.py",
                 "scripts/tests/test_finite_runtime_metrics.py",
             ),
-            {"run_self_hosted_monitoring_contract"},
+            {"run_monitoring_nixos_contract"},
         )
         self.assertEqual(
             selected("scripts/finite_runtime_metrics.py"),
             {
-                "run_self_hosted_monitoring_contract",
+                "run_monitoring_nixos_contract",
                 "run_finite_status_contract",
                 "run_nix_checks",
             },

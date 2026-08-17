@@ -120,6 +120,14 @@
         ];
       };
 
+      monitoring = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          revisionModule
+          ./infra/nixos/hosts/finite-monitoring
+        ];
+      };
+
       hermesPackagesFor =
         system:
         if builtins.hasAttr system hermes-agent.packages then
@@ -263,6 +271,7 @@
             finite-lat-3-disko = lat3.config.system.build.diskoScript;
             finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-3-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
       };
 
@@ -285,5 +294,9 @@
       # The qualified blank-slate host carries the Standard Runner accepting
       # new creation with its host-configured hard sandbox limit.
       nixosConfigurations.finite-lat-3 = lat3;
+
+      # Dedicated NixOS Grafana/Prometheus/Loki receiver. This is the hard-cut
+      # replacement for the historical monitoring Docker Compose stack.
+      nixosConfigurations.finite-monitoring = monitoring;
     };
 }

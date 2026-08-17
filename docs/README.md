@@ -24,6 +24,9 @@ commands against the owning source folder before relying on them.
 - [CI gate MVP hard-cut plan](ci-gate-mvp-plan.md): narrow fail-closed change
   classification, one authoritative merge check, rollout acceptance, and the
   post-MVP module onboarding queue.
+- [LAT logs and host metrics plan](lat-logs-and-host-metrics-plan.md): narrow
+  Grafana/Loki/Alloy plan for centralized LAT service logs and basic host
+  performance metrics.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
   reference analysis used to calibrate Finite's Rust, Nix, command, docs,
   harness, CI, and quality-gate choices.

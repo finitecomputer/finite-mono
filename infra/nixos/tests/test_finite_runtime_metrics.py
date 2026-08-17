@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-RUNTIME_METRICS = ROOT / "infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py"
+RUNTIME_METRICS = ROOT / "infra/nixos/scripts/finite_runtime_metrics.py"
 spec = importlib.util.spec_from_file_location("finite_runtime_metrics", RUNTIME_METRICS)
 assert spec is not None and spec.loader is not None
 finite_runtime_metrics = importlib.util.module_from_spec(spec)

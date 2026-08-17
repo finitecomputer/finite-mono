@@ -32,7 +32,7 @@ jobs:
       run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
       run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
       run_search_check: ${{ steps.detect.outputs.run_search_check }}
-      run_self_hosted_monitoring_contract: ${{ steps.detect.outputs.run_self_hosted_monitoring_contract }}
+      run_monitoring_nixos_contract: ${{ steps.detect.outputs.run_monitoring_nixos_contract }}
       run_finite_status_contract: ${{ steps.detect.outputs.run_finite_status_contract }}
       run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
       run_devfinity_smoke: ${{ steps.detect.outputs.run_devfinity_smoke }}
@@ -390,16 +390,16 @@ jobs:
       - name: Search check
         run: nix develop --command just search check
 
-  self-hosted-monitoring-contract:
-    name: Self-hosted monitoring contract
+  monitoring-nixos-contract:
+    name: Monitoring NixOS contract
     needs: changes
-    if: needs.changes.outputs.run_self_hosted_monitoring_contract == 'true'
+    if: needs.changes.outputs.run_monitoring_nixos_contract == 'true'
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Self-hosted monitoring contract
-        run: nix develop --command just self-hosted-monitoring-contract
+      - name: Monitoring NixOS contract
+        run: nix develop --command just monitoring-nixos-contract
 
   finite-status-contract:
     name: Finite status contract
@@ -840,7 +840,7 @@ jobs:
       - hermes-bridge
       - skills-check
       - search-check
-      - self-hosted-monitoring-contract
+      - monitoring-nixos-contract
       - finite-status-contract
       - nix-checks
       - nix-service-packages
@@ -862,8 +862,8 @@ jobs:
       RESULT_SKILLS_CHECK: ${{ needs['skills-check'].result }}
       RUN_SEARCH_CHECK: ${{ needs.changes.outputs.run_search_check }}
       RESULT_SEARCH_CHECK: ${{ needs['search-check'].result }}
-      RUN_SELF_HOSTED_MONITORING_CONTRACT: ${{ needs.changes.outputs.run_self_hosted_monitoring_contract }}
-      RESULT_SELF_HOSTED_MONITORING_CONTRACT: ${{ needs['self-hosted-monitoring-contract'].result }}
+      RUN_MONITORING_NIXOS_CONTRACT: ${{ needs.changes.outputs.run_monitoring_nixos_contract }}
+      RESULT_MONITORING_NIXOS_CONTRACT: ${{ needs['monitoring-nixos-contract'].result }}
       RUN_FINITE_STATUS_CONTRACT: ${{ needs.changes.outputs.run_finite_status_contract }}
       RESULT_FINITE_STATUS_CONTRACT: ${{ needs['finite-status-contract'].result }}
       RUN_NIX_CHECKS: ${{ needs.changes.outputs.run_nix_checks }}
@@ -913,7 +913,7 @@ jobs:
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
           check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
           check_selected "Search check" "$RUN_SEARCH_CHECK" "$RESULT_SEARCH_CHECK"
-          check_selected "Self-hosted monitoring contract" "$RUN_SELF_HOSTED_MONITORING_CONTRACT" "$RESULT_SELF_HOSTED_MONITORING_CONTRACT"
+          check_selected "Monitoring NixOS contract" "$RUN_MONITORING_NIXOS_CONTRACT" "$RESULT_MONITORING_NIXOS_CONTRACT"
           check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
           check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"
           check_selected "Nix service packages" "$RUN_NIX_SERVICE_PACKAGES" "$RESULT_NIX_SERVICE_PACKAGES"
