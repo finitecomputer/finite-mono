@@ -44,6 +44,28 @@ def run(
     )
 
 
+def _rmtree_readonly(root: Path) -> None:
+    """Delete a staged Nix store copy whose files and directories are 0555.
+
+    Both the files and their containing directories must gain write bits
+    before unlink/rmdir can succeed; chmod bottom-up, then remove.
+    """
+
+    def _chmod(target: str, mode: int) -> None:
+        try:
+            os.chmod(target, mode)
+        except OSError:
+            pass
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            _chmod(os.path.join(dirpath, name), 0o700)
+        for name in dirnames:
+            _chmod(os.path.join(dirpath, name), 0o700)
+    _chmod(str(root), 0o700)
+    shutil.rmtree(root)
+
+
 def nix_system_for_platform(platform: str) -> str:
     parts = platform.split("/")
     if len(parts) < 2 or parts[0] != "linux":
@@ -126,12 +148,7 @@ def stage_runtime_closure(
 
     store_context = context / HERMES_NIX_CONTEXT_DIR
     if store_context.exists():
-        # Staged Nix store files are read-only; make them deletable first.
-        def _make_writable(func, target, _error):
-            os.chmod(target, 0o700 | stat.S_IMODE(os.lstat(target).st_mode))
-            func(target)
-
-        shutil.rmtree(store_context, onexc=_make_writable)
+        _rmtree_readonly(store_context)
     store_root = store_context / "nix" / "store"
     store_root.mkdir(parents=True, exist_ok=True)
 
