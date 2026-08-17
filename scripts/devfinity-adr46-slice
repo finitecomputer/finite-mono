@@ -441,6 +441,22 @@ alice_agent_npub="$(curl -fsS --max-time 5 "$runtime_url/healthz" | node -e '
 note "Alice's agent runtime is live: project=$project_id agent=$agent_email"
 note "AliceAgent npub: $alice_agent_npub"
 
+# Alice's hosted chat identity (her human Principal / card signer).
+curl -fsS --max-time 30 \
+  -H "authorization: Bearer $hosted_api_token" \
+  -H "x-finite-workos-user-id: $ALICE_SUBJECT" \
+  "$hosted_device_url/v1/app/state" >"$scratch/alice-hosted-state.json"
+alice_npub="$(hosted_op "$ALICE_SUBJECT" identifyMember 'null' | node -e '
+  let body = "";
+  process.stdin.on("data", (chunk) => body += chunk);
+  process.stdin.on("end", () => {
+    const npub = String(JSON.parse(body).npub || "");
+    if (!npub.startsWith("npub1")) process.exit(1);
+    process.stdout.write(npub);
+  });
+')"
+note "Alice (human, hosted chat signer) npub: $alice_npub"
+
 say "Act 1: Alice creates her Personal Brain (user-first, hosted-device signed)"
 alice_pubkey_hex="$(node -e '
   const charset = "qpzry9x8gf2tvdcw0s3jn54khce6mua7l";
@@ -524,22 +540,6 @@ runtime_exec -e "SEED_NOTE=$seed_note" "$alice_container_id" /bin/bash -lc '
 ' _ "$alice_tree"
 runtime_exec -w "$alice_tree" "$alice_container_id" fbrain sync now --json >/dev/null
 note "Folder shared-with-bob created; AliceAgent seeded alice-seed.md"
-
-# Alice's hosted chat identity (her human Principal / card signer).
-curl -fsS --max-time 30 \
-  -H "authorization: Bearer $hosted_api_token" \
-  -H "x-finite-workos-user-id: $ALICE_SUBJECT" \
-  "$hosted_device_url/v1/app/state" >"$scratch/alice-hosted-state.json"
-alice_npub="$(hosted_op "$ALICE_SUBJECT" identifyMember 'null' | node -e '
-  let body = "";
-  process.stdin.on("data", (chunk) => body += chunk);
-  process.stdin.on("end", () => {
-    const npub = String(JSON.parse(body).npub || "");
-    if (!npub.startsWith("npub1")) process.exit(1);
-    process.stdout.write(npub);
-  });
-')"
-note "Alice (human, hosted chat signer) npub: $alice_npub"
 
 say "Act 2: provisioning Bob's account, identity, and agent roster"
 curl_bearer_file "$bob_jwt_file" "$core_url/api/core/v1/me" >"$scratch/me-bob.json"
