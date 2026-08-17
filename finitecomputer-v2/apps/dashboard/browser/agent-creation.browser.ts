@@ -1574,6 +1574,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
           topic_id: "home",
           chat_id: "chat_browser_agent",
           text: canonicalReply,
+          metadata_json: null,
         },
       });
       await page
