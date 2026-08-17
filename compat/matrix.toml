@@ -27,9 +27,9 @@ install_url = "https://github.com/finitecomputer/finite-mono/releases/download/f
 notes = "v0.5.0 adds typed mailbox/NIP-05/npub targets and the mailbox-principal reconciliation and persistent-sharing flows; the release also ships finitesitesd-linux for the server deploy."
 
 [field.fbrain-cli]
-released = ["v0.1.2", "v0.1.3", "v0.2.0", "v0.2.1"]
+released = ["v0.1.2", "v0.1.3", "v0.2.0", "v0.2.1", "v0.2.2", "v0.3.0"]
 install_url = "https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/"
-notes = "v0.2.1 keeps new non-Markdown asset bytes out of Folder Objects, syncs Markdown Asset Source Notes under raw/, preserves legacy inline Asset ciphertext as unsupported, and retains incremental-write compatibility with older servers through a bounded-bootstrap fallback. It also adds email-invitation delivery reporting, a non-rewriting V21 migration that permits parallel Brain and Folder invitations, and an opt-in disposable-stack rate-limit override; production defaults are unchanged. Product Client readable-asset portability remains deferred. The release also ships the finite-brain server binary."
+notes = "v0.2.1 keeps new non-Markdown asset bytes out of Folder Objects, syncs Markdown Asset Source Notes under raw/, preserves legacy inline Asset ciphertext as unsupported, and retains incremental-write compatibility with older servers through a bounded-bootstrap fallback. It also adds email-invitation delivery reporting, a non-rewriting V21 migration that permits parallel Brain and Folder invitations, and an opt-in disposable-stack rate-limit override; production defaults are unchanged. Product Client readable-asset portability remains deferred. The release also ships the finite-brain server binary. v0.2.2 shipped the daemon-supervise inotify feedback-loop fix (PR #481). v0.3.0 is the ADR-0046 release: principal grants with provenance, the blessed member/admin invite CLI with signed approval artifacts (fbrain approvals list/approve/deny), chat approval cards anchored to messages via metadata.approve, cohort Folder invitations via folder-scoped plans, the restore drill, SQLite WAL with point lookups and denormalized capacity counters, and backon-owned retry timing. Server binary ships in lockstep at 0.3.0."
 
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.
