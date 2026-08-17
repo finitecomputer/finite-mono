@@ -126,7 +126,7 @@ tested. Two standing gaps:
 | #456 | quiet internal-beta cohort reconciliation plan | ops planning, not code |
 | #457 | reconcile existing access with complete grants | partial: `ensure-access` |
 | #458 | convert pending invitations + cohort-write cutover | ✗ migration never rewritten after #467 closed |
-| #459 | restore cohorts + full release story | ✗ ties to the export-without-restore gap |
+| #459 | restore cohorts + full release story | ✓ as the #527 drill: empty-target restore proven (process drill + slice Act 15) with runbook |
 
 ## Gap register
 
@@ -141,7 +141,9 @@ Orphaned by the client deletion (#540): asset-aware OKF import, graph
 view/replay — both need a new home (agent-side import verb, viewer Phase 3).
 
 Rewrite debt from the closed first attempt: #455 (chat peer-agent
-management), #458 (decided: skip — the rewrite is additive, not cutover; one
-compatibility test instead), #459 (decided: fold into the #527 restore drill
-plus a slice act). #444 landed as folder-scoped plans with per-principal
-share links; its approval-card escalation rides the card work.
+management — next after the card), #458 (decided: skip — the rewrite is
+additive, not cutover; one compatibility test instead), #459 (landed as the
+#527 restore drill: process-level empty-target restore proof, slice Act 15
+departure, runbook at finite-brain/docs/runbooks/brain-restore-drill.md).
+#444 landed as folder-scoped plans with per-principal share links; its
+approval-card escalation rides the card work.

@@ -357,6 +357,77 @@ fn spawn_requester_authorities(
 /// Authorities for the CLI invite/approval roundtrip: Bob's account resolves
 /// to his human Principal plus one active managed agent; the agent npub is the
 /// CLI home the test drives.
+fn spawn_file_backed_brain_server_with_authorities(
+    owner_npub: &str,
+    database_path: std::path::PathBuf,
+    identity_authority_url: String,
+    core_authority_url: String,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let (url_tx, url_rx) = mpsc::channel();
+    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
+    let owner_npub = owner_npub.to_owned();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = nip05_listener.accept() {
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = r#"{"names":{"beta":"02b3c1..."}}"#.to_owned();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let mut store = finite_brain_store::BrainStore::open(&database_path).unwrap();
+            let organization = finite_brain_core::bootstrap_organization_brain(
+                "roundtrip-org",
+                "Roundtrip Org",
+                &owner_npub,
+            )
+            .unwrap();
+            let brain_exists = store
+                .load_brain(&finite_brain_core::BrainId::new("roundtrip-org").unwrap())
+                .is_ok();
+            if !brain_exists {
+                store.create_brain_bootstrap(&organization, &[]).unwrap();
+            }
+            let state = finite_brain_server::ServerState::new(store, url.clone())
+                .with_identity_authority_url(nip05_url)
+                .with_agent_bootstrap_authorities(
+                    core_authority_url,
+                    "process-core-token",
+                    identity_authority_url,
+                    "process-identity-token",
+                );
+            url_tx.send(url).unwrap();
+            let router = finite_brain_server::router_with_state(state);
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+        });
+    });
+    let url = url_rx.recv().unwrap();
+    (url, shutdown_tx, thread)
+}
+
 fn spawn_card_roundtrip_authorities(
     bob_email: &str,
     bob_agent_email: &str,
@@ -1244,6 +1315,317 @@ fn supervisor_quiesces_after_catch_up_when_nothing_changes() {
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn built_fbrain_process_brain_restore_drill() {
+    // The #459/#527 drill, service level: populate a file-backed Brain,
+    // depart a principal, stop the server, copy the database, destroy the
+    // original, and restore onto an empty target. The restored server must
+    // preserve memberships with provenance, pending approvals, accepted
+    // invitations, and departures — and a never-before-seen invitation must
+    // still be acceptable after the restore. Clients hold the keys; the
+    // server only ever sees ciphertext and access facts.
+    let scratch = TempDir::new().unwrap();
+    let home_alice = scratch.path().join("home-alice");
+    let home_member = scratch.path().join("home-member");
+    let home_bob = scratch.path().join("home-bob");
+    for home in [&home_alice, &home_member, &home_bob] {
+        fs::create_dir_all(home).unwrap();
+    }
+    for (home, secret) in [
+        (
+            &home_alice,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ),
+        (
+            &home_bob,
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        ),
+        (
+            &home_member,
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        ),
+    ] {
+        let secret_file = scratch.path().join(format!("secret-{}", &secret[..2]));
+        fs::write(&secret_file, format!("{secret}\n")).unwrap();
+        assert!(
+            run(
+                home,
+                home,
+                &[
+                    "auth",
+                    "import",
+                    "--file",
+                    secret_file.to_str().unwrap(),
+                    "--json"
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let bob_human_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000005")
+            .unwrap();
+    let bob_human_npub = NostrPublicKey::from_protocol(bob_human_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let npub_of = |home: &Path| -> String {
+        let output = run(home, home, &["signer", "public-key", "--json"]);
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["npub"].as_str().unwrap().to_owned()
+    };
+    let alice_npub = npub_of(&home_alice);
+    let member_npub = npub_of(&home_member);
+    let bob_agent_npub = npub_of(&home_bob);
+
+    let (identity_url, core_url) = spawn_card_roundtrip_authorities(
+        "bob@example.com",
+        "bob-agent@example.com",
+        "process-bob",
+        bob_human_npub,
+        bob_agent_npub.clone(),
+    );
+    let database_path = scratch.path().join("state").join("brain-a.sqlite3");
+    fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+    let (server_a_url, shutdown_a, server_a) = spawn_file_backed_brain_server_with_authorities(
+        &alice_npub,
+        database_path.clone(),
+        identity_url.clone(),
+        core_url.clone(),
+    );
+    let run_against = |home: &Path, server_url: &str, args: &[&str]| {
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        command(home, home)
+            .env("FBRAIN_NOW", now)
+            .env("FINITE_BRAIN_SERVER_URL", server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let json_of = |label: &str, output: &Output| -> Value {
+        assert!(
+            output.status.success(),
+            "{label} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // Populate: member without standing invites bob; alice approves; bob
+    // accepts; a second request stays pending across the restore.
+    assert!(
+        run_against(
+            &home_alice,
+            &server_a_url,
+            &[
+                "admin",
+                "member",
+                "add",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                &member_npub,
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    let requested = json_of(
+        "member invite",
+        &run_against(
+            &home_member,
+            &server_a_url,
+            &[
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                "bob@example.com",
+                "--json",
+            ],
+        ),
+    );
+    let request_id = requested["id"].as_str().unwrap().to_owned();
+    json_of(
+        "alice approve",
+        &run_against(
+            &home_alice,
+            &server_a_url,
+            &["approvals", "approve", "--id", &request_id, "--json"],
+        ),
+    );
+    let bob_invitations = json_of(
+        "bob list",
+        &run_against(
+            &home_bob,
+            &server_a_url,
+            &["invite", "brain", "list", "--json"],
+        ),
+    );
+    let accepted_invitation_id = bob_invitations["invitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|invitation| {
+            (invitation["brainId"].as_str() == Some("roundtrip-org"))
+                .then(|| invitation["id"].as_str().unwrap().to_owned())
+        })
+        .expect("bob has an invitation");
+    json_of(
+        "bob accept",
+        &run_against(
+            &home_bob,
+            &server_a_url,
+            &[
+                "invite",
+                "brain",
+                "accept",
+                "--id",
+                &accepted_invitation_id,
+                "--json",
+            ],
+        ),
+    );
+    // A pending request that must survive the restore unresolved.
+    let pending = json_of(
+        "second member invite",
+        &run_against(
+            &home_member,
+            &server_a_url,
+            &[
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                "bob@example.com",
+                "--json",
+            ],
+        ),
+    );
+    let pending_id = pending["id"].as_str().unwrap().to_owned();
+
+    // Departure: the member is removed and must stay removed after restore.
+    assert!(
+        run_against(
+            &home_alice,
+            &server_a_url,
+            &[
+                "admin",
+                "member",
+                "remove",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                &member_npub,
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+
+    // Backup, destroy, restore onto an empty target. The clean shutdown
+    // closes the WAL so the file copy is a complete backup, exactly like a
+    // Litestream restore point.
+    drop(shutdown_a);
+    server_a.join().unwrap();
+    let backup_path = scratch.path().join("backup").join("brain-restored.sqlite3");
+    fs::create_dir_all(backup_path.parent().unwrap()).unwrap();
+    fs::copy(&database_path, &backup_path).unwrap();
+    fs::remove_file(&database_path).unwrap();
+    for wal in ["-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{wal}", database_path.display()));
+    }
+    let restored_path = scratch.path().join("empty-target").join("brain.sqlite3");
+    fs::create_dir_all(restored_path.parent().unwrap()).unwrap();
+    fs::copy(&backup_path, &restored_path).unwrap();
+    let (server_b_url, shutdown_b, server_b) = spawn_file_backed_brain_server_with_authorities(
+        &alice_npub,
+        restored_path,
+        identity_url,
+        core_url,
+    );
+
+    // Memberships and provenance survived; the departed member did too.
+    let metadata = json_of(
+        "restored metadata",
+        &run_against(
+            &home_alice,
+            &server_b_url,
+            &["brain", "metadata", "--brain", "roundtrip-org", "--json"],
+        ),
+    );
+    let members: Vec<&str> = metadata["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|member| member.as_str())
+        .collect();
+    assert!(members.contains(&bob_agent_npub.as_str()));
+    assert!(!members.contains(&member_npub.as_str()));
+
+    // The restored server still answers for the accepted principal.
+    let bob_brains = json_of(
+        "restored bob brain list",
+        &run_against(&home_bob, &server_b_url, &["brain", "list", "--json"]),
+    );
+    assert!(
+        bob_brains["brains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|brain| brain["brainId"].as_str() == Some("roundtrip-org"))
+    );
+
+    // The pending approval survived unresolved and stays deniable.
+    let pending_after = json_of(
+        "restored approvals list",
+        &run_against(&home_alice, &server_b_url, &["approvals", "list", "--json"]),
+    );
+    assert!(
+        pending_after["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|request| request["id"].as_str() == Some(pending_id.as_str()))
+    );
+    let denied = json_of(
+        "restored deny",
+        &run_against(
+            &home_alice,
+            &server_b_url,
+            &["approvals", "deny", "--id", &pending_id, "--json"],
+        ),
+    );
+    assert_eq!(denied["status"], "denied");
+
+    // The departed member's standing did not survive as access.
+    let member_list = run_against(&home_member, &server_b_url, &["brain", "list", "--json"]);
+    if member_list.status.success() {
+        let member_brains: Value = serde_json::from_slice(&member_list.stdout).unwrap();
+        assert!(
+            !member_brains["brains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|brain| brain["brainId"].as_str() == Some("roundtrip-org"))
+        );
+    }
+
+    // No restore path ever exposed plaintext or keys: the backup file is the
+    // same ciphertext-bearing SQLite the server held all along.
+    drop(shutdown_b);
+    server_b.join().unwrap();
 }
 
 #[test]

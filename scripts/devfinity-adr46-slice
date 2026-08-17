@@ -1141,6 +1141,35 @@ JS
 note "members: delegated_by=Bob's CLI principal, origin_kind=invitation, origin_ref=Bob's plan"
 note "folder_key_grants: issuer=Bob, origin_kind=direct"
 
+say "Act 15: departure — BobAgent is removed from Alice's Brain, everything else continues"
+# Alice's agent (admin of her Personal Brain through her delegation) removes
+# exactly BobAgent's principal. Bob's human membership, Bob's own Brain, and
+# Alice's other flows must be untouched — the #459 departure leg.
+runtime_exec -w "$alice_tree" "$alice_container_id" fbrain admin member remove \
+  --brain "$brain_id" --target "$bob_agent_npub" --json >"$scratch/departure.json" \
+  || fail "BobAgent removal failed"
+sqlite3 -readonly "$brain_db" \
+  "SELECT user_id FROM brain_members WHERE brain_id = '$brain_id' ORDER BY user_id" \
+  >"$scratch/post-departure-members.txt"
+node - "$scratch/post-departure-members.txt" "$bob_agent_npub" "$bob_npub" <<'JS' || fail "departure did not remove exactly BobAgent"
+const fs = require("node:fs");
+const members = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").filter(Boolean);
+const [bobAgentNpub, bobNpub] = process.argv.slice(3);
+if (members.includes(bobAgentNpub)) throw new Error("BobAgent is still a member");
+if (!members.includes(bobNpub)) throw new Error("Bob's human principal was removed too");
+JS
+note "BobAgent departed; Bob's human membership and his own Brain are untouched"
+
+# Bob's agent tree is preserved (unsynced local state survives revocation).
+bob_fbrain status --json >/dev/null 2>&1 || true
+test -d "$bob_fbrain_tree_root/$brain_id" || fail "BobAgent's working tree vanished on departure"
+note "BobAgent's working tree survives departure (local state preserved)"
+
+# Unrelated work continues: Alice's agent still syncs her Brain.
+runtime_exec -w "$alice_tree" "$alice_container_id" fbrain sync now --json >"$brain_sync_json" \
+  || fail "Alice's unrelated sync broke after the departure"
+note "Alice's Brain keeps syncing after the departure"
+
 say "ADR-0046 slice PASSED"
 echo "brain_id=$brain_id"
 echo "bob_brain_id=$bob_brain_id"
