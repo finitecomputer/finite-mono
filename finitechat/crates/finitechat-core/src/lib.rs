@@ -371,6 +371,13 @@ pub struct ChatMessage {
     pub display_content: String,
     #[serde(default)]
     pub rich_text_json: String,
+    /// Caller-authored application metadata carried by the message payload,
+    /// serialized as a JSON object string. Derived at projection time from
+    /// the payload's metadata map (minus requester credentials); renderers
+    /// read the keys they know (`metadata.notify`, `metadata.approve`) and
+    /// ignore the rest. Empty when absent.
+    #[serde(default)]
+    pub metadata_json: String,
     #[serde(default)]
     pub kind: ChatMessageKind,
     #[serde(default)]
@@ -732,22 +739,32 @@ pub enum AppAction {
     SendMessage {
         room_id: String,
         text: String,
+        /// JSON object of caller-authored application metadata carried onto
+        /// the message payload's metadata map (e.g. `metadata.approve`).
+        #[serde(default)]
+        metadata_json: Option<String>,
     },
     SendTopicMessage {
         room_id: String,
         topic_id: String,
         text: String,
+        #[serde(default)]
+        metadata_json: Option<String>,
     },
     SendChatMessage {
         room_id: String,
         topic_id: String,
         chat_id: String,
         text: String,
+        #[serde(default)]
+        metadata_json: Option<String>,
     },
     SendReply {
         room_id: String,
         text: String,
         reply_to_message_id: String,
+        #[serde(default)]
+        metadata_json: Option<String>,
     },
     SendChatReply {
         room_id: String,
@@ -755,6 +772,8 @@ pub enum AppAction {
         chat_id: String,
         text: String,
         reply_to_message_id: String,
+        #[serde(default)]
+        metadata_json: Option<String>,
     },
     SendAttachment {
         room_id: String,
@@ -2509,37 +2528,63 @@ impl AppRuntimeState {
                 self.add_room_members(room_id, profiles)?
             }
             AppAction::ScanTarget { value } => self.scan_target(value)?,
-            AppAction::SendMessage { room_id, text } => {
-                self.send_message(room_id, text, requester_context)?
-            }
+            AppAction::SendMessage {
+                room_id,
+                text,
+                metadata_json,
+            } => self.send_message(room_id, text, metadata_json.as_deref(), requester_context)?,
             AppAction::SendTopicMessage {
                 room_id,
                 topic_id,
                 text,
-            } => self.send_topic_message(room_id, topic_id, text, requester_context)?,
+                metadata_json,
+            } => self.send_topic_message(
+                room_id,
+                topic_id,
+                text,
+                metadata_json.as_deref(),
+                requester_context,
+            )?,
             AppAction::SendChatMessage {
                 room_id,
                 topic_id,
                 chat_id,
                 text,
-            } => self.send_chat_message(room_id, topic_id, chat_id, text, requester_context)?,
+                metadata_json,
+            } => self.send_chat_message(
+                room_id,
+                topic_id,
+                chat_id,
+                text,
+                metadata_json.as_deref(),
+                requester_context,
+            )?,
             AppAction::SendReply {
                 room_id,
                 text,
                 reply_to_message_id,
-            } => self.send_reply(room_id, text, reply_to_message_id, requester_context)?,
+                metadata_json,
+            } => self.send_reply(
+                room_id,
+                text,
+                reply_to_message_id,
+                metadata_json.as_deref(),
+                requester_context,
+            )?,
             AppAction::SendChatReply {
                 room_id,
                 topic_id,
                 chat_id,
                 text,
                 reply_to_message_id,
+                metadata_json,
             } => self.send_chat_reply(
                 room_id,
                 topic_id,
                 chat_id,
                 text,
                 reply_to_message_id,
+                metadata_json.as_deref(),
                 requester_context,
             )?,
             AppAction::SendAttachment {
@@ -3380,6 +3425,7 @@ impl AppRuntimeState {
             HOME_TOPIC_ID.to_owned(),
             chat_id,
             trimmed.to_owned(),
+            None,
             None,
         )?;
         self.app.status = "chat started".to_owned();
@@ -4480,9 +4526,10 @@ impl AppRuntimeState {
         &mut self,
         room_id: String,
         text: String,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        self.send_message_with_reply(room_id, text, None, requester_context)
+        self.send_message_with_reply(room_id, text, None, metadata_json, requester_context)
     }
 
     fn send_topic_message(
@@ -4490,6 +4537,7 @@ impl AppRuntimeState {
         room_id: String,
         topic_id: String,
         text: String,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_topic(&room_id, &topic_id)?;
@@ -4505,7 +4553,7 @@ impl AppRuntimeState {
                     })?
             }
         };
-        self.send_chat_message(room_id, topic_id, chat_id, text, requester_context)
+        self.send_chat_message(room_id, topic_id, chat_id, text, metadata_json, requester_context)
     }
 
     fn send_chat_message(
@@ -4514,6 +4562,7 @@ impl AppRuntimeState {
         topic_id: String,
         chat_id: String,
         text: String,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
@@ -4523,6 +4572,7 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             None,
+            metadata_json,
             requester_context,
         )
     }
@@ -4532,11 +4582,18 @@ impl AppRuntimeState {
         room_id: String,
         text: String,
         reply_to_message_id: String,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let target_id = reply_to_message_id.trim();
         self.validate_reply_target(&room_id, target_id)?;
-        self.send_message_with_reply(room_id, text, Some(target_id.to_owned()), requester_context)
+        self.send_message_with_reply(
+            room_id,
+            text,
+            Some(target_id.to_owned()),
+            metadata_json,
+            requester_context,
+        )
     }
 
     fn send_chat_reply(
@@ -4546,6 +4603,7 @@ impl AppRuntimeState {
         chat_id: String,
         text: String,
         reply_to_message_id: String,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
@@ -4557,6 +4615,7 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             Some(target_id.to_owned()),
+            metadata_json,
             requester_context,
         )
     }
@@ -4566,6 +4625,7 @@ impl AppRuntimeState {
         room_id: String,
         text: String,
         reply_to_message_id: Option<String>,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
@@ -4586,6 +4646,7 @@ impl AppRuntimeState {
             Some(chat_id),
             trimmed.to_owned(),
             reply_to_message_id,
+            metadata_json,
             requester_context,
         )
     }
@@ -4597,6 +4658,7 @@ impl AppRuntimeState {
         chat_id: Option<String>,
         text: String,
         reply_to_message_id: Option<String>,
+        metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
@@ -4614,6 +4676,7 @@ impl AppRuntimeState {
             reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
+            metadata_json,
             requester_context,
         )?;
         let app_event_plaintext = encode_application_event_with_segment(
@@ -9081,6 +9144,7 @@ enum DecodedAppEvent {
 struct ChatProjectionPayload {
     text: String,
     display_content: String,
+    metadata: BTreeMap<String, serde_json::Value>,
     kind: ChatMessageKind,
     status: ChatMessageStatus,
     final_delivery: bool,
@@ -9150,6 +9214,7 @@ fn project_chat_message(
         text: projection.text,
         display_content: projection.display_content,
         rich_text_json,
+        metadata_json: chat_metadata_json(&projection.metadata),
         kind: projection.kind,
         status: projection.status,
         final_delivery: projection.final_delivery,
@@ -9274,6 +9339,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         return ChatProjectionPayload {
             display_content: question.clone(),
             text: question,
+            metadata: BTreeMap::new(),
             kind: ChatMessageKind::Message,
             status: ChatMessageStatus::Complete,
             final_delivery: false,
@@ -9287,16 +9353,18 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         };
     }
     if let Ok(Some(payload)) = HermesMessagePayloadV1::decode(payload_bytes) {
+        let final_delivery = payload
+            .metadata
+            .get("notify")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
         return ChatProjectionPayload {
             display_content: payload.text.clone(),
             text: payload.text,
+            metadata: surfaced_message_metadata(payload.metadata),
             kind: chat_message_kind(payload.kind),
             status: chat_message_status(payload.status),
-            final_delivery: payload
-                .metadata
-                .get("notify")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true),
+            final_delivery,
             edit_of_message_id: payload.edit_of,
             conversation_id: payload.conversation_id,
             chat_id: payload.segment_id,
@@ -9315,6 +9383,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
     ChatProjectionPayload {
         display_content: text.clone(),
         text,
+        metadata: BTreeMap::new(),
         kind: ChatMessageKind::Message,
         status: ChatMessageStatus::Complete,
         final_delivery: false,
@@ -9326,6 +9395,25 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         media: Vec::new(),
         poll: None,
     }
+}
+
+/// Payload metadata keys that never surface on the projected message.
+/// Requester credentials are transport claims for the receiving service,
+/// not message content for renderers.
+fn surfaced_message_metadata(
+    metadata: BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut surfaced = metadata;
+    surfaced.remove(finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL);
+    surfaced.remove(finitechat_hermes::HERMES_METADATA_SITES_REQUESTER_ASSERTION);
+    surfaced
+}
+
+fn chat_metadata_json(metadata: &BTreeMap<String, serde_json::Value>) -> String {
+    if metadata.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(metadata).unwrap_or_default()
 }
 
 fn chat_message_kind(kind: HermesSendKindV1) -> ChatMessageKind {
@@ -9630,7 +9718,7 @@ fn encode_text_message_payload(
     text: &str,
     reply_to_message_id: Option<&str>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
-    encode_text_message_payload_scoped(text, reply_to_message_id, None, None, None)
+    encode_text_message_payload_scoped(text, reply_to_message_id, None, None, None, None)
 }
 
 fn encode_text_message_payload_scoped(
@@ -9638,9 +9726,18 @@ fn encode_text_message_payload_scoped(
     reply_to_message_id: Option<&str>,
     conversation_id: Option<&str>,
     chat_id: Option<&str>,
+    metadata_json: Option<&str>,
     requester_context: Option<&VerifiedRequesterContext>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
-    let mut metadata = BTreeMap::new();
+    let mut metadata = match metadata_json.map(str::trim) {
+        None | Some("") => BTreeMap::new(),
+        Some(encoded) => serde_json::from_str::<BTreeMap<String, serde_json::Value>>(encoded)
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "message metadata_json must be a JSON object".to_owned(),
+            })?,
+    };
+    // The verified requester context is authoritative: it is inserted last so
+    // caller metadata can never spoof the transport claims.
     if let Some(requester) = requester_context {
         metadata.insert(
             finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL.to_owned(),
@@ -11962,7 +12059,7 @@ mod tests {
 
     #[test]
     fn text_payload_carries_requester_context_only_when_hosted_dispatch_supplies_it() {
-        let plain = encode_text_message_payload_scoped("hello", None, None, None, None).unwrap();
+        let plain = encode_text_message_payload_scoped("hello", None, None, None, None, None).unwrap();
         let plain = HermesMessagePayloadV1::decode(&plain).unwrap().unwrap();
         assert!(
             !plain
@@ -11975,7 +12072,7 @@ mod tests {
             sites_assertion: "assertion-1".to_owned(),
         };
         let hosted =
-            encode_text_message_payload_scoped("publish", None, None, None, Some(&requester))
+            encode_text_message_payload_scoped("publish", None, None, None, None, Some(&requester))
                 .unwrap();
         let hosted = HermesMessagePayloadV1::decode(&hosted).unwrap().unwrap();
         assert_eq!(
@@ -11992,6 +12089,84 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("assertion-1")
         );
+    }
+
+    #[test]
+    fn message_metadata_round_trips_and_requester_claims_never_surface() {
+        let metadata_json =
+            r#"{"approve":{"service":"brain","requests":[{"brainId":"brain-1","requestId":"approval-1"}]}}"#;
+        let requester = VerifiedRequesterContext {
+            email: "paul@finite.vip".to_owned(),
+            sites_assertion: "assertion-1".to_owned(),
+        };
+        let encoded = encode_text_message_payload_scoped(
+            "approved",
+            None,
+            None,
+            None,
+            Some(metadata_json),
+            Some(&requester),
+        )
+        .unwrap();
+
+        let projected = chat_projection_payload(&encoded);
+        assert_eq!(
+            projected.metadata.get("approve"),
+            Some(&serde_json::json!({
+                "service": "brain",
+                "requests": [{"brainId": "brain-1", "requestId": "approval-1"}],
+            }))
+        );
+        assert!(
+            !projected
+                .metadata
+                .contains_key(finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL)
+        );
+        assert!(
+            !projected
+                .metadata
+                .contains_key(finitechat_hermes::HERMES_METADATA_SITES_REQUESTER_ASSERTION)
+        );
+        assert_eq!(
+            chat_metadata_json(&projected.metadata),
+            serde_json::to_string(&projected.metadata).unwrap()
+        );
+
+        // A spoofed requester claim in caller metadata is overwritten by the
+        // verified requester context.
+        let spoofed = encode_text_message_payload_scoped(
+            "publish",
+            None,
+            None,
+            None,
+            Some(
+                &serde_json::json!({
+                    finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL: "mallory@evil.example"
+                })
+                .to_string(),
+            ),
+            Some(&requester),
+        )
+        .unwrap();
+        let spoofed = HermesMessagePayloadV1::decode(&spoofed).unwrap().unwrap();
+        assert_eq!(
+            spoofed
+                .metadata
+                .get(finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL)
+                .and_then(serde_json::Value::as_str),
+            Some("paul@finite.vip")
+        );
+
+        // Non-object metadata is rejected fail-closed rather than dropped.
+        assert!(encode_text_message_payload_scoped(
+            "publish",
+            None,
+            None,
+            None,
+            Some("[1,2,3]"),
+            None
+        )
+        .is_err());
     }
 
     fn next_permutation(values: &mut [usize]) -> bool {
@@ -12537,6 +12712,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello from cli".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let bob_sync = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -12550,6 +12726,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "hello from ios".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_sync = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -12655,6 +12832,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "app message before relaunch".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -12731,6 +12909,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: home_chat_id.clone(),
                 text: "first Home chat".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert_eq!(first_chat.messages.len(), 1);
@@ -12773,6 +12952,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: second_chat_id.clone(),
                 text: "second Home chat".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert_eq!(second_chat.messages.len(), 1);
@@ -12800,6 +12980,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: second_chat_id.clone(),
                 text: "a later response must not rename this chat".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let stable_title = later_second_chat
@@ -12837,6 +13018,7 @@ mod tests {
                 chat_id: home_chat_id.clone(),
                 text: "reply in Home chat".to_owned(),
                 reply_to_message_id: home_parent_id.clone(),
+            metadata_json: None,
             })
             .unwrap();
         let reply = home_reply
@@ -13117,6 +13299,7 @@ mod tests {
                 topic_id: topic_id.clone(),
                 chat_id: chat_id.clone(),
                 text: "Implement the chats sidebar".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let fallback_title = titled_from_first_message
@@ -13463,6 +13646,7 @@ mod tests {
                 topic_id: topic_id.clone(),
                 chat_id: chat_id.clone(),
                 text: "Archived chats remain usable.".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert!(
@@ -13859,6 +14043,7 @@ mod tests {
                 topic_id: build_topic_id.clone(),
                 chat_id: first_build_chat_id.clone(),
                 text: "First build context".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         hosted
@@ -13892,6 +14077,7 @@ mod tests {
                 topic_id: build_topic_id.clone(),
                 chat_id: second_build_chat_id.clone(),
                 text: "Second build context".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
 
@@ -13919,6 +14105,7 @@ mod tests {
                     topic_id: operations_topic_id.clone(),
                     chat_id: operations_chat_id.clone(),
                     text: format!("Busy operations history {index}"),
+                metadata_json: None,
                 })
                 .unwrap();
         }
@@ -15056,6 +15243,7 @@ mod tests {
                 .dispatch_and_wait(AppAction::SendMessage {
                     room_id: room_id.clone(),
                     text: format!("message-{index:03}"),
+                metadata_json: None,
                 })
                 .unwrap();
         }
@@ -15128,6 +15316,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "survives force close".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -15847,6 +16036,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello from app actor".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert!(
@@ -16757,6 +16947,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello direct".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17478,6 +17669,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello group".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17635,6 +17827,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello after add".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17735,6 +17928,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "carol joined after bob stayed offline".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
 
@@ -17883,6 +18077,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "done typing".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_online = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -18011,6 +18206,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "saved before force close".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         drop(alice);
@@ -18095,6 +18291,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "do not lose this".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert_eq!(failed.status, "sent");
@@ -18182,6 +18379,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "retry after force close".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let local_message_id = failed
@@ -18294,6 +18492,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "retry only after server rejection".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         assert_eq!(rejected.status, "delivery failed");
@@ -18503,6 +18702,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: zulu.clone(),
                 text: "selected room survives force close".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         alice
@@ -18563,6 +18763,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "still here after stale config".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -18635,6 +18836,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "remote message before force close".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let synced = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -18706,6 +18908,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "parent".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let parent_id = parent_state
@@ -18721,6 +18924,7 @@ mod tests {
                 room_id: room_id.clone(),
                 text: "nope".to_owned(),
                 reply_to_message_id: "missing-message".to_owned(),
+            metadata_json: None,
             })
             .expect_err("unknown reply targets are rejected by Rust policy");
         assert!(
@@ -18733,6 +18937,7 @@ mod tests {
                 room_id: room_id.clone(),
                 text: "child".to_owned(),
                 reply_to_message_id: parent_id.clone(),
+            metadata_json: None,
             })
             .unwrap();
         let reply = replied
@@ -19280,6 +19485,7 @@ mod tests {
             bob.dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: format!("filler {index}"),
+            metadata_json: None,
             })
             .unwrap();
         }
@@ -19409,6 +19615,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "hello over app sse".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.wait_for_update(1_000).unwrap();
@@ -19454,6 +19661,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "remote sync survives force close".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_synced = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -19651,6 +19859,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "tap a reaction on this".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let target_message_id = bob_state
@@ -19734,6 +19943,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "reaction target".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let target_message_id = alice_state
@@ -19750,6 +19960,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "concurrent message before reaction".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
 
@@ -19775,6 +19986,7 @@ mod tests {
             .send_message(
                 room_id,
                 "send while peer reaction is queued".to_owned(),
+                None,
                 None,
             )
             .unwrap();
@@ -19815,6 +20027,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "read me".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let target_message_id = bob_state
@@ -20015,6 +20228,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "from the local Device".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         let hosted_state = hosted.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -20121,6 +20335,7 @@ mod tests {
                 .dispatch_and_wait(AppAction::SendMessage {
                     room_id: room_id.clone(),
                     text: format!("frozen history {index}"),
+                metadata_json: None,
                 })
                 .unwrap();
         }
@@ -20182,6 +20397,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "ordinary sync after frozen enrollment snapshot".to_owned(),
+            metadata_json: None,
             })
             .unwrap();
         drop(source);
@@ -20302,6 +20518,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "first unread".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -20317,6 +20534,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "second unread".to_owned(),
+        metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
