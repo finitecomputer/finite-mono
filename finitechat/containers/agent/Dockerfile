@@ -10,15 +10,25 @@ FROM python:3.13-slim-trixie
 ARG HERMES_AGENT_VERSION=0.20.0
 ARG HERMES_AGENT_STORE_PATH
 ARG HERMES_AGENT_PYTHON_PATH
+ARG AGENT_RUNTIME_TOOLCHAIN_PATH
+ARG AGENT_RUNTIME_TOOLCHAIN_BINS
+ARG PLAYWRIGHT_BROWSERS_PATH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates restic \
     && rm -rf /var/lib/apt/lists/*
 COPY .finite-hermes-nix-store/nix/store /nix/store
 RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && test -n "${HERMES_AGENT_PYTHON_PATH}" \
+    && test -n "${AGENT_RUNTIME_TOOLCHAIN_PATH}" \
+    && test -n "${PLAYWRIGHT_BROWSERS_PATH}" \
     && test -x "${HERMES_AGENT_STORE_PATH}/bin/hermes" \
     && test -x "${HERMES_AGENT_PYTHON_PATH}/bin/python3" \
     && test "$("${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')" = "${HERMES_AGENT_VERSION}" \
+    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do \
+         test -x "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}"; \
+         ln -sf "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}" "/usr/local/bin/${bin}"; \
+       done \
+    && test -d "${PLAYWRIGHT_BROWSERS_PATH}" \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes" /usr/local/bin/hermes \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-agent" /usr/local/bin/hermes-agent \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
@@ -46,7 +56,11 @@ ENV FINITE_HOME=/data/agent
 ENV HERMES_HOME=/data/agent/hermes-home
 ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
 ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
-ENV PATH="${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
+ENV AGENT_RUNTIME_TOOLCHAIN_PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}"
+ENV AGENT_RUNTIME_TOOLCHAIN_BINS="${AGENT_RUNTIME_TOOLCHAIN_BINS}"
+ENV PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}"
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin:${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
 EXPOSE 8080
 # FINITE_SERVER_URL is provided at `container run` time (the host's vmnet
 # gateway address, e.g. http://192.168.64.1:18787).

@@ -28,6 +28,10 @@ ARG HERMES_AGENT_STORE_PATH
 ARG HERMES_AGENT_PYTHON_PATH
 ARG HERMES_AGENT_NIX_ATTR
 ARG HERMES_AGENT_NIX_SYSTEM
+ARG AGENT_RUNTIME_TOOLCHAIN_PATH
+ARG AGENT_RUNTIME_TOOLCHAIN_ATTR
+ARG AGENT_RUNTIME_TOOLCHAIN_BINS
+ARG PLAYWRIGHT_BROWSERS_PATH
 ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
 ARG TARGETARCH
@@ -38,6 +42,7 @@ LABEL org.opencontainers.image.revision="${FINITE_MONO_REV}"
 LABEL computer.finite.runtime.hermes-agent-version="${HERMES_AGENT_VERSION}"
 LABEL computer.finite.runtime.hermes-agent-nix-attr="${HERMES_AGENT_NIX_ATTR}"
 LABEL computer.finite.runtime.hermes-agent-nix-system="${HERMES_AGENT_NIX_SYSTEM}"
+LABEL computer.finite.runtime.toolchain-nix-attr="${AGENT_RUNTIME_TOOLCHAIN_ATTR}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -77,15 +82,24 @@ COPY .finite-hermes-nix-store/nix/store /nix/store
 
 RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && test -n "${HERMES_AGENT_PYTHON_PATH}" \
+    && test -n "${AGENT_RUNTIME_TOOLCHAIN_PATH}" \
+    && test -n "${PLAYWRIGHT_BROWSERS_PATH}" \
     && test -x "${HERMES_AGENT_STORE_PATH}/bin/hermes" \
     && test -x "${HERMES_AGENT_PYTHON_PATH}/bin/python3" \
     && test "$("${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')" = "${HERMES_AGENT_VERSION}" \
     && "${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import googleapiclient, google_auth_httplib2, google_auth_oauthlib' \
+    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do \
+         test -x "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}"; \
+         ln -sf "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}" "/usr/local/bin/${bin}"; \
+       done \
+    && test -d "${PLAYWRIGHT_BROWSERS_PATH}" \
+    && find "${PLAYWRIGHT_BROWSERS_PATH}" -iname '*chrom*' | grep -q . \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes" /usr/local/bin/hermes \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-agent" /usr/local/bin/hermes-agent \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
     && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python3 \
-    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python
+    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python \
+    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do "$bin" --version >/dev/null; done
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
@@ -121,7 +135,11 @@ RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
 
 ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
 ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
-ENV PATH="${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
+ENV AGENT_RUNTIME_TOOLCHAIN_PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}"
+ENV AGENT_RUNTIME_TOOLCHAIN_BINS="${AGENT_RUNTIME_TOOLCHAIN_BINS}"
+ENV PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}"
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin:${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"
 ENV FINITECHAT_HOME=/data/agent
 # Shared Finite identity contract: identity.json on the durable mount.
 ENV FINITE_HOME=/data/agent

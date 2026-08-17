@@ -124,6 +124,8 @@
         system:
         if builtins.hasAttr system hermes-agent.packages then
           let
+            # Same pin as hermes-agent so toolchain ELFs share that glibc.
+            hermesPkgs = import hermes-nixpkgs { inherit system; };
             hermesAgentPackage = hermes-agent.packages.${system}.default;
             hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
           in
@@ -134,6 +136,9 @@
             hermes-agent-minimal = hermesAgentMinimal;
             hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
             hermes-agent-python = hermesAgentMinimal.hermesVenv;
+            agent-runtime-toolchains = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix {
+              hermesAgent = hermesAgentPackage;
+            };
           }
         else
           { };

@@ -17,7 +17,7 @@ from typing import Any
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
 
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
@@ -248,8 +248,8 @@ def build_image(
         )
     print(
         "Staged "
-        f"{hermes_runtime.attr} ({hermes_runtime.closure_count} Nix store paths) "
-        f"for {platform}",
+        f"{hermes_runtime.attr} + {hermes_runtime.toolchain_attr} "
+        f"({hermes_runtime.closure_count} Nix store paths) for {platform}",
         flush=True,
     )
 
@@ -266,16 +266,10 @@ def build_image(
             str(dockerfile),
             "--tag",
             args.image_ref,
-            "--build-arg",
-            f"HERMES_AGENT_VERSION={args.hermes_agent_version}",
-            "--build-arg",
-            f"HERMES_AGENT_STORE_PATH={hermes_runtime.store_path}",
-            "--build-arg",
-            f"HERMES_AGENT_PYTHON_PATH={hermes_runtime.python_store_path}",
-            "--build-arg",
-            f"HERMES_AGENT_NIX_ATTR={hermes_runtime.attr}",
-            "--build-arg",
-            f"HERMES_AGENT_NIX_SYSTEM={hermes_runtime.nix_system}",
+            *image_build_args(
+                hermes_runtime,
+                hermes_agent_version=args.hermes_agent_version,
+            ),
             "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",
         ]
@@ -308,9 +302,13 @@ def build_image(
     image_metadata["hermes_nix_runtime"] = {
         "attr": hermes_runtime.attr,
         "python_attr": hermes_runtime.python_attr,
+        "toolchain_attr": hermes_runtime.toolchain_attr,
         "nix_system": hermes_runtime.nix_system,
         "store_path": hermes_runtime.store_path,
         "python_store_path": hermes_runtime.python_store_path,
+        "toolchain_store_path": hermes_runtime.toolchain_store_path,
+        "playwright_browsers_path": hermes_runtime.playwright_browsers_path,
+        "toolchain_bins": hermes_runtime.toolchain_bins,
         "closure_count": hermes_runtime.closure_count,
     }
     return image_metadata

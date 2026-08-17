@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Helpers for staging the pinned Nix-built Hermes runtime into image contexts."""
+"""Helpers for staging pinned Nix runtimes into Agent Runtime image contexts."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
-import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,15 +14,20 @@ HERMES_NIX_CONTEXT_DIR = ".finite-hermes-nix-store"
 HERMES_PACKAGE_ATTR = ".#packages.{system}.hermes-agent"
 HERMES_RUNTIME_ATTR = ".#packages.{system}.hermes-agent-runtime"
 HERMES_RUNTIME_PYTHON_ATTR = ".#packages.{system}.hermes-agent-runtime-python"
+TOOLCHAIN_ATTR = ".#packages.{system}.agent-runtime-toolchains"
 
 
 @dataclass(frozen=True)
 class HermesRuntimeClosure:
     attr: str
     python_attr: str
+    toolchain_attr: str
     nix_system: str
     store_path: str
     python_store_path: str
+    toolchain_store_path: str
+    playwright_browsers_path: str
+    toolchain_bins: list[str]
     version: str
     closure_count: int
 
@@ -96,6 +101,10 @@ def package_attr(system: str) -> str:
     return HERMES_PACKAGE_ATTR.format(system=system)
 
 
+def toolchain_attr(system: str) -> str:
+    return TOOLCHAIN_ATTR.format(system=system)
+
+
 def build_attr(repo_root: Path, attr: str, *, timeout: int = 7200) -> str:
     try:
         result = run(
@@ -121,6 +130,76 @@ def eval_runtime_version(repo_root: Path, system: str) -> str:
     ).stdout.strip()
 
 
+def eval_playwright_browsers_path(repo_root: Path, attr: str) -> str:
+    path = run(["nix", "eval", "--raw", f"{attr}.browsersPath"], cwd=repo_root).stdout.strip()
+    if not path.startswith("/nix/store/"):
+        raise SystemExit(f"Nix did not print a Playwright browsers store path for {attr}")
+    return path
+
+
+def eval_toolchain_bins(repo_root: Path, attr: str) -> list[str]:
+    """Render the image's exposed CLI names from the Nix `bins` authority."""
+    raw = run(["nix", "eval", "--json", f"{attr}.bins"], cwd=repo_root).stdout
+    bins = json.loads(raw)
+    if not isinstance(bins, list) or not bins or any(
+        not isinstance(name, str) or not name or " " in name or "/" in name for name in bins
+    ):
+        raise SystemExit(f"Nix did not print a bin name list for {attr}")
+    return bins
+
+
+def recursive_store_paths(repo_root: Path, store_path: str, *, timeout: int) -> list[str]:
+    closure = run(
+        ["nix", "path-info", "--recursive", store_path],
+        cwd=repo_root,
+        timeout=timeout,
+    ).stdout.splitlines()
+    paths = [path.strip() for path in closure if path.startswith("/nix/store/")]
+    if not paths:
+        raise SystemExit(f"Nix closure for {store_path} was empty")
+    return paths
+
+
+def stage_store_paths(
+    repo_root: Path,
+    context: Path,
+    store_paths: list[str],
+    *,
+    timeout: int,
+) -> None:
+    store_context = context / HERMES_NIX_CONTEXT_DIR
+    if store_context.exists():
+        _rmtree_readonly(store_context)
+    store_root = store_context / "nix" / "store"
+    store_root.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    for path in store_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        run(["rsync", "-a", path, f"{store_root}/"], cwd=repo_root, timeout=timeout, capture=False)
+
+
+def image_build_args(runtime: HermesRuntimeClosure, *, hermes_agent_version: str) -> list[str]:
+    pairs = (
+        ("HERMES_AGENT_VERSION", hermes_agent_version),
+        ("HERMES_AGENT_STORE_PATH", runtime.store_path),
+        ("HERMES_AGENT_PYTHON_PATH", runtime.python_store_path),
+        ("HERMES_AGENT_NIX_ATTR", runtime.attr),
+        ("HERMES_AGENT_NIX_SYSTEM", runtime.nix_system),
+        ("AGENT_RUNTIME_TOOLCHAIN_PATH", runtime.toolchain_store_path),
+        ("AGENT_RUNTIME_TOOLCHAIN_ATTR", runtime.toolchain_attr),
+        ("AGENT_RUNTIME_TOOLCHAIN_BINS", " ".join(runtime.toolchain_bins)),
+        ("PLAYWRIGHT_BROWSERS_PATH", runtime.playwright_browsers_path),
+    )
+    args: list[str] = []
+    for name, value in pairs:
+        if not value:
+            raise SystemExit(f"missing runtime image build-arg {name}")
+        args.extend(["--build-arg", f"{name}={value}"])
+    return args
+
+
 def stage_runtime_closure(
     repo_root: Path,
     context: Path,
@@ -130,39 +209,40 @@ def stage_runtime_closure(
 ) -> HermesRuntimeClosure:
     attr = runtime_attr(system)
     python_attr = runtime_python_attr(system)
+    tools_attr = toolchain_attr(system)
     version = eval_runtime_version(repo_root, system)
     store_path = build_attr(repo_root, attr, timeout=timeout)
     python_store_path = build_attr(repo_root, python_attr, timeout=timeout)
-    closure = run(
-        ["nix", "path-info", "--recursive", store_path],
-        cwd=repo_root,
-        timeout=timeout,
-    ).stdout.splitlines()
-    closure_paths = [path.strip() for path in closure if path.startswith("/nix/store/")]
-    if not closure_paths:
-        raise SystemExit(f"Nix closure for {store_path} was empty")
-    if python_store_path not in closure_paths:
+    toolchain_store_path = build_attr(repo_root, tools_attr, timeout=timeout)
+    playwright_browsers_path = eval_playwright_browsers_path(repo_root, tools_attr)
+    toolchain_bins = eval_toolchain_bins(repo_root, tools_attr)
+
+    hermes_paths = recursive_store_paths(repo_root, store_path, timeout=timeout)
+    if python_store_path not in hermes_paths:
         raise SystemExit(
             f"Nix closure for {store_path} did not include Hermes Python runtime {python_store_path}"
         )
+    toolchain_paths = recursive_store_paths(repo_root, toolchain_store_path, timeout=timeout)
+    if playwright_browsers_path not in toolchain_paths:
+        toolchain_paths = toolchain_paths + recursive_store_paths(
+            repo_root, playwright_browsers_path, timeout=timeout
+        )
 
-    store_context = context / HERMES_NIX_CONTEXT_DIR
-    if store_context.exists():
-        _rmtree_readonly(store_context)
-    store_root = store_context / "nix" / "store"
-    store_root.mkdir(parents=True, exist_ok=True)
-
-    for path in closure_paths:
-        run(["rsync", "-a", path, f"{store_root}/"], cwd=repo_root, timeout=timeout, capture=False)
+    staged_paths = hermes_paths + toolchain_paths
+    stage_store_paths(repo_root, context, staged_paths, timeout=timeout)
 
     return HermesRuntimeClosure(
         attr=attr,
         python_attr=python_attr,
+        toolchain_attr=tools_attr,
         nix_system=system,
         store_path=store_path,
         python_store_path=python_store_path,
+        toolchain_store_path=toolchain_store_path,
+        playwright_browsers_path=playwright_browsers_path,
+        toolchain_bins=toolchain_bins,
         version=version,
-        closure_count=len(closure_paths),
+        closure_count=len({path for path in staged_paths}),
     )
 
 

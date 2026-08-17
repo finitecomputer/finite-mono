@@ -285,6 +285,7 @@ class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
             self.assertIn(requirement, setup)
         self.assertIn("ARG HERMES_AGENT_STORE_PATH", dockerfile)
         self.assertIn("ARG HERMES_AGENT_PYTHON_PATH", dockerfile)
+        self.assertIn("ARG AGENT_RUNTIME_TOOLCHAIN_PATH", dockerfile)
         self.assertIn("COPY .finite-hermes-nix-store/nix/store /nix/store", dockerfile)
         self.assertIn(
             '"${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c '

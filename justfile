@@ -118,6 +118,7 @@ identity-edge-contract:
 runtime-image-contract:
     python3 finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py
     python3 -m unittest discover -s finitecomputer-v2/deploy/finite-computer/images/tests -p 'test_runtime_image_contract.py'
+    python3 -m unittest discover -s scripts/tests -p 'test_hermes_nix_runtime.py'
 
 # Measured eight-H200 DeepSeek serving identity and scheduler contract.
 finite-private-deepseek-contract:
