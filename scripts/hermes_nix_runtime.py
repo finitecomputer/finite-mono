@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,7 +126,12 @@ def stage_runtime_closure(
 
     store_context = context / HERMES_NIX_CONTEXT_DIR
     if store_context.exists():
-        shutil.rmtree(store_context)
+        # Staged Nix store files are read-only; make them deletable first.
+        def _make_writable(func, target, _error):
+            os.chmod(target, 0o700 | stat.S_IMODE(os.lstat(target).st_mode))
+            func(target)
+
+        shutil.rmtree(store_context, onexc=_make_writable)
     store_root = store_context / "nix" / "store"
     store_root.mkdir(parents=True, exist_ok=True)
 
