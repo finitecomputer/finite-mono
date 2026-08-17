@@ -5353,3 +5353,83 @@ button.finite-chat__folder-summary {
     width: calc(100% - 24px);
   }
 }
+
+.finite-chat__brain-cards {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px;
+}
+
+.finite-brain-cards {
+  display: grid;
+  gap: 8px;
+}
+
+.finite-brain-cards__note {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.finite-brain-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  padding: 12px 14px;
+}
+
+.finite-brain-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.finite-brain-card__brain {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finite-brain-card__body {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.finite-brain-card__error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 13px;
+}
+
+.finite-brain-card__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.finite-brain-card__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.finite-brain-card__actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

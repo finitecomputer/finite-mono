@@ -65,6 +65,7 @@ import type {
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
+import { BrainActionCards } from "@/components/brain-action-cards";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
@@ -923,6 +924,7 @@ export function HostedWebChat({
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
+                <BrainActionCards className="finite-chat__brain-cards" />
                 {selectedRoom && selectionPending && !hasRenderableChatContent ? (
                   <ChatLoading label="Opening chat…" />
                 ) : null}

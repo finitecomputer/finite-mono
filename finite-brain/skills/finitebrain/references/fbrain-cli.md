@@ -315,6 +315,12 @@ chat approval card; Folder plans additionally need the key-holding
 committer). Emails without a Finite account fall back to the one-time email
 invitation.
 
+When your invite files an approval request, tell the user: an approval card
+appears in their chat (they can also run `fbrain approvals list`). When the
+user asks whether anything is waiting for them, check both sides: your own
+`fbrain invite brain list` for invitations addressed to your principal, and
+their pending approval and invitation cards in chat.
+
 ```sh
 fbrain invite brain create --target <email|npub>
 fbrain invite brain create --target <email|npub> --expires-in 7d

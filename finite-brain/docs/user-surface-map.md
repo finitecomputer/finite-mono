@@ -67,10 +67,10 @@ rewrite actually serves.
 
 | Capability | CLI/agent | Human surface | State |
 | --- | --- | --- | --- |
-| Invite by email → plan → per-principal | `invite brain create` (#543) | approval card **pending** | CLI done |
+| Invite by email → plan → per-principal | `invite brain create` (#543) | approval card ✓ (chat) | CLI done |
 | Invite by npub / one-time email invite | `invite brain create` | none | OK |
 | Cohort folder invite (mailbox → one Folder, per-principal guests) | `invite folder create --target <email>` | card escalation pending | CLI done (#444 v1) |
-| Accept invitation | `invite brain accept` | invitation card **missing** | CLI done |
+| Accept invitation | `invite brain accept` | invitation card ✓ (chat) | CLI done |
 | Discover my invitations | `invite brain list` (`my-invitations`) | none | OK |
 | Revoke invitation | `invite brain revoke` | none | OK |
 | Public invite instructions | `…/llms.txt` routes | n/a | OK |
@@ -79,7 +79,7 @@ rewrite actually serves.
 | Folder access grant / revoke / ensure | `admin folder-access …`, `admin ensure-access` | none | OK |
 | Mounts (cross-brain folders) | full verb set | none | expert-only, fine |
 | Departure facts / roster revocation | automatic (#489) | n/a | OK |
-| Approval cards (agent asks, human signs) | `approvals list/approve/deny` (#543) | **card missing — in flight** | CLI done |
+| Approval cards (agent asks, human signs) | `approvals list/approve/deny` (#543) | approval card ✓ (chat, hosted signature) | done |
 | File a delegation-grant request | — | — | route exists, no verb |
 | Key delivery to invitees | pending wraps on sync (#530) | n/a | automatic; key-holder agent must be online (accepted trade) |
 
@@ -100,8 +100,9 @@ tested. Two standing gaps:
 ## 5. Consumption surfaces
 
 - Agent chat: everything the CLI does, once the skill teaches it.
-- Human chat: approval cards (in flight) and invitation cards (missing) are
-  the whole show until the `brain://` viewer.
+- Human chat: approval cards and invitation cards render in the chat
+  (hosted human-principal signature via `approveBrainAction` /
+  `authorizeHttpRequest`); the `brain://` viewer is the remaining surface.
 - Human browser: nothing, by design since #540.
 
 ## Issue cross-map (#441–#459 → surface)
