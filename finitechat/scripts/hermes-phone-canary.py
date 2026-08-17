@@ -84,7 +84,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only prove admission. By default the canary also requires one real Hermes model reply.",
     )
-    parser.add_argument("--skip-build", action="store_true")
     parser.add_argument(
         "--keep-running",
         action="store_true",
@@ -169,6 +168,30 @@ def run_json(
         raise CanaryFailure(
             f"command did not emit JSON: {args!r}\nstdout={proc.stdout[-3000:]}"
         ) from exc
+
+
+def nix_package_binary(package: str, binary: str) -> Path:
+    if shutil.which("nix") is None:
+        raise CanaryFailure(f"nix is required to resolve {binary}")
+    result = run(
+        ["nix", "build", "--no-link", "--print-out-paths", f"{MONOREPO_ROOT}#{package}"],
+        cwd=MONOREPO_ROOT,
+        timeout=600,
+    )
+    outputs = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(outputs) != 1:
+        raise CanaryFailure(f"expected one Nix output for {package}, got {outputs!r}")
+    return Path(outputs[0]) / "bin" / binary
+
+
+def resolve_binary(env_name: str, package: str, binary: str) -> Path:
+    configured = os.environ.get(env_name)
+    if configured:
+        return Path(configured)
+    found = shutil.which(binary)
+    if found:
+        return Path(found)
+    return nix_package_binary(package, binary)
 
 
 def free_port() -> int:
@@ -628,7 +651,7 @@ def main() -> int:
     logs_dir = state_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    finitechat_bin = REPO_ROOT / "target/debug/finitechat"
+    finitechat_bin = resolve_binary("FINITECHAT_BIN", "finitechat", "finitechat")
     if shutil.which("nix") is None:
         raise CanaryFailure("nix is required to run the pinned Hermes Agent runtime")
 
@@ -689,9 +712,6 @@ def main() -> int:
     gateway: subprocess.Popen[str] | None = None
     keep_children = False
     try:
-        if not args.skip_build:
-            run_inherit(["cargo", "build", "-q", "-p", "finitechat-cli"], timeout=600)
-            step("finitechat.build")
         if not finitechat_bin.exists():
             raise CanaryFailure(f"finitechat binary not found: {finitechat_bin}")
 

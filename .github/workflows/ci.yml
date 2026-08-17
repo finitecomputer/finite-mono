@@ -525,6 +525,7 @@ jobs:
             ".#packages.x86_64-linux.fsite"
             ".#packages.x86_64-linux.fbrain"
             ".#packages.x86_64-linux.finitechat"
+            ".#packages.x86_64-linux.finitechat-rmp"
           )
 
           nix build --dry-run --option builders '' "${packages[@]}" 2>&1 | tee "$BUILD_PLAN"

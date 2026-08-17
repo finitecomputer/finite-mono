@@ -290,4 +290,23 @@ rec {
       "finitechat/integrations/hermes/finitechat/plugin.yaml"
     ];
   };
+  finitechat-rmp = mkWorkspaceCrate {
+    pname = "finitechat-rmp";
+    dir = "finitechat/crates/finitechat-rmp";
+    sourcePaths = [
+      "finite-identity"
+      "finite-nostr"
+      "finitechat/crates/finitechat-blob"
+      "finitechat/crates/finitechat-client"
+      "finitechat/crates/finitechat-core"
+      "finitechat/crates/finitechat-delivery"
+      "finitechat/crates/finitechat-hermes"
+      "finitechat/crates/finitechat-http"
+      "finitechat/crates/finitechat-mls"
+      "finitechat/crates/finitechat-proto"
+      "finitechat/crates/finitechat-rmp"
+      "finitechat/crates/finitechat-server"
+      "finitechat/crates/finitechat-transport"
+    ];
+  };
 }

@@ -156,8 +156,9 @@ Recommended defaults:
 Required preflight:
 
 1. `git status --short --branch` is recorded in the report.
-2. `cargo build -p finitechat-cli -p finitechat-rmp`
-   succeeds, or the report records `--skip-build` with binary provenance.
+2. The `finitechat` and `finitechat-rmp` host tools resolve from Nix package
+   outputs or explicit binary environment variables; the canary does not use
+   local Cargo artifacts.
 3. The phone server URL is `https://chat.finite.computer`.
 4. The app installs on the target phone.
 5. The sidecar answers `/healthz` and `/readyz`.

@@ -39,8 +39,12 @@ class IOSLocalAgentContractTests(unittest.TestCase):
 
         self.assertLess(preflight_index, build_index)
         self.assertIn('"/dev/tcp/127.0.0.1/${port}"', script)
+        self.assertIn("${mono_root}#finitechat-hosted-device", script)
+        self.assertIn("${hosted_device_out}/bin/finitechat-hosted-device", script)
 
-    def test_electron_harness_is_isolated_and_uses_the_local_pairing_stack(self) -> None:
+    def test_electron_harness_is_isolated_and_uses_the_local_pairing_stack(
+        self,
+    ) -> None:
         script = ELECTRON_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("FINITECHAT_USER_DATA_DIR", script)

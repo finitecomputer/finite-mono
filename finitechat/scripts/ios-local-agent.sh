@@ -26,7 +26,6 @@ workos_email="ios-local@finite.invalid"
 ios_device_id="${FINITECHAT_IOS_LOCAL_DEVICE_ID:-ios-local-$(openssl rand -hex 6)}"
 stress_message_count="${FINITECHAT_IOS_LOCAL_STRESS_MESSAGE_COUNT:-0}"
 stress_chat_count="${FINITECHAT_IOS_LOCAL_STRESS_CHAT_COUNT:-81}"
-cargo_target_dir="${finitechat_root}/target"
 hermes_pid=""
 hosted_pid=""
 dashboard_pid=""
@@ -112,11 +111,7 @@ if [[ ! -x "${dashboard_root}/node_modules/.bin/next" ]]; then
 fi
 
 echo "Building local chat services..."
-(
-  cd "${mono_root}"
-  CARGO_TARGET_DIR="${cargo_target_dir}" \
-    cargo build -q -p finitechat-cli -p finitechat-server -p finitechat-hosted-device
-)
+hosted_device_out="$(nix build --no-link --print-out-paths "${mono_root}#finitechat-hosted-device")"
 
 echo "Starting Local Agent and the chat server..."
 (
@@ -124,7 +119,6 @@ echo "Starting Local Agent and the chat server..."
   if [[ "${stress_message_count}" != "0" && -z "${OPENROUTER_API_KEY:-}" ]]; then
     export OPENROUTER_API_KEY="local-stress-seeding-pauses-agent-replies"
   fi
-  CARGO_TARGET_DIR="${cargo_target_dir}" \
   FINITECHAT_HERMES_STATE_ROOT="${hermes_state}" \
   FINITECHAT_HERMES_PORT="${chat_port}" \
   FINITECHAT_HERMES_ROOM_NAME="Local Agent" \
@@ -152,7 +146,7 @@ FINITECHAT_HOSTED_BIND="127.0.0.1:${hosted_port}" \
 FINITECHAT_HOSTED_DATA_ROOT="${hosted_state}" \
 FINITECHAT_SERVER_URL="${chat_url}" \
 FINITECHAT_PUBLIC_URL="${chat_url}" \
-  "${cargo_target_dir}/debug/finitechat-hosted-device" \
+  "${hosted_device_out}/bin/finitechat-hosted-device" \
   >"${state_root}/hosted-device.log" 2>&1 &
 hosted_pid="$!"
 wait_for_url "hosted device" "${hosted_url}/healthz" "${hosted_pid}"

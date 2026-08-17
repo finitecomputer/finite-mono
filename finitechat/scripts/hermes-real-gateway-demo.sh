@@ -9,6 +9,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mono_root="$(cd "${repo_root}/.." && pwd)"
 state_root="${FINITECHAT_HERMES_STATE_ROOT:-${repo_root}/.state/hermes-real}"
 agent_device_id="${FINITECHAT_HERMES_AGENT_DEVICE_ID:-hermes-real-agent}"
 port="${FINITECHAT_HERMES_PORT:-18788}"
@@ -22,8 +23,6 @@ hermes_home="${FINITECHAT_HERMES_HOME:-${state_root}/hermes-home}"
 agent_home="${FINITECHAT_HERMES_AGENT_HOME:-${state_root}/agent-home}"
 finite_home="${FINITECHAT_HERMES_FINITE_HOME:-${state_root}/finite-home}"
 agent_info="${state_root}/agent-info.json"
-finitechat_bin="${repo_root}/target/debug/finitechat"
-server_bin="${repo_root}/target/debug/finitechat-server"
 model="${FINITECHAT_HERMES_MODEL:-anthropic/claude-sonnet-4.6}"
 
 nix_bin="$(command -v nix || true)"
@@ -33,7 +32,10 @@ if [[ -z "${nix_bin}" ]]; then
 fi
 
 cd "${repo_root}"
-cargo build -q -p finitechat-cli -p finitechat-server
+finitechat_out="$(nix build --no-link --print-out-paths "${mono_root}#finitechat")"
+server_out="$(nix build --no-link --print-out-paths "${mono_root}#finitechat-server")"
+finitechat_bin="${finitechat_out}/bin/finitechat"
+server_bin="${server_out}/bin/finitechat-server"
 
 write_hermes_profile() {
   local target_home="$1"

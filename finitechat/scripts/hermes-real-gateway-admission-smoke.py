@@ -60,9 +60,6 @@ def parse_args() -> argparse.Namespace:
         help="Nix dev shell that provides the pinned Hermes Agent runtime.",
     )
     parser.add_argument(
-        "--skip-build", action="store_true", help="Use existing target/debug binaries."
-    )
-    parser.add_argument(
         "--hold-seconds",
         type=int,
         default=0,
@@ -122,6 +119,30 @@ def run_json(
         raise SmokeFailure(
             f"command did not emit JSON: {args!r}\nstdout={proc.stdout[-2000:]}"
         ) from exc
+
+
+def nix_package_binary(package: str, binary: str) -> Path:
+    if shutil.which("nix") is None:
+        raise SmokeFailure(f"nix is required to resolve {binary}")
+    result = run(
+        ["nix", "build", "--no-link", "--print-out-paths", f"{MONOREPO_ROOT}#{package}"],
+        timeout=600,
+        cwd=MONOREPO_ROOT,
+    )
+    outputs = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(outputs) != 1:
+        raise SmokeFailure(f"expected one Nix output for {package}, got {outputs!r}")
+    return Path(outputs[0]) / "bin" / binary
+
+
+def resolve_binary(env_name: str, package: str, binary: str) -> Path:
+    configured = os.environ.get(env_name)
+    if configured:
+        return Path(configured)
+    found = shutil.which(binary)
+    if found:
+        return Path(found)
+    return nix_package_binary(package, binary)
 
 
 def wait_http_ok(url: str, *, timeout: float, name: str) -> None:
@@ -195,17 +216,11 @@ def main() -> int:
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    finitechat_bin = Path(os.environ.get("FINITECHAT_BIN", REPO_ROOT / "target/debug/finitechat"))
-    server_bin = Path(
-        os.environ.get("FINITECHAT_SERVER_BIN", REPO_ROOT / "target/debug/finitechat-server")
-    )
+    finitechat_bin = resolve_binary("FINITECHAT_BIN", "finitechat", "finitechat")
+    server_bin = resolve_binary("FINITECHAT_SERVER_BIN", "finitechat-server", "finitechat-server")
     if shutil.which("nix") is None:
         raise SmokeFailure("nix is required to run the pinned Hermes Agent runtime")
 
-    if not args.skip_build:
-        run(
-            ["cargo", "build", "-q", "-p", "finitechat-cli", "-p", "finitechat-server"], timeout=240
-        )
     if not finitechat_bin.exists():
         raise SmokeFailure(f"finitechat binary not found: {finitechat_bin}")
     if not server_bin.exists():
