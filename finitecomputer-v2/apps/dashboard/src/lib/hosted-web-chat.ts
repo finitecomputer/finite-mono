@@ -443,6 +443,20 @@ async function ensureRuntimeStarted(
   return hostedDeviceAction(context.config, context.account, { StartRuntime: null });
 }
 
+function optionalMetadataJson(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new HostedWebChatError("metadata_json must be a string.", 400);
+  }
+  const encoded = value.trim();
+  if (!encoded) return null;
+  if (encoded.length > 16 * 1024) {
+    throw new HostedWebChatError("metadata_json is too large.", 400);
+  }
+  JSON.parse(encoded);
+  return encoded;
+}
+
 export function parseHostedChatAction(payload: unknown): HostedChatAction {
   const record = objectRecord(payload, "chat action");
   const keys = Object.keys(record);
@@ -532,6 +546,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         SendMessage: {
           room_id: boundedString(value.room_id, "room_id"),
           text: boundedString(value.text, "text", 64 * 1024),
+          metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
     }
@@ -542,6 +557,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
           room_id: boundedString(value.room_id, "room_id"),
           topic_id: boundedString(value.topic_id, "topic_id"),
           text: boundedString(value.text, "text", 64 * 1024),
+          metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
     }
@@ -553,6 +569,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
           topic_id: boundedString(value.topic_id, "topic_id"),
           chat_id: boundedString(value.chat_id, "chat_id"),
           text: boundedString(value.text, "text", 64 * 1024),
+          metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
     }

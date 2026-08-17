@@ -214,8 +214,46 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
         topic_id: "topic-1",
         chat_id: "chat-1",
         text: "hello",
+        metadata_json: null,
       },
     }
+  );
+
+  assert.deepEqual(
+    parseHostedChatAction({
+      SendChatMessage: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        text: "approved",
+        metadata_json: JSON.stringify({
+          approve: { service: "brain", choice: "approved", requests: [] },
+        }),
+      },
+    }),
+    {
+      SendChatMessage: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        text: "approved",
+        metadata_json: JSON.stringify({
+          approve: { service: "brain", choice: "approved", requests: [] },
+        }),
+      },
+    }
+  );
+
+  assert.throws(() =>
+    parseHostedChatAction({
+      SendChatMessage: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        text: "hello",
+        metadata_json: "not json",
+      },
+    })
   );
 
   assert.deepEqual(
