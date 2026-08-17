@@ -21,6 +21,7 @@ def _closure() -> HermesRuntimeClosure:
         python_store_path="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-hermes-venv",
         toolchain_store_path="/nix/store/cccccccccccccccccccccccccccccccc-agent-runtime-toolchains",
         playwright_browsers_path="/nix/store/dddddddddddddddddddddddddddddddd-playwright-browsers",
+        toolchain_bins=["node", "npm", "npx", "bun", "bunx", "deno", "uv", "uvx", "playwright"],
         version="0.20.0",
         closure_count=3,
     )
@@ -49,11 +50,17 @@ class HermesNixRuntimeTests(unittest.TestCase):
                 "HERMES_AGENT_NIX_SYSTEM=x86_64-linux",
                 "AGENT_RUNTIME_TOOLCHAIN_PATH=/nix/store/cccccccccccccccccccccccccccccccc-agent-runtime-toolchains",
                 "AGENT_RUNTIME_TOOLCHAIN_ATTR=.#packages.x86_64-linux.agent-runtime-toolchains",
+                "AGENT_RUNTIME_TOOLCHAIN_BINS=node npm npx bun bunx deno uv uvx playwright",
                 "PLAYWRIGHT_BROWSERS_PATH=/nix/store/dddddddddddddddddddddddddddddddd-playwright-browsers",
             ],
         )
 
     def test_image_build_args_fail_closed_on_missing_toolchain(self) -> None:
         runtime = replace(_closure(), toolchain_store_path="")
+        with self.assertRaises(SystemExit):
+            image_build_args(runtime, hermes_agent_version="0.20.0")
+
+    def test_image_build_args_fail_closed_on_missing_bins(self) -> None:
+        runtime = replace(_closure(), toolchain_bins=[])
         with self.assertRaises(SystemExit):
             image_build_args(runtime, hermes_agent_version="0.20.0")

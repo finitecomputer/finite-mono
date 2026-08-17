@@ -111,18 +111,11 @@ jobs:
             test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
             test -n "$PLAYWRIGHT_BROWSERS_PATH"
-            test "$(command -v node)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/node"
-            test "$(command -v bun)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/bun"
-            test "$(command -v deno)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/deno"
-            test "$(command -v uv)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/uv"
-            test "$(command -v ffmpeg)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/ffmpeg"
-            test "$(command -v playwright)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/playwright"
-            node --version >/dev/null
-            bun --version >/dev/null
-            deno --version >/dev/null
-            uv --version >/dev/null
-            ffmpeg -version >/dev/null
-            playwright --version >/dev/null
+            test -n "$AGENT_RUNTIME_TOOLCHAIN_BINS"
+            for bin in $AGENT_RUNTIME_TOOLCHAIN_BINS; do
+              test "$(command -v "$bin")" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/$bin"
+              "$bin" --version >/dev/null
+            done
             test -d "$PLAYWRIGHT_BROWSERS_PATH"
             find "$PLAYWRIGHT_BROWSERS_PATH" -iname '*chrom*' | grep -q .
             /runtime/bin/finitechat --help >/dev/null

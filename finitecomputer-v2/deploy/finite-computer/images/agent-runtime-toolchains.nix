@@ -3,13 +3,17 @@
 # flake) so the image carries one glibc family. Node is Hermes's wrapped
 # Node 26 — do not add a second nixpkgs nodejs. Versions live on this
 # derivation's passthru and in flake.lock; do not copy sha256s into Dockerfiles.
+#
+# `bins` is the single authority for which CLI symlinks the image exposes:
+# the build passes it as the AGENT_RUNTIME_TOOLCHAIN_BINS build-arg, and the
+# Dockerfile loops and workflow probes render from that list. Do not
+# enumerate these bin names anywhere else.
 {
   lib,
   symlinkJoin,
   bun,
   deno,
   uv,
-  ffmpeg,
   playwright-driver,
   playwright-test,
   hermesAgent,
@@ -25,7 +29,6 @@ symlinkJoin {
     bun
     deno
     uv
-    ffmpeg
     playwright-test
     browsers
   ];
@@ -41,14 +44,11 @@ symlinkJoin {
       "deno"
       "uv"
       "uvx"
-      "ffmpeg"
-      "ffprobe"
       "playwright"
     ];
     versions = {
       bun = bun.version;
       deno = deno.version;
-      ffmpeg = ffmpeg.version;
       playwright = playwright-driver.version;
       uv = uv.version;
     };
@@ -56,10 +56,13 @@ symlinkJoin {
   meta = {
     description = "Finite Agent Runtime baseline toolchains";
     longDescription = ''
-      node/npm/npx (Hermes Node 26), bun, deno, uv, ffmpeg/ffprobe, and the
-      Playwright CLI plus browser blobs. Exposed on the container PATH so
-      agents do not re-download toolchains into ephemeral writable layers.
+      node/npm/npx (Hermes Node 26), bun, deno, uv, and the Playwright CLI
+      plus browser blobs. Exposed on the container PATH so agents do not
+      re-download toolchains into ephemeral writable layers.
     '';
-    license = lib.licenses.mit;
+    license = with lib.licenses; [
+      mit
+      asl20
+    ];
   };
 }

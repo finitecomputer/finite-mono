@@ -32,6 +32,12 @@ Notes:
 
 - `runtime.Dockerfile` stays next to `build_runtime_image.py` because the
   script assembles its own staged build context and references that path.
+- The Runtime's baseline CLIs are defined by
+  `finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix`
+  (`.#agent-runtime-toolchains` on the root flake). Its `bins` passthru is the
+  single authority for which CLI names the image exposes; the build carries it
+  as the `AGENT_RUNTIME_TOOLCHAIN_BINS` build-arg and the Dockerfiles and
+  workflow probes loop over that list — do not enumerate the names elsewhere.
 - `finitechat/containers/agent/Dockerfile` remains a component test fixture;
   it is not a second publishable product Runtime.
 - Image workflows run on Depot-managed GitHub Actions runners and Depot remote

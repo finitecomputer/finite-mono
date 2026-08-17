@@ -136,7 +136,7 @@
             hermes-agent-minimal = hermesAgentMinimal;
             hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
             hermes-agent-python = hermesAgentMinimal.hermesVenv;
-            agent-runtime-toolchains = hermesPkgs.callPackage ./infra/nixos/agent-runtime-toolchains.nix {
+            agent-runtime-toolchains = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix {
               hermesAgent = hermesAgentPackage;
             };
           }

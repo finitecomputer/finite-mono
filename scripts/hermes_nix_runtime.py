@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
-import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +27,7 @@ class HermesRuntimeClosure:
     python_store_path: str
     toolchain_store_path: str
     playwright_browsers_path: str
+    toolchain_bins: list[str]
     version: str
     closure_count: int
 
@@ -136,6 +137,17 @@ def eval_playwright_browsers_path(repo_root: Path, attr: str) -> str:
     return path
 
 
+def eval_toolchain_bins(repo_root: Path, attr: str) -> list[str]:
+    """Render the image's exposed CLI names from the Nix `bins` authority."""
+    raw = run(["nix", "eval", "--json", f"{attr}.bins"], cwd=repo_root).stdout
+    bins = json.loads(raw)
+    if not isinstance(bins, list) or not bins or any(
+        not isinstance(name, str) or not name or " " in name or "/" in name for name in bins
+    ):
+        raise SystemExit(f"Nix did not print a bin name list for {attr}")
+    return bins
+
+
 def recursive_store_paths(repo_root: Path, store_path: str, *, timeout: int) -> list[str]:
     closure = run(
         ["nix", "path-info", "--recursive", store_path],
@@ -177,6 +189,7 @@ def image_build_args(runtime: HermesRuntimeClosure, *, hermes_agent_version: str
         ("HERMES_AGENT_NIX_SYSTEM", runtime.nix_system),
         ("AGENT_RUNTIME_TOOLCHAIN_PATH", runtime.toolchain_store_path),
         ("AGENT_RUNTIME_TOOLCHAIN_ATTR", runtime.toolchain_attr),
+        ("AGENT_RUNTIME_TOOLCHAIN_BINS", " ".join(runtime.toolchain_bins)),
         ("PLAYWRIGHT_BROWSERS_PATH", runtime.playwright_browsers_path),
     )
     args: list[str] = []
@@ -202,6 +215,7 @@ def stage_runtime_closure(
     python_store_path = build_attr(repo_root, python_attr, timeout=timeout)
     toolchain_store_path = build_attr(repo_root, tools_attr, timeout=timeout)
     playwright_browsers_path = eval_playwright_browsers_path(repo_root, tools_attr)
+    toolchain_bins = eval_toolchain_bins(repo_root, tools_attr)
 
     hermes_paths = recursive_store_paths(repo_root, store_path, timeout=timeout)
     if python_store_path not in hermes_paths:
@@ -226,6 +240,7 @@ def stage_runtime_closure(
         python_store_path=python_store_path,
         toolchain_store_path=toolchain_store_path,
         playwright_browsers_path=playwright_browsers_path,
+        toolchain_bins=toolchain_bins,
         version=version,
         closure_count=len({path for path in staged_paths}),
     )

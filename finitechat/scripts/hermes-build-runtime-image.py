@@ -121,6 +121,7 @@ def main() -> int:
             "python_store_path": hermes_runtime.python_store_path,
             "toolchain_store_path": hermes_runtime.toolchain_store_path,
             "playwright_browsers_path": hermes_runtime.playwright_browsers_path,
+            "toolchain_bins": hermes_runtime.toolchain_bins,
             "closure_count": hermes_runtime.closure_count,
         },
         "image_metadata": docker_image_metadata(image_ref),

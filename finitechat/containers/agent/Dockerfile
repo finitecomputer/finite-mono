@@ -11,6 +11,7 @@ ARG HERMES_AGENT_VERSION=0.20.0
 ARG HERMES_AGENT_STORE_PATH
 ARG HERMES_AGENT_PYTHON_PATH
 ARG AGENT_RUNTIME_TOOLCHAIN_PATH
+ARG AGENT_RUNTIME_TOOLCHAIN_BINS
 ARG PLAYWRIGHT_BROWSERS_PATH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates restic \
@@ -23,7 +24,7 @@ RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && test -x "${HERMES_AGENT_STORE_PATH}/bin/hermes" \
     && test -x "${HERMES_AGENT_PYTHON_PATH}/bin/python3" \
     && test "$("${HERMES_AGENT_PYTHON_PATH}/bin/python3" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')" = "${HERMES_AGENT_VERSION}" \
-    && for bin in node npm npx bun bunx deno uv uvx ffmpeg ffprobe playwright; do \
+    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do \
          test -x "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}"; \
          ln -sf "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/${bin}" "/usr/local/bin/${bin}"; \
        done \
@@ -56,6 +57,7 @@ ENV HERMES_HOME=/data/agent/hermes-home
 ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
 ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
 ENV AGENT_RUNTIME_TOOLCHAIN_PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}"
+ENV AGENT_RUNTIME_TOOLCHAIN_BINS="${AGENT_RUNTIME_TOOLCHAIN_BINS}"
 ENV PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}"
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin:${HERMES_AGENT_STORE_PATH}/bin:${HERMES_AGENT_PYTHON_PATH}/bin:/usr/local/bin:${PATH}"

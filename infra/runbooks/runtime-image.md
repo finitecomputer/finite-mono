@@ -308,7 +308,7 @@ in `infra/tinfoil/README.md`.
 1. Smoke evidence and the publication report name the same monorepo SHA,
    Hermes `0.20.0`, Runtime image digest, CLIs, plugin, bundled Finite
    Skills source, and the Nix-staged baseline toolchains (node, bun, deno,
-   uv, ffmpeg, Playwright browsers).
+   uv, Playwright browsers).
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:
    verify the Core runtime row, `journalctl -u finite-saas-runner` on lat1,
