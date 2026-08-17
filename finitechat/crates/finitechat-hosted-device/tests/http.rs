@@ -1865,6 +1865,7 @@ async fn hosted_device_chats_with_an_agent_and_restarts_with_the_transcript() {
         .dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "hello from the agent".to_owned(),
+            metadata_json: None,
         })
         .unwrap();
     let replied = action_for(

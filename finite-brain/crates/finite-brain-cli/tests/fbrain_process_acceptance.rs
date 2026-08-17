@@ -1771,9 +1771,12 @@ fn built_fbrain_process_cli_invite_approval_roundtrip() {
 
     // The filing is recorded for the Runtime chat adapter: the agent's next
     // final delivery carries metadata.approve naming this request.
-    let outbox_text =
-        std::fs::read_to_string(home_member.join("fbrain-config").join("approval-outbox.jsonl"))
-            .expect("member filing writes the approval outbox");
+    let outbox_text = std::fs::read_to_string(
+        home_member
+            .join("fbrain-config")
+            .join("approval-outbox.jsonl"),
+    )
+    .expect("member filing writes the approval outbox");
     assert!(
         outbox_text
             .lines()

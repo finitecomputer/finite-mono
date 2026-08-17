@@ -161,6 +161,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     user.dispatch_and_wait(AppAction::SendMessage {
         room_id: room_id.clone(),
         text: "hello hermes over welcome".to_owned(),
+        metadata_json: None,
     })
     .expect("user sends");
 

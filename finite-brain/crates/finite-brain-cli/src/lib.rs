@@ -3780,10 +3780,7 @@ fn find_approval_request(
 /// request, so the human's chat surfaces the question in-stream. Best-effort
 /// by design — the filing itself is already durable server-side and
 /// `fbrain approvals list` remains the authoritative fallback.
-pub(crate) fn append_approval_filing_notice(
-    env: &CliEnvironment,
-    response: &serde_json::Value,
-) {
+pub(crate) fn append_approval_filing_notice(env: &CliEnvironment, response: &serde_json::Value) {
     let Some(request_id) = response.get("id").and_then(|id| id.as_str()) else {
         return;
     };
@@ -3806,15 +3803,14 @@ pub(crate) fn append_approval_filing_notice(
         "filedAtUnix": filed_at_unix,
     });
     let outbox = env.config_dir.join("approval-outbox.jsonl");
-    let appended = fs::create_dir_all(&env.config_dir)
-        .and_then(|()| {
-            use std::io::Write as _;
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&outbox)?;
-            writeln!(file, "{notice}")
-        });
+    let appended = fs::create_dir_all(&env.config_dir).and_then(|()| {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&outbox)?;
+        writeln!(file, "{notice}")
+    });
     if let Err(error) = appended {
         eprintln!("fbrain: could not record approval filing for chat delivery: {error}");
     }

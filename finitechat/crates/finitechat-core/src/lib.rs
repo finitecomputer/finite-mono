@@ -351,6 +351,14 @@ pub enum ChatMessageStatus {
     Complete,
 }
 
+/// One outbound plain-text chat delivery: the body plus its optional reply
+/// target and caller-authored application metadata.
+struct OutboundChatText {
+    text: String,
+    reply_to_message_id: Option<String>,
+    metadata_json: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ChatMessage {
     pub room_id: String,
@@ -2555,8 +2563,11 @@ impl AppRuntimeState {
                 room_id,
                 topic_id,
                 chat_id,
-                text,
-                metadata_json.as_deref(),
+                OutboundChatText {
+                    text,
+                    reply_to_message_id: None,
+                    metadata_json,
+                },
                 requester_context,
             )?,
             AppAction::SendReply {
@@ -2582,9 +2593,11 @@ impl AppRuntimeState {
                 room_id,
                 topic_id,
                 chat_id,
-                text,
-                reply_to_message_id,
-                metadata_json.as_deref(),
+                OutboundChatText {
+                    text,
+                    reply_to_message_id: Some(reply_to_message_id),
+                    metadata_json,
+                },
                 requester_context,
             )?,
             AppAction::SendAttachment {
@@ -3424,8 +3437,11 @@ impl AppRuntimeState {
             room_id,
             HOME_TOPIC_ID.to_owned(),
             chat_id,
-            trimmed.to_owned(),
-            None,
+            OutboundChatText {
+                text: trimmed.to_owned(),
+                reply_to_message_id: None,
+                metadata_json: None,
+            },
             None,
         )?;
         self.app.status = "chat started".to_owned();
@@ -4529,7 +4545,15 @@ impl AppRuntimeState {
         metadata_json: Option<&str>,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        self.send_message_with_reply(room_id, text, None, metadata_json, requester_context)
+        self.send_message_with_reply(
+            room_id,
+            OutboundChatText {
+                text,
+                reply_to_message_id: None,
+                metadata_json: metadata_json.map(str::to_owned),
+            },
+            requester_context,
+        )
     }
 
     fn send_topic_message(
@@ -4553,7 +4577,17 @@ impl AppRuntimeState {
                     })?
             }
         };
-        self.send_chat_message(room_id, topic_id, chat_id, text, metadata_json, requester_context)
+        self.send_chat_message(
+            room_id,
+            topic_id,
+            chat_id,
+            OutboundChatText {
+                text,
+                reply_to_message_id: None,
+                metadata_json: metadata_json.map(str::to_owned),
+            },
+            requester_context,
+        )
     }
 
     fn send_chat_message(
@@ -4561,8 +4595,7 @@ impl AppRuntimeState {
         room_id: String,
         topic_id: String,
         chat_id: String,
-        text: String,
-        metadata_json: Option<&str>,
+        outbound: OutboundChatText,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
@@ -4570,9 +4603,7 @@ impl AppRuntimeState {
             room_id,
             Some(topic_id),
             Some(chat_id),
-            text,
-            None,
-            metadata_json,
+            outbound,
             requester_context,
         )
     }
@@ -4589,9 +4620,11 @@ impl AppRuntimeState {
         self.validate_reply_target(&room_id, target_id)?;
         self.send_message_with_reply(
             room_id,
-            text,
-            Some(target_id.to_owned()),
-            metadata_json,
+            OutboundChatText {
+                text,
+                reply_to_message_id: Some(target_id.to_owned()),
+                metadata_json: metadata_json.map(str::to_owned),
+            },
             requester_context,
         )
     }
@@ -4601,21 +4634,25 @@ impl AppRuntimeState {
         room_id: String,
         topic_id: String,
         chat_id: String,
-        text: String,
-        reply_to_message_id: String,
-        metadata_json: Option<&str>,
+        outbound: OutboundChatText,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
-        let target_id = reply_to_message_id.trim();
-        self.validate_reply_target(&room_id, target_id)?;
+        let target_id = outbound
+            .reply_to_message_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        self.validate_reply_target(&room_id, &target_id)?;
         self.send_message_with_conversation_and_chat(
             room_id,
             Some(topic_id),
             Some(chat_id),
-            text,
-            Some(target_id.to_owned()),
-            metadata_json,
+            OutboundChatText {
+                reply_to_message_id: Some(target_id),
+                ..outbound
+            },
             requester_context,
         )
     }
@@ -4623,12 +4660,10 @@ impl AppRuntimeState {
     fn send_message_with_reply(
         &mut self,
         room_id: String,
-        text: String,
-        reply_to_message_id: Option<String>,
-        metadata_json: Option<&str>,
+        outbound: OutboundChatText,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        let trimmed = text.trim();
+        let trimmed = outbound.text.trim();
         if trimmed.is_empty() {
             return Ok(());
         }
@@ -4638,15 +4673,18 @@ impl AppRuntimeState {
             });
         }
 
-        let reply_to_message_id = self.normalize_reply_target(&room_id, reply_to_message_id)?;
+        let reply_to_message_id =
+            self.normalize_reply_target(&room_id, outbound.reply_to_message_id)?;
         let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
         self.send_message_with_conversation_and_chat(
             room_id,
             Some(topic_id),
             Some(chat_id),
-            trimmed.to_owned(),
-            reply_to_message_id,
-            metadata_json,
+            OutboundChatText {
+                text: trimmed.to_owned(),
+                reply_to_message_id,
+                ..outbound
+            },
             requester_context,
         )
     }
@@ -4656,12 +4694,10 @@ impl AppRuntimeState {
         room_id: String,
         conversation_id: Option<String>,
         chat_id: Option<String>,
-        text: String,
-        reply_to_message_id: Option<String>,
-        metadata_json: Option<&str>,
+        outbound: OutboundChatText,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        let trimmed = text.trim();
+        let trimmed = outbound.text.trim();
         if trimmed.is_empty() {
             return Ok(());
         }
@@ -4673,10 +4709,10 @@ impl AppRuntimeState {
 
         let chat_payload = encode_text_message_payload_scoped(
             trimmed,
-            reply_to_message_id.as_deref(),
+            outbound.reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
-            metadata_json,
+            outbound.metadata_json.as_deref(),
             requester_context,
         )?;
         let app_event_plaintext = encode_application_event_with_segment(
@@ -12059,7 +12095,8 @@ mod tests {
 
     #[test]
     fn text_payload_carries_requester_context_only_when_hosted_dispatch_supplies_it() {
-        let plain = encode_text_message_payload_scoped("hello", None, None, None, None, None).unwrap();
+        let plain =
+            encode_text_message_payload_scoped("hello", None, None, None, None, None).unwrap();
         let plain = HermesMessagePayloadV1::decode(&plain).unwrap().unwrap();
         assert!(
             !plain
@@ -12093,8 +12130,7 @@ mod tests {
 
     #[test]
     fn message_metadata_round_trips_and_requester_claims_never_surface() {
-        let metadata_json =
-            r#"{"approve":{"service":"brain","requests":[{"brainId":"brain-1","requestId":"approval-1"}]}}"#;
+        let metadata_json = r#"{"approve":{"service":"brain","requests":[{"brainId":"brain-1","requestId":"approval-1"}]}}"#;
         let requester = VerifiedRequesterContext {
             email: "paul@finite.vip".to_owned(),
             sites_assertion: "assertion-1".to_owned(),
@@ -12158,15 +12194,10 @@ mod tests {
         );
 
         // Non-object metadata is rejected fail-closed rather than dropped.
-        assert!(encode_text_message_payload_scoped(
-            "publish",
-            None,
-            None,
-            None,
-            Some("[1,2,3]"),
-            None
-        )
-        .is_err());
+        assert!(
+            encode_text_message_payload_scoped("publish", None, None, None, Some("[1,2,3]"), None)
+                .is_err()
+        );
     }
 
     fn next_permutation(values: &mut [usize]) -> bool {
@@ -12712,7 +12743,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello from cli".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let bob_sync = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -12726,7 +12757,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "hello from ios".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_sync = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -12832,7 +12863,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "app message before relaunch".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -12909,7 +12940,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: home_chat_id.clone(),
                 text: "first Home chat".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert_eq!(first_chat.messages.len(), 1);
@@ -12952,7 +12983,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: second_chat_id.clone(),
                 text: "second Home chat".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert_eq!(second_chat.messages.len(), 1);
@@ -12980,7 +13011,7 @@ mod tests {
                 topic_id: HOME_TOPIC_ID.to_owned(),
                 chat_id: second_chat_id.clone(),
                 text: "a later response must not rename this chat".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let stable_title = later_second_chat
@@ -13018,7 +13049,7 @@ mod tests {
                 chat_id: home_chat_id.clone(),
                 text: "reply in Home chat".to_owned(),
                 reply_to_message_id: home_parent_id.clone(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let reply = home_reply
@@ -13299,7 +13330,7 @@ mod tests {
                 topic_id: topic_id.clone(),
                 chat_id: chat_id.clone(),
                 text: "Implement the chats sidebar".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let fallback_title = titled_from_first_message
@@ -13646,7 +13677,7 @@ mod tests {
                 topic_id: topic_id.clone(),
                 chat_id: chat_id.clone(),
                 text: "Archived chats remain usable.".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert!(
@@ -14043,7 +14074,7 @@ mod tests {
                 topic_id: build_topic_id.clone(),
                 chat_id: first_build_chat_id.clone(),
                 text: "First build context".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         hosted
@@ -14077,7 +14108,7 @@ mod tests {
                 topic_id: build_topic_id.clone(),
                 chat_id: second_build_chat_id.clone(),
                 text: "Second build context".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
 
@@ -14105,7 +14136,7 @@ mod tests {
                     topic_id: operations_topic_id.clone(),
                     chat_id: operations_chat_id.clone(),
                     text: format!("Busy operations history {index}"),
-                metadata_json: None,
+                    metadata_json: None,
                 })
                 .unwrap();
         }
@@ -15243,7 +15274,7 @@ mod tests {
                 .dispatch_and_wait(AppAction::SendMessage {
                     room_id: room_id.clone(),
                     text: format!("message-{index:03}"),
-                metadata_json: None,
+                    metadata_json: None,
                 })
                 .unwrap();
         }
@@ -15316,7 +15347,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "survives force close".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -16036,7 +16067,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello from app actor".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert!(
@@ -16947,7 +16978,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello direct".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17669,7 +17700,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello group".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17827,7 +17858,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "hello after add".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -17928,7 +17959,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "carol joined after bob stayed offline".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
 
@@ -18077,7 +18108,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "done typing".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_online = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -18206,7 +18237,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "saved before force close".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         drop(alice);
@@ -18291,7 +18322,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "do not lose this".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert_eq!(failed.status, "sent");
@@ -18379,7 +18410,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "retry after force close".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let local_message_id = failed
@@ -18492,7 +18523,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "retry only after server rejection".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         assert_eq!(rejected.status, "delivery failed");
@@ -18702,7 +18733,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: zulu.clone(),
                 text: "selected room survives force close".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         alice
@@ -18763,7 +18794,7 @@ mod tests {
         app.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "still here after stale config".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         drop(app);
@@ -18836,7 +18867,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "remote message before force close".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let synced = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -18908,7 +18939,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "parent".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let parent_id = parent_state
@@ -18924,7 +18955,7 @@ mod tests {
                 room_id: room_id.clone(),
                 text: "nope".to_owned(),
                 reply_to_message_id: "missing-message".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .expect_err("unknown reply targets are rejected by Rust policy");
         assert!(
@@ -18937,7 +18968,7 @@ mod tests {
                 room_id: room_id.clone(),
                 text: "child".to_owned(),
                 reply_to_message_id: parent_id.clone(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let reply = replied
@@ -19485,7 +19516,7 @@ mod tests {
             bob.dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: format!("filler {index}"),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         }
@@ -19615,7 +19646,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "hello over app sse".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.wait_for_update(1_000).unwrap();
@@ -19661,7 +19692,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "remote sync survives force close".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_synced = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -19859,7 +19890,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "tap a reaction on this".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let target_message_id = bob_state
@@ -19943,7 +19974,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "reaction target".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let target_message_id = alice_state
@@ -19960,7 +19991,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "concurrent message before reaction".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
 
@@ -20027,7 +20058,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "read me".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let target_message_id = bob_state
@@ -20228,7 +20259,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "from the local Device".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         let hosted_state = hosted.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -20335,7 +20366,7 @@ mod tests {
                 .dispatch_and_wait(AppAction::SendMessage {
                     room_id: room_id.clone(),
                     text: format!("frozen history {index}"),
-                metadata_json: None,
+                    metadata_json: None,
                 })
                 .unwrap();
         }
@@ -20397,7 +20428,7 @@ mod tests {
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
                 text: "ordinary sync after frozen enrollment snapshot".to_owned(),
-            metadata_json: None,
+                metadata_json: None,
             })
             .unwrap();
         drop(source);
@@ -20518,7 +20549,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "first unread".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -20534,7 +20565,7 @@ mod tests {
         bob.dispatch_and_wait(AppAction::SendMessage {
             room_id: room_id.clone(),
             text: "second unread".to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();

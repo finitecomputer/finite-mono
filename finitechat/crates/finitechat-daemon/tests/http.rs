@@ -356,6 +356,7 @@ async fn authenticated_actions_and_restart_reopen_the_same_selected_chat() {
             topic_id: topic_id.clone(),
             chat_id: chat_id.clone(),
             text: "survives an Electron daemon restart".to_owned(),
+            metadata_json: None,
         },
     )
     .await;

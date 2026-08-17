@@ -344,7 +344,7 @@ fn send_to_chat(
             topic_id: topic_id.to_owned(),
             chat_id: chat_id.to_owned(),
             text: text.to_owned(),
-        metadata_json: None,
+            metadata_json: None,
         })
         .unwrap();
 }
