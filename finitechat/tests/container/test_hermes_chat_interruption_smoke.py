@@ -62,7 +62,8 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
     def test_dispatch_workflow_runs_and_uploads_the_matrix(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn("chat_interruption_smoke:", workflow)
-        self.assertIn("cargo build --locked -p finitechat-server", workflow)
+        self.assertIn("../#finitechat-server", workflow)
+        self.assertIn("FINITECHAT_SERVER_BIN=", workflow)
         self.assertIn("scripts/hermes-chat-interruption-docker-smoke.py", workflow)
         self.assertIn("target/hermes-chat-interruption-docker-smoke/report.json", workflow)
 

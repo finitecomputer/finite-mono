@@ -86,9 +86,9 @@ let
       // extraAttrs
     );
 in
-{
+rec {
   # CI/local harness
-  devfinity = mkWorkspaceCrate {
+  devfinity-unwrapped = mkWorkspaceCrate {
     pname = "devfinity";
     dir = "devfinity";
     sourcePaths = [ "devfinity" ];
@@ -99,6 +99,44 @@ in
         --replace-fail 'finitechat-core = { path = "../finitechat/crates/finitechat-core" }' ""
     '';
   };
+
+  devfinity =
+    let
+      runtimeInputs = [
+        devfinity-unwrapped
+        finite-saas-core
+        finite-saas-local
+        finite-saas-runner
+        finitechat-server
+        finitechat-hosted-device
+        finitesitesd
+        finite-identity
+        finite-brain
+        fsite
+        fbrain
+        pkgs.curl
+        pkgs.git
+        pkgs.jq
+        pkgs.nodejs_24
+        pkgs.pnpm
+        pkgs.postgresql_16
+        pkgs.process-compose
+        pkgs.python3
+        pkgs.sqlite
+      ];
+    in
+    pkgs.writeShellApplication {
+      name = "devfinity";
+      inherit runtimeInputs;
+      text = ''
+        exec ${devfinity-unwrapped}/bin/devfinity "$@"
+      '';
+      meta.mainProgram = "devfinity";
+      passthru = {
+        inherit runtimeInputs;
+        unwrapped = devfinity-unwrapped;
+      };
+    };
 
   # Servers
   finite-saas-core = mkWorkspaceCrate {
@@ -250,6 +288,25 @@ in
       "finitechat/integrations/hermes/finitechat/__init__.py"
       "finitechat/integrations/hermes/finitechat/adapter.py"
       "finitechat/integrations/hermes/finitechat/plugin.yaml"
+    ];
+  };
+  finitechat-rmp = mkWorkspaceCrate {
+    pname = "finitechat-rmp";
+    dir = "finitechat/crates/finitechat-rmp";
+    sourcePaths = [
+      "finite-identity"
+      "finite-nostr"
+      "finitechat/crates/finitechat-blob"
+      "finitechat/crates/finitechat-client"
+      "finitechat/crates/finitechat-core"
+      "finitechat/crates/finitechat-delivery"
+      "finitechat/crates/finitechat-hermes"
+      "finitechat/crates/finitechat-http"
+      "finitechat/crates/finitechat-mls"
+      "finitechat/crates/finitechat-proto"
+      "finitechat/crates/finitechat-rmp"
+      "finitechat/crates/finitechat-server"
+      "finitechat/crates/finitechat-transport"
     ];
   };
 }

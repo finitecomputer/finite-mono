@@ -67,11 +67,6 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.88"
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -118,9 +113,10 @@ jobs:
       - name: In-flight chat interruption and restore smoke
         if: ${{ inputs.chat_interruption_smoke }}
         run: |
-          cargo build --locked -p finitechat-server
+          server_out="$(nix build --no-link --print-build-logs --print-out-paths --option builders '' ../#finitechat-server)"
           python3 -m py_compile scripts/hermes-chat-interruption-docker-smoke.py
-          scripts/hermes-chat-interruption-docker-smoke.py \
+          FINITECHAT_SERVER_BIN="$server_out/bin/finitechat-server" \
+            scripts/hermes-chat-interruption-docker-smoke.py \
             --image "$RUNTIME_IMAGE_REF" \
             --report target/hermes-chat-interruption-docker-smoke/report.json
 

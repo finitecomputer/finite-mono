@@ -21,15 +21,14 @@ from tests.hermes.test_live_hermes_agent_media_e2e import (
     RecordingPluginContext,
     free_local_port,
     load_adapter_module,
+    required_binary,
     run_json,
     wait_for_health,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_IOS_MEDIA_REPORT = REPO_ROOT / "target/ios-hermes-agent-media-e2e/report.json"
-FINITECHAT_RMP_BIN = Path(
-    os.environ.get("FINITECHAT_RMP_BIN", REPO_ROOT / "target/debug/finitechat-rmp")
-)
+FINITECHAT_RMP_BIN = required_binary("FINITECHAT_RMP_BIN", "finitechat-rmp")
 BUNDLE_ID = os.environ.get("FINITECHAT_IOS_BUNDLE_ID", "computer.finite.finitechat")
 IOS_DEVICE_ID = "ios-hermes-media-sim"
 IOS_CAPTION = "ios media hello"

@@ -156,7 +156,6 @@ JS
 
 check_identity_reconciliation_operator_boundary() {
   local smoke_root
-  local finitesitesd_bin
   local source_db
   local synthetic_db
   local preview_json
@@ -168,7 +167,6 @@ check_identity_reconciliation_operator_boundary() {
   local smoke_pubkey="2222222222222222222222222222222222222222222222222222222222222222"
 
   smoke_root="${DEVFINITY_STATE_DIR:?}/sites-reconciliation-smoke"
-  finitesitesd_bin="${DEVFINITY_FINITESITESD_BIN:-$(pwd)/target/debug/finitesitesd}"
   source_db="${DEVFINITY_STATE_DIR:?}/finitesites/registry.db"
   synthetic_db="$smoke_root/registry.db"
   preview_json="$smoke_root/preview.json"
@@ -182,7 +180,7 @@ check_identity_reconciliation_operator_boundary() {
   authorized_before="$(sqlite3 "$synthetic_db" \
     "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
 
-  "$finitesitesd_bin" reconcile-identity --data "$smoke_root" >"$preview_json"
+  finitesitesd reconcile-identity --data "$smoke_root" >"$preview_json"
   node - "$preview_json" <<'JS'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -197,7 +195,7 @@ JS
     return 1
   fi
 
-  "$finitesitesd_bin" reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
+  finitesitesd reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
   node - "$apply_json" <<'JS'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -221,7 +219,6 @@ check_native_requesting_user_site() {
   local smoke_root
   local agent_home
   local agent_finite_home
-  local fsite_bin
   local project_dir
   local hosted_config
   local sites_config
@@ -257,7 +254,6 @@ check_native_requesting_user_site() {
   smoke_root="${DEVFINITY_STATE_DIR:?}/sites-native-requester-${run_id}"
   agent_home="$smoke_root/home"
   agent_finite_home="$smoke_root/finite-home"
-  fsite_bin="${DEVFINITY_FSITE_BIN:-$(pwd)/target/debug/fsite}"
   project_dir="$smoke_root/project"
   hosted_config="$smoke_root/hosted-device.curl"
   sites_config="$smoke_root/sites-service.curl"
@@ -315,19 +311,16 @@ JS
     'spa = false' >"$project_dir/finite.toml"
   printf '<h1>%s</h1>\n' "$marker" >"$project_dir/site/index.html"
 
-  if [[ -z "${DEVFINITY_FSITE_BIN:-}" ]]; then
-    cargo build -q -p fsite-cli
-  fi
   env \
     HOME="$agent_home" \
     FINITE_HOME="$agent_finite_home" \
     FINITE_SITES_API="$sites_url" \
     GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
-    "$fsite_bin" auth register --output json >/dev/null
+    fsite auth register --output json >/dev/null
   env \
     HOME="$agent_home" \
     FINITE_HOME="$agent_finite_home" \
-    "$fsite_bin" auth status --output json >"$agent_identity_json"
+    fsite auth status --output json >"$agent_identity_json"
   agent_npub="$(node - "$agent_identity_json" <<'JS'
 const fs = require("node:fs");
 const identity = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -394,7 +387,7 @@ JS
       HERMES_SESSION_PLATFORM=finitechat \
       HERMES_SESSION_KEY="$session_key" \
       HERMES_SESSION_USER_ID="$requesting_user_id" \
-      "$fsite_bin" project init \
+      fsite project init \
         --config finite.toml \
         --dry-run \
         --output json >/dev/null
@@ -406,7 +399,7 @@ JS
       HERMES_SESSION_PLATFORM=finitechat \
       HERMES_SESSION_KEY="$session_key" \
       HERMES_SESSION_USER_ID="$requesting_user_id" \
-      "$fsite_bin" project init \
+      fsite project init \
         --config finite.toml \
         --output json >"$init_json"
   )
@@ -444,7 +437,7 @@ JS
     FINITE_HOME="$agent_finite_home" \
     FINITE_SITES_API="$sites_url" \
     GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
-    "$fsite_bin" auth git "$slug" --store --output json >/dev/null
+    fsite auth git "$slug" --store --output json >/dev/null
   (
     cd "$project_dir"
     export GIT_CONFIG_GLOBAL="$agent_home/gitconfig"
@@ -590,7 +583,7 @@ JS
     FINITE_HOME="$agent_finite_home" \
     FINITE_SITES_API="$sites_url" \
     GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
-    "$fsite_bin" project share "$slug" "$output_id" \
+    fsite project share "$slug" "$output_id" \
       --remove-npub "$requesting_user_npub" \
       --output json >"$revoke_json"
   status="$(curl -sS --max-time 15 -o /dev/null -H "Cookie: $viewer_cookie" -w '%{http_code}' "$output_url")"
@@ -604,6 +597,8 @@ JS
 need bash
 need cargo
 need curl
+need finitesitesd
+need fsite
 need node
 need sqlite3
 

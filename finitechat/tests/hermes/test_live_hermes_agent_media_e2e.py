@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,11 +19,21 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.py"
-FINITECHAT_BIN = Path(os.environ.get("FINITECHAT_BIN", REPO_ROOT / "target/debug/finitechat"))
-FINITECHAT_SERVER_BIN = Path(
-    os.environ.get("FINITECHAT_SERVER_BIN", REPO_ROOT / "target/debug/finitechat-server")
-)
 DEFAULT_MEDIA_REPORT = REPO_ROOT / "target/hermes-agent-media-e2e/report.json"
+
+
+def required_binary(env_name: str, binary_name: str) -> Path:
+    configured = os.environ.get(env_name)
+    if configured:
+        return Path(configured)
+    found = shutil.which(binary_name)
+    if found:
+        return Path(found)
+    return Path(binary_name)
+
+
+FINITECHAT_BIN = required_binary("FINITECHAT_BIN", "finitechat")
+FINITECHAT_SERVER_BIN = required_binary("FINITECHAT_SERVER_BIN", "finitechat-server")
 
 
 def run_json(args: list[str], *, timeout: int = 120) -> dict[str, Any]:

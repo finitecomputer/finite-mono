@@ -31,7 +31,7 @@ pub enum ProcessComposeMode {
 enum ManagedProcess {
     ProcessCompose,
     WorkosFixture,
-    RustBuild,
+    ServiceBinaries,
     Postgres,
     Core,
     FiniteChat,
@@ -52,7 +52,7 @@ impl ManagedProcess {
     const ALL: [Self; 17] = [
         Self::ProcessCompose,
         Self::WorkosFixture,
-        Self::RustBuild,
+        Self::ServiceBinaries,
         Self::Postgres,
         Self::Core,
         Self::FiniteChat,
@@ -73,7 +73,7 @@ impl ManagedProcess {
         match self {
             Self::ProcessCompose => "process-compose",
             Self::WorkosFixture => "workos-fixture",
-            Self::RustBuild => "rust-build",
+            Self::ServiceBinaries => "service-binaries",
             Self::Postgres => "postgres",
             Self::Core => "core",
             Self::FiniteChat => "finitechat",
@@ -256,15 +256,6 @@ const DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV: &str = "DEVFINITY_DOCKER_RUNTIM
 const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
 const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
 const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
-const DEVFINITY_FINITE_SAAS_CORE_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_CORE_BIN";
-const DEVFINITY_FINITECHAT_SERVER_BIN_ENV: &str = "DEVFINITY_FINITECHAT_SERVER_BIN";
-const DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV: &str = "DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN";
-const DEVFINITY_FINITESITESD_BIN_ENV: &str = "DEVFINITY_FINITESITESD_BIN";
-const DEVFINITY_FINITE_IDENTITYD_BIN_ENV: &str = "DEVFINITY_FINITE_IDENTITYD_BIN";
-const DEVFINITY_FINITE_BRAIN_BIN_ENV: &str = "DEVFINITY_FINITE_BRAIN_BIN";
-const DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_RUNNER_BIN";
-const DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV: &str = "DEVFINITY_FINITE_SAAS_LOCAL_BIN";
-
 #[derive(Clone)]
 struct WorkosStagingConfig {
     api_key: String,
@@ -467,6 +458,24 @@ impl Stack {
     pub fn with_workos_staging(mut self) -> Result<Self> {
         self.workos_mode = WorkosMode::Staging(load_workos_staging_config(&self.repo_root)?);
         Ok(self)
+    }
+
+    pub fn ensure_service_binaries_available(&self) -> Result<()> {
+        if self.profile.is_test_infrastructure() {
+            return Ok(());
+        }
+        let missing = self
+            .service_binary_names()
+            .into_iter()
+            .filter(|binary| !binary_exists_on_path(binary))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "devfinity up requires Nix-provided service binaries on PATH; missing {}. Start the stack through `just dev up` or `nix run .#devfinity -- up`",
+                missing.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// Prepare the host-only prerequisites needed to generate an accurate
@@ -1111,7 +1120,7 @@ impl Stack {
             self.write_postgres(&mut yaml);
             return yaml;
         }
-        self.write_rust_build(&mut yaml);
+        self.write_service_binaries(&mut yaml);
         if self.workos_mode.is_fixture() {
             self.write_workos_fixture(&mut yaml);
         }
@@ -1136,129 +1145,66 @@ impl Stack {
         yaml
     }
 
-    fn write_rust_build(&self, yaml: &mut String) {
-        let process = ManagedProcess::RustBuild;
+    fn write_service_binaries(&self, yaml: &mut String) {
+        let process = ManagedProcess::ServiceBinaries;
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
-            "Build Rust service binaries",
+            "Verify Nix-provided service binaries",
             &self.repo_root,
             process,
         );
-        let build_commands = self.rust_build_commands();
-        let command = if build_commands.is_empty() {
-            String::from("printf '%s\\n' 'devfinity service binaries supplied by package outputs'")
-        } else {
-            build_commands.join(" && ")
-        };
-        self.write_managed_command(
-            yaml,
-            process,
-            // For Cargo fallbacks, keep one build per package, matching each
-            // service's `cargo run -p` resolution: a combined `-p A -p B -p C`
-            // build unifies features across the packages (resolver 2),
-            // producing artifacts the per-package runs don't reuse.
-            &[command],
-            &[],
+        let required = self.service_binary_names().join(" ");
+        let command = format!(
+            "for binary in {required}; do command -v \"$binary\" >/dev/null || {{ echo \"missing devfinity service binary: $binary\" >&2; exit 127; }}; done; printf '%s\\n' 'devfinity service binaries supplied by Nix PATH'"
         );
+        self.write_managed_command(yaml, process, &[command], &[]);
         let _ = writeln!(yaml, "    availability:");
         let _ = writeln!(yaml, "      restart: exit_on_failure");
     }
 
-    fn rust_build_commands(&self) -> Vec<String> {
-        let mut commands = Vec::new();
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITE_SAAS_CORE_BIN_ENV,
-            "cargo build -p finite-saas-core",
-        );
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITECHAT_SERVER_BIN_ENV,
-            "cargo build -p finitechat-server",
-        );
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV,
-            "cargo build -p finitechat-hosted-device",
-        );
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITESITESD_BIN_ENV,
-            "cargo build -p finitesitesd",
-        );
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITE_IDENTITYD_BIN_ENV,
-            "cargo build -p finite-identity --bin finite-identityd",
-        );
-        push_cargo_build_if_missing(
-            &mut commands,
-            DEVFINITY_FINITE_BRAIN_BIN_ENV,
-            "cargo build -p finite-brain-app",
-        );
+    fn service_binary_names(&self) -> Vec<&'static str> {
+        let mut commands = vec![
+            "devfinity",
+            "finite-saas-core",
+            "finitechat-server",
+            "finitechat-hosted-device",
+            "finitesitesd",
+            "finite-identityd",
+            "finite-brain",
+        ];
         if self.profile.includes_runtime() {
-            push_cargo_build_if_missing(
-                &mut commands,
-                DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV,
-                "cargo build -p finite-saas-local",
-            );
-            push_cargo_build_if_missing(
-                &mut commands,
-                DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV,
-                "cargo build -p finite-saas-runner",
-            );
+            commands.extend(["finite-saas-local", "finite-saas-runner"]);
         }
         commands
     }
 
-    fn finite_saas_core_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITE_SAAS_CORE_BIN_ENV,
-            "cargo run -p finite-saas-core --",
-        )
+    fn finite_saas_core_command(&self) -> &'static str {
+        "finite-saas-core"
     }
 
-    fn finitechat_server_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITECHAT_SERVER_BIN_ENV,
-            "cargo run -p finitechat-server --",
-        )
+    fn finitechat_server_command(&self) -> &'static str {
+        "finitechat-server"
     }
 
-    fn finitechat_hosted_device_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITECHAT_HOSTED_DEVICE_BIN_ENV,
-            "cargo run -p finitechat-hosted-device",
-        )
+    fn finitechat_hosted_device_command(&self) -> &'static str {
+        "finitechat-hosted-device"
     }
 
-    fn finitesitesd_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITESITESD_BIN_ENV,
-            "cargo run -p finitesitesd --",
-        )
+    fn finitesitesd_command(&self) -> &'static str {
+        "finitesitesd"
     }
 
-    fn finite_identityd_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITE_IDENTITYD_BIN_ENV,
-            "cargo run -p finite-identity --bin finite-identityd --",
-        )
+    fn finite_identityd_command(&self) -> &'static str {
+        "finite-identityd"
     }
 
-    fn finite_brain_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITE_BRAIN_BIN_ENV,
-            "cargo run -p finite-brain-app",
-        )
+    fn finite_brain_command(&self) -> &'static str {
+        "finite-brain"
     }
 
-    fn finite_saas_runner_command(&self) -> String {
-        service_command(
-            DEVFINITY_FINITE_SAAS_RUNNER_BIN_ENV,
-            "cargo run -p finite-saas-runner --",
-        )
+    fn finite_saas_runner_command(&self) -> &'static str {
+        "finite-saas-runner"
     }
 
     fn write_postgres(&self, yaml: &mut String) {
@@ -1311,7 +1257,7 @@ impl Stack {
             yaml,
             process,
             &[format!(
-                "exec cargo run -p devfinity -- workos-fixture --listen 127.0.0.1:{} --state-dir {}",
+                "exec devfinity workos-fixture --listen 127.0.0.1:{} --state-dir {}",
                 self.ports.workos_fixture,
                 shell_quote(&self.workos_fixture_dir().display().to_string())
             )],
@@ -1438,7 +1384,7 @@ wait "$postgres_pid"
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Postgres);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -1518,7 +1464,7 @@ wait "$postgres_pid"
         );
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe_host(
             yaml,
@@ -1556,7 +1502,7 @@ wait "$postgres_pid"
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -1633,7 +1579,7 @@ wait "$postgres_pid"
             ],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -1666,7 +1612,7 @@ wait "$postgres_pid"
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -1742,7 +1688,7 @@ wait "$postgres_pid"
         );
         self.write_managed_command(yaml, process, &command, &[]);
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe(yaml, "/health", self.ports.finite_identity, 1, 2, 3, 45);
     }
@@ -1791,10 +1737,6 @@ wait "$postgres_pid"
             ". {}",
             shell_quote(&self.limiter_secret_file().display().to_string())
         );
-        let finite_saas_local_command = service_command(
-            DEVFINITY_FINITE_SAAS_LOCAL_BIN_ENV,
-            "cargo run -p finite-saas-local --",
-        );
         let command = format!(
             concat!(
                 "exec {} finite-private-limiter-up ",
@@ -1803,7 +1745,7 @@ wait "$postgres_pid"
                 "--dashboard-url {} ",
                 "--agent-host {}"
             ),
-            finite_saas_local_command,
+            "finite-saas-local",
             shell_quote(&format!(
                 "{}:{}",
                 self.service_bind_host(),
@@ -1834,7 +1776,7 @@ wait "$postgres_pid"
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -1961,7 +1903,7 @@ wait "$postgres_pid"
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
@@ -2011,7 +1953,7 @@ wait "$postgres_pid"
         );
         self.write_managed_command(yaml, process, &command, &[]);
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeArtifact);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
@@ -2778,7 +2720,7 @@ wait "$postgres_pid"
                     ManagedProcess::WorkosFixture => {
                         vec![String::from("devfinity"), String::from("workos-fixture")]
                     }
-                    ManagedProcess::RustBuild => vec![String::from("cargo"), String::from("build")],
+                    ManagedProcess::ServiceBinaries => vec![String::from("finite-saas-core")],
                     ManagedProcess::Postgres => vec![
                         String::from("bash"),
                         self.postgres_script_path().display().to_string(),
@@ -4187,20 +4129,25 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn service_command(env_name: &str, cargo_command: &str) -> String {
-    service_command_from_env_value(nonempty_env_value(env_name), cargo_command)
+fn binary_exists_on_path(binary: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            let path = dir.join(binary);
+            path.is_file() && is_executable(&path)
+        })
+    })
 }
 
-fn service_command_from_env_value(value: Option<String>, cargo_command: &str) -> String {
-    value
-        .map(|binary| shell_quote(&binary))
-        .unwrap_or_else(|| cargo_command.to_string())
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
-fn push_cargo_build_if_missing(commands: &mut Vec<String>, env_name: &str, cargo_command: &str) {
-    if nonempty_env_value(env_name).is_none() {
-        commands.push(cargo_command.to_string());
-    }
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn nonempty_env(name: &str) -> bool {
@@ -4585,17 +4532,22 @@ mod tests {
     }
 
     #[test]
-    fn service_command_prefers_supplied_binary_path() {
+    fn service_binary_contract_uses_path_names() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+
         assert_eq!(
-            service_command_from_env_value(
-                Some("/nix/store/example finite/bin/finite-saas-core".to_string()),
-                "cargo run -p finite-saas-core --",
-            ),
-            "'/nix/store/example finite/bin/finite-saas-core'"
-        );
-        assert_eq!(
-            service_command_from_env_value(None, "cargo run -p finite-saas-core --"),
-            "cargo run -p finite-saas-core --"
+            stack.service_binary_names(),
+            vec![
+                "devfinity",
+                "finite-saas-core",
+                "finitechat-server",
+                "finitechat-hosted-device",
+                "finitesitesd",
+                "finite-identityd",
+                "finite-brain",
+                "finite-saas-local",
+                "finite-saas-runner",
+            ]
         );
     }
 
@@ -4758,7 +4710,7 @@ mod tests {
         stack.ports.runtime_agent = 18081;
         stack.apple_container_name_prefix = "finite-devfinity-test".to_string();
         let yaml = stack.process_compose_yaml();
-        assert!(yaml.contains("rust-build:"));
+        assert!(yaml.contains("service-binaries:"));
         assert!(yaml.contains("postgres:"));
         assert!(yaml.contains("core:"));
         assert!(yaml.contains("finitechat:"));
@@ -4768,16 +4720,16 @@ mod tests {
         );
         assert_eq!(yaml.matches("restart: always").count(), 3);
         assert!(yaml.contains("workos-fixture:"));
-        assert!(yaml.contains("workos-fixture --listen 127.0.0.1:14199"));
+        assert!(yaml.contains("devfinity workos-fixture --listen 127.0.0.1:14199"));
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("finite-identity:"));
-        assert!(yaml.contains("finite-identityd -- serve"));
+        assert!(yaml.contains("finite-identityd serve"));
         assert!(yaml.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
         assert!(yaml.contains("secrets/identity-authority.sh"));
         assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
         assert!(!yaml.contains("--operator-token"));
-        assert!(yaml.contains("cargo run -p finite-brain-app"));
+        assert!(yaml.contains("exec finite-brain"));
         assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(yaml.contains("FINITE_BRAIN_INVITE_MAILER=dev"));
         assert!(yaml.contains("FINITE_BRAIN_PROTECTED_RATE_LIMIT=10000:60"));
@@ -4826,7 +4778,7 @@ mod tests {
         assert!(yaml.contains("runner-artifact.sh"));
         assert!(yaml.contains("--promoted"));
         assert!(yaml.contains("runner:"));
-        assert!(yaml.contains("finite-saas-runner -- serve"));
+        assert!(yaml.contains("finite-saas-runner serve"));
         assert!(yaml.contains("FC_RUNNER_CLASS=apple_container"));
         assert!(yaml.contains("FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX=finite-devfinity-test"));
         assert!(yaml.contains("FC_RUNNER_APPLE_CONTAINER_HOST_PORT=18081"));
@@ -4856,7 +4808,7 @@ mod tests {
         assert!(yaml.contains("pids/core.pid"));
         assert!(yaml.contains("run-postgres.sh"));
         assert!(yaml.contains("psql -X -h 127.0.0.1"));
-        assert!(yaml.contains("cargo run -p finitechat-hosted-device"));
+        assert!(yaml.contains("exec finitechat-hosted-device"));
         assert!(yaml.contains("FINITECHAT_HOSTED_DATA_ROOT="));
         assert!(yaml.contains("FC_HOSTED_WEB_DEVICE_URL="));
         assert!(yaml.contains("FINITECHAT_HOSTED_API_TOKEN="));
@@ -4882,7 +4834,7 @@ mod tests {
         assert!(!yaml.contains("-tAc 'select 1'"));
         assert!(!yaml.contains("-d finite_saas_core"));
         for excluded in [
-            "\n  rust-build:\n",
+            "\n  service-binaries:\n",
             "\n  workos-fixture:\n",
             "\n  core:\n",
             "\n  finitechat:\n",
@@ -5107,7 +5059,7 @@ mod tests {
         assert!(!yaml.contains("runtime-image:"));
         assert!(!yaml.contains("runtime-artifact:"));
         assert!(!yaml.contains("apple-network-probe:"));
-        assert!(!yaml.contains("finite-saas-runner -- serve"));
+        assert!(!yaml.contains("finite-saas-runner serve"));
         assert!(yaml.contains("dashboard:"));
     }
 
@@ -5195,20 +5147,16 @@ mod tests {
         let process = ProcessInfo {
             pid: 1,
             ppid: 0,
-            command: "cargo run -p finite-saas-core -- serve".to_string(),
+            command: "finite-saas-core serve".to_string(),
         };
 
         assert!(process_matches(
             &process,
-            &[
-                "cargo".to_string(),
-                "finite-saas-core".to_string(),
-                "serve".to_string()
-            ],
+            &["finite-saas-core".to_string(), "serve".to_string()],
         ));
         assert!(!process_matches(
             &process,
-            &["cargo".to_string(), "finitesitesd".to_string()],
+            &["finite-saas-core".to_string(), "finitesitesd".to_string()],
         ));
     }
 

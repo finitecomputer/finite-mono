@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MONOREPO_ROOT = REPO_ROOT.parent
 DURABLE_SMOKE_PATH = REPO_ROOT / "scripts" / "hermes-durable-home-docker-smoke.py"
 DEFAULT_IMAGE = "finite-agent-chat-interruption-smoke"
 EXPECTED_HERMES_VERSION = "0.20.0"
@@ -40,9 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", default=os.environ.get("FINITE_DOCKER_IMAGE", DEFAULT_IMAGE))
     parser.add_argument(
         "--server-bin",
-        default=os.environ.get(
-            "FINITECHAT_SERVER_BIN", str(REPO_ROOT.parent / "target/debug/finitechat-server")
-        ),
+        default=os.environ.get("FINITECHAT_SERVER_BIN") or shutil.which("finitechat-server") or "",
     )
     parser.add_argument(
         "--report",
@@ -54,6 +53,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--container", default="")
     parser.add_argument("--keep-state", action="store_true")
     return parser.parse_args()
+
+
+def run_nix_package_binary(package: str, binary: str) -> Path:
+    if shutil.which("nix") is None:
+        raise SmokeFailure(f"nix is required to resolve {binary}")
+    result = subprocess.run(
+        ["nix", "build", "--no-link", "--print-out-paths", f"{MONOREPO_ROOT}#{package}"],
+        cwd=MONOREPO_ROOT,
+        text=True,
+        capture_output=True,
+        timeout=600,
+    )
+    if result.returncode != 0:
+        raise SmokeFailure(
+            f"nix build failed for {package}\nstdout={result.stdout[-3000:]}\nstderr={result.stderr[-3000:]}"
+        )
+    outputs = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(outputs) != 1:
+        raise SmokeFailure(f"expected one Nix output for {package}, got {outputs!r}")
+    return Path(outputs[0]) / "bin" / binary
+
+
+def resolve_server_binary(value: str) -> Path:
+    if value:
+        return Path(value).resolve()
+    return run_nix_package_binary("finitechat-server", "finitechat-server")
 
 
 def free_port() -> int:
@@ -420,7 +445,7 @@ def restore_volume(*, image: str, target_volume: str, snapshot_volume: str) -> N
 def main() -> int:
     args = parse_args()
     image = args.image
-    server_bin = Path(args.server_bin).resolve()
+    server_bin = resolve_server_binary(args.server_bin)
     if not server_bin.is_file():
         raise SmokeFailure(f"finitechat-server binary not found: {server_bin}")
 

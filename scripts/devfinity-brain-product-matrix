@@ -387,20 +387,11 @@ def main() -> int:
         "FC_RUNNER_FINITE_PRIVATE_BASE_URL": f"http://host.docker.internal:{model_port}/v1",
         "FC_RUNNER_FINITE_PRIVATE_MODEL": "finite-brain-matrix",
     })
-    devfinity_bin = os.environ.get("DEVFINITY_BIN")
-    command = (
-        [
-            devfinity_bin,
-            "--state-dir", str(state_dir), "up", "--docker-runtime", "--headless", "--",
-            str(ROOT / "scripts/devfinity-saas-smoke"),
-        ]
-        if devfinity_bin
-        else [
-            "cargo", "run", "-p", "devfinity", "--",
-            "--state-dir", str(state_dir), "up", "--docker-runtime", "--headless", "--",
-            str(ROOT / "scripts/devfinity-saas-smoke"),
-        ]
-    )
+    command = [
+        "nix", "run", ".#devfinity", "--",
+        "--state-dir", str(state_dir), "up", "--docker-runtime", "--headless", "--",
+        str(ROOT / "scripts/devfinity-saas-smoke"),
+    ]
     outcome = "failed"
     try:
         completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
