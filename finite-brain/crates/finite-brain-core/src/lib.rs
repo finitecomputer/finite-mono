@@ -2882,6 +2882,7 @@ fn contains_nul_or_control(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::SecretKey;
     use nostr::event::FinalizeEvent;
     use nostr::{EventBuilder, Keys, Tag, Timestamp};
 
@@ -3733,6 +3734,80 @@ mod tests {
     fn sign_approval(keys: &Keys, payload: &BrainApprovalPayload) -> Event {
         let template = brain_approval_event_template(payload, 1_780_000_000).unwrap();
         sign_brain_event_template(keys, &template).unwrap()
+    }
+
+    /// FROZEN WIRE CONTRACT — `finite-brain-approval-v1`. These literals pin
+    /// the canonical JSON serialization, tag profile, kind, event-id
+    /// derivation, and signature for a fixed key, payload, and created_at.
+    /// Every client that signs or verifies Brain approvals (Rust server, CLI,
+    /// hosted device, and future native Swift/Electron implementations) must
+    /// reproduce these bytes exactly. If a deliberate protocol change breaks
+    /// one of these assertions, version the format (`-v2`) rather than
+    /// silently reordering fields — existing artifacts are durable and must
+    /// keep validating. The test key is a committed fixture, never a secret.
+    #[test]
+    fn brain_approval_wire_format_is_frozen() {
+        const SECRET_HEX: &str = "d1f1a2b3c4d5e6f708192a3b4c5d6e7f8192a3b4c5d6e7f8192a3b4c5d6e7f81";
+        const HUMAN_NPUB: &str = "npub12ht6ulk5xgnw7v58g8vpfvnclnvfy39rcvkshgy6kk733675q85qdxlf8h";
+        const CANONICAL_JSON: &str = "{\"version\":\"finite-brain-approval-v1\",\"humanNpub\":\"npub12ht6ulk5xgnw7v58g8vpfvnclnvfy39rcvkshgy6kk733675q85qdxlf8h\",\"action\":\"invite-commit\",\"brainId\":\"fixture-brain\",\"planId\":\"plan-fixture-1\",\"targetNpubs\":[],\"nonce\":\"0123456789abcdef0123456789abcdef\",\"expiresAt\":4102444800}";
+        const EVENT_ID: &str = "8d434be7990e2271a43f267ccfb6d26707ae0f5b068a60f85e0830e25bfa32a3";
+        // The signature itself is not frozen: BIP-340 signing takes auxiliary
+        // randomness, so valid signatures vary run to run. The event id IS
+        // deterministic — it hashes the canonical event serialization — so
+        // freezing it pins field order and formatting exactly.
+        const PUBKEY_HEX: &str = "55d7ae7ed43226ef328741d814b278fcd89244a3c32d0ba09ab5bd18ebd401e8";
+
+        let keys = Keys::new(SecretKey::parse(SECRET_HEX).unwrap());
+        assert_eq!(npub(&keys), HUMAN_NPUB);
+
+        let payload = BrainApprovalPayload {
+            version: BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: HUMAN_NPUB.to_owned(),
+            action: BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+            brain_id: "fixture-brain".to_owned(),
+            plan_id: Some("plan-fixture-1".to_owned()),
+            target_npubs: Vec::new(),
+            nonce: "0123456789abcdef0123456789abcdef".to_owned(),
+            expires_at: 4_102_444_800,
+        };
+        assert_eq!(payload.canonical_json(), CANONICAL_JSON);
+
+        let template = brain_approval_event_template(&payload, 1_780_000_000).unwrap();
+        assert_eq!(template.kind, APP_SPECIFIC_KIND);
+        assert_eq!(
+            template.tags,
+            vec![
+                vec![
+                    "d".to_owned(),
+                    "finite-brain-approval:fixture-brain:0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                ],
+                vec!["brain".to_owned(), "fixture-brain".to_owned()],
+                vec!["action".to_owned(), "invite-commit".to_owned()],
+                vec![
+                    "nonce".to_owned(),
+                    "0123456789abcdef0123456789abcdef".to_owned(),
+                ],
+            ]
+        );
+
+        let event = sign_brain_event_template(&keys, &template).unwrap();
+        assert_eq!(event.pubkey.to_hex(), PUBKEY_HEX);
+        assert_eq!(event.id.to_hex(), EVENT_ID);
+        assert_eq!(event.created_at.as_secs(), 1_780_000_000);
+        assert_eq!(event.kind.as_u16(), 3_0078);
+        verify_event_integrity(&event).unwrap();
+
+        // The signed event round-trips through its JSON wire form and fully
+        // validates: a future client that reproduces exactly these literals
+        // (canonical content, tags, kind, id derivation) is wire-compatible.
+        let parsed = Event::from_json(event.as_json()).unwrap();
+        assert_eq!(parsed.id.to_hex(), EVENT_ID);
+        verify_event_integrity(&parsed).unwrap();
+        assert_eq!(
+            validate_brain_approval_event(&parsed, HUMAN_NPUB).unwrap(),
+            payload
+        );
     }
 
     #[test]
