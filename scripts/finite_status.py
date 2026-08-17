@@ -82,7 +82,12 @@ CONTRACT: dict[str, Any] = {
         # that recovery point daily and has the separate 50-hour freshness gate.
         "snapshot_maximum_age_seconds": 604_800,
         "borg_maximum_age_seconds": 180_000,
-        "litestream_service_unit": "finite-litestream.service",
+        # One replicator instance per enrolled database (finite-litestream.nix);
+        # all must be active for the recovery boundary to stay green.
+        "litestream_service_units": [
+            "finite-litestream-finite-chat-server.service",
+            "finite-litestream-finite-brain.service",
+        ],
         "litestream_health_unit": "finite-litestream-health.service",
         "litestream_success_stamp": "/var/lib/finite-litestream/health-last-success",
         # The health timer refreshes the stamp every 5 minutes when replication
@@ -634,12 +639,18 @@ def collect_recovery(hostname: str) -> dict[str, Any]:
         )
     except (OSError, ValueError) as error:
         raw["litestream_last_success_error"] = f"cannot read {litestream_stamp}: {error}"
-    for key in ("litestream_service_unit", "litestream_health_unit"):
-        unit = recovery[key]
+    litestream_units: dict[str, Any] = {}
+    for unit in recovery["litestream_service_units"]:
         try:
-            raw[key] = systemd_properties(unit)
+            litestream_units[unit] = systemd_properties(unit)
         except CollectionError as error:
-            raw[key] = {"error": str(error)}
+            litestream_units[unit] = {"error": str(error)}
+    raw["litestream_service_units"] = litestream_units
+    health_unit = recovery["litestream_health_unit"]
+    try:
+        raw["litestream_health_unit"] = systemd_properties(health_unit)
+    except CollectionError as error:
+        raw["litestream_health_unit"] = {"error": str(error)}
     return raw
 
 
@@ -1193,8 +1204,20 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
     else:
         litestream_age = None
         litestream_stamp_status = "unknown"
-    litestream_service_status = unit_status(
-        raw.get("litestream_service_unit", {}), active_required=True
+    litestream_service_units = raw.get("litestream_service_units")
+    if not isinstance(litestream_service_units, dict) or not litestream_service_units:
+        litestream_service_units = {
+            unit: {"error": "unit evidence missing"}
+            for unit in CONTRACT["recovery"]["litestream_service_units"]
+        }
+    litestream_service_statuses = {
+        unit: unit_status(
+            properties if isinstance(properties, dict) else {}, active_required=True
+        )
+        for unit, properties in litestream_service_units.items()
+    }
+    litestream_service_status = combine_status(
+        list(litestream_service_statuses.values())
     )
     litestream_health_status = unit_status(
         raw.get("litestream_health_unit", {}), active_required=False
@@ -1222,7 +1245,7 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
             "completion_mechanism": (
                 "health timer verifies replicated LTX freshness and writes a success stamp"
             ),
-            "service_unit": CONTRACT["recovery"]["litestream_service_unit"],
+            "service_units": litestream_service_statuses,
             "service_status": litestream_service_status,
             "health_unit": CONTRACT["recovery"]["litestream_health_unit"],
             "health_status": litestream_health_status,

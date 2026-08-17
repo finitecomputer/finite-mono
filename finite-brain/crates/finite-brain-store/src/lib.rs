@@ -1369,18 +1369,23 @@ impl BrainStore {
     /// Open or create a SQLite store at `path` and apply migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, true)
     }
 
     /// Open an in-memory SQLite store. Useful for fast unit tests only.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, false)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self, StoreError> {
+    fn from_connection(conn: Connection, wal: bool) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        if wal {
+            // WAL is required for continuous replication (Litestream) and lets
+            // readers proceed while a write is in flight on the same file.
+            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        }
         let mut store = Self { conn };
         store.apply_migrations()?;
         Ok(store)
@@ -1525,15 +1530,7 @@ impl BrainStore {
     pub fn sync_bootstrap(&self, brain_id: &BrainId) -> Result<SyncBootstrap, StoreError> {
         self.require_brain_exists(brain_id)?;
         let objects = self.load_current_objects(brain_id)?;
-        let control_records = sync_records::load_sync_records(&self.conn, brain_id)?
-            .into_iter()
-            .filter(|record| {
-                matches!(
-                    record.record_type,
-                    SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange
-                )
-            })
-            .collect::<Vec<_>>();
+        let control_records = sync_records::load_control_records(&self.conn, brain_id)?;
         Ok(SyncBootstrap {
             brain_id: brain_id.clone(),
             latest_sequence: self.latest_sequence(brain_id)?,
@@ -6523,6 +6520,139 @@ mod tests {
     }
 
     #[test]
+    fn capacity_counters_track_writes_and_fail_closed_at_the_envelope() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+
+        assert_eq!(capacity_count(&store, "folders"), 3);
+        assert_eq!(capacity_count(&store, "members"), 1);
+        assert_eq!(capacity_count(&store, "folder_key_grants"), 3);
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 0);
+
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 1);
+        assert_eq!(capacity_count(&store, "current_objects"), 1);
+
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-update-1", "obj_000000000001", 2, Some(1), "update"),
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "ordinary_sync_records"), 2);
+        assert_eq!(capacity_count(&store, "current_objects"), 1);
+
+        let now = "2026-06-23T00:00:00.000Z";
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-pending-counter",
+                &UserId::new("npub-invited-member").unwrap(),
+                "invite-pending-counter0123456789abcd",
+                "/v1/brain-invitation-links/invite-pending-counter0123456789abcd/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "pending_invitations"), 1);
+        store
+            .accept_brain_invitation_by_code(
+                "invite-pending-counter0123456789abcd",
+                &UserId::new("npub-invited-member").unwrap(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(capacity_count(&store, "pending_invitations"), 0);
+
+        let max_folders = BRAIN_CAPACITY_ENVELOPE.folders;
+        store
+            .conn
+            .execute(
+                "UPDATE brain_capacity_counts SET folders = ?1 WHERE brain_id = 'acme'",
+                params![max_folders as i64],
+            )
+            .unwrap();
+        let blocked = Folder {
+            id: FolderId::new("blocked").unwrap(),
+            name: DisplayName::new("folder_name", "Blocked").unwrap(),
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Blocked").unwrap(),
+            ..strategy_folder()
+        };
+        assert_eq!(
+            store
+                .create_folder(
+                    &brain_id,
+                    &blocked,
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-blocked-admin",
+                        "blocked",
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: max_folders,
+                current: max_folders + 1,
+            }
+        );
+        assert!(!store.folder_exists(&brain_id, &blocked.id).unwrap());
+
+        let ordinary_max = BRAIN_CAPACITY_ENVELOPE.sync_records - BRAIN_CAPACITY_ENVELOPE.folders;
+        store
+            .conn
+            .execute(
+                "UPDATE brain_capacity_counts SET ordinary_sync_records = ?1 WHERE brain_id = 'acme'",
+                params![ordinary_max as i64],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record("event-over-cap", "obj_000000000002", 1, None, "over"),
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "sync_records".to_owned(),
+                max: ordinary_max,
+                current: ordinary_max + 1,
+            }
+        );
+        assert!(
+            store
+                .pull_sync_records(&brain_id, 0, 100)
+                .unwrap()
+                .records
+                .iter()
+                .all(|record| record.record_event_id != "event-over-cap")
+        );
+    }
+
+    fn capacity_count(store: &BrainStore, column: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                &format!("SELECT {column} FROM brain_capacity_counts WHERE brain_id = 'acme'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
     fn folder_depth_accepts_exact_boundary_and_rejects_one_over_without_mutation() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
@@ -9276,6 +9406,67 @@ mod tests {
     }
 
     #[test]
+    fn load_current_object_returns_one_row_and_bootstrap_omits_object_revisions_from_controls() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+
+        for index in 1..=8 {
+            let object_id = format!("obj_{index:012}");
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record(
+                        &format!("event-create-{index}"),
+                        &object_id,
+                        1,
+                        None,
+                        &format!("body-{index}"),
+                    ),
+                )
+                .unwrap();
+        }
+
+        let target = ObjectId::new("obj_000000000004").unwrap();
+        let found = store
+            .load_current_object(&brain_id, &folder_id, &target)
+            .unwrap()
+            .expect("point lookup should find the requested object");
+        assert_eq!(found.object_id, target);
+        assert_eq!(found.payload_json, "{\"body\":\"body-4\"}");
+        assert!(!found.deleted);
+
+        assert!(
+            store
+                .load_current_object(
+                    &brain_id,
+                    &folder_id,
+                    &ObjectId::new("obj_000000000099").unwrap()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store.latest_sequence(&BrainId::new("missing-brain").unwrap()),
+            Err(StoreError::MissingBrain { .. })
+        ));
+
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert_eq!(bootstrap.object_count, 8);
+        assert_eq!(bootstrap.latest_sequence, 8);
+        assert!(
+            bootstrap.control_records.is_empty(),
+            "object revisions must not be loaded as bootstrap control records"
+        );
+        assert!(bootstrap.control_records.iter().all(|record| {
+            matches!(
+                record.record_type,
+                SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange
+            )
+        }));
+    }
+
+    #[test]
     fn sync_duplicate_event_returns_existing_sequence() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
@@ -9494,6 +9685,44 @@ mod tests {
             assert_eq!(bootstrap.objects[0].revision, 1);
             assert!(!bootstrap.objects[0].deleted);
         }
+    }
+
+    #[test]
+    fn file_store_enables_wal_and_reopens_with_the_same_projection() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("brain.sqlite3");
+        let brain_id = BrainId::new("acme").unwrap();
+
+        {
+            let mut store = BrainStore::open(&db).unwrap();
+            let journal_mode: String = store
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+            bootstrap_org_and_strategy_folder(&mut store);
+            store
+                .submit_sync_record(
+                    &brain_id,
+                    &revision_record("event-wal-1", "obj_000000000001", 1, None, "wal"),
+                )
+                .unwrap();
+            let wal_sidecar = format!("{}-wal", db.display());
+            assert!(
+                std::path::Path::new(&wal_sidecar).exists(),
+                "file-backed BrainStore must create a WAL sidecar so Litestream can follow it"
+            );
+        }
+
+        let store = BrainStore::open(&db).unwrap();
+        let journal_mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert_eq!(bootstrap.object_count, 1);
+        assert_eq!(bootstrap.objects[0].payload_json, "{\"body\":\"wal\"}");
     }
 
     #[test]

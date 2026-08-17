@@ -46,6 +46,9 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1"
+# Retry timing/backoff owner. `backoff` is unmaintained (RUSTSEC-2025-0012);
+# blocking-only features keep the sync CLI free of an async runtime.
+backon = { version = "1.6", default-features = false, features = ["std-blocking-sleep"] }
 axum = "0.8"
 base64 = "0.22"
 bech32 = "0.11"

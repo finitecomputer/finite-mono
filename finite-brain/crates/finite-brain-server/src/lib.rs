@@ -249,12 +249,12 @@ impl ServerState {
 
     fn publish_access_update_for(&self, brain_id: &BrainId, target_npub: &str) {
         let Ok(store) = self.store.lock() else { return };
-        let Ok(bootstrap) = store.sync_bootstrap(brain_id) else {
+        let Ok(latest_sequence) = store.latest_sequence(brain_id) else {
             return;
         };
         let _ = self.brain_updates.send(BrainUpdateNotification {
             brain_id: brain_id.as_str().to_owned(),
-            latest_sequence: bootstrap.latest_sequence,
+            latest_sequence,
             reason: BrainUpdateReason::AccessUpdated,
             notify_npubs: vec![target_npub.to_owned()],
         });
@@ -262,12 +262,12 @@ impl ServerState {
 
     fn publish_access_update(&self, brain_id: &BrainId) {
         let Ok(store) = self.store.lock() else { return };
-        let Ok(bootstrap) = store.sync_bootstrap(brain_id) else {
+        let Ok(latest_sequence) = store.latest_sequence(brain_id) else {
             return;
         };
         let _ = self.brain_updates.send(BrainUpdateNotification {
             brain_id: brain_id.as_str().to_owned(),
-            latest_sequence: bootstrap.latest_sequence,
+            latest_sequence,
             reason: BrainUpdateReason::AccessUpdated,
             notify_npubs: Vec::new(),
         });
@@ -2594,6 +2594,16 @@ fn request_field(body: &[u8], field: &'static str) -> Result<String, ApiError> {
 
 fn lock_error<T>(_error: T) -> ApiError {
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "store lock poisoned")
+}
+
+async fn spawn_store<T, F>(state: ServerState, f: F) -> Result<T, ApiError>
+where
+    F: FnOnce(ServerState) -> Result<T, ApiError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || f(state))
+        .await
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "store worker failed"))?
 }
 
 fn grants_for_required(
@@ -6671,6 +6681,17 @@ mod tests {
         .await;
         assert_error(get_deleted, StatusCode::NOT_FOUND, "object not found").await;
 
+        let missing = authed_request(
+            router.clone(),
+            &keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/objects/obj_000000000099",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(missing, StatusCode::NOT_FOUND, "object not found").await;
+
         let bootstrap = authed_request(
             router.clone(),
             &keys,
@@ -6907,6 +6928,61 @@ mod tests {
         let retry: ObjectWriteResponse = read_json(retry).await;
         assert_eq!(retry.sequence, setup_sequence + 1);
         assert!(retry.duplicate);
+    }
+
+    #[tokio::test]
+    async fn object_get_returns_one_of_several_objects_and_404s_unknown_ids() {
+        let keys = Keys::generate();
+        let router = router_with_test_org_folders(&keys).await;
+        for (index, content) in [(1, "first page"), (2, "second page"), (3, "third page")] {
+            let object_id = format!("obj_{index:012}");
+            let path = format!("/v1/brains/acme/folders/getting-started/objects/{object_id}");
+            let body = object_write_body(
+                &keys,
+                RevisionFixture {
+                    brain_id: "acme",
+                    folder_id: "getting-started",
+                    object_id: &object_id,
+                    operation: FolderObjectOperation::Create,
+                    revision: 1,
+                    base_revision: None,
+                    key_version: 1,
+                    content,
+                    nonce: 10 + index,
+                    record_type: false,
+                },
+            );
+            let create =
+                authed_request(router.clone(), &keys, "PUT", &path, Some(body), TEST_NOW).await;
+            assert_eq!(create.status(), StatusCode::OK);
+        }
+
+        let get = authed_request(
+            router.clone(),
+            &keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/objects/obj_000000000002",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(get.status(), StatusCode::OK);
+        let current: ObjectResponse = read_json(get).await;
+        assert_eq!(current.object_id, "obj_000000000002");
+        assert_eq!(current.revision, 1);
+        assert!(!current.deleted);
+        assert!(current.ciphertext.contains("\"cipher\":\"AES-256-GCM\""));
+
+        let missing = authed_request(
+            router,
+            &keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/objects/obj_000000000099",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(missing, StatusCode::NOT_FOUND, "object not found").await;
     }
 
     #[tokio::test]

@@ -61,9 +61,18 @@ in
     };
     dbs = [
       {
+        # 9351 predates the per-db split and is referenced by runbooks —
+        # keep it stable for the chat instance.
         name = "finite-chat-server";
         path = "/var/lib/private/finite-chat/data/server.sqlite3";
         owningService = "finitechat-server.service";
+        metricsAddress = "127.0.0.1:9351";
+      }
+      {
+        name = "finite-brain";
+        path = "/var/lib/private/finitebrain/finite-brain.sqlite3";
+        owningService = "finite-brain-app.service";
+        metricsAddress = "127.0.0.1:9352";
       }
     ];
   };

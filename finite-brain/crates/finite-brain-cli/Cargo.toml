@@ -14,6 +14,7 @@ name = "fbrain"
 path = "src/main.rs"
 
 [dependencies]
+backon.workspace = true
 base64 = "0.22.1"
 finite-brain-core = { path = "../finite-brain-core" }
 finite-identity.workspace = true

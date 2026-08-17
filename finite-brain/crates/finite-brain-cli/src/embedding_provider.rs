@@ -3,6 +3,7 @@ use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
+use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{CliError, validate_http_url};
@@ -16,6 +17,7 @@ const MAX_EMBEDDING_HEADINGS: usize = 12;
 const MAX_EMBEDDING_HEADING_CHARS: usize = 512;
 const MAX_EMBEDDING_TOTAL_CHARS: usize = 8 * 1024 * 1024;
 const MAX_EMBEDDING_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Total provider request attempts per batch (initial attempt plus retries).
 const EMBEDDING_PROVIDER_ATTEMPTS: usize = 3;
 const EMBEDDING_PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 
@@ -194,40 +196,44 @@ impl EmbeddingProviderAdapter {
     ) -> Result<EmbeddingProviderResponse, CliError> {
         let url = format!("{}/v1/embeddings", self.endpoint);
         let payload = serde_json::json!({ "inputs": inputs });
-        let mut attempt = 0;
-        let response = loop {
+        let mut attempt = 0_usize;
+        let send_batch = || {
             attempt += 1;
-            let response = self
-                .agent
+            self.agent
                 .post(&url)
                 .set("Accept", "application/json")
                 .set("Content-Type", "application/json")
                 .set("Authorization", &format!("Bearer {}", self.bearer_token))
-                .send_json(&payload);
-            match response {
-                Ok(response) => break response,
-                Err(ureq::Error::Status(status, _))
-                    if retryable_provider_status(status)
-                        && attempt < EMBEDDING_PROVIDER_ATTEMPTS =>
-                {
-                    std::thread::sleep(provider_retry_delay(attempt));
-                }
-                Err(ureq::Error::Transport(_)) if attempt < EMBEDDING_PROVIDER_ATTEMPTS => {
-                    std::thread::sleep(provider_retry_delay(attempt));
-                }
-                Err(ureq::Error::Status(status, _)) => {
-                    return Err(CliError::EmbeddingProvider(format!(
-                        "provider returned status {status}"
-                    )));
-                }
-                Err(ureq::Error::Transport(error)) => {
-                    return Err(CliError::EmbeddingProvider(format!(
-                        "provider request failed after {attempt} attempts: {}",
-                        safe_transport_error(&error.to_string())
-                    )));
-                }
-            }
+                .send_json(&payload)
+                .map_err(|error| match error {
+                    ureq::Error::Status(status, _) => ProviderBatchError::Status(status),
+                    ureq::Error::Transport(error) => {
+                        ProviderBatchError::Transport(safe_transport_error(&error.to_string()))
+                    }
+                })
         };
+        // backon's `max_times` counts retries after the initial attempt, so it
+        // is pinned to EMBEDDING_PROVIDER_ATTEMPTS - 1 to keep the historical
+        // three-attempt budget. Timing (50ms exponential base plus additive
+        // jitter) is owned by the builder; only the retryable-vs-fatal
+        // classification stays in this module.
+        let response = send_batch
+            .retry(
+                ExponentialBuilder::default()
+                    .with_min_delay(EMBEDDING_PROVIDER_RETRY_BASE_DELAY)
+                    .with_max_times(EMBEDDING_PROVIDER_ATTEMPTS - 1)
+                    .with_jitter(),
+            )
+            .when(retryable_provider_error)
+            .call()
+            .map_err(|error| match error {
+                ProviderBatchError::Status(status) => {
+                    CliError::EmbeddingProvider(format!("provider returned status {status}"))
+                }
+                ProviderBatchError::Transport(message) => CliError::EmbeddingProvider(format!(
+                    "provider request failed after {attempt} attempts: {message}"
+                )),
+            })?;
         let mut body = Vec::new();
         response
             .into_reader()
@@ -252,9 +258,20 @@ fn retryable_provider_status(status: u16) -> bool {
     status == 408 || status == 429 || status >= 500
 }
 
-fn provider_retry_delay(failed_attempt: usize) -> Duration {
-    EMBEDDING_PROVIDER_RETRY_BASE_DELAY
-        .saturating_mul(1_u32 << failed_attempt.saturating_sub(1).min(4))
+/// Transport-level failure classification for one provider request. The
+/// retryable-vs-fatal decision is domain logic and stays here; `backon` owns
+/// timing, jitter, caps, and attempt counting.
+#[derive(Debug)]
+enum ProviderBatchError {
+    Status(u16),
+    Transport(String),
+}
+
+fn retryable_provider_error(error: &ProviderBatchError) -> bool {
+    match error {
+        ProviderBatchError::Status(status) => retryable_provider_status(*status),
+        ProviderBatchError::Transport(_) => true,
+    }
 }
 
 fn validate_input_identifiers(inputs: &[EmbeddingProviderInput]) -> Result<(), CliError> {

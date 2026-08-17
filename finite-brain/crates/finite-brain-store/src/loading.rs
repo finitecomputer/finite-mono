@@ -283,7 +283,9 @@ impl BrainStore {
             .map_err(StoreError::from)
     }
 
-    pub(crate) fn latest_sequence(&self, brain_id: &BrainId) -> Result<u64, StoreError> {
+    /// Latest accepted sequence for a Brain, or an error if the Brain is missing.
+    pub fn latest_sequence(&self, brain_id: &BrainId) -> Result<u64, StoreError> {
+        self.require_brain_exists(brain_id)?;
         let latest = self.conn.query_row(
             "SELECT COALESCE(MAX(sequence), 0) FROM brain_record_index WHERE brain_id = ?1",
             params![brain_id.as_str()],
@@ -317,22 +319,36 @@ impl BrainStore {
             ORDER BY folder_id, object_id
             "#,
         )?;
-        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
-            Ok(CurrentObjectRow {
-                folder_id: row.get(0)?,
-                object_id: row.get(1)?,
-                payload_json: row.get(2)?,
-                revision: row.get(3)?,
-                updated_at: row.get(4)?,
-                deleted: row.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![brain_id.as_str()], current_object_row_from_sql)?;
 
         let mut objects = Vec::new();
         for row in rows {
             objects.push(row?.try_into_current_object()?);
         }
         Ok(objects)
+    }
+
+    /// Load one current encrypted object without materializing the rest of the Brain.
+    pub fn load_current_object(
+        &self,
+        brain_id: &BrainId,
+        folder_id: &FolderId,
+        object_id: &ObjectId,
+    ) -> Result<Option<CurrentEncryptedObject>, StoreError> {
+        self.require_brain_exists(brain_id)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT folder_id, object_id, payload_json, revision, updated_at, deleted
+                FROM current_encrypted_brain_objects
+                WHERE brain_id = ?1 AND folder_id = ?2 AND object_id = ?3
+                "#,
+                params![brain_id.as_str(), folder_id.as_str(), object_id.as_str()],
+                current_object_row_from_sql,
+            )
+            .optional()?
+            .map(CurrentObjectRow::try_into_current_object)
+            .transpose()
     }
 
     pub(crate) fn load_connection_members(
@@ -387,4 +403,15 @@ impl BrainStore {
         }
         Ok(members)
     }
+}
+
+fn current_object_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<CurrentObjectRow> {
+    Ok(CurrentObjectRow {
+        folder_id: row.get(0)?,
+        object_id: row.get(1)?,
+        payload_json: row.get(2)?,
+        revision: row.get(3)?,
+        updated_at: row.get(4)?,
+        deleted: row.get(5)?,
+    })
 }
