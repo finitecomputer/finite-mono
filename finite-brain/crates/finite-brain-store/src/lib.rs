@@ -14,14 +14,18 @@ use finite_brain_core::{
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod approvals;
 mod brains;
+mod departure;
 mod folder_access;
 mod folder_deletion;
 mod links;
 mod loading;
+mod pending_wraps;
 mod personal_agents;
 mod schema;
 mod shared_folders;
@@ -148,6 +152,144 @@ fn parse_capacity_error(message: &str) -> Option<(String, usize)> {
     let limit = parts.next()?.to_owned();
     let max = parts.next()?.split_whitespace().next()?.parse().ok()?;
     Some((limit, max))
+}
+
+/// ADR-0046 Grant Provenance origin: how an access record came to exist.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ProvenanceOriginKind {
+    /// Written directly by an admin action with no invitation or approval.
+    Direct,
+    /// Produced by accepting or claiming a Brain Invitation.
+    Invitation,
+    /// Produced by a signed Approval Card.
+    Approval,
+    /// Produced by an account bootstrap flow.
+    Bootstrap,
+    /// Produced by consuming a Core Permanent Departure Fact.
+    Departure,
+}
+
+impl ProvenanceOriginKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Invitation => "invitation",
+            Self::Approval => "approval",
+            Self::Bootstrap => "bootstrap",
+            Self::Departure => "departure",
+        }
+    }
+}
+
+impl TryFrom<&str> for ProvenanceOriginKind {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "invitation" => Ok(Self::Invitation),
+            "approval" => Ok(Self::Approval),
+            "bootstrap" => Ok(Self::Bootstrap),
+            "departure" => Ok(Self::Departure),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown provenance origin kind {value}"),
+            }),
+        }
+    }
+}
+
+/// Provenance stamped on one stored Folder Key Grant. Metadata only; it never
+/// carries key material.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GrantProvenance {
+    /// Principal who delegated the access, when known.
+    pub delegated_by_npub: Option<UserId>,
+    /// Origin classification.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Invitation id, Invitation Plan id, or approval id the grant came from.
+    pub origin_ref: Option<String>,
+    /// Account roster revision at write time, when roster-derived.
+    pub roster_revision: Option<i64>,
+}
+
+impl GrantProvenance {
+    /// Provenance for a grant written directly by an admin action.
+    pub fn direct() -> Self {
+        Self {
+            delegated_by_npub: None,
+            origin_kind: ProvenanceOriginKind::Direct,
+            origin_ref: None,
+            roster_revision: None,
+        }
+    }
+
+    /// Provenance for a grant written through a Brain Invitation.
+    pub fn invitation(
+        delegated_by_npub: UserId,
+        origin_ref: String,
+        roster_revision: Option<i64>,
+    ) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Invitation,
+            origin_ref: Some(origin_ref),
+            roster_revision,
+        }
+    }
+
+    /// Provenance for a grant written through a signed Approval Card.
+    pub fn approval(
+        delegated_by_npub: UserId,
+        origin_ref: String,
+        roster_revision: Option<i64>,
+    ) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Approval,
+            origin_ref: Some(origin_ref),
+            roster_revision,
+        }
+    }
+}
+
+/// Provenance stamped on one Brain Membership row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemberProvenance {
+    /// Principal who delegated the membership, when known.
+    pub delegated_by_npub: Option<UserId>,
+    /// Origin classification.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Invitation id, Invitation Plan id, or approval id the membership came from.
+    pub origin_ref: Option<String>,
+}
+
+impl MemberProvenance {
+    /// Provenance for a membership written directly.
+    pub fn direct() -> Self {
+        Self {
+            delegated_by_npub: None,
+            origin_kind: ProvenanceOriginKind::Direct,
+            origin_ref: None,
+        }
+    }
+
+    /// Provenance for a membership written through a Brain Invitation.
+    pub fn invitation(delegated_by_npub: UserId, origin_ref: String) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Invitation,
+            origin_ref: Some(origin_ref),
+        }
+    }
+
+    /// Provenance for a membership written through a signed Approval Card.
+    pub fn approval(delegated_by_npub: UserId, origin_ref: String) -> Self {
+        Self {
+            delegated_by_npub: Some(delegated_by_npub),
+            origin_kind: ProvenanceOriginKind::Approval,
+            origin_ref: Some(origin_ref),
+        }
+    }
 }
 
 /// Stored Folder Key Grant metadata. The encrypted key remains opaque to the server.
@@ -380,6 +522,172 @@ pub enum GrantFolderAccessOutcome {
     Granted,
     /// The identity already had effective access and the current-version grant.
     AlreadyHasAccess,
+}
+
+/// Core Permanent Departure Fact principal classification.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DeparturePrincipalKind {
+    /// A departed human account.
+    Human,
+    /// A retired or deleted Managed Agent.
+    Agent,
+}
+
+impl DeparturePrincipalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+impl TryFrom<&str> for DeparturePrincipalKind {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "human" => Ok(Self::Human),
+            "agent" => Ok(Self::Agent),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown departure principal kind {value}"),
+            }),
+        }
+    }
+}
+
+/// One Core Permanent Departure Fact the server resolved for local application.
+/// `departed_npub` is `None` when no authority or local alias could bind the
+/// principal; the fact is then consumed (cursor advances) with no local effect.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DepartureFactApplication {
+    /// Global monotonic departure log revision.
+    pub fact_revision: i64,
+    /// Owning account id (WorkOS user id).
+    pub account_id: String,
+    /// Principal classification.
+    pub principal_kind: DeparturePrincipalKind,
+    /// Stable external principal reference (Managed Agent Email or human mailbox).
+    pub principal_ref: String,
+    /// Locally resolved Principal npub, when bound.
+    pub departed_npub: Option<UserId>,
+    /// Application timestamp.
+    pub applied_at: String,
+}
+
+impl DepartureFactApplication {
+    /// Deterministic authority reference recorded on revocation ledger rows.
+    pub fn origin_ref(&self) -> String {
+        format!("core-departure-fact:{}", self.fact_revision)
+    }
+}
+
+/// Result of applying one departure fact.
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct DepartureFactOutcome {
+    /// False when the fact was already covered by the cursor (idempotent replay).
+    pub applied: bool,
+    /// Brains whose authorization state changed, including Mount source Brains.
+    pub affected_brain_ids: BTreeSet<BrainId>,
+    /// Revocation ledger rows written.
+    pub revocations: usize,
+}
+
+/// Stored revocation ledger row. The departure fact is the authority record.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DepartureRevocationRecord {
+    /// Stable ledger id (`departure-{revision}-{brain_id}`).
+    pub id: String,
+    /// Brain whose access changed.
+    pub brain_id: BrainId,
+    /// Departed Principal npub.
+    pub departed_npub: Option<UserId>,
+    /// Principal classification.
+    pub principal_kind: DeparturePrincipalKind,
+    /// Stable external principal reference.
+    pub principal_ref: String,
+    /// Owning account id.
+    pub account_id: String,
+    /// Departure log revision that authorized this revocation.
+    pub fact_revision: i64,
+    /// Provenance origin, always `departure` on this ledger.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Authority reference (`core-departure-fact:{revision}`).
+    pub origin_ref: String,
+    /// Application timestamp.
+    pub applied_at: String,
+}
+
+/// One Folder still needing a client-driven re-wrap after a departure.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeparturePendingRotation {
+    /// Brain holding the Folder.
+    pub brain_id: BrainId,
+    /// Folder id.
+    pub folder_id: FolderId,
+    /// Departure log revision that marked the Folder.
+    pub marked_at_revision: i64,
+    /// Folder Key version that was current when marked; rotation must leave it.
+    pub key_version: u32,
+}
+
+/// Why a Principal gained Folder entitlement without a wrapped Folder Key.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PendingGrantWrapReason {
+    /// An npub-bound Brain Invitation was committed naming this recipient.
+    Invitation,
+    /// The recipient accepted a Brain Invitation, gaining entitlement.
+    Accept,
+    /// An ensure-access repair wrote or confirmed the Membership.
+    EnsureAccess,
+    /// Reserved for bootstrap flows that defer wrapping.
+    Bootstrap,
+}
+
+impl PendingGrantWrapReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Invitation => "invitation",
+            Self::Accept => "accept",
+            Self::EnsureAccess => "ensure-access",
+            Self::Bootstrap => "bootstrap",
+        }
+    }
+}
+
+impl TryFrom<&str> for PendingGrantWrapReason {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "invitation" => Ok(Self::Invitation),
+            "accept" => Ok(Self::Accept),
+            "ensure-access" => Ok(Self::EnsureAccess),
+            "bootstrap" => Ok(Self::Bootstrap),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown pending grant wrap reason {value}"),
+            }),
+        }
+    }
+}
+
+/// One Folder Key wrap a key-holding client still owes a waiting recipient.
+/// A delivery hint only: nothing blocks on it, and it clears once any path
+/// commits a current-version grant for the recipient.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PendingGrantWrap {
+    /// Brain holding the Folder.
+    pub brain_id: BrainId,
+    /// Folder id.
+    pub folder_id: FolderId,
+    /// Principal waiting for the wrapped Folder Key.
+    pub recipient_npub: UserId,
+    /// Folder Key version that was current when marked.
+    pub key_version: u32,
+    /// Why the marker was recorded.
+    pub reason: PendingGrantWrapReason,
+    /// Mark timestamp.
+    pub created_at: String,
 }
 
 /// Result of atomically deleting one Folder subtree.
@@ -671,8 +979,144 @@ pub struct StoredBrainInvitation {
     pub updated_at: String,
     /// Acceptance timestamp when consumed.
     pub accepted_at: Option<String>,
+    /// Invitation Plan id this invitation was committed from, when plan-linked.
+    pub origin_ref: Option<String>,
+    /// Whether this invitation was committed directly or through an Approval.
+    pub origin_kind: ProvenanceOriginKind,
+    /// Account roster revision at commit time, when roster-derived.
+    pub roster_revision: Option<i64>,
     /// True when accept returned an already-consumed result for the same target.
     pub duplicate_accept: bool,
+}
+
+/// One agent resolved into an Invitation Plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredPlanAgent {
+    /// Managed Agent email from the account roster.
+    pub managed_agent_email: String,
+    /// Resolved Agent Principal npub, when grant-ready.
+    pub agent_npub: Option<String>,
+    /// Roster status for the agent.
+    pub status: String,
+}
+
+/// One participant excluded from an Invitation Plan with an explicit reason.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredPlanExclusion {
+    /// Email or npub of the excluded participant.
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    /// Why the participant is not grant-ready.
+    pub reason: String,
+}
+
+/// Stored immutable Invitation Plan: the resolved invite set previewed at
+/// preflight and committed as per-principal Brain Invitations.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredInvitationPlan {
+    /// Stable plan id.
+    pub id: String,
+    /// Brain id.
+    pub brain_id: BrainId,
+    /// Hash over the full resolved set and roster revision.
+    pub plan_hash: String,
+    /// Admin who created the plan.
+    pub inviter_npub: UserId,
+    /// Finite account id behind the invited email, when it binds to one.
+    pub workos_user_id: Option<String>,
+    /// Invited human email.
+    pub human_email: String,
+    /// Resolved human npub, when resolvable.
+    pub human_npub: Option<UserId>,
+    /// Resolved roster agents.
+    pub agents: Vec<StoredPlanAgent>,
+    /// Participants excluded with reasons.
+    pub exclusions: Vec<StoredPlanExclusion>,
+    /// Account roster revision at resolution time.
+    pub roster_revision: Option<i64>,
+    /// Folder scoping: None commits Brain membership; Some commits
+    /// per-principal Folder share links for exactly this Folder.
+    pub folder_id: Option<FolderId>,
+    /// True once committed into per-principal invitations.
+    pub committed: bool,
+    /// Commit-by timestamp.
+    pub expires_at: String,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Lifecycle state of one stored human Approval request.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ApprovalRequestStatus {
+    /// Waiting for a human decision.
+    Pending,
+    /// A signed Approval artifact was applied for this request.
+    Approved,
+    /// A human dismissed the request; nothing was signed.
+    Denied,
+}
+
+impl ApprovalRequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+impl TryFrom<&str> for ApprovalRequestStatus {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "denied" => Ok(Self::Denied),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown approval request status {value}"),
+            }),
+        }
+    }
+}
+
+/// Stored human Approval request (ADR-0046): the exact unsigned action payload
+/// a human key holder can sign, plus the server-minted nonce and expiry. The
+/// row is also the durable link from the applied approval event id back to
+/// the action it authorized.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredBrainApprovalRequest {
+    /// Stable request id.
+    pub id: String,
+    /// Brain id.
+    pub brain_id: BrainId,
+    /// Approval action kind ('invite-commit' or 'delegation-grant').
+    pub action: String,
+    /// Canonical unsigned Approval payload JSON (no humanNpub).
+    pub payload_json: String,
+    /// Server-minted replay nonce the signed artifact must carry.
+    pub nonce: String,
+    /// Expiry as unix seconds; the signed artifact carries the same value.
+    pub expires_at_unix: u64,
+    /// Principal who submitted the request.
+    pub requested_by_npub: UserId,
+    /// Lifecycle state.
+    pub status: ApprovalRequestStatus,
+    /// Applied approval event id, once approved.
+    pub approval_event_id: Option<String>,
+    /// Principal who approved or denied the request.
+    pub resolved_by_npub: Option<UserId>,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+    /// Invitation ids an approved invite-commit produced, if any.
+    pub result_invitations: Option<Vec<String>>,
 }
 
 /// Stored npub-bound singleton Folder Share Link.
@@ -1270,7 +1714,8 @@ impl BrainStore {
         Ok(())
     }
 
-    fn member_exists(&self, brain_id: &BrainId, user_id: &UserId) -> Result<bool, StoreError> {
+    /// True when the npub already holds Brain Membership.
+    pub fn member_exists(&self, brain_id: &BrainId, user_id: &UserId) -> Result<bool, StoreError> {
         let exists = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM brain_members WHERE brain_id = ?1 AND user_id = ?2)",
             params![brain_id.as_str(), user_id.as_str()],
@@ -1835,6 +2280,10 @@ fn brain_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
         accepted_at: row.get(11)?,
+        origin_ref: row.get(21)?,
+        roster_revision: row.get(22)?,
+        origin_kind: ProvenanceOriginKind::try_from(row.get::<_, String>(23)?.as_str())
+            .map_err(to_store_from_sql_error(23, rusqlite::types::Type::Text))?,
         duplicate_accept: false,
     })
 }
@@ -2001,7 +2450,9 @@ fn ensure_share_link_available(
     Ok(())
 }
 
-fn timestamp_expired(expires_at: &str, now: &str) -> bool {
+/// Fail-closed lifecycle check: true when `expires_at` is at or before `now`,
+/// or when either timestamp cannot be parsed as RFC3339.
+pub fn timestamp_expired(expires_at: &str, now: &str) -> bool {
     if expires_at.is_empty() {
         return false;
     }
@@ -2108,9 +2559,26 @@ fn insert_member_if_missing(
     brain_id: &BrainId,
     user_id: &UserId,
 ) -> Result<(), StoreError> {
+    insert_member_with_provenance_if_missing(tx, brain_id, user_id, &MemberProvenance::direct())
+}
+
+fn insert_member_with_provenance_if_missing(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    user_id: &UserId,
+    provenance: &MemberProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT OR IGNORE INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
-        params![brain_id.as_str(), user_id.as_str()],
+        "INSERT OR IGNORE INTO brain_members (
+            brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            brain_id.as_str(),
+            user_id.as_str(),
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref
+        ],
     )?;
     Ok(())
 }
@@ -2235,13 +2703,23 @@ fn insert_grant_or_ignore(
     brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
+    insert_grant_or_ignore_with_provenance(tx, brain_id, grant, &GrantProvenance::direct())
+}
+
+fn insert_grant_or_ignore_with_provenance(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    grant: &FolderKeyGrantMetadata,
+    provenance: &GrantProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT OR IGNORE INTO folder_key_grants (
             id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
-            wrapped_event_json, access_change_event_json, created_at
+            wrapped_event_json, access_change_event_json, created_at,
+            delegated_by_npub, origin_kind, origin_ref, roster_revision
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         "#,
         params![
             grant.id,
@@ -2253,7 +2731,11 @@ fn insert_grant_or_ignore(
             grant.format,
             grant.wrapped_event_json,
             grant.access_change_event_json,
-            grant.created_at
+            grant.created_at,
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref,
+            provenance.roster_revision
         ],
     )?;
     Ok(())
@@ -2295,11 +2777,16 @@ fn validate_loaded_brain(brain: &Brain) -> Result<(), StoreError> {
             }
         }
         BrainKind::Organization => {
-            if brain.owner_user_id.is_some() || brain.admins.is_empty() {
+            if brain.owner_user_id.is_some() {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "organization brain must have admins and no owner".to_owned(),
+                    reason: "organization brain must have no owner".to_owned(),
                 });
             }
+            // An empty admin set is the provable total-admin-loss state reached
+            // when Permanent Departure Facts cover every admin (ADR-0046).
+            // Loads stay valid so remaining members keep read access while
+            // Recovery Set activation is pending; administration fails closed
+            // because no principal passes the admin check.
             let members = brain
                 .members
                 .iter()
@@ -3034,13 +3521,23 @@ fn insert_grant(
     brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
+    insert_grant_with_provenance(tx, brain_id, grant, &GrantProvenance::direct())
+}
+
+fn insert_grant_with_provenance(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    grant: &FolderKeyGrantMetadata,
+    provenance: &GrantProvenance,
+) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT INTO folder_key_grants (
             id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
-            wrapped_event_json, access_change_event_json, created_at
+            wrapped_event_json, access_change_event_json, created_at,
+            delegated_by_npub, origin_kind, origin_ref, roster_revision
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         "#,
         params![
             grant.id,
@@ -3052,10 +3549,17 @@ fn insert_grant(
             grant.format,
             grant.wrapped_event_json,
             grant.access_change_event_json,
-            grant.created_at
+            grant.created_at,
+            provenance.delegated_by_npub.as_ref().map(UserId::as_str),
+            provenance.origin_kind.as_str(),
+            provenance.origin_ref,
+            provenance.roster_revision
         ],
     )
     .map_err(map_insert_error("folder_key_grant_id", &grant.id))?;
+    // Any committed grant at or past a marked version satisfies the pending
+    // wrap for that recipient, whichever path wrote the grant.
+    pending_wraps::clear_pending_grant_wraps_for_grant(tx, brain_id, grant)?;
     Ok(())
 }
 
@@ -4151,6 +4655,166 @@ mod tests {
     }
 
     #[test]
+    fn list_pending_brain_invitations_for_target_filters_status_and_target() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let other = UserId::new("npub-other").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-pending",
+                &target,
+                "invite-pending",
+                "/v1/brain-invitation-links/invite-pending/accept",
+                std::slice::from_ref(&restricted),
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let other_brain = bootstrap_organization_brain("acme2", "Acme Two", "npub-admin").unwrap();
+        let other_grants = grants_for_required(&other_brain.required_key_grants, "npub-admin");
+        store
+            .create_brain_bootstrap(&other_brain, &other_grants)
+            .unwrap();
+        let other_brain_id = BrainId::new("acme2").unwrap();
+        store
+            .create_brain_invitation(
+                &other_brain_id,
+                "invitation-expired",
+                &target,
+                "invite-expired",
+                "/v1/brain-invitation-links/invite-expired/accept",
+                &[],
+                &admin,
+                "2026-06-20T00:00:00.000Z",
+                "2026-06-19T00:00:00.000Z",
+            )
+            .unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-other",
+                &other,
+                "invite-other",
+                "/v1/brain-invitation-links/invite-other/accept",
+                std::slice::from_ref(&restricted),
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+
+        // Expired rows are included; callers compute the expired marker at
+        // read time.
+        let target_invitations = store
+            .list_pending_brain_invitations_for_target(&target)
+            .unwrap();
+        assert_eq!(target_invitations.len(), 2);
+        assert_eq!(target_invitations[0].id, "invitation-pending");
+        assert_eq!(target_invitations[1].id, "invitation-expired");
+        assert!(timestamp_expired(&target_invitations[1].expires_at, now));
+
+        let other_invitations = store
+            .list_pending_brain_invitations_for_target(&other)
+            .unwrap();
+        assert_eq!(other_invitations.len(), 1);
+        assert_eq!(other_invitations[0].id, "invitation-other");
+
+        let stranger = UserId::new("npub-stranger").unwrap();
+        assert!(
+            store
+                .list_pending_brain_invitations_for_target(&stranger)
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .accept_brain_invitation_by_code("invite-pending", &target, now)
+            .unwrap();
+        let remaining = store
+            .list_pending_brain_invitations_for_target(&target)
+            .unwrap();
+        assert_eq!(remaining.len(), 1, "accepted invitations drop out");
+        assert_eq!(remaining[0].id, "invitation-expired");
+    }
+
+    #[test]
+    fn revoke_expired_pending_brain_invitations_supersedes_only_expired_rows() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-expired",
+                &target,
+                "invite-expired",
+                "/v1/brain-invitation-links/invite-expired/accept",
+                &[],
+                &admin,
+                "2026-06-20T00:00:00.000Z",
+                "2026-06-19T00:00:00.000Z",
+            )
+            .unwrap();
+
+        let revoked = store
+            .revoke_expired_pending_brain_invitations(&brain_id, &target, &admin, now)
+            .unwrap();
+        assert_eq!(revoked, vec!["invitation-expired".to_owned()]);
+        assert_eq!(
+            store
+                .load_brain_invitation("invitation-expired")
+                .unwrap()
+                .status,
+            LinkStatus::Revoked
+        );
+
+        // A fresh live pending invitation for the same target now fits the
+        // singleton index and is left untouched by another supersede pass.
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-live",
+                &target,
+                "invite-live",
+                "/v1/brain-invitation-links/invite-live/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let revoked = store
+            .revoke_expired_pending_brain_invitations(&brain_id, &target, &admin, now)
+            .unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(
+            store
+                .load_brain_invitation("invitation-live")
+                .unwrap()
+                .status,
+            LinkStatus::Pending
+        );
+
+        // Supersede requires brain operational authority.
+        let stranger = UserId::new("npub-stranger").unwrap();
+        assert!(
+            store
+                .revoke_expired_pending_brain_invitations(&brain_id, &target, &stranger, now)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn email_brain_invitation_claims_membership_access_and_grants_atomically() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();
@@ -4308,6 +4972,477 @@ mod tests {
                 .unwrap_err(),
             StoreError::UnavailableLink {
                 kind: "brain invitation"
+            }
+        );
+    }
+
+    #[test]
+    fn invitation_acceptance_stamps_member_provenance() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let invitation = store
+            .create_brain_invitation_with_provenance(
+                &brain_id,
+                "invitation-plan-linked",
+                &target,
+                "invite-plan0123456789abcdef0123456",
+                "/v1/brain-invitation-links/invite-plan0123456789abcdef0123456/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+                Some("plan-roster-1"),
+                Some(7),
+                ProvenanceOriginKind::Invitation,
+            )
+            .unwrap();
+        assert_eq!(invitation.origin_ref.as_deref(), Some("plan-roster-1"));
+        assert_eq!(invitation.origin_kind, ProvenanceOriginKind::Invitation);
+        assert_eq!(invitation.roster_revision, Some(7));
+
+        store
+            .accept_brain_invitation_by_code("invite-plan0123456789abcdef0123456", &target, now)
+            .unwrap();
+
+        let provenance = store
+            .member_provenance(&brain_id, &target)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            provenance,
+            MemberProvenance::invitation(admin.clone(), "plan-roster-1".to_owned())
+        );
+
+        // A plain invitation still records invitation provenance keyed by its
+        // own invitation id.
+        let plain_target = UserId::new("npub-plain-target").unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-plain",
+                &plain_target,
+                "invite-plain0123456789abcdef012345",
+                "/v1/brain-invitation-links/invite-plain0123456789abcdef012345/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        store
+            .accept_brain_invitation_by_code(
+                "invite-plain0123456789abcdef012345",
+                &plain_target,
+                now,
+            )
+            .unwrap();
+        let provenance = store
+            .member_provenance(&brain_id, &plain_target)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            provenance,
+            MemberProvenance::invitation(admin, "invitation-plain".to_owned())
+        );
+    }
+
+    fn stored_approval_request(
+        brain_id: &BrainId,
+        id: &str,
+        action: &str,
+        nonce: &str,
+        requested_by: &UserId,
+    ) -> StoredBrainApprovalRequest {
+        StoredBrainApprovalRequest {
+            id: id.to_owned(),
+            brain_id: brain_id.clone(),
+            action: action.to_owned(),
+            payload_json: format!(
+                "{{\"version\":\"finite-brain-approval-v1\",\"action\":\"{action}\",\"brainId\":\"{}\",\"planId\":\"plan-1\",\"targetNpubs\":[],\"nonce\":\"{nonce}\",\"expiresAt\":1780000900}}",
+                brain_id.as_str()
+            ),
+            nonce: nonce.to_owned(),
+            expires_at_unix: 1_780_000_900,
+            requested_by_npub: requested_by.clone(),
+            status: ApprovalRequestStatus::Pending,
+            approval_event_id: None,
+            resolved_by_npub: None,
+            created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            updated_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            result_invitations: None,
+        }
+    }
+
+    #[test]
+    fn approval_request_lifecycle_is_pending_then_terminal_exactly_once() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let requester = UserId::new("npub-requester").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let request = store
+            .create_brain_approval_request(&stored_approval_request(
+                &brain_id,
+                "approval-req-1",
+                "invite-commit",
+                &"aa".repeat(16),
+                &requester,
+            ))
+            .unwrap();
+        assert_eq!(request.status, ApprovalRequestStatus::Pending);
+        assert_eq!(
+            store.list_brain_approval_requests(&brain_id).unwrap(),
+            vec![request.clone()]
+        );
+
+        // The same nonce cannot seed a second request on this Brain.
+        let mut duplicate = stored_approval_request(
+            &brain_id,
+            "approval-req-2",
+            "invite-commit",
+            &"aa".repeat(16),
+            &requester,
+        );
+        assert!(matches!(
+            store.create_brain_approval_request(&duplicate),
+            Err(StoreError::Conflict { .. })
+        ));
+        duplicate.nonce = "bb".repeat(16);
+        store.create_brain_approval_request(&duplicate).unwrap();
+
+        let resolved = store
+            .resolve_brain_approval_request(
+                "approval-req-1",
+                ApprovalRequestStatus::Approved,
+                Some("event-approval-1"),
+                &admin,
+                now,
+            )
+            .unwrap();
+        assert_eq!(resolved.status, ApprovalRequestStatus::Approved);
+        assert_eq!(
+            resolved.approval_event_id.as_deref(),
+            Some("event-approval-1")
+        );
+        assert_eq!(resolved.resolved_by_npub, Some(admin.clone()));
+
+        // Terminal state is exactly-once.
+        assert!(matches!(
+            store.resolve_brain_approval_request(
+                "approval-req-1",
+                ApprovalRequestStatus::Denied,
+                None,
+                &admin,
+                now,
+            ),
+            Err(StoreError::Conflict { .. })
+        ));
+
+        // The event id links back to the request for plan narrowing.
+        let by_event = store
+            .load_brain_approval_request_by_event_id(&brain_id, "event-approval-1")
+            .unwrap()
+            .expect("approval request is linked by event id");
+        assert_eq!(by_event.id, "approval-req-1");
+        assert!(
+            store
+                .load_brain_approval_request_by_event_id(&brain_id, "event-unknown")
+                .unwrap()
+                .is_none()
+        );
+
+        let denied = store
+            .resolve_brain_approval_request(
+                "approval-req-2",
+                ApprovalRequestStatus::Denied,
+                None,
+                &admin,
+                now,
+            )
+            .unwrap();
+        assert_eq!(denied.status, ApprovalRequestStatus::Denied);
+        assert!(denied.approval_event_id.is_none());
+        assert!(matches!(
+            store.load_brain_approval_request("approval-req-missing"),
+            Err(StoreError::UnavailableLink { .. })
+        ));
+    }
+
+    #[test]
+    fn approval_nonce_replay_is_a_conflict() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let nonce = "cc".repeat(16);
+
+        assert!(!store.approval_nonce_seen(&brain_id, &nonce).unwrap());
+        store
+            .record_brain_approval_nonce(
+                &brain_id,
+                &nonce,
+                "event-1",
+                &signer,
+                "invite-commit",
+                now,
+            )
+            .unwrap();
+        assert!(store.approval_nonce_seen(&brain_id, &nonce).unwrap());
+        assert!(matches!(
+            store.record_brain_approval_nonce(
+                &brain_id,
+                &nonce,
+                "event-1",
+                &signer,
+                "invite-commit",
+                now
+            ),
+            Err(StoreError::Conflict { .. })
+        ));
+        // The same nonce on another Brain is independent.
+        let other = BrainId::new("other").unwrap();
+        assert!(!store.approval_nonce_seen(&other, &nonce).unwrap());
+    }
+
+    #[test]
+    fn grant_admin_with_provenance_stamps_approval_origin() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let provenance = MemberProvenance::approval(signer.clone(), "event-approval-1".to_owned());
+
+        store
+            .grant_admin_with_provenance(&brain_id, &target, &provenance)
+            .unwrap();
+        let brain = store.load_core_brain(&brain_id).unwrap();
+        assert!(brain.admins.contains(&target));
+        assert!(brain.members.iter().any(|member| member.user_id == target));
+        assert_eq!(
+            store
+                .member_provenance(&brain_id, &target)
+                .unwrap()
+                .unwrap(),
+            provenance
+        );
+
+        // Granting an existing admin is a conflict, never a silent no-op.
+        assert!(matches!(
+            store.grant_admin_with_provenance(&brain_id, &target, &provenance),
+            Err(StoreError::Conflict { .. })
+        ));
+
+        // Personal Brains have an owner, not a delegatable admin role.
+        let personal_id = BrainId::new("personal").unwrap();
+        assert!(
+            store
+                .grant_admin_with_provenance(&personal_id, &target, &provenance)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn approval_committed_invitation_stamps_approval_provenance_on_accept() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let signer = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-target").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let invitation = store
+            .create_brain_invitation_with_provenance(
+                &brain_id,
+                "invitation-approval-linked",
+                &target,
+                "invite-appr0123456789abcdef0123456",
+                "/v1/brain-invitation-links/invite-appr0123456789abcdef0123456/accept",
+                &[],
+                &signer,
+                "2026-06-30T00:00:00.000Z",
+                now,
+                Some("event-approval-1"),
+                Some(3),
+                ProvenanceOriginKind::Approval,
+            )
+            .unwrap();
+        assert_eq!(invitation.origin_kind, ProvenanceOriginKind::Approval);
+        assert_eq!(invitation.origin_ref.as_deref(), Some("event-approval-1"));
+
+        store
+            .accept_brain_invitation_by_code("invite-appr0123456789abcdef0123456", &target, now)
+            .unwrap();
+        assert_eq!(
+            store
+                .member_provenance(&brain_id, &target)
+                .unwrap()
+                .unwrap(),
+            MemberProvenance::approval(signer, "event-approval-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn email_claim_stamps_grant_and_member_provenance() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let unwrap_npub = UserId::new("npub-unwrap").unwrap();
+        let claimant = UserId::new("npub-claimant").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-email-provenance",
+                "friend@example.com",
+                &unwrap_npub,
+                "sha256-bootstrap-payload",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-emailprov0123456789abcdef01",
+                "/v1/brain-invitation-links/invite-emailprov0123456789abcdef01/claim",
+                std::slice::from_ref(&restricted),
+                false,
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+
+        let claim_grants = vec![
+            grant(
+                "claim-grant-team-notes",
+                "team-notes",
+                1,
+                "npub-claimant",
+                "npub-claimant",
+            ),
+            grant(
+                "claim-grant-private-project",
+                "private-project",
+                1,
+                "npub-claimant",
+                "npub-claimant",
+            ),
+        ];
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-emailprov0123456789abcdef01",
+                "friend@example.com",
+                &claimant,
+                &claim_grants,
+                now,
+            )
+            .unwrap();
+
+        let member_provenance = store
+            .member_provenance(&brain_id, &claimant)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            member_provenance,
+            MemberProvenance::invitation(admin.clone(), "invitation-email-provenance".to_owned())
+        );
+
+        for claim_grant in &claim_grants {
+            let provenance = store
+                .grant_provenance(&brain_id, &claim_grant.id)
+                .unwrap()
+                .expect("grant provenance is recorded");
+            assert_eq!(
+                provenance,
+                GrantProvenance::invitation(
+                    admin.clone(),
+                    "invitation-email-provenance".to_owned(),
+                    None,
+                )
+            );
+        }
+
+        // Grants written outside the invitation spine keep 'direct' provenance.
+        let stored = store.load_brain(&brain_id).unwrap();
+        let direct_grant = stored
+            .grants
+            .iter()
+            .find(|grant| !claim_grants.contains(grant))
+            .expect("fixture has a bootstrap grant")
+            .clone();
+        let provenance = store
+            .grant_provenance(&brain_id, &direct_grant.id)
+            .unwrap()
+            .expect("grant provenance is recorded");
+        assert_eq!(provenance, GrantProvenance::direct());
+    }
+
+    #[test]
+    fn invitation_plan_roundtrips_and_commits_exactly_once() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let plan = StoredInvitationPlan {
+            id: "plan-roster-1".to_owned(),
+            brain_id: brain_id.clone(),
+            plan_hash: "sha256-plan".to_owned(),
+            inviter_npub: UserId::new("npub-admin").unwrap(),
+            workos_user_id: Some("user_workos_1".to_owned()),
+            human_email: "friend@example.com".to_owned(),
+            human_npub: Some(UserId::new("npub-human").unwrap()),
+            agents: vec![
+                StoredPlanAgent {
+                    managed_agent_email: "agent-one@finite.vip".to_owned(),
+                    agent_npub: Some("npub-agent-one".to_owned()),
+                    status: "active".to_owned(),
+                },
+                StoredPlanAgent {
+                    managed_agent_email: "agent-two@finite.vip".to_owned(),
+                    agent_npub: None,
+                    status: "active".to_owned(),
+                },
+            ],
+            exclusions: vec![StoredPlanExclusion {
+                ref_: "agent-two@finite.vip".to_owned(),
+                reason: "agent npub is not resolvable".to_owned(),
+            }],
+            roster_revision: Some(7),
+            folder_id: None,
+            committed: false,
+            expires_at: "2026-06-23T00:15:00.000Z".to_owned(),
+            created_at: now.to_owned(),
+            updated_at: now.to_owned(),
+        };
+
+        let created = store.create_brain_invitation_plan(&plan).unwrap();
+        assert_eq!(created, plan);
+        assert_eq!(
+            store
+                .load_brain_invitation_plan("plan-roster-1")
+                .unwrap()
+                .as_ref(),
+            Some(&plan)
+        );
+        assert!(
+            store
+                .load_brain_invitation_plan("plan-missing")
+                .unwrap()
+                .is_none()
+        );
+
+        let committed = store
+            .mark_brain_invitation_plan_committed("plan-roster-1", now)
+            .unwrap();
+        assert!(committed.committed);
+        assert_eq!(
+            store
+                .mark_brain_invitation_plan_committed("plan-roster-1", now)
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "invitation plan is not pending".to_owned(),
+                current_revision: None,
             }
         );
     }
@@ -8702,6 +9837,632 @@ mod tests {
         )
     }
 
+    fn departure_fact(
+        revision: i64,
+        principal_kind: DeparturePrincipalKind,
+        principal_ref: &str,
+        departed_npub: Option<&UserId>,
+    ) -> DepartureFactApplication {
+        DepartureFactApplication {
+            fact_revision: revision,
+            account_id: "user_workos_owner".to_owned(),
+            principal_kind,
+            principal_ref: principal_ref.to_owned(),
+            departed_npub: departed_npub.cloned(),
+            applied_at: "2026-06-24T00:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn store_with_member_folder_access() -> (BrainStore, BrainId, UserId) {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store
+            .grant_folder_access(
+                &brain_id,
+                &FolderId::new("private-project").unwrap(),
+                &member,
+                &grant(
+                    "grant-private-project-member",
+                    "private-project",
+                    1,
+                    "npub-admin",
+                    "npub-member",
+                ),
+            )
+            .unwrap();
+        (store, brain_id, member)
+    }
+
+    fn pending_rotation_folder_ids(store: &BrainStore, brain_id: &BrainId) -> BTreeSet<String> {
+        store
+            .departure_pending_rotations(brain_id)
+            .unwrap()
+            .iter()
+            .map(|pending| pending.folder_id.as_str().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn departure_fact_cursor_starts_at_zero_and_consumes_unresolved_facts() {
+        let mut store = store_with_strategy_folder();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 0);
+
+        let outcome = store
+            .apply_departure_fact(&departure_fact(
+                7,
+                DeparturePrincipalKind::Agent,
+                "gone@finite.vip",
+                None,
+            ))
+            .unwrap();
+        assert!(outcome.applied);
+        assert_eq!(outcome.revocations, 0);
+        assert!(outcome.affected_brain_ids.is_empty());
+        assert_eq!(store.departure_fact_cursor().unwrap(), 7);
+
+        // Replaying the same or an older revision is a no-op.
+        for revision in [7, 3] {
+            let replay = store
+                .apply_departure_fact(&departure_fact(
+                    revision,
+                    DeparturePrincipalKind::Agent,
+                    "gone@finite.vip",
+                    None,
+                ))
+                .unwrap();
+            assert!(!replay.applied);
+            assert_eq!(store.departure_fact_cursor().unwrap(), 7);
+        }
+    }
+
+    #[test]
+    fn departure_fact_rejects_malformed_revisions_without_advancing_cursor() {
+        let mut store = store_with_strategy_folder();
+        let member = UserId::new("npub-member").unwrap();
+        for fact in [
+            departure_fact(
+                0,
+                DeparturePrincipalKind::Agent,
+                "agent@finite.vip",
+                Some(&member),
+            ),
+            departure_fact(
+                -2,
+                DeparturePrincipalKind::Agent,
+                "agent@finite.vip",
+                Some(&member),
+            ),
+            departure_fact(1, DeparturePrincipalKind::Agent, "  ", Some(&member)),
+        ] {
+            assert!(store.apply_departure_fact(&fact).is_err());
+        }
+        assert_eq!(store.departure_fact_cursor().unwrap(), 0);
+    }
+
+    #[test]
+    fn departure_revocation_removes_access_marks_rotation_and_advances_cursor() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invitation-departed-member",
+                &member,
+                "invite-departed-member01",
+                "/v1/brain-invitation-links/invite-departed-member01/accept",
+                &[],
+                &UserId::new("npub-admin").unwrap(),
+                "2026-07-01T00:00:00.000Z",
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store
+            .grant_folder_access(
+                &brain_id,
+                &FolderId::new("private-project").unwrap(),
+                &member,
+                &grant(
+                    "grant-private-project-member",
+                    "private-project",
+                    1,
+                    "npub-admin",
+                    "npub-member",
+                ),
+            )
+            .unwrap();
+
+        let outcome = store
+            .apply_departure_fact(&departure_fact(
+                3,
+                DeparturePrincipalKind::Agent,
+                "member@finite.vip",
+                Some(&member),
+            ))
+            .unwrap();
+
+        assert!(outcome.applied);
+        assert_eq!(outcome.revocations, 1);
+        assert!(outcome.affected_brain_ids.contains(&brain_id));
+        assert_eq!(store.departure_fact_cursor().unwrap(), 3);
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|existing| existing.user_id == member)
+        );
+        assert!(
+            !stored
+                .folder_access
+                .values()
+                .any(|users| users.contains(&member))
+        );
+        assert!(
+            !stored
+                .grants
+                .iter()
+                .any(|existing| existing.recipient_npub == member)
+        );
+        let invitation = store
+            .load_brain_invitation_by_code("invite-departed-member01")
+            .unwrap();
+        assert_eq!(invitation.status, LinkStatus::Revoked);
+
+        // The member read team-notes (all_members) and private-project
+        // (restricted with explicit access); strategy stayed admin-only.
+        let pending = pending_rotation_folder_ids(&store, &brain_id);
+        assert!(pending.contains("team-notes"));
+        assert!(pending.contains("private-project"));
+        assert!(!pending.contains("strategy"));
+        for marker in store.departure_pending_rotations(&brain_id).unwrap() {
+            assert_eq!(marker.key_version, 1);
+            assert_eq!(marker.marked_at_revision, 3);
+        }
+
+        let ledger = store.departure_revocations(&brain_id).unwrap();
+        assert_eq!(ledger.len(), 1);
+        let record = &ledger[0];
+        assert_eq!(record.departed_npub.as_ref(), Some(&member));
+        assert_eq!(record.principal_kind, DeparturePrincipalKind::Agent);
+        assert_eq!(record.principal_ref, "member@finite.vip");
+        assert_eq!(record.fact_revision, 3);
+        assert_eq!(record.origin_kind, ProvenanceOriginKind::Departure);
+        assert_eq!(record.origin_ref, "core-departure-fact:3");
+
+        // Idempotent replay: same fact twice applies once, never double-writes.
+        let replay = store
+            .apply_departure_fact(&departure_fact(
+                3,
+                DeparturePrincipalKind::Agent,
+                "member@finite.vip",
+                Some(&member),
+            ))
+            .unwrap();
+        assert!(!replay.applied);
+        assert_eq!(store.departure_revocations(&brain_id).unwrap().len(), 1);
+        assert_eq!(store.departure_fact_cursor().unwrap(), 3);
+
+        // A fact for a principal with no local presence still advances.
+        let stranger = UserId::new("npub-stranger").unwrap();
+        let next = store
+            .apply_departure_fact(&departure_fact(
+                4,
+                DeparturePrincipalKind::Human,
+                "stranger@finite.computer",
+                Some(&stranger),
+            ))
+            .unwrap();
+        assert!(next.applied);
+        assert_eq!(next.revocations, 0);
+        assert_eq!(store.departure_fact_cursor().unwrap(), 4);
+    }
+
+    #[test]
+    fn departure_revocation_strips_admin_role_before_membership() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let second_admin = UserId::new("npub-second-admin").unwrap();
+        store.add_member(&brain_id, &second_admin).unwrap();
+        store.add_admin(&brain_id, &second_admin).unwrap();
+
+        store
+            .apply_departure_fact(&departure_fact(
+                1,
+                DeparturePrincipalKind::Human,
+                "second@finite.computer",
+                Some(&second_admin),
+            ))
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(!stored.brain.admins.contains(&second_admin));
+        assert!(
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == second_admin)
+        );
+    }
+
+    #[test]
+    fn departure_revocation_removes_personal_agent_and_marks_every_folder() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        bootstrap_personal_named(
+            &mut store,
+            "personal",
+            "npub-owner",
+            "npub-agent",
+            "2026-06-23T00:00:00.000Z",
+        );
+        let brain_id = BrainId::new("personal").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let folder_count = store.load_brain(&brain_id).unwrap().brain.folders.len();
+
+        let outcome = store
+            .apply_departure_fact(&departure_fact(
+                2,
+                DeparturePrincipalKind::Agent,
+                "agent@finite.vip",
+                Some(&agent),
+            ))
+            .unwrap();
+
+        assert!(outcome.applied);
+        assert!(outcome.affected_brain_ids.contains(&brain_id));
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.personal_agent.is_none());
+        assert!(
+            !stored
+                .grants
+                .iter()
+                .any(|grant| grant.recipient_npub == agent)
+        );
+        assert_eq!(
+            pending_rotation_folder_ids(&store, &brain_id).len(),
+            folder_count
+        );
+    }
+
+    #[test]
+    fn departure_revocation_removes_mount_participation_and_marks_source_folder() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let destination_member = UserId::new("npub-dest-member").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .add_member(&destination_brain_id, &destination_member)
+            .unwrap();
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &FolderId::new("strategy").unwrap(),
+                &destination_brain_id,
+                "mount-offer-departure",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-departure/accept",
+                &grant(
+                    "grant-departure-controller-v1",
+                    "strategy",
+                    1,
+                    source_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-offer-departure",
+            &destination_admin,
+            "mount-departure",
+            "projection-departure",
+            &[],
+            now,
+        )
+        .unwrap();
+        add_mount_member_for_test(
+            &mut store,
+            "mount-departure",
+            &destination_admin,
+            &destination_member,
+            &grant(
+                "grant-departure-member-v1",
+                "strategy",
+                1,
+                destination_admin.as_str(),
+                destination_member.as_str(),
+            ),
+            now,
+        )
+        .unwrap();
+
+        let outcome = store
+            .apply_departure_fact(&departure_fact(
+                5,
+                DeparturePrincipalKind::Human,
+                "member@finite.computer",
+                Some(&destination_member),
+            ))
+            .unwrap();
+
+        assert!(outcome.applied);
+        assert!(outcome.affected_brain_ids.contains(&destination_brain_id));
+        assert!(outcome.affected_brain_ids.contains(&source_brain_id));
+        let connection = store
+            .load_shared_folder_connection("mount-departure")
+            .unwrap();
+        assert_eq!(connection.status, SharedFolderConnectionStatus::Active);
+        assert!(!connection.member_npubs.contains(&destination_member));
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&FolderId::new("strategy").unwrap())
+                .is_some_and(|users| users.contains(&destination_member))
+        );
+        assert!(
+            pending_rotation_folder_ids(&store, &source_brain_id).contains("strategy"),
+            "mounted source Folder must be marked for rotation-on-replay"
+        );
+        assert_eq!(
+            store
+                .departure_revocations(&destination_brain_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn departure_of_mount_controller_revokes_the_mount() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &FolderId::new("strategy").unwrap(),
+                &destination_brain_id,
+                "mount-offer-controller-departure",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-controller-departure/accept",
+                &grant(
+                    "grant-controller-departure-v1",
+                    "strategy",
+                    1,
+                    source_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-offer-controller-departure",
+            &destination_admin,
+            "mount-controller-departure",
+            "projection-controller-departure",
+            &[],
+            now,
+        )
+        .unwrap();
+
+        store
+            .apply_departure_fact(&departure_fact(
+                6,
+                DeparturePrincipalKind::Human,
+                "admin@finite.computer",
+                Some(&destination_admin),
+            ))
+            .unwrap();
+
+        let connection = store
+            .load_shared_folder_connection("mount-controller-departure")
+            .unwrap();
+        assert_eq!(connection.status, SharedFolderConnectionStatus::Revoked);
+        let destination = store.load_brain(&destination_brain_id).unwrap();
+        assert!(!destination.brain.admins.contains(&destination_admin));
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&FolderId::new("strategy").unwrap())
+                .is_some_and(|users| users.contains(&destination_admin))
+        );
+        assert!(pending_rotation_folder_ids(&store, &source_brain_id).contains("strategy"));
+    }
+
+    #[test]
+    fn complete_departure_rotation_rewraps_for_remaining_recipients() {
+        let (mut store, brain_id, member) = store_with_member_folder_access();
+        store
+            .apply_departure_fact(&departure_fact(
+                3,
+                DeparturePrincipalKind::Agent,
+                "member@finite.vip",
+                Some(&member),
+            ))
+            .unwrap();
+        let folder_id = FolderId::new("private-project").unwrap();
+        let now = "2026-06-24T00:00:00.000Z";
+
+        // Grants that miss a remaining required recipient roll everything back.
+        let incomplete =
+            store.complete_departure_rotation(&brain_id, &folder_id, 2, &[], &[], now, &[]);
+        assert_eq!(
+            incomplete.unwrap_err(),
+            StoreError::MissingRequiredGrant {
+                recipient_user_id: "npub-admin".to_owned(),
+            }
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(
+            stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .unwrap()
+                .current_key_version,
+            1
+        );
+        assert!(pending_rotation_folder_ids(&store, &brain_id).contains("private-project"));
+
+        let rotated_grant = grant(
+            "grant-private-project-admin-v2",
+            "private-project",
+            2,
+            "npub-admin",
+            "npub-admin",
+        );
+        let control_records = vec![folder_key_grant_control_record(
+            &rotated_grant,
+            "event-private-project-rotation-v2",
+        )];
+        store
+            .complete_departure_rotation(
+                &brain_id,
+                &folder_id,
+                2,
+                std::slice::from_ref(&rotated_grant),
+                &[],
+                now,
+                &control_records,
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(
+            stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .unwrap()
+                .current_key_version,
+            2
+        );
+        assert!(
+            stored
+                .grants
+                .iter()
+                .any(|existing| existing.id == rotated_grant.id)
+        );
+        assert!(!pending_rotation_folder_ids(&store, &brain_id).contains("private-project"));
+
+        // Completing with no marker pending fails closed.
+        assert_eq!(
+            store
+                .complete_departure_rotation(&brain_id, &folder_id, 3, &[], &[], now, &[])
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "no departure rotation is pending for this Folder".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn complete_departure_rotation_clears_marker_satisfied_by_another_path() {
+        let (mut store, brain_id, member) = store_with_member_folder_access();
+        store
+            .apply_departure_fact(&departure_fact(
+                3,
+                DeparturePrincipalKind::Agent,
+                "member@finite.vip",
+                Some(&member),
+            ))
+            .unwrap();
+        let folder_id = FolderId::new("private-project").unwrap();
+        let rotated_grant = grant(
+            "grant-private-project-admin-v2",
+            "private-project",
+            2,
+            "npub-admin",
+            "npub-admin",
+        );
+        let control_records = vec![folder_key_grant_control_record(
+            &rotated_grant,
+            "event-private-project-rotation-v2",
+        )];
+        store
+            .complete_departure_rotation(
+                &brain_id,
+                &folder_id,
+                2,
+                std::slice::from_ref(&rotated_grant),
+                &[],
+                "2026-06-24T00:00:00.000Z",
+                &control_records,
+            )
+            .unwrap();
+
+        // Simulate a marker left behind at an older version after the Folder
+        // already rotated through another path.
+        let second = UserId::new("npub-second-member").unwrap();
+        store
+            .apply_departure_fact(&departure_fact(
+                4,
+                DeparturePrincipalKind::Human,
+                "second@finite.computer",
+                Some(&second),
+            ))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_departure_pending_rotations (
+                    brain_id, folder_id, marked_at_revision, key_version, updated_at
+                 ) VALUES (?1, ?2, 4, 1, '2026-06-24T00:00:00.000Z')",
+                params![brain_id.as_str(), folder_id.as_str()],
+            )
+            .unwrap();
+
+        store
+            .complete_departure_rotation(
+                &brain_id,
+                &folder_id,
+                3,
+                &[],
+                &[],
+                "2026-06-24T00:01:00.000Z",
+                &[],
+            )
+            .unwrap();
+        assert!(!pending_rotation_folder_ids(&store, &brain_id).contains("private-project"));
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(
+            stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .unwrap()
+                .current_key_version,
+            2
+        );
+    }
+
     fn grant(
         id: &str,
         folder_id: &str,
@@ -8880,5 +10641,339 @@ mod tests {
             payload_json: "{\"body\":\"delete\"}".to_owned(),
             record_event_kind: APP_SPECIFIC_KIND,
         })
+    }
+
+    fn invite_member_with_private_project(
+        store: &mut BrainStore,
+        id: &str,
+    ) -> StoredBrainInvitation {
+        store
+            .create_brain_invitation(
+                &BrainId::new("acme").unwrap(),
+                id,
+                &UserId::new("npub-member").unwrap(),
+                &format!("code-{id}"),
+                "/accept",
+                &[FolderId::new("private-project").unwrap()],
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00Z",
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap()
+    }
+
+    fn pending_wrap_folders(
+        store: &BrainStore,
+        brain_id: &BrainId,
+        recipient: &UserId,
+    ) -> BTreeSet<(String, PendingGrantWrapReason)> {
+        store
+            .pending_grant_wraps(brain_id)
+            .unwrap()
+            .iter()
+            .filter(|wrap| wrap.recipient_npub == *recipient)
+            .map(|wrap| (wrap.folder_id.as_str().to_owned(), wrap.reason))
+            .collect()
+    }
+
+    #[test]
+    fn invitation_commit_marks_pending_wraps_for_entitled_folders() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        // Membership-adjacent All-Members Folder plus the invited Restricted
+        // Folder; the uninvited Restricted child Folder is not marked.
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([
+                ("team-notes".to_owned(), PendingGrantWrapReason::Invitation),
+                (
+                    "private-project".to_owned(),
+                    PendingGrantWrapReason::Invitation
+                ),
+            ])
+        );
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert!(wraps.iter().all(|wrap| wrap.key_version == 1));
+    }
+
+    #[test]
+    fn invitation_revoke_clears_commit_time_pending_wraps() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .revoke_brain_invitation(
+                &brain_id,
+                &invitation.id,
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        assert!(pending_wrap_folders(&store, &brain_id, &member).is_empty());
+    }
+
+    #[test]
+    fn accept_marks_pending_wraps_without_duplicating_commit_markers() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .accept_brain_invitation_by_code(
+                &invitation.invite_code,
+                &member,
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        // Commit already marked both Folders at the same key version, so
+        // accept adds nothing new.
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert_eq!(wraps.len(), 2);
+
+        // A pre-markers invitation (simulated by clearing) is marked at
+        // accept time with the accept reason.
+        store
+            .conn
+            .execute("DELETE FROM brain_pending_grant_wraps", [])
+            .unwrap();
+        let second = store
+            .create_brain_invitation(
+                &brain_id,
+                "invite-2",
+                &UserId::new("npub-second").unwrap(),
+                "code-invite-2",
+                "/accept",
+                &[],
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00Z",
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM brain_pending_grant_wraps", [])
+            .unwrap();
+        store
+            .accept_brain_invitation_by_code(
+                &second.invite_code,
+                &UserId::new("npub-second").unwrap(),
+                "2026-06-25T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &UserId::new("npub-second").unwrap()),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Accept)])
+        );
+    }
+
+    #[test]
+    fn add_member_marks_all_members_folders_for_ensure_access() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+
+        store.add_member(&brain_id, &member).unwrap();
+
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([(
+                "team-notes".to_owned(),
+                PendingGrantWrapReason::EnsureAccess
+            )])
+        );
+    }
+
+    fn complete_wraps_for_test(
+        store: &mut BrainStore,
+        folder_id: &str,
+        recipients: &[&str],
+        grants: &[FolderKeyGrantMetadata],
+    ) -> Result<usize, StoreError> {
+        let control_records = mount_control_records(grants);
+        store.complete_pending_grant_wraps(
+            &BrainId::new("acme").unwrap(),
+            &FolderId::new(folder_id).unwrap(),
+            &recipients
+                .iter()
+                .map(|recipient| UserId::new(*recipient).unwrap())
+                .collect::<Vec<_>>(),
+            grants,
+            &control_records,
+        )
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_delivers_grants_and_clears_markers() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let invitation = invite_member_with_private_project(&mut store, "invite-1");
+        store
+            .accept_brain_invitation_by_code(
+                &invitation.invite_code,
+                &member,
+                "2026-06-24T00:00:00Z",
+            )
+            .unwrap();
+
+        let completed = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-member"],
+            &[grant(
+                "grant-private-project-member",
+                "private-project",
+                1,
+                "npub-admin",
+                "npub-member",
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(completed, 1);
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.grants.iter().any(|existing| {
+            existing.folder_id.as_str() == "private-project"
+                && existing.recipient_npub == member
+                && existing.key_version == 1
+        }));
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_rejects_wrong_recipient_set_closed() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        let result = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-intruder"],
+            &[grant(
+                "grant-private-project-intruder",
+                "private-project",
+                1,
+                "npub-admin",
+                "npub-intruder",
+            )],
+        );
+
+        assert!(matches!(result, Err(StoreError::BrokenInvariant { .. })));
+        // Nothing committed: the marker survives and no grant landed.
+        assert!(pending_wrap_folders(&store, &brain_id, &member).contains(&(
+            "private-project".to_owned(),
+            PendingGrantWrapReason::Invitation
+        )));
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            !stored
+                .grants
+                .iter()
+                .any(|grant| grant.recipient_npub.as_str() == "npub-intruder")
+        );
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_fails_closed_on_key_version_drift() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+        // Simulate a rotation that happened underneath the pending wrap
+        // without covering the marked recipient.
+        store
+            .conn
+            .execute(
+                "UPDATE folders SET current_key_version = 2 WHERE brain_id = 'acme' AND id = 'private-project'",
+                [],
+            )
+            .unwrap();
+
+        let result = complete_wraps_for_test(
+            &mut store,
+            "private-project",
+            &["npub-member"],
+            &[grant(
+                "grant-private-project-member",
+                "private-project",
+                2,
+                "npub-admin",
+                "npub-member",
+            )],
+        );
+
+        assert!(matches!(result, Err(StoreError::BrokenInvariant { .. })));
+        assert!(pending_wrap_folders(&store, &brain_id, &member).contains(&(
+            "private-project".to_owned(),
+            PendingGrantWrapReason::Invitation
+        )));
+    }
+
+    #[test]
+    fn complete_pending_grant_wraps_double_complete_is_a_noop() {
+        let mut store = store_with_strategy_folder();
+        invite_member_with_private_project(&mut store, "invite-1");
+        let grants = [grant(
+            "grant-private-project-member",
+            "private-project",
+            1,
+            "npub-admin",
+            "npub-member",
+        )];
+
+        assert_eq!(
+            complete_wraps_for_test(&mut store, "private-project", &["npub-member"], &grants)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            complete_wraps_for_test(&mut store, "private-project", &["npub-member"], &grants)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn committed_grant_clears_the_matching_pending_wrap_marker() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        invite_member_with_private_project(&mut store, "invite-1");
+
+        store
+            .grant_folder_access(
+                &brain_id,
+                &FolderId::new("private-project").unwrap(),
+                &member,
+                &grant(
+                    "grant-private-project-member",
+                    "private-project",
+                    1,
+                    "npub-admin",
+                    "npub-member",
+                ),
+            )
+            .unwrap();
+
+        // The manual grant path satisfies the marker; the untouched
+        // team-notes marker remains.
+        assert_eq!(
+            pending_wrap_folders(&store, &brain_id, &member),
+            BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
+        );
     }
 }

@@ -1503,6 +1503,7 @@ mod tests {
                 topic_id: finitechat_core::HOME_TOPIC_ID.to_owned(),
                 chat_id: bob_home_chat_id.clone(),
                 text: "hello from app cli".to_owned(),
+                metadata_json: None,
             })
             .expect("bob sends");
         let synced = run_cli_json([

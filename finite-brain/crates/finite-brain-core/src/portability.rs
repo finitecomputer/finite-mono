@@ -795,6 +795,13 @@ mod tests {
         assert!(root_instructions.contains("Brain ID: `acme`"));
         assert!(root_instructions.contains("Acting Member Identity: `npub-admin`"));
         assert!(root_instructions.contains("Acting Brain role: `admin`"));
+        // The root file onboards an unfamiliar agent: what a Brain is, the
+        // everyday commands, sharing, and the full guide pointer.
+        assert!(root_instructions.contains("end-to-end encrypted knowledge base"));
+        assert!(root_instructions.contains("fbrain sync now"));
+        assert!(root_instructions.contains("fbrain folder list"));
+        assert!(root_instructions.contains("fbrain invite brain accept"));
+        assert!(root_instructions.contains("fbrain --skill"));
         assert!(projection.files.contains_key("_index.md"));
         assert!(projection.files.contains_key("_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/AGENTS.md"));

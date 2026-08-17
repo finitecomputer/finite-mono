@@ -200,6 +200,19 @@ pub(crate) async fn sync_bootstrap_handler(
         .filter(|record| record_visible(&stored, record, &actor))
         .map(sync_record_response)
         .collect::<Vec<_>>();
+    // Pending grant wraps are visible only to key-holding clients (Brain
+    // admin standing): they are the ones who can open the current Folder
+    // Keys and complete the wraps. Older clients ignore the field.
+    let pending_wraps = if ensure_brain_admin(&stored, &actor).is_ok() {
+        let store = state.store.lock().map_err(lock_error)?;
+        store
+            .pending_grant_wraps(&brain_id)?
+            .into_iter()
+            .map(pending_grant_wrap_response)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     Ok(Json(SyncBootstrapResponse {
         brain_id: brain_id.to_string(),
@@ -208,6 +221,7 @@ pub(crate) async fn sync_bootstrap_handler(
         objects,
         control_records,
         current_state_kind: bootstrap.current_state_kind.to_owned(),
+        pending_wraps,
     }))
 }
 

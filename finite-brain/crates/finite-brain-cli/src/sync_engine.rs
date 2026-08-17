@@ -34,14 +34,14 @@ use serde::Deserialize;
 use crate::initialize_private_working_tree;
 use crate::{
     APP_SPECIFIC_KIND, AdminAccessAction, AgentState, BrainMetadataView, CliEnvironment, CliError,
-    ConflictEntry, ConflictState, SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES, SessionFolderKeyring,
-    SyncChangeReport, SyncOnceReport, admin_access_change_event, current_tree_root,
-    deterministic_id, folder_key_grant_request, folder_required_recipients, load_signer,
-    read_agent_state, read_json_file, read_working_tree_state, server_url_for_command, sign_event,
-    signed_json_request, signed_json_request_to_server,
-    signed_json_request_to_server_with_response_limit, tag_vec, timestamp, timestamp_from_unix,
-    unix_timestamp, write_agent_state, write_json_file, write_private_file_atomic,
-    write_working_tree_state,
+    CompletedWrapReport, ConflictEntry, ConflictState, LocalSigner,
+    SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES, SessionFolderKeyring, SyncChangeReport, SyncOnceReport,
+    admin_access_change_event, current_tree_root, deterministic_id, folder_key_grant_request,
+    folder_required_recipients, load_signer, read_agent_state, read_json_file,
+    read_working_tree_state, server_url_for_command, sign_event, signed_json_request,
+    signed_json_request_to_server, signed_json_request_to_server_with_response_limit, tag_vec,
+    timestamp, timestamp_from_unix, unix_timestamp, write_agent_state, write_json_file,
+    write_private_file_atomic, write_working_tree_state,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -93,6 +93,18 @@ pub(crate) fn run_working_tree_sync(
     for mounted in &mounted_exports {
         open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
     }
+    // Opportunistically deliver pending grant wraps before anything else:
+    // invitees waiting on a wrapped current Folder Key get their grants from
+    // any key-holding client that syncs. Never blocks; skipped quietly when
+    // this Home holds no usable key for a marked Folder.
+    let completed_wraps = complete_pending_grant_wraps_for_sync(
+        env,
+        args,
+        &agent_state.brain_id,
+        &auth,
+        &session_keys,
+        &export,
+    );
     let newly_readable_keys = newly_readable_session_key_count(
         &prior_tree_state,
         &export,
@@ -276,7 +288,80 @@ pub(crate) fn run_working_tree_sync(
         local_changes: local_result.changes,
         remote_changes,
         unsupported_objects,
+        completed_wraps,
     })
+}
+
+/// Opportunistically complete pending grant wraps: the export tells
+/// key-holding clients (Brain admin standing) which recipients still need a
+/// wrapped current Folder Key, and this Finite Home wraps every marked Folder
+/// Key it can open. Best-effort by contract — the field is absent for
+/// non-admins and older servers, a Folder whose key this Home cannot open is
+/// skipped, and a failed completion never blocks sync.
+fn complete_pending_grant_wraps_for_sync(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    auth: &LocalSigner,
+    session_keys: &SessionFolderKeyring,
+    export: &CliEncryptedBrainExport,
+) -> Vec<CompletedWrapReport> {
+    let mut by_folder: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+    for wrap in &export.pending_wraps {
+        by_folder
+            .entry(wrap.folder_id.clone())
+            .or_default()
+            .push((wrap.recipient_npub.clone(), wrap.key_version));
+    }
+    let mut completed = Vec::new();
+    for (folder_id, entries) in by_folder {
+        // The server requires the exact marked recipient set, so a Folder is
+        // only submittable when every marked key version is openable here.
+        let mut grants = Vec::with_capacity(entries.len());
+        let mut openable = true;
+        for (recipient, key_version) in &entries {
+            let Some(folder_key) = session_keys.get(brain_id, &folder_id, *key_version) else {
+                openable = false;
+                break;
+            };
+            match folder_key_grant_request(
+                auth,
+                brain_id,
+                &folder_id,
+                *key_version,
+                recipient,
+                folder_key,
+                env,
+            ) {
+                Ok(grant) => grants.push(grant),
+                Err(_) => {
+                    openable = false;
+                    break;
+                }
+            }
+        }
+        if !openable || grants.is_empty() {
+            continue;
+        }
+        let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/pending-wraps");
+        if signed_json_request(
+            env,
+            args,
+            "POST",
+            &route,
+            Some(serde_json::json!({ "grants": grants })),
+        )
+        .is_ok()
+        {
+            for (recipient, _) in &entries {
+                completed.push(CompletedWrapReport {
+                    folder_id: folder_id.clone(),
+                    recipient_npub: recipient.clone(),
+                });
+            }
+        }
+    }
+    completed
 }
 
 fn sync_stage_error(stage: &str, root: &Path, error: CliError) -> CliError {
@@ -1295,6 +1380,8 @@ pub(crate) fn open_offered_folder_key(
             members: Vec::new(),
             admins: Vec::new(),
         },
+
+        pending_wraps: Vec::new(),
     };
     let plaintext = opened_export_folder_key_grants(&auth, &export)?
         .into_iter()
@@ -3204,6 +3291,20 @@ pub(crate) struct CliEncryptedBrainExport {
     pub(crate) objects: Vec<CliExportObject>,
     pub(crate) key_grants: Vec<CliFolderKeyGrant>,
     pub(crate) access_state: CliExportAccessState,
+    /// Pending grant wraps, present only for key-holding (admin-standing)
+    /// requesters; older servers omit the field entirely.
+    #[serde(default)]
+    pub(crate) pending_wraps: Vec<CliPendingWrap>,
+}
+
+/// One pending grant wrap marker from the sync surface: a recipient still
+/// waiting for the current Folder Key, wrapped for them.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPendingWrap {
+    pub(crate) folder_id: String,
+    pub(crate) recipient_npub: String,
+    pub(crate) key_version: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -3389,6 +3490,8 @@ mod tests {
                 members: vec![],
                 admins: vec![],
             },
+
+            pending_wraps: Vec::new(),
         };
         let deleted_routes = BTreeSet::from([
             ("brain".to_owned(), "parent".to_owned()),
@@ -3919,6 +4022,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let readable = BTreeSet::from([("brain".to_owned(), "home".to_owned())]);
 
@@ -4227,6 +4332,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 7,
@@ -4426,6 +4533,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 2,
@@ -4518,6 +4627,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let empty_bootstrap = CliSyncBootstrap {
             latest_sequence: 0,
@@ -4717,6 +4828,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let source_export = CliEncryptedBrainExport {
             brain: CliExportBrain {
@@ -4738,6 +4851,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let mounted = MountedFolderMaterializeContext {
             mount: CliMountedFolder {
@@ -4896,6 +5011,8 @@ mod tests {
                 members: Vec::new(),
                 admins: Vec::new(),
             },
+
+            pending_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 0,

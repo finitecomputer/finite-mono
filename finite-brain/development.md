@@ -62,9 +62,6 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
-node --check crates/finite-brain-server/src/product-client.js
-node --check crates/finite-brain-server/src/smoke-ui.js
-node crates/finite-brain-server/src/product-client.test.js
 ```
 
 Run the local server:
@@ -148,7 +145,9 @@ loopback addresses, or the exact development host explicitly named by
   allowlist entry for an Apple Container host bridge.
 - `FINITE_BRAIN_DB`: SQLite database path, default `finite-brain.sqlite3`.
 - `FINITE_IDENTITY_AUTHORITY`: finite-identity Authority base URL used by
-  email-targeted Brain Invitation claims to verify current email proof.
+  email-targeted Brain Invitation claims to verify current email proof, and by
+  `fbrain auth login|redeem` for email proof. `fbrain` defaults to the public
+  Authority `https://identity.finite.vip`; this variable is an override.
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, `postmark`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend` or `postmark`.
@@ -176,8 +175,6 @@ knowledge or a Recovery Set.
   positive tests plus stale/replay/negative tests where relevant.
 - SQLite behavior should be tested through persistence/reopen paths when a
   migration or transaction invariant matters.
-- Product Client changes need `node --check` plus
-  `node crates/finite-brain-server/src/product-client.test.js`.
 - Before handoff, run `cargo fmt --all --check`, `cargo test --workspace`, and
   `cargo clippy --workspace --all-targets -- -D warnings`.
 
@@ -212,9 +209,6 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --locked --release --package finite-brain-cli --bin fbrain
-node --check crates/finite-brain-server/src/product-client.js
-node --check crates/finite-brain-server/src/smoke-ui.js
-node crates/finite-brain-server/src/product-client.test.js
 ```
 
 ## Safety And Public Repo Rules

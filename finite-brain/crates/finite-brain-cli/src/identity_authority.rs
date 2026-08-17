@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CliEnvironment, CliError, load_or_generate_identity, unix_timestamp};
+use crate::{
+    CliEnvironment, CliError, environment::DEFAULT_FINITE_IDENTITY_AUTHORITY_URL,
+    load_or_generate_identity, unix_timestamp,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct IdentityAuthorityClient {
@@ -12,17 +15,14 @@ pub(crate) struct IdentityAuthorityClient {
 
 impl IdentityAuthorityClient {
     pub(crate) fn from_environment(env: &CliEnvironment) -> Result<Self, CliError> {
+        // Good defaults built-in: an unset override resolves to the canonical
+        // public Identity Authority rather than failing the command.
         let base_url = env
             .identity_authority_url
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                CliError::Unsupported(
-                    "email auth requires FINITE_IDENTITY_AUTHORITY to point at finite-identity"
-                        .to_owned(),
-                )
-            })?
+            .unwrap_or(DEFAULT_FINITE_IDENTITY_AUTHORITY_URL)
             .trim_end_matches('/')
             .to_owned();
         Ok(Self {
@@ -174,4 +174,35 @@ fn identity_response_json<T: serde::de::DeserializeOwned>(
 
 fn is_finite_vip_email(email: &str) -> bool {
     email.trim().to_ascii_lowercase().ends_with("@finite.vip")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn unset_authority_url_uses_the_public_default_instead_of_failing() {
+        let env = CliEnvironment {
+            cwd: PathBuf::from("."),
+            config_dir: PathBuf::from("."),
+            server_url: None,
+            public_base_url: None,
+            working_tree_root: None,
+            now: None,
+            identity_authority_url: None,
+            finite_home: None,
+            embedding_provider: None,
+        };
+        let client = IdentityAuthorityClient::from_environment(&env).unwrap();
+        assert_eq!(client.base_url, DEFAULT_FINITE_IDENTITY_AUTHORITY_URL);
+
+        let env = CliEnvironment {
+            identity_authority_url: Some(" https://identity.test/ ".to_owned()),
+            ..env
+        };
+        let client = IdentityAuthorityClient::from_environment(&env).unwrap();
+        assert_eq!(client.base_url, "https://identity.test");
+    }
 }

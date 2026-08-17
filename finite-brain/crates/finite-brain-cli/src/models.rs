@@ -266,6 +266,17 @@ pub(crate) struct SyncOnceReport {
     pub(crate) remote_changes: Vec<SyncChangeReport>,
     pub(crate) unsupported_objects: Vec<SyncChangeReport>,
     pub(crate) conflicts: Vec<SyncChangeReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) completed_wraps: Vec<CompletedWrapReport>,
+}
+
+/// One pending grant wrap this Finite Home completed during sync: the current
+/// Folder Key wrapped for a waiting recipient.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompletedWrapReport {
+    pub(crate) folder_id: String,
+    pub(crate) recipient_npub: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -296,6 +307,10 @@ pub(crate) struct StatusReport {
     pub(crate) sync: SyncStatus,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) blocked: Vec<String>,
+    /// Pending grant wraps waiting on a key-holding client. Populated only
+    /// when the server reports the admin-only field for this identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_wraps: Option<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -393,6 +408,9 @@ pub(crate) struct AccessSummaryReport {
     pub(crate) folders: Vec<FolderAccessSummary>,
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     pub(crate) grant_count: usize,
+    /// Per-principal Folder key readiness (empty for Personal Brains and
+    /// non-admin requesters).
+    pub(crate) collaborator_readiness: Vec<CollaboratorReadinessView>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -434,6 +452,21 @@ pub(crate) struct BrainMetadataView {
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     #[serde(default)]
     pub(crate) grant_count: usize,
+    /// Authoritative per-principal Folder key coverage for Organization
+    /// Brains. Only present when the requester is a Brain admin; older
+    /// servers omit it and this defaults to empty. Per-principal pending-wrap
+    /// markers from the stacked pending-wraps work can extend this view later.
+    #[serde(default)]
+    pub(crate) collaborator_readiness: Vec<CollaboratorReadinessView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CollaboratorReadinessView {
+    pub(crate) target_npub: String,
+    pub(crate) brain_role: String,
+    pub(crate) ready_count: usize,
+    pub(crate) total_count: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]

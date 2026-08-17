@@ -49,6 +49,7 @@ fbrain brain list|create|bootstrap-personal|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
+approvals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]
 fbrain invite folder create|list|inspect|accept|claim|revoke
 fbrain mount offer create|list|inspect|revoke
 fbrain mount accept|list|inspect|revoke
@@ -304,6 +305,22 @@ normal sharing workflow.
 
 ## Invitations And Sharing
 
+`invite brain create --target <email>` and
+`invite folder create --target <email>` are the blessed invite paths. For a
+Finite account email the CLI resolves the account's human and managed agents
+into one plan (Brain membership, or Guest access to exactly one Folder); a
+signer with Brain admin standing commits it directly, everyone else files an
+approval request that a Brain admin signs (`fbrain approvals approve` or the
+chat approval card; Folder plans additionally need the key-holding
+committer). Emails without a Finite account fall back to the one-time email
+invitation.
+
+When your invite files an approval request, tell the user: an approval card
+appears in their chat (they can also run `fbrain approvals list`). When the
+user asks whether anything is waiting for them, check both sides: your own
+`fbrain invite brain list` for invitations addressed to your principal, and
+their pending approval and invitation cards in chat.
+
 ```sh
 fbrain invite brain create --target <email|npub>
 fbrain invite brain create --target <email|npub> --expires-in 7d
@@ -311,6 +328,10 @@ fbrain invite brain list
 fbrain invite brain inspect <invitation-id>
 fbrain invite brain accept <invitation-id>
 fbrain invite brain revoke <invitation-id>
+
+fbrain approvals list
+fbrain approvals approve --id <request-id>
+fbrain approvals deny --id <request-id>
 
 fbrain invite folder create --target <email|npub>
 fbrain invite folder list

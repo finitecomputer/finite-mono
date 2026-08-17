@@ -14,6 +14,7 @@ mod requester_context;
 mod search;
 mod semantic_index;
 mod signer;
+mod skill;
 mod state;
 mod sync_engine;
 mod wiki;
@@ -37,6 +38,7 @@ pub(crate) use output::*;
 pub(crate) use requester_context::*;
 pub(crate) use search::*;
 pub(crate) use signer::*;
+pub(crate) use skill::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
 pub(crate) use wiki::*;
@@ -57,17 +59,17 @@ use finite_brain_core::portability::{
     WorkingTreeObjectManifestEntry, WorkingTreeSyncState,
 };
 use finite_brain_core::{
-    AdminAccessAction, BrainGrantIntent, BrainId, EmailInviteScopeError, EmailInviteScopeFolder,
-    FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
+    AdminAccessAction, BrainApprovalPayload, BrainGrantIntent, BrainId, EmailInviteScopeError,
+    EmailInviteScopeFolder, FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
     bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
-    derive_email_invite_scope, derive_safe_top_level_folder_path, derive_stable_resource_id,
-    open_folder_key_grant,
+    brain_approval_event_template, derive_email_invite_scope, derive_safe_top_level_folder_path,
+    derive_stable_resource_id, open_folder_key_grant,
 };
 use finite_nostr::{
     GiftWrapValidation, NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, open_gift_wrap,
     wrap_rumor,
 };
-use nostr::{Event, Keys, Kind};
+use nostr::{Event, Keys, Kind, Tag};
 use sha2::{Digest, Sha256};
 
 pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
@@ -121,6 +123,9 @@ where
     {
         return help(output);
     }
+    if take_flag(&mut args, "--skill") {
+        return print_skill(output);
+    }
     let command = args.first().cloned().unwrap_or_else(|| "help".to_owned());
     match command.as_str() {
         "help" | "--help" | "-h" => help(output),
@@ -147,6 +152,7 @@ where
         "admin" => admin(&args[1..], &env, json, output),
         "collaborator" => collaborators(&args[1..], &env, json, output),
         "invite" => invite(&args[1..], &env, json, output),
+        "approvals" => approvals(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
     }
 }
@@ -154,7 +160,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -1885,6 +1891,16 @@ fn sync<W: Write>(
                     .any(|arg| arg == "--summary" || arg == "--verbose" || arg == "-v")
                 {
                     write_sync_change_rows(output, &report)?;
+                    if !report.completed_wraps.is_empty() {
+                        writeln!(output, "wrapped grants:")?;
+                        for wrap in &report.completed_wraps {
+                            writeln!(
+                                output,
+                                "- wrapped {} key for {}",
+                                wrap.folder_id, wrap.recipient_npub
+                            )?;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -2165,7 +2181,13 @@ fn path_entry_exists(path: &Path) -> Result<bool, CliError> {
 }
 
 fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<(), CliError> {
-    let report = status_report(env)?;
+    let mut report = status_report(env)?;
+    // Best-effort admin signal: the server only includes pendingWraps for
+    // key-holding identities, so its presence already implies admin standing.
+    // Any failure (offline, non-admin, older server) leaves the field unset.
+    if report.brain_id.is_some() && report.auth.state == "authenticated" {
+        report.pending_wraps = fetch_pending_wrap_count(env, report.brain_id.as_deref());
+    }
     if json {
         write_json(output, &report)
     } else {
@@ -2187,8 +2209,23 @@ fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<
             report.sync.mode, report.sync.status
         )?;
         writeln!(output, "Conflicts: {}", report.conflicts.len())?;
+        if let Some(pending_wraps) = report.pending_wraps
+            && pending_wraps > 0
+        {
+            writeln!(output, "PendingWraps: {pending_wraps}")?;
+        }
         Ok(())
     }
+}
+
+fn fetch_pending_wrap_count(env: &CliEnvironment, brain_id: Option<&str>) -> Option<usize> {
+    let brain_id = brain_id?;
+    let route = format!("/v1/brains/{brain_id}/metadata");
+    let metadata = signed_json_request(env, &[], "GET", &route, None).ok()?;
+    metadata
+        .get("pendingWraps")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
 }
 
 fn unlock<W: Write>(
@@ -2457,6 +2494,7 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
         folders,
         mounted_folders: metadata.mounted_folders,
         grant_count: metadata.grant_count,
+        collaborator_readiness: metadata.collaborator_readiness,
     })
 }
 
@@ -2473,6 +2511,13 @@ fn write_access_summary_rows<W: Write>(
         report.guests.len(),
         report.grant_count
     )?;
+    for person in &report.collaborator_readiness {
+        writeln!(
+            output,
+            "person {} role={} keys={}/{}",
+            person.target_npub, person.brain_role, person.ready_count, person.total_count
+        )?;
+    }
     if report.folders.is_empty() {
         writeln!(output, "no folders")?;
     } else {
@@ -3463,6 +3508,9 @@ fn admin<W: Write>(
         .first()
         .map(String::as_str)
         .ok_or(CliError::MissingArgument("admin namespace"))?;
+    if namespace == "ensure-access" {
+        return admin_ensure_access(&args[1..], env, json, output);
+    }
     let action = args
         .get(1)
         .map(String::as_str)
@@ -3495,6 +3543,63 @@ fn admin<W: Write>(
         }
     };
     admin_operation(namespace, action, operation_args, env, json, output)
+}
+
+fn admin_ensure_access<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let brain_id = command_brain_id(args, env)?;
+    let target = required_option_or_positional(args, "--target", 0, "target-identity")?;
+    let receipt = ensure_brain_access(env, args, &brain_id, &target)?;
+    if json {
+        return write_json(output, &receipt);
+    }
+    let field = |name: &str| {
+        receipt
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+    };
+    writeln!(
+        output,
+        "ensure-access {} -> {}",
+        field("brainId"),
+        field("targetNpub")
+    )?;
+    writeln!(output, "membership: {}", field("membership"))?;
+    if let Some(folders) = receipt.get("folders").and_then(serde_json::Value::as_array) {
+        for folder in folders {
+            let path = folder
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let grant = folder
+                .get("grant")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            match folder.get("repair").and_then(serde_json::Value::as_str) {
+                Some("needsKeyHolder") => writeln!(
+                    output,
+                    "- {path}: grant missing; no usable Folder Key in this Finite Home; re-run from a current key holder"
+                )?,
+                Some("failed") => writeln!(
+                    output,
+                    "- {path}: grant failed: {}",
+                    folder
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                )?,
+                Some(repair) => writeln!(output, "- {path}: grant {repair}")?,
+                None => writeln!(output, "- {path}: grant {grant}")?,
+            }
+        }
+    }
+    writeln!(output, "state: {}", field("state"))?;
+    Ok(())
 }
 
 fn collaborators<W: Write>(
@@ -3591,6 +3696,306 @@ fn collaborators<W: Write>(
     }
 }
 
+fn approvals<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("list") => list_approvals(args, env, json, output),
+        Some("approve") => approve_approval(args, env, json, output),
+        Some("deny") => deny_approval(args, env, json, output),
+        Some(other) => Err(CliError::InvalidCommand(format!("approvals {other}"))),
+        None => Err(CliError::MissingArgument("approvals action")),
+    }
+}
+
+/// Candidate brains whose approval requests `approvals` inspects: the
+/// `--brain` selection, or every brain the caller's principal can list.
+fn approvals_brain_ids(env: &CliEnvironment, args: &[String]) -> Result<Vec<String>, CliError> {
+    if let Some(brain_id) = option_value(args, "--brain") {
+        return Ok(vec![brain_id]);
+    }
+    let response = signed_json_request(env, args, "GET", "/v1/brains", None)?;
+    let brains = response
+        .get("brains")
+        .and_then(|brains| brains.as_array())
+        .ok_or_else(|| CliError::HttpStatus {
+            status: 200,
+            body: "brain list response has no brains array".to_owned(),
+        })?;
+    let mut ids = Vec::new();
+    for brain in brains {
+        let id = brain
+            .get("brainId")
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "brain list entry has no brainId".to_owned(),
+            })?;
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
+}
+
+fn fetch_approval_requests(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let response = signed_json_request(
+        env,
+        args,
+        "GET",
+        &format!("/v1/brains/{brain_id}/approval-requests"),
+        None,
+    )?;
+    Ok(response
+        .get("requests")
+        .and_then(|requests| requests.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn find_approval_request(
+    env: &CliEnvironment,
+    args: &[String],
+    request_id: &str,
+) -> Result<(String, serde_json::Value), CliError> {
+    for brain_id in approvals_brain_ids(env, args)? {
+        for request in fetch_approval_requests(env, args, &brain_id)? {
+            if request.get("id").and_then(|id| id.as_str()) == Some(request_id) {
+                return Ok((brain_id, request));
+            }
+        }
+    }
+    Err(CliError::InvalidInput(format!(
+        "approval request {request_id} was not found in your brains"
+    )))
+}
+
+/// The machine-readable trailer the Runtime chat adapter scans for in
+/// terminal tool results: one line per filed Approval Request. The next
+/// final delivery in that Runtime carries `metadata.approve` naming the
+/// request, so the human's chat surfaces the question in-stream. Emitted on
+/// stderr always — stdout must stay pure JSON in `--json` mode — and on
+/// stdout in human mode; the PTY merges both streams into the tool result,
+/// and the adapter dedupes by request id. Best-effort by design: the filing
+/// itself is already durable server-side and `fbrain approvals list` remains
+/// the authoritative fallback.
+pub(crate) fn emit_approval_filing_marker(brain_id: &str, request_id: &str, json: bool) {
+    let marker = format!("finite-brain-approval-filed brain={brain_id} request={request_id}");
+    eprintln!("{marker}");
+    if !json {
+        // Human mode has no JSON on stdout to corrupt; repeating the marker
+        // there also survives stdout-only tool capture.
+        println!("{marker}");
+    }
+}
+
+/// Extract (brainId, requestId) from a filed-approval response and emit the
+/// adapter marker for it.
+pub(crate) fn append_approval_filing_notice(json: bool, response: &serde_json::Value) {
+    let Some(request_id) = response.get("id").and_then(|id| id.as_str()) else {
+        return;
+    };
+    let Some(brain_id) = response
+        .get("brainId")
+        .and_then(|id| id.as_str())
+        .or_else(|| response.get("brain_id").and_then(|id| id.as_str()))
+    else {
+        return;
+    };
+    emit_approval_filing_marker(brain_id, request_id, json);
+}
+
+fn list_approvals<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let include_resolved = args.iter().any(|argument| argument == "--all");
+    let mut requests = Vec::new();
+    for brain_id in approvals_brain_ids(env, args)? {
+        for mut request in fetch_approval_requests(env, args, &brain_id)? {
+            if let Some(object) = request.as_object_mut() {
+                object.insert(
+                    "brainId".to_owned(),
+                    serde_json::Value::String(brain_id.clone()),
+                );
+            }
+            requests.push(request);
+        }
+    }
+    if !include_resolved {
+        requests.retain(|request| {
+            request.get("status").and_then(|status| status.as_str()) == Some("pending")
+        });
+    }
+    if json {
+        write_json(
+            output,
+            &serde_json::json!({ "requests": requests, "count": requests.len() }),
+        )
+    } else if requests.is_empty() {
+        writeln!(output, "no pending approval requests")?;
+        Ok(())
+    } else {
+        for request in &requests {
+            let id = request.get("id").and_then(|id| id.as_str()).unwrap_or("?");
+            let action = request
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("?");
+            let brain = request
+                .get("brainId")
+                .and_then(|b| b.as_str())
+                .unwrap_or("?");
+            let requested_by = request
+                .get("requestedByNpub")
+                .and_then(|r| r.as_str())
+                .unwrap_or("?");
+            let expires = request
+                .get("expiresAt")
+                .and_then(|e| e.as_str())
+                .unwrap_or("?");
+            writeln!(
+                output,
+                "{id}  {action}  brain {brain}  by {requested_by}  expires {expires}"
+            )?;
+        }
+        writeln!(
+            output,
+            "approve with: fbrain approvals approve --id <request-id>"
+        )?;
+        Ok(())
+    }
+}
+
+fn approve_approval<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let request_id = option_value(args, "--id")
+        .ok_or_else(|| CliError::InvalidInput("approvals approve requires --id".to_owned()))?;
+    let (brain_id, request) = find_approval_request(env, args, &request_id)?;
+    if request.get("status").and_then(|status| status.as_str()) != Some("pending") {
+        return Err(CliError::InvalidInput(format!(
+            "approval request {request_id} is already resolved"
+        )));
+    }
+    let payload = request.get("payload").ok_or_else(|| CliError::HttpStatus {
+        status: 200,
+        body: "approval request has no payload".to_owned(),
+    })?;
+    let signer = load_signer(env)?;
+    let approval = BrainApprovalPayload {
+        version: payload
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        human_npub: signer.npub.clone(),
+        action: payload
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        brain_id: payload
+            .get("brainId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        plan_id: payload
+            .get("planId")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        target_npubs: payload
+            .get("targetNpubs")
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        nonce: payload
+            .get("nonce")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        expires_at: payload
+            .get("expiresAt")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default(),
+    };
+    let created_at = unix_timestamp();
+    let template = brain_approval_event_template(&approval, created_at)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let tags = template
+        .tags
+        .iter()
+        .map(|tag| Tag::parse(tag.clone()))
+        .collect::<Result<Vec<Tag>, _>>()
+        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
+    let event = sign_event(
+        &signer.keys,
+        Kind::Custom(template.kind),
+        template.content,
+        tags,
+        template.created_at,
+        None,
+    )?;
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("/v1/brains/{brain_id}/approvals"),
+        Some(serde_json::json!({
+            "approvalEventJson": event.as_json(),
+            "requestId": request_id,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        writeln!(output, "approved {request_id}")?;
+        Ok(())
+    }
+}
+
+fn deny_approval<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let request_id = option_value(args, "--id")
+        .ok_or_else(|| CliError::InvalidInput("approvals deny requires --id".to_owned()))?;
+    let (brain_id, _) = find_approval_request(env, args, &request_id)?;
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("/v1/brains/{brain_id}/approval-requests/{request_id}/deny"),
+        None,
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        writeln!(output, "denied {request_id}")?;
+        Ok(())
+    }
+}
+
 fn invite<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -3632,34 +4037,13 @@ fn brain_invites<W: Write>(
                     &folders,
                     &expires_at,
                 )
-            } else if invite_finite_vip_email(&raw_target) {
-                match resolve_identity_npub(env, args, &raw_target) {
-                    Ok(target) => write_npub_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &target,
-                        &folders,
-                        &expires_at,
-                    ),
-                    Err(CliError::HttpStatus { status: 404, .. }) => write_email_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &brain_id,
-                        &raw_target,
-                        &folders,
-                        &expires_at,
-                        false,
-                    ),
-                    Err(error) => Err(error),
-                }
             } else if invite_email_like(&raw_target) {
-                write_email_invite_create(
+                // The blessed email path: resolve the account into an
+                // invitation plan, then either commit it directly (the caller
+                // holds admin standing) or file an approval request for a
+                // human admin to sign. Emails without a Finite account fall
+                // back to the one-time email invitation.
+                write_plan_or_email_invite_create(
                     output,
                     json,
                     env,
@@ -3669,7 +4053,6 @@ fn brain_invites<W: Write>(
                     &raw_target,
                     &folders,
                     &expires_at,
-                    false,
                 )
             } else {
                 let target = resolve_identity_npub(env, args, &raw_target)?;
@@ -3686,10 +4069,23 @@ fn brain_invites<W: Write>(
             }
         }
         Some("list") => {
-            let brain_id = command_brain_id(args, env)?;
-            let route = format!("/v1/brains/{brain_id}/invitations");
-            let response = signed_json_request(env, args, "GET", &route, None)?;
-            write_command_response(output, json, &response)
+            let scoped_brain_id = match option_value(args, "--brain") {
+                Some(brain_id) => Some(brain_id),
+                None => current_brain_id(env)?,
+            };
+            match scoped_brain_id {
+                Some(brain_id) => {
+                    let route = format!("/v1/brains/{brain_id}/invitations");
+                    let response = signed_json_request(env, args, "GET", &route, None)?;
+                    write_brain_invitations(output, json, &response)
+                }
+                None => {
+                    // No Working Tree: the caller is an invitee, not an admin.
+                    let response =
+                        signed_json_request(env, args, "GET", "/v1/my-invitations", None)?;
+                    write_my_invitations(output, json, &response)
+                }
+            }
         }
         Some("inspect") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
@@ -3699,6 +4095,7 @@ fn brain_invites<W: Write>(
         }
         Some("accept") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
+            reject_invite_code_as_invitation_id(&id)?;
             let route = format!("/v1/invitations/{id}/accept");
             let response = signed_json_request(env, args, "POST", &route, None)?;
             write_command_response(output, json, &response)
@@ -3712,6 +4109,121 @@ fn brain_invites<W: Write>(
         Some(other) => Err(CliError::InvalidCommand(format!("invite brain {other}"))),
         None => Err(CliError::MissingArgument("invite brain command")),
     }
+}
+
+fn write_my_invitations<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let invitations = value
+        .get("invitations")
+        .and_then(serde_json::Value::as_array);
+    match invitations {
+        Some(invitations) if !invitations.is_empty() => {
+            for invitation in invitations {
+                let field = |name: &str| {
+                    invitation
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                let expired = invitation
+                    .get("expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let id = field("id");
+                writeln!(output, "invitation {id}")?;
+                writeln!(
+                    output,
+                    "  brain {} ({})",
+                    field("brainDisplayName"),
+                    field("brainId")
+                )?;
+                writeln!(output, "  expires {}", field("expiresAt"))?;
+                if expired {
+                    writeln!(
+                        output,
+                        "  status expired; ask the inviting admin to re-invite you"
+                    )?;
+                } else {
+                    writeln!(output, "  accept: fbrain invite brain accept --id {id}")?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no pending invitations")?;
+            Ok(())
+        }
+    }
+}
+
+fn write_brain_invitations<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let invitations = value
+        .get("invitations")
+        .and_then(serde_json::Value::as_array);
+    match invitations {
+        Some(invitations) if !invitations.is_empty() => {
+            for invitation in invitations {
+                let field = |name: &str| {
+                    invitation
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                let expired = invitation
+                    .get("expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let target = {
+                    let user_id = field("userId");
+                    if user_id.is_empty() {
+                        field("invitedEmail")
+                    } else {
+                        user_id
+                    }
+                };
+                let status = if expired && field("status") == "pending" {
+                    "pending (expired)".to_owned()
+                } else {
+                    field("status").to_owned()
+                };
+                writeln!(
+                    output,
+                    "invitation {} -> {target} status={status} expires={}",
+                    field("id"),
+                    field("expiresAt")
+                )?;
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no invitations")?;
+            Ok(())
+        }
+    }
+}
+
+fn reject_invite_code_as_invitation_id(id: &str) -> Result<(), CliError> {
+    if id.starts_with("invite-") {
+        return Err(CliError::InvalidInput(format!(
+            "{id} is an invite code, not an invitation id; open the invitation's public \
+             instructions (GET /v1/brain-invitation-links/{id}/llms.txt on the Brain server) \
+             and run the accept command it prints for the matching invitation id"
+        )));
+    }
+    Ok(())
 }
 
 fn claim_email_folder_invitation<W: Write>(
@@ -3901,6 +4413,142 @@ fn claim_email_folder_invitation<W: Write>(
     write_command_response(output, json, &claimed)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_plan_or_email_folder_invite_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+    raw_target: &str,
+    expires_at: &str,
+) -> Result<(), CliError> {
+    let classic_fallback = |output: &mut W| -> Result<(), CliError> {
+        let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
+        write_email_invite_create(
+            output,
+            json,
+            env,
+            args,
+            &route,
+            brain_id,
+            raw_target,
+            std::slice::from_ref(&folder_id.to_owned()),
+            expires_at,
+            true,
+        )
+    };
+    let email = canonical_invite_email(raw_target)?;
+    let preflight_route =
+        format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/preflight");
+    let plan = match signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({ "target": email })),
+    ) {
+        Ok(plan) => plan,
+        Err(CliError::HttpStatus { status: 403, .. }) => {
+            return Err(CliError::HttpStatus {
+                status: 403,
+                body: "cohort Folder invitations require Brain admin standing (the key-holding                        committer); ask your admin, or wait for the chat approval card escalation"
+                    .to_owned(),
+            });
+        }
+        Err(CliError::HttpStatus { status: 502, .. })
+        | Err(CliError::HttpStatus { status: 503, .. }) => {
+            return classic_fallback(output);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut principals: Vec<String> = Vec::new();
+    if let Some(human_npub) = plan
+        .get("human")
+        .and_then(|human| human.get("npub"))
+        .and_then(|npub| npub.as_str())
+        .filter(|npub| !npub.is_empty())
+    {
+        principals.push(human_npub.to_owned());
+    }
+    if let Some(agents) = plan.get("agents").and_then(|agents| agents.as_array()) {
+        for agent in agents {
+            if let Some(agent_npub) = agent.get("agentNpub").and_then(|v| v.as_str()) {
+                principals.push(agent_npub.to_owned());
+            }
+        }
+    }
+    if principals.is_empty() {
+        // No Finite account for this email: the one-time Folder invitation.
+        return classic_fallback(output);
+    }
+    let key_version = plan
+        .get("currentKeyVersion")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| CliError::HttpStatus {
+            status: 200,
+            body: "folder plan preflight response has no currentKeyVersion".to_owned(),
+        })?;
+    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
+    let folder_key = opened_folder_key(&session_keys, brain_id, folder_id, key_version)?;
+    let auth = load_signer(env)?;
+    let mut participants = Vec::with_capacity(principals.len());
+    for target in &principals {
+        let event = admin_access_change_event(
+            env,
+            brain_id,
+            AdminAccessAction::GrantFolderAccess,
+            Some(folder_id),
+            Some(target),
+            Some(key_version),
+        )?;
+        let grant = folder_key_grant_request(
+            &auth,
+            brain_id,
+            folder_id,
+            key_version,
+            target,
+            &folder_key,
+            env,
+        )?;
+        participants.push(serde_json::json!({
+            "recipientNpub": target,
+            "grant": grant,
+            "accessChangeEvent": event,
+        }));
+    }
+    let commit_route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/commit");
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &commit_route,
+        Some(serde_json::json!({
+            "planId": plan.get("planId").cloned().unwrap_or(serde_json::Value::Null),
+            "planHash": plan.get("planHash").cloned().unwrap_or(serde_json::Value::Null),
+            "expiresAt": expires_at,
+            "participants": participants,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        let invited = response
+            .get("invitations")
+            .and_then(|invitations| invitations.as_array())
+            .map(|invitations| invitations.len())
+            .unwrap_or_default();
+        writeln!(
+            output,
+            "invited {invited} principal(s) to folder {folder_id}; they accept with `fbrain invite folder accept --id <invitation-id>`"
+        )?;
+        Ok(())
+    }
+}
+
 fn folder_invites<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -3925,18 +4573,15 @@ fn folder_invites<W: Write>(
                 None
             };
             if invite_email_like(&raw_target) && resolved_target.is_none() {
-                let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
-                return write_email_invite_create(
+                return write_plan_or_email_folder_invite_create(
                     output,
                     json,
                     env,
                     args,
-                    &route,
                     &brain_id,
+                    &folder_id,
                     &raw_target,
-                    std::slice::from_ref(&folder_id),
                     &expires_at,
-                    true,
                 );
             }
             let target = resolved_target
@@ -4075,6 +4720,153 @@ fn write_npub_invite_create<W: Write>(
     });
     let response = signed_json_request(env, args, "POST", route, Some(body))?;
     write_command_response(output, json, &response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_plan_or_email_invite_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    route: &str,
+    brain_id: &str,
+    raw_target: &str,
+    folders: &[String],
+    expires_at: &str,
+) -> Result<(), CliError> {
+    let email = canonical_invite_email(raw_target)?;
+    let preflight_route = format!("/v1/brains/{brain_id}/invitations/preflight");
+    match signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({ "target": email })),
+    ) {
+        Ok(plan) => {
+            let resolves_account = plan
+                .get("human")
+                .and_then(|human| human.get("npub"))
+                .and_then(|npub| npub.as_str())
+                .is_some_and(|npub| !npub.is_empty())
+                || plan
+                    .get("agents")
+                    .and_then(|agents| agents.as_array())
+                    .is_some_and(|agents| !agents.is_empty());
+            if !resolves_account {
+                // No Finite account for this email: the one-time invitation.
+                return write_email_invite_create(
+                    output, json, env, args, route, brain_id, raw_target, folders, expires_at,
+                    false,
+                );
+            }
+            commit_invitation_plan(output, json, env, args, brain_id, &plan)
+        }
+        Err(CliError::HttpStatus { status: 403, .. }) => {
+            // The caller lacks admin standing: request the human's approval
+            // for a server-resolved plan instead of committing directly.
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                &format!("/v1/brains/{brain_id}/approval-requests"),
+                Some(serde_json::json!({ "action": "invite-commit", "target": email })),
+            )?;
+            append_approval_filing_notice(json, &response);
+            if json {
+                write_json(output, &response)
+            } else {
+                write_command_response(output, false, &response)?;
+                writeln!(
+                    output,
+                    "approval requested: a Brain admin must approve this invite with `fbrain approvals approve --id <request-id>` or the chat approval card"
+                )?;
+                Ok(())
+            }
+        }
+        Err(CliError::HttpStatus { status: 502, .. })
+        | Err(CliError::HttpStatus { status: 503, .. }) => {
+            // Account enrichment is unreachable: degrade to the one-time
+            // email invitation, never the cryptography.
+            write_email_invite_create(
+                output, json, env, args, route, brain_id, raw_target, folders, expires_at, false,
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn commit_invitation_plan<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    plan: &serde_json::Value,
+) -> Result<(), CliError> {
+    let commit_once = |plan: &serde_json::Value| -> Result<serde_json::Value, CliError> {
+        let plan_id = plan
+            .get("planId")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "invitation plan response has no planId".to_owned(),
+            })?;
+        let plan_hash = plan
+            .get("planHash")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| CliError::HttpStatus {
+                status: 200,
+                body: "invitation plan response has no planHash".to_owned(),
+            })?;
+        signed_json_request(
+            env,
+            args,
+            "POST",
+            &format!("/v1/brains/{brain_id}/invitations/commit"),
+            Some(serde_json::json!({ "planId": plan_id, "planHash": plan_hash })),
+        )
+    };
+    let response = match commit_once(plan) {
+        Ok(response) => response,
+        Err(CliError::HttpStatus { status: 409, .. }) => {
+            // Roster drift superseded the preview: re-preflight once and
+            // commit the fresh plan instead of the stale one.
+            let fresh = signed_json_request(
+                env,
+                args,
+                "POST",
+                &format!("/v1/brains/{brain_id}/invitations/preflight"),
+                Some(serde_json::json!({ "target": plan_target_email(plan, brain_id) })),
+            )?;
+            commit_once(&fresh)?
+        }
+        Err(error) => return Err(error),
+    };
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        let invited = response
+            .get("invitations")
+            .and_then(|invitations| invitations.as_array())
+            .map(|invitations| invitations.len())
+            .unwrap_or_default();
+        writeln!(
+            output,
+            "invited {invited} principal(s); they accept with `fbrain invite brain accept`"
+        )?;
+        Ok(())
+    }
+}
+
+/// Recover the target email of a previewed plan for roster-drift re-preflight.
+fn plan_target_email(plan: &serde_json::Value, _brain_id: &str) -> String {
+    plan.get("human")
+        .and_then(|human| human.get("email"))
+        .and_then(|email| email.as_str())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5722,7 +6514,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -5906,7 +6698,18 @@ mod tests {
                             "setupIncomplete": false
                         }],
                         "mountedFolders": [],
-                        "grantCount": 3
+                        "grantCount": 3,
+                        "collaboratorReadiness": [{
+                            "targetNpub": "npub-admin",
+                            "brainRole": "admin",
+                            "readyCount": 2,
+                            "totalCount": 3
+                        }, {
+                            "targetNpub": "npub-member",
+                            "brainRole": "member",
+                            "readyCount": 0,
+                            "totalCount": 2
+                        }]
                     })
                 }
                 .to_string();
@@ -5966,6 +6769,45 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
             request_line
+        });
+        (url, handle)
+    }
+
+    /// Capture server returning one scripted (status, body) response per
+    /// request, in order; requests beyond the script answer 500.
+    #[allow(clippy::type_complexity)]
+    fn start_scripted_capture_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let mut responses = responses.into_iter().peekable();
+            let mut requests = Vec::new();
+            while responses.peek().is_some() {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                requests.push((request_line, body));
+                let (status, response_body) = responses.next().unwrap();
+                let reason = if (200..300).contains(&status) {
+                    "OK"
+                } else if status == 403 {
+                    "Forbidden"
+                } else {
+                    "Error"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            requests
         });
         (url, handle)
     }
@@ -7388,6 +8230,132 @@ mod tests {
         assert!(!durable_state.contains(&folder_key.to_base64()));
     }
 
+    fn start_ensure_access_server(
+        target_npub: String,
+        export_grant: Value,
+    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/ensure-access") {
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "targetNpub": target_npub,
+                        "membership": "added",
+                        "brainRole": "member",
+                        "folders": [{
+                            "folderId": "general",
+                            "path": "general",
+                            "keyVersion": 1,
+                            "grant": "missing"
+                        }],
+                        "missingCount": 1,
+                        "state": "grantsMissing"
+                    })
+                    .to_string()
+                } else if request_line.contains("/export") {
+                    serde_json::json!({
+                        "brain": {
+                            "id": "acme",
+                            "kind": "organization",
+                            "name": "Acme",
+                            "ownerUserId": null
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "general",
+                            "access": "all_members",
+                            "currentKeyVersion": 1,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
+                        "accessState": {
+                            "members": [],
+                            "admins": []
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "outcome": "granted",
+                    })
+                    .to_string()
+                };
+                requests.push((request_line, body));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn admin_ensure_access_fills_missing_folder_grants() {
+        let tmp = TempDir::new().unwrap();
+        let target_secret = "0000000000000000000000000000000000000000000000000000000000000002";
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let admin_npub = npub_for_secret(TEST_SECRET_HEX);
+        let target_npub = npub_for_secret(target_secret);
+        let folder_key = FolderKey::from_bytes([9; 32]);
+        let tree = tmp.path().join("org");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) = start_ensure_access_server(target_npub.clone(), export_grant);
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "admin",
+                "ensure-access",
+                "--brain",
+                "acme",
+                "--target",
+                &target_npub,
+                "--server",
+                &server_url,
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap();
+        let plain = String::from_utf8(output).unwrap();
+        assert!(plain.contains("membership: added"));
+        assert!(plain.contains("- general: grant granted"));
+        assert!(plain.contains("state: complete"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0, "POST /v1/brains/acme/ensure-access HTTP/1.1");
+        assert_eq!(requests[1].0, "GET /v1/brains/acme/export HTTP/1.1");
+        assert_eq!(
+            requests[2].0,
+            format!("PUT /v1/admin/brains/acme/folders/general/access/{target_npub} HTTP/1.1")
+        );
+        let body: Value = serde_json::from_str(&requests[2].1).unwrap();
+        assert_eq!(
+            grant_plaintext_folder_key(&body, target_secret, &target_npub),
+            folder_key.to_base64()
+        );
+    }
+
     #[test]
     fn redundant_folder_grant_reports_that_the_person_already_has_access() {
         let output = run_redundant_folder_grant(false);
@@ -7612,6 +8580,8 @@ mod tests {
                 members: vec![],
                 admins: vec![],
             },
+
+            pending_wraps: Vec::new(),
         };
         let opened = opened_export_folder_key_grants_tolerant(&auth, &export);
         assert_eq!(opened.len(), 1);
@@ -7978,6 +8948,21 @@ mod tests {
             access["folders"][2]["effectiveAccessUserIds"],
             serde_json::json!(["npub-admin", "npub-member"])
         );
+        assert_eq!(
+            access["collaboratorReadiness"],
+            serde_json::json!([{
+                "targetNpub": "npub-admin",
+                "brainRole": "admin",
+                "readyCount": 2,
+                "totalCount": 3
+            }, {
+                "targetNpub": "npub-member",
+                "brainRole": "member",
+                "readyCount": 0,
+                "totalCount": 2
+            }]),
+            "access list must surface per-principal folder-key readiness"
+        );
         let mut output = Vec::new();
         run_with_env(
             ["access", "list", "--brain", "acme", "--server", &server_url],
@@ -7986,6 +8971,8 @@ mod tests {
         )
         .unwrap();
         let access_text = String::from_utf8(output).unwrap();
+        assert!(access_text.contains("person npub-admin role=admin keys=2/3"));
+        assert!(access_text.contains("person npub-member role=member keys=0/2"));
         assert!(access_text.contains(
             "folder general path=general access=all_members keyVersion=2 state=ready explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin,npub-member]"
         ));
@@ -8173,6 +9160,125 @@ mod tests {
     }
 
     #[test]
+    fn invite_create_without_standing_files_approval_request() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        // First response: preflight is forbidden (no admin standing). Second:
+        // the approval request is created and returned.
+        let (server_url, server) = start_scripted_capture_server(vec![
+            (
+                403,
+                r#"{"error":"approval signer does not hold brain admin standing"}"#.to_owned(),
+            ),
+            (
+                200,
+                r#"{"id":"approval-1","status":"pending","action":"invite-commit","payload":{"planId":"plan-1","nonce":"n1"}}"#
+                    .to_owned(),
+            ),
+        ]);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "acme",
+                "--target",
+                "bob@example.com",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["id"], "approval-1");
+        assert_eq!(json["status"], "pending");
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/preflight")
+        );
+        assert!(
+            requests[1]
+                .0
+                .starts_with("POST /v1/brains/acme/approval-requests")
+        );
+        let body: Value = serde_json::from_str(&requests[1].1).unwrap();
+        assert_eq!(body["action"], "invite-commit");
+        assert_eq!(body["target"], "bob@example.com");
+    }
+
+    #[test]
+    fn approvals_approve_signs_and_submits_the_stored_payload() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000001");
+        // Brain list, then the request listing, then the artifact submission.
+        let (server_url, server) = start_scripted_capture_server(vec![
+            (200, r#"{"brains":[{"brainId":"acme"}]}"#.to_owned()),
+            (
+                200,
+                r#"{"requests":[{"id":"approval-1","status":"pending","payload":{"version":"finite-brain-approval-v1","action":"invite-commit","brainId":"acme","planId":"plan-1","targetNpubs":[],"nonce":"00112233445566778899aabbccddeeff","expiresAt":9999999999}}]}"#
+                    .to_owned(),
+            ),
+            (200, r#"{"status":"applied"}"#.to_owned()),
+        ]);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "approvals",
+                "approve",
+                "--id",
+                "approval-1",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["status"], "applied");
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1]
+                .0
+                .starts_with("GET /v1/brains/acme/approval-requests")
+        );
+        assert!(requests[2].0.starts_with("POST /v1/brains/acme/approvals"));
+        let body: Value = serde_json::from_str(&requests[2].1).unwrap();
+        assert_eq!(body["requestId"], "approval-1");
+        let event: Value =
+            serde_json::from_str(body["approvalEventJson"].as_str().unwrap()).unwrap();
+        assert_eq!(event["kind"], 30078);
+        assert_eq!(
+            event["pubkey"],
+            NostrPublicKey::parse(&npub).unwrap().to_hex()
+        );
+        let payload: Value = serde_json::from_str(event["content"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["humanNpub"], npub);
+        assert_eq!(payload["nonce"], "00112233445566778899aabbccddeeff");
+        assert_eq!(payload["planId"], "plan-1");
+    }
+
+    #[test]
     fn invites_create_posts_initial_folder_access() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -8272,10 +9378,17 @@ mod tests {
         );
 
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].0.contains("/v1/brains/acme/metadata"));
-        assert!(requests[1].0.contains("/v1/brains/acme/export"));
-        let (request, body) = &requests[2];
+        assert_eq!(requests.len(), 4);
+        // The email path preflights the account first; the unregistered
+        // mailbox falls through to the classic one-time invitation.
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/preflight")
+        );
+        assert!(requests[1].0.contains("/v1/brains/acme/metadata"));
+        assert!(requests[2].0.contains("/v1/brains/acme/export"));
+        let (request, body) = &requests[3];
         assert!(request.starts_with("POST /v1/brains/acme/invitations"));
         assert!(
             !body.contains(invite_secret),
@@ -8372,10 +9485,22 @@ mod tests {
         )
         .unwrap();
 
-        let response: Value = serde_json::from_slice(&output).unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap_or_else(|error| {
+            panic!(
+                "output was: {:?} ({error})",
+                String::from_utf8_lossy(&output)
+            )
+        });
         let invite_secret = response["inviteSecret"].as_str().unwrap();
         let requests = server.join().unwrap();
-        let (_, body) = &requests[2];
+        // The email path folder-preflights the account first; the
+        // unregistered mailbox falls through to the classic one-time path.
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/folders/getting-started/invitations/preflight")
+        );
+        let (_, body) = &requests[3];
         assert!(!body.contains(invite_secret));
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["target"], "new-person@example.com");
@@ -8495,6 +9620,41 @@ mod tests {
         assert!(requests[0].0.starts_with(
             "POST /v1/invitations/invitation-4f82a37c1b82bcdd54973c466cdde914/accept"
         ));
+    }
+
+    #[test]
+    fn invite_brain_accept_rejects_an_invite_code_with_a_pointer() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+
+        let mut output = Vec::new();
+        let error = run_with_env(
+            [
+                "invite",
+                "brain",
+                "accept",
+                "--id",
+                "invite-0fe6eda60e1bf6e662acb8e2b5c425d9",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("invite code, not an invitation id"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "/v1/brain-invitation-links/invite-0fe6eda60e1bf6e662acb8e2b5c425d9/llms.txt"
+            ),
+            "{message}"
+        );
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -10664,6 +11824,7 @@ mod tests {
             remote_changes: Vec::new(),
             unsupported_objects: Vec::new(),
             conflicts: Vec::new(),
+            completed_wraps: Vec::new(),
         };
 
         assert_eq!(reconcile_search_changes(&tree, &report).unwrap(), 1);
@@ -12111,6 +13272,244 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    fn start_fixed_response_server(
+        body: String,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn invite_brain_list_without_working_tree_uses_my_invitations() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [{
+                "id": "invitation-1",
+                "inviteCode": "invite-abc",
+                "brainId": "alice-brain",
+                "brainDisplayName": "Alice's Brain",
+                "inviterDisplay": "alice@finite.vip",
+                "folderScope": ["shared-with-bob"],
+                "expiresAt": "2026-06-30T00:00:00Z",
+                "publicInstructionsUrl": "https://brain.example/v1/brain-invitation-links/invite-abc/llms.txt",
+                "originKind": "invitation",
+                "originRef": null
+            }]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 2);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--json"],
+            env.clone(),
+            &mut output,
+        )
+        .unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["invitations"][0]["id"], "invitation-1");
+        assert_eq!(json["invitations"][0]["brainId"], "alice-brain");
+        assert_eq!(json["invitations"][0]["expiresAt"], "2026-06-30T00:00:00Z");
+
+        let mut plain = Vec::new();
+        run_with_env(["invite", "brain", "list"], env, &mut plain).unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains("invitation invitation-1"));
+        assert!(plain.contains("Alice's Brain (alice-brain)"));
+        assert!(plain.contains("expires 2026-06-30T00:00:00Z"));
+        assert!(plain.contains("fbrain invite brain accept --id invitation-1"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                "GET /v1/my-invitations HTTP/1.1".to_owned(),
+                "GET /v1/my-invitations HTTP/1.1".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_flag_prints_the_self_contained_agent_guide() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let mut output = Vec::new();
+        run_with_env(["--skill"], env, &mut output).unwrap();
+        let guide = String::from_utf8(output).unwrap();
+        for expected in [
+            "# fbrain skill guide",
+            "fbrain open personal",
+            "fbrain sync now --summary",
+            "fbrain invite brain create",
+            "fbrain invite brain accept --id",
+            "preflight",
+            "admin ensure-access",
+            "llms.txt",
+            "Provenance",
+            "Error glossary",
+        ] {
+            assert!(guide.contains(expected), "guide is missing: {expected}");
+        }
+    }
+
+    #[test]
+    fn invite_brain_list_with_brain_flag_or_working_tree_keeps_admin_route() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = setup_incremental_tree(&tmp, 0);
+        let (server_url, server) =
+            start_fixed_response_server("{\"invitations\":[]}".to_owned(), 2);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut flagged = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--brain", "acme", "--json"],
+            env.clone(),
+            &mut flagged,
+        )
+        .unwrap();
+
+        env.cwd = tree;
+        let mut in_tree = Vec::new();
+        run_with_env(["invite", "brain", "list", "--json"], env, &mut in_tree).unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                "GET /v1/brains/acme/invitations HTTP/1.1".to_owned(),
+                "GET /v1/brains/brain/invitations HTTP/1.1".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invite_brain_list_marks_expired_invitations_for_the_invitee() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [
+                {
+                    "id": "invitation-live",
+                    "inviteCode": "invite-live",
+                    "brainId": "alice-brain",
+                    "brainDisplayName": "Alice's Brain",
+                    "inviterDisplay": "alice@finite.vip",
+                    "folderScope": [],
+                    "expiresAt": "2026-06-30T00:00:00Z",
+                    "expired": false,
+                    "publicInstructionsUrl": null,
+                    "originKind": "invitation",
+                    "originRef": null
+                },
+                {
+                    "id": "invitation-expired",
+                    "inviteCode": "invite-expired",
+                    "brainId": "bob-brain",
+                    "brainDisplayName": "Bob's Brain",
+                    "inviterDisplay": "bob@finite.vip",
+                    "folderScope": [],
+                    "expiresAt": "2026-05-02T00:00:00Z",
+                    "expired": true,
+                    "publicInstructionsUrl": null,
+                    "originKind": "invitation",
+                    "originRef": null
+                }
+            ]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 1);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut plain = Vec::new();
+        run_with_env(["invite", "brain", "list"], env, &mut plain).unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains("invitation invitation-live"));
+        assert!(plain.contains("accept: fbrain invite brain accept --id invitation-live"));
+        assert!(plain.contains("invitation invitation-expired"));
+        assert!(plain.contains("status expired; ask the inviting admin to re-invite you"));
+        assert!(!plain.contains("accept --id invitation-expired"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests, vec!["GET /v1/my-invitations HTTP/1.1".to_owned()]);
+    }
+
+    #[test]
+    fn invite_brain_list_marks_expired_invitations_for_the_admin() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let body = serde_json::json!({
+            "invitations": [{
+                "id": "invitation-expired",
+                "brainId": "acme",
+                "userId": "npub1target",
+                "status": "pending",
+                "expiresAt": "2026-05-02T00:00:00Z",
+                "expired": true
+            }]
+        })
+        .to_string();
+        let (server_url, server) = start_fixed_response_server(body, 1);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(server_url);
+
+        let mut plain = Vec::new();
+        run_with_env(
+            ["invite", "brain", "list", "--brain", "acme"],
+            env,
+            &mut plain,
+        )
+        .unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(plain.contains(
+            "invitation invitation-expired -> npub1target status=pending (expired) expires=2026-05-02T00:00:00Z"
+        ));
+
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests,
+            vec!["GET /v1/brains/acme/invitations HTTP/1.1".to_owned()]
+        );
+    }
+
     #[test]
     fn access_explain_infers_folder_from_the_current_managed_directory() {
         let tmp = TempDir::new().unwrap();
@@ -12281,6 +13680,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
 
         assert_eq!(
@@ -12307,6 +13707,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
         assert_eq!(
             folder_required_recipients(&personal_metadata, "restricted", &[]).unwrap(),
@@ -12328,6 +13729,7 @@ mod tests {
             folders: Vec::new(),
             mounted_folders: Vec::new(),
             grant_count: 0,
+            collaborator_readiness: Vec::new(),
         };
 
         let post_removal = metadata_after_member_removal(&metadata, "npub-removed");

@@ -132,6 +132,139 @@ pub(crate) fn ensure_organization_admin(
     }
 }
 
+/// One-step repair for a half-onboarded member: the server idempotently
+/// completes Membership and reports entitled Folder grant gaps; this Finite
+/// Home then fills every gap it can by wrapping the current Folder Keys it
+/// can open, exactly like `admin folder-access grant` per Folder. Safe to
+/// re-run: existing Membership and grants report as already in place.
+pub(crate) fn ensure_brain_access(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    target_input: &str,
+) -> Result<serde_json::Value, CliError> {
+    let target = resolve_identity_npub(env, args, target_input)?;
+    let event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::AddMember,
+        None,
+        Some(&target),
+        None,
+    )?;
+    let route = format!("/v1/brains/{brain_id}/ensure-access");
+    let mut receipt = signed_json_request(
+        env,
+        args,
+        "POST",
+        &route,
+        Some(serde_json::json!({
+            "targetNpub": target,
+            "accessChangeEvent": event,
+        })),
+    )?;
+
+    let missing_count;
+    {
+        let Some(folders) = receipt
+            .get_mut("folders")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(receipt);
+        };
+        let missing = folders
+            .iter()
+            .enumerate()
+            .filter(|(_, folder)| {
+                folder.get("grant").and_then(serde_json::Value::as_str) == Some("missing")
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            // Tolerant opener: one undecryptable grant must not block repairs
+            // for the Folders this Finite Home can still open.
+            let keyring = open_brain_session_folder_keys_for_collaboration(env, args, brain_id)?;
+            let auth = load_signer(env)?;
+            for index in missing {
+                let folder_id = folders[index]
+                    .get("folderId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let key_version = folders[index]
+                    .get("keyVersion")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as u32;
+                let Some(folder_key) = keyring.get(brain_id, &folder_id, key_version) else {
+                    folders[index]["repair"] = serde_json::json!("needsKeyHolder");
+                    folders[index]["reason"] = serde_json::json!(
+                        "no usable current Folder Key in this Finite Home; re-run from a current key holder"
+                    );
+                    continue;
+                };
+                let repair = (|| {
+                    let grant = folder_key_grant_request(
+                        &auth,
+                        brain_id,
+                        &folder_id,
+                        key_version,
+                        &target,
+                        folder_key,
+                        env,
+                    )?;
+                    let event = admin_access_change_event(
+                        env,
+                        brain_id,
+                        AdminAccessAction::GrantFolderAccess,
+                        Some(&folder_id),
+                        Some(&target),
+                        Some(key_version),
+                    )?;
+                    let route =
+                        format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
+                    signed_json_request(
+                        env,
+                        args,
+                        "PUT",
+                        &route,
+                        Some(serde_json::json!({
+                            "grant": grant,
+                            "accessChangeEvent": event,
+                        })),
+                    )
+                })();
+                match repair {
+                    Ok(response) => {
+                        let outcome = response
+                            .get("outcome")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("granted");
+                        folders[index]["grant"] = serde_json::json!("present");
+                        folders[index]["repair"] = serde_json::json!(outcome);
+                    }
+                    Err(error) => {
+                        folders[index]["repair"] = serde_json::json!("failed");
+                        folders[index]["reason"] = serde_json::json!(error.to_string());
+                    }
+                }
+            }
+        }
+        missing_count = folders
+            .iter()
+            .filter(|folder| {
+                folder.get("grant").and_then(serde_json::Value::as_str) == Some("missing")
+            })
+            .count();
+    }
+    receipt["missingCount"] = serde_json::json!(missing_count);
+    receipt["state"] = serde_json::json!(if missing_count == 0 {
+        "complete"
+    } else {
+        "grantsMissing"
+    });
+    Ok(receipt)
+}
+
 pub(crate) fn resolve_identity_npub(
     env: &CliEnvironment,
     args: &[String],

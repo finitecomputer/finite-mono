@@ -513,6 +513,12 @@ impl BrainStore {
                 removed_user_id.as_str()
             ],
         )?;
+        pending_wraps::clear_pending_grant_wraps_for_folder_recipient(
+            &tx,
+            brain_id,
+            folder_id,
+            removed_user_id,
+        )?;
         tx.execute(
             "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
             params![brain_id.as_str(), folder_id.as_str(), new_key_version],
@@ -857,6 +863,12 @@ impl BrainStore {
                         target.as_str()
                     ],
                 )?;
+                pending_wraps::clear_pending_grant_wraps_for_folder_recipient(
+                    &tx,
+                    &connection.source_brain_id,
+                    &connection.source_folder_id,
+                    target,
+                )?;
             }
             tx.execute(
                 "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
@@ -908,6 +920,7 @@ impl BrainStore {
             "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), removed_user_id.as_str()],
         )?;
+        pending_wraps::clear_pending_grant_wraps_for_recipient(&tx, brain_id, removed_user_id)?;
         for (record_brain_id, control_records) in control_records_by_brain {
             sync_records::append_sync_records(&tx, record_brain_id, control_records)?;
         }

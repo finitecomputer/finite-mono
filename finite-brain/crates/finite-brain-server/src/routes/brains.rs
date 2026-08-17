@@ -297,6 +297,7 @@ pub(crate) async fn brain_metadata_handler(
         store.load_brain(&brain_id)?
     };
     ensure_metadata_visible(&stored, &actor_npub)?;
+    let actor_is_admin = ensure_brain_admin(&stored, &actor_npub).is_ok();
     let mounted_folders = {
         let store = state.store.lock().map_err(lock_error)?;
         store.mounted_folder_projection(&brain_id, &UserId::new(actor_npub.clone())?)?
@@ -306,6 +307,10 @@ pub(crate) async fn brain_metadata_handler(
     {
         let store = state.store.lock().map_err(lock_error)?;
         enrich_metadata_identities(&store, &mut response)?;
+        if actor_is_admin {
+            attach_pending_approvals(&store, &mut response, &brain_id)?;
+            attach_pending_wraps(&store, &mut response, &brain_id)?;
+        }
     }
     Ok(Json(response))
 }
@@ -320,13 +325,29 @@ pub(crate) async fn encrypted_brain_export_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor_id = UserId::new(actor.clone())?;
     let brain_id = BrainId::new(brain_id)?;
-    let export = {
+    let (export, pending_wraps) = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_metadata_visible(&stored, &actor)?;
-        store.encrypted_brain_export(&brain_id, &actor_id)?
+        let export = store.encrypted_brain_export(&brain_id, &actor_id)?;
+        // Pending grant wraps ride the export only for key-holding clients
+        // (Brain admin standing); everyone else gets the export exactly as
+        // before and older clients ignore the field.
+        let pending_wraps = if ensure_brain_admin(&stored, &actor).is_ok() {
+            store
+                .pending_grant_wraps(&brain_id)?
+                .into_iter()
+                .map(pending_grant_wrap_response)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        (export, pending_wraps)
     };
-    Ok(Json(encrypted_brain_export_response(export)))
+    Ok(Json(encrypted_brain_export_response_with_wraps(
+        export,
+        pending_wraps,
+    )))
 }
 
 pub(crate) async fn brain_search_handler(
@@ -380,6 +401,120 @@ pub(crate) async fn add_member_handler(
     })?;
     notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
     Ok(Json(response))
+}
+
+/// One-step repair for a half-onboarded member: idempotently ensure the
+/// target's Brain Membership server-side, then report every Folder the target
+/// is entitled to read and whether a current Folder Key Grant exists for
+/// them. Missing grants are left to the caller, who holds the Folder Keys.
+pub(crate) async fn ensure_access_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<EnsureAccessResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: EnsureAccessRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let target_identity = resolve_and_record_identity(&state, &request.target_npub).await?;
+    let target = UserId::new(target_identity.npub.clone())?;
+
+    let membership = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let already_present = stored.brain.owner_user_id.as_ref() == Some(&target)
+            || stored.brain.admins.contains(&target)
+            || store.member_exists(&brain_id, &target)?;
+        if already_present {
+            "alreadyMember"
+        } else {
+            let Some(event_value) = request.access_change_event.clone() else {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "accessChangeEvent is required to add the missing Brain Membership",
+                ));
+            };
+            let (event, payload) = validate_admin_access_change_value(
+                event_value,
+                &brain_id,
+                &actor,
+                AdminAccessAction::AddMember,
+                None,
+                Some(target.as_str()),
+                None,
+            )?;
+            let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
+            store.add_member_with_control_records(&brain_id, &target, &control_records)?;
+            "added"
+        }
+    };
+    if membership == "added" {
+        state.publish_access_update_for(&brain_id, target.as_str());
+    }
+
+    // Re-load after the membership mutation so the receipt is authoritative.
+    let stored = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.load_brain(&brain_id)?
+    };
+    let is_owner = stored.brain.owner_user_id.as_ref() == Some(&target);
+    let is_admin = stored.brain.admins.contains(&target);
+    let brain_role = if is_owner {
+        "owner"
+    } else if is_admin {
+        "admin"
+    } else {
+        "member"
+    };
+    let full_access = is_owner || is_admin;
+    let mut folders = Vec::new();
+    for folder in &stored.brain.folders {
+        let entitled = full_access
+            || folder.access == FolderAccessMode::AllMembers
+            || stored
+                .folder_access
+                .get(&folder.id)
+                .is_some_and(|users| users.contains(&target));
+        if !entitled {
+            continue;
+        }
+        let present = stored.grants.iter().any(|grant| {
+            grant.folder_id == folder.id
+                && grant.key_version == folder.current_key_version
+                && grant.recipient_npub == target
+        });
+        folders.push(EnsureAccessFolderStatus {
+            folder_id: folder.id.to_string(),
+            path: folder.path.to_string(),
+            key_version: folder.current_key_version,
+            grant: if present {
+                EnsureAccessGrantState::Present
+            } else {
+                EnsureAccessGrantState::Missing
+            },
+        });
+    }
+    let missing_count = folders
+        .iter()
+        .filter(|folder| folder.grant == EnsureAccessGrantState::Missing)
+        .count();
+    Ok(Json(EnsureAccessResponse {
+        brain_id: brain_id.to_string(),
+        target_npub: target.to_string(),
+        membership: membership.to_owned(),
+        brain_role: brain_role.to_owned(),
+        state: if missing_count == 0 {
+            "complete".to_owned()
+        } else {
+            "grantsMissing".to_owned()
+        },
+        folders,
+        missing_count,
+    }))
 }
 
 pub(crate) async fn remove_member_handler(
@@ -584,6 +719,7 @@ pub(crate) async fn list_brain_invitations_handler(
 ) -> Result<Json<BrainInvitationListResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let brain_id = BrainId::new(brain_id)?;
+    let now = server_timestamp(&state);
     let invitations = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
@@ -595,12 +731,66 @@ pub(crate) async fn list_brain_invitations_handler(
             .map(brain_invitation_response)
             .collect::<Vec<_>>();
         for response in &mut responses {
+            mark_invitation_expired(response, &now);
             enrich_brain_invitation_identities(&store, response)?;
             attach_invitation_public_url(&state, response);
         }
         responses
     };
     Ok(Json(BrainInvitationListResponse { invitations }))
+}
+
+/// List the caller's own pending npub-targeted Brain Invitations, including
+/// expired ones marked with `expired: true` so an expired Invite surfaces as
+/// expired instead of silently disappearing. Identity-hiding: the exact
+/// target sees their invitations, everyone else sees an empty list. Email
+/// Invite Bootstraps are not bound to an npub until claim, so they are
+/// excluded.
+pub(crate) async fn list_my_invitations_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Json<MyInvitationListResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let actor = UserId::new(actor)?;
+    let now = server_timestamp(&state);
+    let mut invitations = Vec::new();
+    {
+        let store = state.store.lock().map_err(lock_error)?;
+        for invitation in store.list_pending_brain_invitations_for_target(&actor)? {
+            let expired = timestamp_expired(&invitation.expires_at, &now);
+            let brain_display_name = store.load_brain(&invitation.brain_id)?.brain.name;
+            let inviter_display =
+                known_identity_responses(&store, [invitation.created_by_npub.to_string()])?
+                    .into_iter()
+                    .next()
+                    .map(|identity| identity.display)
+                    .unwrap_or_else(|| invitation.created_by_npub.to_string());
+            let public_instructions_url = Some(absolute_public_url(
+                &state,
+                &public_invite_instructions_path(&invitation.invite_code),
+            ));
+            invitations.push(MyInvitationResponse {
+                id: invitation.id,
+                invite_code: invitation.invite_code,
+                brain_id: invitation.brain_id.to_string(),
+                brain_display_name: brain_display_name.to_string(),
+                inviter_display,
+                folder_scope: invitation
+                    .initial_folder_access
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                expires_at: invitation.expires_at,
+                expired,
+                public_instructions_url,
+                origin_kind: invitation.origin_kind.as_str().to_owned(),
+                origin_ref: invitation.origin_ref,
+            });
+        }
+    }
+    Ok(Json(MyInvitationListResponse { invitations }))
 }
 
 pub(crate) async fn create_brain_invitation_handler(
@@ -839,17 +1029,36 @@ pub(crate) async fn public_brain_invitation_instructions_handler(
     State(state): State<ServerState>,
     AxumPath(invite_code): AxumPath<String>,
 ) -> Result<Response, ApiError> {
-    {
+    let invitation = {
         let store = state.store.lock().map_err(lock_error)?;
-        let invitation = store.load_brain_invitation_by_code(&invite_code)?;
-        if invitation.target_kind != BrainInvitationTargetKind::EmailBootstrap {
-            return Err(StoreError::UnavailableLink {
-                kind: "brain invitation",
+        store.load_brain_invitation_by_code(&invite_code)?
+    };
+    match invitation.target_kind {
+        BrainInvitationTargetKind::EmailBootstrap => {
+            Ok(text_response(public_invite_instructions_text()))
+        }
+        BrainInvitationTargetKind::Npub => {
+            // E1: the npub variant reveals the target npub and invitation id,
+            // so it resolves only while the invitation is still acceptable;
+            // terminal and expired invitations get the identity-hiding
+            // unavailable response, same as unknown codes.
+            let now = server_timestamp(&state);
+            if invitation.status != LinkStatus::Pending
+                || timestamp_expired(&invitation.expires_at, &now)
+            {
+                return Err(StoreError::UnavailableLink {
+                    kind: "brain invitation",
+                }
+                .into());
             }
-            .into());
+            let text = npub_invite_instructions_text(&state, &invitation).ok_or(
+                StoreError::UnavailableLink {
+                    kind: "brain invitation",
+                },
+            )?;
+            Ok(text_response(text))
         }
     }
-    Ok(text_response(public_invite_instructions_text()))
 }
 
 pub(crate) async fn post_proof_brain_invitation_instructions_handler(
@@ -974,11 +1183,19 @@ pub(crate) async fn accept_brain_invitation_link_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor = UserId::new(actor)?;
     let now = server_timestamp(&state);
+    let narrowing = {
+        let invitation = {
+            let store = state.store.lock().map_err(lock_error)?;
+            store.load_brain_invitation_by_code(&invite_code)?
+        };
+        check_invitation_acceptance_narrowing(&state, &invitation, &actor).await?
+    };
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.accept_brain_invitation_by_code(&invite_code, &actor, &now)?
     };
     let mut response = brain_invitation_response(invitation);
+    response.narrowed = narrowing;
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;
@@ -1019,6 +1236,7 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
         .into());
     }
 
+    let mut narrowing = None;
     let invitation = if invitation.status == LinkStatus::Accepted {
         if invitation.claimed_by_npub.as_ref() == Some(&actor_user_id) {
             let mut invitation = invitation;
@@ -1031,6 +1249,8 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
             .into());
         }
     } else {
+        narrowing =
+            check_invitation_acceptance_narrowing(&state, &invitation, &actor_user_id).await?;
         validate_email_proof_window(&invitation, &request.email_proof_created_at, &now)?;
         verify_identity_authority_email_proof(&state, invited_email.as_str(), &actor_user_id)
             .await?;
@@ -1092,6 +1312,7 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
     };
 
     let mut response = brain_invitation_response(invitation);
+    response.narrowed = narrowing;
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;

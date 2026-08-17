@@ -6,7 +6,7 @@ const BRAIN_INVITATION_SELECT: &str = r#"
            created_at, updated_at, accepted_at, target_kind, invited_email,
            invite_unwrap_npub, bootstrap_payload_hash, bootstrap_wrapped_event_json,
            bootstrap_authorization_event_json, claimed_by_npub, bootstrap_scope_json
-           , folder_only
+           , folder_only, origin_ref, roster_revision, origin_kind
     FROM brain_invitations
 "#;
 
@@ -24,6 +24,44 @@ impl BrainStore {
         created_by_npub: &UserId,
         expires_at: &str,
         created_at: &str,
+    ) -> Result<StoredBrainInvitation, StoreError> {
+        self.create_brain_invitation_with_provenance(
+            brain_id,
+            id,
+            user_id,
+            invite_code,
+            accept_path,
+            initial_folder_access,
+            created_by_npub,
+            expires_at,
+            created_at,
+            None,
+            None,
+            ProvenanceOriginKind::Invitation,
+        )
+    }
+
+    /// Create one npub-bound singleton Brain Invitation committed from an
+    /// Invitation Plan, recording the plan id and roster revision so
+    /// acceptance can re-check the roster and narrow only. `origin_kind`
+    /// distinguishes a direct admin commit from a signed Approval commit;
+    /// approval-committed invitations carry the approval event id as their
+    /// origin ref.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_brain_invitation_with_provenance(
+        &mut self,
+        brain_id: &BrainId,
+        id: &str,
+        user_id: &UserId,
+        invite_code: &str,
+        accept_path: &str,
+        initial_folder_access: &[FolderId],
+        created_by_npub: &UserId,
+        expires_at: &str,
+        created_at: &str,
+        origin_ref: Option<&str>,
+        roster_revision: Option<i64>,
+        origin_kind: ProvenanceOriginKind,
     ) -> Result<StoredBrainInvitation, StoreError> {
         let stored = self.load_brain(brain_id)?;
         if !has_brain_operational_authority(&stored, created_by_npub) {
@@ -44,29 +82,50 @@ impl BrainStore {
         }
         let initial_folder_access_json = folder_id_vec_json(initial_folder_access)?;
 
-        self.conn
-            .execute(
-                r#"
+        let pending_wrap_folders =
+            invitation_pending_wrap_folders(&stored.brain, initial_folder_access);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
                 INSERT INTO brain_invitations (
                     id, brain_id, user_id, target_kind, status, invite_code, accept_path,
                     initial_folder_access_json, created_by_npub, expires_at,
-                    created_at, updated_at, bootstrap_scope_json
+                    created_at, updated_at, bootstrap_scope_json, origin_ref, roster_revision,
+                    origin_kind
                 )
-                VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]')
+                VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]', ?10, ?11, ?12)
                 "#,
-                params![
-                    id,
-                    brain_id.as_str(),
-                    user_id.as_str(),
-                    invite_code,
-                    accept_path,
-                    initial_folder_access_json,
-                    created_by_npub.as_str(),
-                    expires_at,
-                    created_at
-                ],
-            )
-            .map_err(map_insert_error("brain_invitation_id", id))?;
+            params![
+                id,
+                brain_id.as_str(),
+                user_id.as_str(),
+                invite_code,
+                accept_path,
+                initial_folder_access_json,
+                created_by_npub.as_str(),
+                expires_at,
+                created_at,
+                origin_ref,
+                roster_revision,
+                origin_kind.as_str(),
+            ],
+        )
+        .map_err(map_insert_error("brain_invitation_id", id))?;
+        // The invitee gains entitlement on accept but receives no wrapped
+        // grants at commit; mark every Folder they will be entitled to read so
+        // a key-holding client can deliver the wraps ahead of or after accept.
+        for folder in pending_wrap_folders {
+            pending_wraps::mark_pending_grant_wrap(
+                &tx,
+                brain_id,
+                &folder.id,
+                user_id,
+                folder.current_key_version,
+                PendingGrantWrapReason::Invitation,
+                created_at,
+            )?;
+        }
+        tx.commit()?;
 
         self.load_brain_invitation(id)
     }
@@ -199,6 +258,28 @@ impl BrainStore {
             })
     }
 
+    /// Load the pending Brain Invitation for one target principal, if any.
+    /// The (brain, target) pending singleton makes this the delivery handle
+    /// a duplicate commit must reuse rather than collide with.
+    pub fn pending_brain_invitation_for_target(
+        &self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+    ) -> Result<Option<StoredBrainInvitation>, StoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{BRAIN_INVITATION_SELECT} \
+                     WHERE brain_id = ?1 AND user_id = ?2 AND status = 'pending' \
+                     ORDER BY created_at DESC LIMIT 1"
+                ),
+                params![brain_id.as_str(), user_id.as_str()],
+                brain_invitation_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// Load one Brain Invitation by invite code without applying recipient availability rules.
     pub fn load_brain_invitation_by_code(
         &self,
@@ -228,6 +309,29 @@ impl BrainStore {
         let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map(
             params![brain_id.as_str(), MAX_LINK_LIST_ROWS],
+            brain_invitation_from_row,
+        )?;
+        let mut invitations = Vec::new();
+        for row in rows {
+            invitations.push(row?);
+        }
+        Ok(invitations)
+    }
+
+    /// List pending npub-targeted Brain Invitations addressed to one target,
+    /// newest first, bounded by MAX_LINK_LIST_ROWS. Expired rows are included;
+    /// callers compute the expired marker at read time. Email Invite
+    /// Bootstraps are excluded: they bind to the caller only at claim time.
+    pub fn list_pending_brain_invitations_for_target(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<StoredBrainInvitation>, StoreError> {
+        let query = format!(
+            "{BRAIN_INVITATION_SELECT} WHERE user_id = ?1 AND target_kind = 'npub' AND status = 'pending' ORDER BY created_at DESC, id LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(
+            params![user_id.as_str(), MAX_LINK_LIST_ROWS],
             brain_invitation_from_row,
         )?;
         let mut invitations = Vec::new();
@@ -302,7 +406,8 @@ impl BrainStore {
                 kind: "brain invitation",
             });
         }
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             r#"
             UPDATE brain_invitations
             SET status = 'revoked',
@@ -315,7 +420,75 @@ impl BrainStore {
             "#,
             params![brain_id.as_str(), invitation_id, updated_at],
         )?;
+        // A revoked pending invitation never matures into entitlement, so its
+        // commit-time wrap markers are no longer deliverable.
+        if let Some(user_id) = &invitation.user_id {
+            pending_wraps::clear_pending_grant_wraps_for_reason(
+                &tx,
+                brain_id,
+                user_id,
+                PendingGrantWrapReason::Invitation,
+            )?;
+        }
+        tx.commit()?;
         self.load_brain_invitation(invitation_id)
+    }
+
+    /// Supersede pending-but-expired npub Brain Invitations for one target by
+    /// revoking them, returning the revoked invitation ids. Invitation Plan
+    /// commit calls this before writing a fresh invitation so a re-invite
+    /// after expiry replaces the stale delivery handle instead of colliding
+    /// on the pending (Brain, target) singleton index. Live pending
+    /// invitations are left untouched.
+    pub fn revoke_expired_pending_brain_invitations(
+        &mut self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+        actor_npub: &UserId,
+        now: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "brain invitation supersede requires brain operational authority"
+                    .to_owned(),
+            });
+        }
+        let query = format!(
+            "{BRAIN_INVITATION_SELECT} WHERE brain_id = ?1 AND user_id = ?2 AND target_kind = 'npub' AND status = 'pending'"
+        );
+        let expired_ids = {
+            let mut stmt = self.conn.prepare(&query)?;
+            let rows = stmt.query_map(
+                params![brain_id.as_str(), user_id.as_str()],
+                brain_invitation_from_row,
+            )?;
+            let mut expired = Vec::new();
+            for row in rows {
+                let invitation = row?;
+                if timestamp_expired(&invitation.expires_at, now) {
+                    expired.push(invitation.id);
+                }
+            }
+            expired
+        };
+        let mut revoked = Vec::new();
+        for invitation_id in expired_ids {
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "UPDATE brain_invitations SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![invitation_id, now],
+            )?;
+            pending_wraps::clear_pending_grant_wraps_for_reason(
+                &tx,
+                brain_id,
+                user_id,
+                PendingGrantWrapReason::Invitation,
+            )?;
+            tx.commit()?;
+            revoked.push(invitation_id);
+        }
+        Ok(revoked)
     }
 
     /// Accept a pending Brain Invitation, adding the target as a member exactly once.
@@ -350,6 +523,7 @@ impl BrainStore {
         }
         ensure_invitation_available(&invitation, user_id, now)?;
         let already_member = self.member_exists(&invitation.brain_id, user_id)?;
+        let member_provenance = invitation_member_provenance(&invitation);
         let brain = self.load_core_brain(&invitation.brain_id)?;
         let restricted_initial_folder_access = invitation
             .initial_folder_access
@@ -361,9 +535,19 @@ impl BrainStore {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let pending_wrap_folders =
+            invitation_pending_wrap_folders(&brain, &invitation.initial_folder_access)
+                .into_iter()
+                .map(|folder| (folder.id.clone(), folder.current_key_version))
+                .collect::<Vec<_>>();
 
         let tx = self.conn.transaction()?;
-        insert_member_if_missing(&tx, &invitation.brain_id, user_id)?;
+        insert_member_with_provenance_if_missing(
+            &tx,
+            &invitation.brain_id,
+            user_id,
+            &member_provenance,
+        )?;
         for folder_id in restricted_initial_folder_access {
             insert_folder_access_if_missing(&tx, &invitation.brain_id, &folder_id, user_id)?;
             insert_folder_access_source(
@@ -373,6 +557,19 @@ impl BrainStore {
                 user_id,
                 "invitation",
                 &invitation.id,
+                now,
+            )?;
+        }
+        // Accept grants entitlement without delivering wrapped grants; mark
+        // every readable Folder so any key-holding client completes the wraps.
+        for (folder_id, key_version) in pending_wrap_folders {
+            pending_wraps::mark_pending_grant_wrap(
+                &tx,
+                &invitation.brain_id,
+                &folder_id,
+                user_id,
+                key_version,
+                PendingGrantWrapReason::Accept,
                 now,
             )?;
         }
@@ -494,10 +691,17 @@ impl BrainStore {
             .iter()
             .map(|scope| scope.folder_id.clone())
             .collect::<Vec<_>>();
+        let member_provenance = invitation_member_provenance(&invitation);
+        let grant_provenance = invitation_grant_provenance(&invitation);
 
         let tx = self.conn.transaction()?;
         if !invitation.folder_only {
-            insert_member_if_missing(&tx, &invitation.brain_id, claimant)?;
+            insert_member_with_provenance_if_missing(
+                &tx,
+                &invitation.brain_id,
+                claimant,
+                &member_provenance,
+            )?;
         }
         for folder_id in invited_scope {
             insert_folder_access_if_missing(&tx, &invitation.brain_id, &folder_id, claimant)?;
@@ -512,7 +716,7 @@ impl BrainStore {
             )?;
         }
         for grant in grants {
-            insert_grant(&tx, &invitation.brain_id, grant)?;
+            insert_grant_with_provenance(&tx, &invitation.brain_id, grant, &grant_provenance)?;
         }
         sync_records::append_sync_records(&tx, &invitation.brain_id, control_records)?;
         tx.execute(
@@ -802,4 +1006,212 @@ impl BrainStore {
 
         self.load_share_link(share_link_id)
     }
+}
+
+fn invitation_member_provenance(invitation: &StoredBrainInvitation) -> MemberProvenance {
+    let delegated_by = invitation.created_by_npub.clone();
+    let origin_ref = invitation
+        .origin_ref
+        .clone()
+        .unwrap_or_else(|| invitation.id.clone());
+    match invitation.origin_kind {
+        ProvenanceOriginKind::Approval => MemberProvenance::approval(delegated_by, origin_ref),
+        _ => MemberProvenance::invitation(delegated_by, origin_ref),
+    }
+}
+
+fn invitation_grant_provenance(invitation: &StoredBrainInvitation) -> GrantProvenance {
+    let delegated_by = invitation.created_by_npub.clone();
+    let origin_ref = invitation
+        .origin_ref
+        .clone()
+        .unwrap_or_else(|| invitation.id.clone());
+    match invitation.origin_kind {
+        ProvenanceOriginKind::Approval => {
+            GrantProvenance::approval(delegated_by, origin_ref, invitation.roster_revision)
+        }
+        _ => GrantProvenance::invitation(delegated_by, origin_ref, invitation.roster_revision),
+    }
+}
+
+/// Folders an invited Principal becomes entitled to read on accept: every
+/// All-Members Folder through Membership, plus the invited Restricted
+/// Folders. Owner and Admin-Only Folders never follow from an invitation.
+fn invitation_pending_wrap_folders<'a>(
+    brain: &'a Brain,
+    initial_folder_access: &[FolderId],
+) -> Vec<&'a Folder> {
+    brain
+        .folders
+        .iter()
+        .filter(|folder| {
+            folder.access == FolderAccessMode::AllMembers
+                || (folder.access == FolderAccessMode::Restricted
+                    && initial_folder_access.contains(&folder.id))
+        })
+        .collect()
+}
+
+impl BrainStore {
+    /// Store one immutable Invitation Plan resolved at preflight.
+    pub fn create_brain_invitation_plan(
+        &mut self,
+        plan: &StoredInvitationPlan,
+    ) -> Result<StoredInvitationPlan, StoreError> {
+        self.require_brain_exists(&plan.brain_id)?;
+        validate_link_id("brain_invitation_plan_id", &plan.id)?;
+        validate_link_id("brain_invitation_plan_hash", &plan.plan_hash)?;
+        validate_link_timestamp("expiresAt", &plan.expires_at)?;
+        let agents_json =
+            serde_json::to_string(&plan.agents).map_err(|error| StoreError::BrokenInvariant {
+                reason: format!("invitation plan agents did not serialize: {error}"),
+            })?;
+        let exclusions_json = serde_json::to_string(&plan.exclusions).map_err(|error| {
+            StoreError::BrokenInvariant {
+                reason: format!("invitation plan exclusions did not serialize: {error}"),
+            }
+        })?;
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitation_plans (
+                    id, brain_id, plan_hash, inviter_npub, workos_user_id,
+                    human_email, human_npub, agents_json, exclusions_json,
+                    roster_revision, status, expires_at, created_at, updated_at,
+                    folder_id
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)
+                "#,
+                params![
+                    plan.id,
+                    plan.brain_id.as_str(),
+                    plan.plan_hash,
+                    plan.inviter_npub.as_str(),
+                    plan.workos_user_id,
+                    plan.human_email,
+                    plan.human_npub.as_ref().map(UserId::as_str),
+                    agents_json,
+                    exclusions_json,
+                    plan.roster_revision,
+                    if plan.committed {
+                        "committed"
+                    } else {
+                        "pending"
+                    },
+                    plan.expires_at,
+                    plan.created_at,
+                    plan.folder_id.as_ref().map(FolderId::as_str)
+                ],
+            )
+            .map_err(map_insert_error("brain_invitation_plan_id", &plan.id))?;
+        self.load_brain_invitation_plan(&plan.id)?
+            .ok_or_else(|| StoreError::BrokenInvariant {
+                reason: "invitation plan was not persisted".to_owned(),
+            })
+    }
+
+    /// Load one Invitation Plan by id.
+    pub fn load_brain_invitation_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Option<StoredInvitationPlan>, StoreError> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, brain_id, plan_hash, inviter_npub, workos_user_id,
+                       human_email, human_npub, agents_json, exclusions_json,
+                       roster_revision, status, expires_at, created_at, updated_at,
+                       folder_id
+                FROM brain_invitation_plans
+                WHERE id = ?1
+                "#,
+                params![plan_id],
+                invitation_plan_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Mark one Invitation Plan as committed into per-principal invitations.
+    pub fn mark_brain_invitation_plan_committed(
+        &mut self,
+        plan_id: &str,
+        updated_at: &str,
+    ) -> Result<StoredInvitationPlan, StoreError> {
+        let updated = self.conn.execute(
+            r#"
+            UPDATE brain_invitation_plans
+            SET status = 'committed', updated_at = ?2
+            WHERE id = ?1 AND status = 'pending'
+            "#,
+            params![plan_id, updated_at],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::Conflict {
+                reason: "invitation plan is not pending".to_owned(),
+                current_revision: None,
+            });
+        }
+        self.load_brain_invitation_plan(plan_id)?
+            .ok_or_else(|| StoreError::BrokenInvariant {
+                reason: "invitation plan disappeared after commit".to_owned(),
+            })
+    }
+}
+
+fn invitation_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredInvitationPlan> {
+    let agents_json = row.get::<_, String>(7)?;
+    let exclusions_json = row.get::<_, String>(8)?;
+    let status = row.get::<_, String>(10)?;
+    Ok(StoredInvitationPlan {
+        id: row.get(0)?,
+        brain_id: BrainId::new(row.get::<_, String>(1)?)
+            .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
+        plan_hash: row.get(2)?,
+        inviter_npub: UserId::new(row.get::<_, String>(3)?)
+            .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
+        workos_user_id: row.get(4)?,
+        human_email: row.get(5)?,
+        human_npub: row
+            .get::<_, Option<String>>(6)?
+            .map(UserId::new)
+            .transpose()
+            .map_err(to_from_sql_error(6, rusqlite::types::Type::Text))?,
+        agents: serde_json::from_str(&agents_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        exclusions: serde_json::from_str(&exclusions_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        roster_revision: row.get(9)?,
+        folder_id: row
+            .get::<_, Option<String>>(14)?
+            .map(FolderId::new)
+            .transpose()
+            .map_err(to_from_sql_error(14, rusqlite::types::Type::Text))?,
+        committed: match status.as_str() {
+            "pending" => false,
+            "committed" => true,
+            other => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(StoreError::BrokenInvariant {
+                        reason: format!("unknown invitation plan status {other}"),
+                    }),
+                ));
+            }
+        },
+        expires_at: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
 }

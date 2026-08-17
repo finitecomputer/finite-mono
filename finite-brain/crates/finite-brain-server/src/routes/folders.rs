@@ -336,6 +336,90 @@ pub(crate) async fn grant_folder_access_handler(
     Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
+pub(crate) async fn complete_pending_wraps_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<CompletePendingWrapsResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: CompletePendingWrapsRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+    }
+    if request.grants.is_empty() || request.grants.len() > BRAIN_CAPACITY_ENVELOPE.members {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "grants must hold one entry per pending wrap recipient",
+        ));
+    }
+    let grant_created_at = server_timestamp(&state);
+    let grants =
+        grant_requests_to_metadata(&request.grants, &folder_id, &actor, None, &grant_created_at)?;
+    let control_records = grants
+        .iter()
+        .map(folder_key_grant_sync_record)
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipients = grants
+        .iter()
+        .map(|grant| grant.recipient_npub.clone())
+        .collect::<Vec<_>>();
+    let completed = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        store.complete_pending_grant_wraps(
+            &brain_id,
+            &folder_id,
+            &recipients,
+            &grants,
+            &control_records,
+        )?
+    };
+    for recipient in &recipients {
+        state.publish_access_update_for(&brain_id, recipient.as_str());
+    }
+    Ok(Json(CompletePendingWrapsResponse {
+        brain_id: brain_id.to_string(),
+        folder_id: folder_id.to_string(),
+        outcome: if completed == 0 {
+            "noPendingWraps"
+        } else {
+            "completed"
+        }
+        .to_owned(),
+        completed_count: completed,
+        completed_recipients: if completed == 0 {
+            Vec::new()
+        } else {
+            recipients.iter().map(ToString::to_string).collect()
+        },
+    }))
+}
+
+/// Attach the pending grant wrap markers to a metadata response. Callers
+/// gate on Brain admin standing before calling this; the markers name the
+/// waiting recipients, and only key-holding clients can act on them.
+pub(crate) fn attach_pending_wraps(
+    store: &BrainStore,
+    response: &mut BrainMetadataResponse,
+    brain_id: &BrainId,
+) -> Result<(), ApiError> {
+    response.pending_wraps = store
+        .pending_grant_wraps(brain_id)?
+        .into_iter()
+        .map(pending_grant_wrap_response)
+        .collect();
+    Ok(())
+}
+
 pub(crate) async fn remove_folder_access_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

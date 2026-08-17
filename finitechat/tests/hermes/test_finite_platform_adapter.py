@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from dataclasses import dataclass, field
@@ -2752,6 +2753,198 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
         self.assertIn("serve", calls[0])
         self.assertTrue(fake_process.terminated)
+
+    def brain_adapter(self):
+        adapter = self.adapter()
+        # Isolate the module-level broker (shared with the post_tool_call
+        # hook in production) per test.
+        adapter._brain_approval_filings = self.module._BrainApprovalFilings()
+        return adapter
+
+    @staticmethod
+    def marker_hook(broker, result, tool_name="terminal"):
+        broker.after_tool_call(
+            tool_name=tool_name,
+            args={"command": "fbrain invite brain create --target bob@finite.vip"},
+            result=result,
+            session_id="s",
+            task_id="t",
+            tool_call_id="c",
+            turn_id="",
+            status="ok",
+            duration_ms=1,
+        )
+
+    def test_final_send_carries_marker_filing_and_drains_it(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker,
+            json.dumps(
+                {
+                    "output": "approval requested: a Brain admin must approve\n"
+                    "finite-brain-approval-filed brain=brain-1 request=approval-1"
+                }
+            ),
+        )
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload))
+            return self.module._FiniteChatResult(True, {"message_id": "m-1"}, None, False)
+
+        adapter._finitechat_json = fake_json
+        result = asyncio.run(adapter.send("room-agent-1", "Asked Alice to approve."))
+
+        self.assertTrue(result.success)
+        approve = calls[0][1]["metadata"]["approve"]
+        self.assertEqual(approve["service"], "brain")
+        self.assertEqual(
+            approve["requests"],
+            [{"brainId": "brain-1", "requestId": "approval-1"}],
+        )
+        # Drained: a second final send carries nothing.
+        calls.clear()
+        asyncio.run(adapter.send("room-agent-1", "Anything else?"))
+        self.assertNotIn("approve", calls[0][1]["metadata"])
+
+    def test_failed_send_keeps_the_filing_for_the_next_delivery(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker, {"output": "finite-brain-approval-filed brain=b request=approval-1"}
+        )
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload))
+            if len(calls) == 1:
+                return self.module._FiniteChatResult(False, {}, "boom", True)
+            return self.module._FiniteChatResult(True, {"message_id": "m-2"}, None, False)
+
+        adapter._finitechat_json = fake_json
+        first = asyncio.run(adapter.send("room-agent-1", "try once"))
+        self.assertFalse(first.success)
+        # The failed delivery did not drain the filing.
+        second = asyncio.run(adapter.send("room-agent-1", "try again"))
+        self.assertTrue(second.success)
+        self.assertEqual(
+            calls[1][1]["metadata"]["approve"]["requests"],
+            [{"brainId": "b", "requestId": "approval-1"}],
+        )
+
+    def test_non_final_deliveries_never_carry_brain_approvals(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker, {"output": "finite-brain-approval-filed brain=b request=approval-1"}
+        )
+        for payload in (
+            {"kind": "tool", "status": "complete", "metadata": {}},
+            {"kind": "message", "status": "running", "metadata": {}},
+            {"kind": "status", "status": "complete", "metadata": {}},
+        ):
+            drained = adapter._attach_brain_approval_metadata(payload)
+            self.assertEqual(drained, [])
+            self.assertNotIn("approve", payload)
+        self.assertEqual(
+            broker.take_pending()[0]["requestId"],
+            "approval-1",
+        )
+
+    def test_marker_extraction_survives_every_result_shape(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        shapes = [
+            "finite-brain-approval-filed brain=b1 request=r1",  # plain string
+            json.dumps(
+                {"output": "finite-brain-approval-filed brain=b2 request=r2"}
+            ),  # JSON string
+            {"output": "finite-brain-approval-filed brain=b3 request=r3"},  # dict output
+            {"stdout": "finite-brain-approval-filed brain=b4 request=r4"},  # dict stdout
+            {
+                "result": {"text": "finite-brain-approval-filed brain=b5 request=r5"}
+            },  # nested via dump
+            12345,  # nonsense type
+            None,  # absent
+            "",  # empty
+        ]
+        for shape in shapes:
+            self.marker_hook(broker, shape)
+        ids = sorted(f["requestId"] for f in broker.take_pending())
+        self.assertEqual(ids, ["r1", "r2", "r3", "r4", "r5"])
+
+    def test_hook_ignores_non_terminal_tools_and_never_raises(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker,
+            {"output": "finite-brain-approval-filed brain=b request=r"},
+            tool_name="browser",
+        )
+        self.assertEqual(broker.take_pending(), [])
+        # Hostile kwargs must not raise — hermes catches, but we guarantee it.
+        for kwargs in (
+            {"tool_name": "terminal", "result": {1, 2}},
+            {"tool_name": "terminal"},
+            {"tool_name": None, "result": None},
+            {},
+        ):
+            broker.after_tool_call(**kwargs)
+
+    def test_malformed_markers_are_ignored(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        bad = [
+            "finite-brain-approval-filed brain=BAD! request=r",
+            "finite-brain-approval-filed brain=b request=",  # empty request
+            "finite-brain-approval-filed request=r",  # missing brain
+            "finite-brain-approval-filed brain=-leading-dash request=r",
+            "not the marker at all",
+        ]
+        for text in bad:
+            self.marker_hook(broker, {"output": text})
+        self.assertEqual(broker.take_pending(), [])
+
+    def test_duplicate_markers_dedupe_and_pending_is_bounded(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        for _ in range(3):
+            self.marker_hook(
+                broker, {"output": "finite-brain-approval-filed brain=b request=approval-1"}
+            )
+        self.assertEqual(len(broker.take_pending()), 1)
+        for index in range(80):
+            self.marker_hook(
+                broker, {"output": f"finite-brain-approval-filed brain=b request=r{index}"}
+            )
+        self.assertLessEqual(len(broker.take_pending()), broker._max_pending)
+
+    def test_stale_filings_never_ride(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker, {"output": "finite-brain-approval-filed brain=b request=approval-1"}
+        )
+        broker._pending[0]["filedAt"] = time.time() - 3600
+        self.assertEqual(broker.take_pending(), [])
+
+    def test_existing_approve_metadata_is_never_overwritten(self):
+        adapter = self.brain_adapter()
+        broker = adapter._brain_approval_filings
+        self.marker_hook(
+            broker, {"output": "finite-brain-approval-filed brain=b request=approval-1"}
+        )
+        payload = {
+            "kind": "message",
+            "status": "complete",
+            "metadata": {"approve": {"service": "brain", "requests": []}},
+        }
+        drained = adapter._attach_brain_approval_metadata(payload)
+        self.assertEqual(drained, [])
+        self.assertEqual(payload["metadata"]["approve"]["requests"], [])
+        # Filing survives for a later delivery without the collision.
+        self.assertEqual(broker.take_pending()[0]["requestId"], "approval-1")
 
 
 if __name__ == "__main__":

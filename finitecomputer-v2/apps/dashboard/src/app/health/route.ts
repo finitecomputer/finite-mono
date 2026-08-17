@@ -1,7 +1,3 @@
-import { NextRequest } from "next/server";
-
-import { proxyBrainRequest } from "@/lib/brain-proxy";
-
-export function GET(request: NextRequest) {
-  return proxyBrainRequest(request, "/health");
+export function GET() {
+  return Response.json({ status: "ok" }, { headers: { "cache-control": "no-store" } });
 }

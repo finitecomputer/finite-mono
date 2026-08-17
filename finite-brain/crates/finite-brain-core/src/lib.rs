@@ -163,6 +163,54 @@ pub struct BrainGrantIntent {
     pub key_version: Option<u32>,
 }
 
+/// Versioned signed Approval artifact produced by a human key holder (ADR-0046).
+pub const BRAIN_APPROVAL_VERSION: &str = "finite-brain-approval-v1";
+/// Approval action that executes one committed Invitation Plan.
+pub const BRAIN_APPROVAL_ACTION_INVITE_COMMIT: &str = "invite-commit";
+/// Approval action that delegates a Brain admin role to target Principals.
+pub const BRAIN_APPROVAL_ACTION_DELEGATION_GRANT: &str = "delegation-grant";
+/// Maximum target Principals one delegation-grant Approval can name.
+pub const MAX_BRAIN_APPROVAL_TARGETS: usize = 100;
+
+/// Signed payload bound into a `finite-brain-approval-v1` Nostr event. The
+/// human's hosted key signs it; the Brain server only validates it.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrainApprovalPayload {
+    pub version: String,
+    pub human_npub: String,
+    pub action: String,
+    pub brain_id: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub target_npubs: Vec<String>,
+    pub nonce: String,
+    pub expires_at: u64,
+}
+
+impl BrainApprovalPayload {
+    /// Canonical JSON carried as the signed event content.
+    pub fn canonical_json(&self) -> String {
+        let plan_id = match &self.plan_id {
+            Some(plan_id) => json_string(plan_id),
+            None => "null".to_owned(),
+        };
+        format!(
+            "{{\"version\":{},\"humanNpub\":{},\"action\":{},\"brainId\":{},\"planId\":{},\"targetNpubs\":{},\"nonce\":{},\"expiresAt\":{}}}",
+            json_string(&self.version),
+            json_string(&self.human_npub),
+            json_string(&self.action),
+            json_string(&self.brain_id),
+            plan_id,
+            serde_json::to_string(&self.target_npubs)
+                .expect("serializing approval targets cannot fail"),
+            json_string(&self.nonce),
+            self.expires_at,
+        )
+    }
+}
+
 /// Returns the crate name used in workspace status surfaces.
 pub fn crate_name() -> &'static str {
     "finite-brain-core"
@@ -997,60 +1045,7 @@ fn bootstrap_organization_brain_with_admins(
     })
 }
 
-/// Development-only deterministic bootstrap summary used by the smoke server.
-pub fn smoke_bootstrap_summary() -> Result<BootstrapSmokeSummary, CoreError> {
-    let personal =
-        bootstrap_personal_brain("personal-smoke", "Personal Smoke", "npub-smoke-owner")?;
-    let organization =
-        bootstrap_organization_brain("org-smoke", "Organization Smoke", "npub-smoke-admin")?;
-
-    Ok(BootstrapSmokeSummary {
-        personal: BootstrapBrainSummary::from_output(&personal),
-        organization: BootstrapBrainSummary::from_output(&organization),
-    })
-}
-
-/// Development smoke summary for both bootstrap shapes.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BootstrapSmokeSummary {
-    /// Personal Brain summary.
-    pub personal: BootstrapBrainSummary,
-    /// Organization Brain summary.
-    pub organization: BootstrapBrainSummary,
-}
-
-/// Compact bootstrap summary safe to return from smoke endpoints.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BootstrapBrainSummary {
-    /// Brain kind.
-    pub kind: BrainKind,
-    /// Folder ids created by bootstrap.
-    pub folder_ids: Vec<String>,
-    /// Number of current required Folder Key Grants.
-    pub required_grants: usize,
-    /// Admin count.
-    pub admin_count: usize,
-    /// Member count.
-    pub member_count: usize,
-}
-
-impl BootstrapBrainSummary {
-    fn from_output(output: &BootstrapOutput) -> Self {
-        Self {
-            kind: output.brain.kind,
-            folder_ids: output
-                .brain
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect(),
-            required_grants: output.required_key_grants.len(),
-            admin_count: output.brain.admins.len(),
-            member_count: output.brain.members.len(),
-        }
-    }
-}
-
+/// Folder Object crypto and signed-record validation errors.
 /// Folder Object crypto and signed-record validation errors.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CryptoRecordError {
@@ -2153,6 +2148,137 @@ fn brain_identity_provider_error<T>(reason: &str) -> Result<T, CryptoRecordError
     })
 }
 
+/// Validate the typed payload of one Brain Approval before signing or applying it.
+pub fn validate_brain_approval_payload(
+    payload: &BrainApprovalPayload,
+) -> Result<(), CryptoRecordError> {
+    if payload.version != BRAIN_APPROVAL_VERSION {
+        return brain_identity_provider_error("Brain Approval version is unsupported");
+    }
+    BrainId::new(payload.brain_id.clone())?;
+    NostrPublicKey::parse(&payload.human_npub).map_err(|error| {
+        CryptoRecordError::EventMismatch {
+            reason: format!("Brain Approval human npub is invalid: {error}"),
+        }
+    })?;
+    match payload.action.as_str() {
+        BRAIN_APPROVAL_ACTION_INVITE_COMMIT => {
+            if payload
+                .plan_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                return brain_identity_provider_error(
+                    "Brain invite-commit Approval requires a plan id",
+                );
+            }
+            if !payload.target_npubs.is_empty() {
+                return brain_identity_provider_error(
+                    "Brain invite-commit Approval cannot name target Principals",
+                );
+            }
+        }
+        BRAIN_APPROVAL_ACTION_DELEGATION_GRANT => {
+            if payload.plan_id.is_some() {
+                return brain_identity_provider_error(
+                    "Brain delegation-grant Approval cannot name an invitation plan",
+                );
+            }
+            if payload.target_npubs.is_empty()
+                || payload.target_npubs.len() > MAX_BRAIN_APPROVAL_TARGETS
+            {
+                return brain_identity_provider_error(
+                    "Brain delegation-grant Approval target Principals are out of bounds",
+                );
+            }
+            let mut seen = BTreeSet::new();
+            for target in &payload.target_npubs {
+                NostrPublicKey::parse(target).map_err(|error| {
+                    CryptoRecordError::EventMismatch {
+                        reason: format!("Brain Approval target npub is invalid: {error}"),
+                    }
+                })?;
+                if !seen.insert(target) {
+                    return brain_identity_provider_error(
+                        "Brain delegation-grant Approval names a duplicate target Principal",
+                    );
+                }
+            }
+        }
+        _ => return brain_identity_provider_error("unsupported Brain Approval action"),
+    }
+    if payload.nonce.len() != 32 || !payload.nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return brain_identity_provider_error("Brain Approval nonce is invalid");
+    }
+    if payload.expires_at == 0 {
+        return brain_identity_provider_error("Brain Approval expiry is invalid");
+    }
+    Ok(())
+}
+
+fn brain_approval_tags(payload: &BrainApprovalPayload) -> Vec<Vec<String>> {
+    vec![
+        vec![
+            "d".to_owned(),
+            format!(
+                "finite-brain-approval:{}:{}",
+                payload.brain_id, payload.nonce
+            ),
+        ],
+        vec!["brain".to_owned(), payload.brain_id.clone()],
+        vec!["action".to_owned(), payload.action.clone()],
+        vec!["nonce".to_owned(), payload.nonce.clone()],
+    ]
+}
+
+/// Build the unsigned event template a human key holder signs for one Approval.
+pub fn brain_approval_event_template(
+    payload: &BrainApprovalPayload,
+    created_at: u64,
+) -> Result<BrainEventTemplate, CryptoRecordError> {
+    validate_brain_approval_payload(payload)?;
+    Ok(BrainEventTemplate {
+        kind: APP_SPECIFIC_KIND,
+        created_at,
+        tags: brain_approval_tags(payload),
+        content: payload.canonical_json(),
+    })
+}
+
+/// Validate a signed Brain Approval event's scoped shape and return its bound
+/// payload. Signature integrity is verified by the caller; this checks that
+/// the event kind, canonical content, tags, and named human all agree.
+pub fn validate_brain_approval_event(
+    event: &Event,
+    signer_npub: &str,
+) -> Result<BrainApprovalPayload, CryptoRecordError> {
+    if event.kind.as_u16() != APP_SPECIFIC_KIND || event.content.is_empty() {
+        return brain_identity_provider_error("Brain Approval event kind or content is invalid");
+    }
+    let payload: BrainApprovalPayload =
+        serde_json::from_str(&event.content).map_err(|_| CryptoRecordError::EventMismatch {
+            reason: "Brain Approval payload did not parse".to_owned(),
+        })?;
+    validate_brain_approval_payload(&payload)?;
+    if payload.human_npub != signer_npub {
+        return brain_identity_provider_error("Brain Approval signer does not match its human");
+    }
+    if payload.canonical_json() != event.content {
+        return brain_identity_provider_error("Brain Approval payload is not canonical");
+    }
+    let actual_tags = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect::<Vec<_>>();
+    if actual_tags != brain_approval_tags(&payload) {
+        return brain_identity_provider_error("Brain Approval tags differ from its payload");
+    }
+    Ok(payload)
+}
+
 fn template_tag_values<'a>(template: &'a BrainEventTemplate, name: &str) -> Vec<&'a str> {
     template
         .tags
@@ -2756,6 +2882,7 @@ fn contains_nul_or_control(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::SecretKey;
     use nostr::event::FinalizeEvent;
     use nostr::{EventBuilder, Keys, Tag, Timestamp};
 
@@ -3201,21 +3328,6 @@ mod tests {
     }
 
     #[test]
-    fn smoke_bootstrap_summary_is_stable() {
-        let summary = smoke_bootstrap_summary().unwrap();
-
-        assert_eq!(summary.personal.kind, BrainKind::Personal);
-        assert!(summary.personal.folder_ids.is_empty());
-        assert_eq!(summary.personal.required_grants, 0);
-
-        assert_eq!(summary.organization.kind, BrainKind::Organization);
-        assert!(summary.organization.folder_ids.is_empty());
-        assert_eq!(summary.organization.required_grants, 0);
-        assert_eq!(summary.organization.admin_count, 1);
-        assert_eq!(summary.organization.member_count, 1);
-    }
-
-    #[test]
     fn hashes_canonical_spec_vectors() {
         let request_body = r#"{"recordType":"folder_object_revision","folderId":"strategy","objectId":"obj_0123456789abcdef"}"#;
         assert_eq!(
@@ -3604,5 +3716,242 @@ mod tests {
         NostrPublicKey::from_protocol(keys.public_key())
             .to_npub()
             .unwrap()
+    }
+
+    fn invite_commit_approval_payload(human_npub: &str) -> BrainApprovalPayload {
+        BrainApprovalPayload {
+            version: BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: human_npub.to_owned(),
+            action: BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+            brain_id: "acme".to_owned(),
+            plan_id: Some("plan-123".to_owned()),
+            target_npubs: Vec::new(),
+            nonce: "ab".repeat(16),
+            expires_at: 1_780_000_900,
+        }
+    }
+
+    fn sign_approval(keys: &Keys, payload: &BrainApprovalPayload) -> Event {
+        let template = brain_approval_event_template(payload, 1_780_000_000).unwrap();
+        sign_brain_event_template(keys, &template).unwrap()
+    }
+
+    /// FROZEN WIRE CONTRACT — `finite-brain-approval-v1`. These literals pin
+    /// the canonical JSON serialization, tag profile, kind, event-id
+    /// derivation, and signature for a fixed key, payload, and created_at.
+    /// Every client that signs or verifies Brain approvals (Rust server, CLI,
+    /// hosted device, and future native Swift/Electron implementations) must
+    /// reproduce these bytes exactly. If a deliberate protocol change breaks
+    /// one of these assertions, version the format (`-v2`) rather than
+    /// silently reordering fields — existing artifacts are durable and must
+    /// keep validating. The test key is a committed fixture, never a secret.
+    #[test]
+    fn brain_approval_wire_format_is_frozen() {
+        const SECRET_HEX: &str = "d1f1a2b3c4d5e6f708192a3b4c5d6e7f8192a3b4c5d6e7f8192a3b4c5d6e7f81";
+        const HUMAN_NPUB: &str = "npub12ht6ulk5xgnw7v58g8vpfvnclnvfy39rcvkshgy6kk733675q85qdxlf8h";
+        const CANONICAL_JSON: &str = "{\"version\":\"finite-brain-approval-v1\",\"humanNpub\":\"npub12ht6ulk5xgnw7v58g8vpfvnclnvfy39rcvkshgy6kk733675q85qdxlf8h\",\"action\":\"invite-commit\",\"brainId\":\"fixture-brain\",\"planId\":\"plan-fixture-1\",\"targetNpubs\":[],\"nonce\":\"0123456789abcdef0123456789abcdef\",\"expiresAt\":4102444800}";
+        const EVENT_ID: &str = "8d434be7990e2271a43f267ccfb6d26707ae0f5b068a60f85e0830e25bfa32a3";
+        // The signature itself is not frozen: BIP-340 signing takes auxiliary
+        // randomness, so valid signatures vary run to run. The event id IS
+        // deterministic — it hashes the canonical event serialization — so
+        // freezing it pins field order and formatting exactly.
+        const PUBKEY_HEX: &str = "55d7ae7ed43226ef328741d814b278fcd89244a3c32d0ba09ab5bd18ebd401e8";
+
+        let keys = Keys::new(SecretKey::parse(SECRET_HEX).unwrap());
+        assert_eq!(npub(&keys), HUMAN_NPUB);
+
+        let payload = BrainApprovalPayload {
+            version: BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: HUMAN_NPUB.to_owned(),
+            action: BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+            brain_id: "fixture-brain".to_owned(),
+            plan_id: Some("plan-fixture-1".to_owned()),
+            target_npubs: Vec::new(),
+            nonce: "0123456789abcdef0123456789abcdef".to_owned(),
+            expires_at: 4_102_444_800,
+        };
+        assert_eq!(payload.canonical_json(), CANONICAL_JSON);
+
+        let template = brain_approval_event_template(&payload, 1_780_000_000).unwrap();
+        assert_eq!(template.kind, APP_SPECIFIC_KIND);
+        assert_eq!(
+            template.tags,
+            vec![
+                vec![
+                    "d".to_owned(),
+                    "finite-brain-approval:fixture-brain:0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                ],
+                vec!["brain".to_owned(), "fixture-brain".to_owned()],
+                vec!["action".to_owned(), "invite-commit".to_owned()],
+                vec![
+                    "nonce".to_owned(),
+                    "0123456789abcdef0123456789abcdef".to_owned(),
+                ],
+            ]
+        );
+
+        let event = sign_brain_event_template(&keys, &template).unwrap();
+        assert_eq!(event.pubkey.to_hex(), PUBKEY_HEX);
+        assert_eq!(event.id.to_hex(), EVENT_ID);
+        assert_eq!(event.created_at.as_secs(), 1_780_000_000);
+        assert_eq!(event.kind.as_u16(), 3_0078);
+        verify_event_integrity(&event).unwrap();
+
+        // The signed event round-trips through its JSON wire form and fully
+        // validates: a future client that reproduces exactly these literals
+        // (canonical content, tags, kind, id derivation) is wire-compatible.
+        let parsed = Event::from_json(event.as_json()).unwrap();
+        assert_eq!(parsed.id.to_hex(), EVENT_ID);
+        verify_event_integrity(&parsed).unwrap();
+        assert_eq!(
+            validate_brain_approval_event(&parsed, HUMAN_NPUB).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn brain_approval_round_trips_through_template_signing_and_validation() {
+        let human_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let payload = invite_commit_approval_payload(&human_npub);
+        let event = sign_approval(&human_keys, &payload);
+        verify_event_integrity(&event).unwrap();
+        let validated = validate_brain_approval_event(&event, &human_npub).unwrap();
+        assert_eq!(validated, payload);
+
+        let delegation = BrainApprovalPayload {
+            action: BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+            plan_id: None,
+            target_npubs: vec![npub(&Keys::generate()), npub(&Keys::generate())],
+            ..invite_commit_approval_payload(&human_npub)
+        };
+        let event = sign_approval(&human_keys, &delegation);
+        verify_event_integrity(&event).unwrap();
+        assert_eq!(
+            validate_brain_approval_event(&event, &human_npub).unwrap(),
+            delegation
+        );
+    }
+
+    #[test]
+    fn brain_approval_payload_requires_scoped_fields() {
+        let human_npub = npub(&Keys::generate());
+        let target = npub(&Keys::generate());
+        let valid = invite_commit_approval_payload(&human_npub);
+        let cases: Vec<BrainApprovalPayload> = vec![
+            BrainApprovalPayload {
+                version: "finite-brain-approval-v0".to_owned(),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                action: "open-brain".to_owned(),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                plan_id: None,
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                target_npubs: vec![target.clone()],
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                action: BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                action: BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+                plan_id: None,
+                target_npubs: Vec::new(),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                action: BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+                plan_id: None,
+                target_npubs: vec![target.clone(), target.clone()],
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                action: BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+                plan_id: None,
+                target_npubs: vec!["not-an-npub".to_owned()],
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                nonce: "zz".repeat(16),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                nonce: "ab".repeat(8),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                expires_at: 0,
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                human_npub: "not-an-npub".to_owned(),
+                ..valid.clone()
+            },
+            BrainApprovalPayload {
+                brain_id: "bad brain".to_owned(),
+                ..valid.clone()
+            },
+        ];
+        for (index, payload) in cases.iter().enumerate() {
+            assert!(
+                validate_brain_approval_payload(payload).is_err(),
+                "case {index} must fail validation"
+            );
+            assert!(
+                brain_approval_event_template(payload, 1_780_000_000).is_err(),
+                "case {index} must not produce a signable template"
+            );
+        }
+    }
+
+    #[test]
+    fn brain_approval_event_rejects_tampering_wrong_signer_and_tag_drift() {
+        let human_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let payload = invite_commit_approval_payload(&human_npub);
+        let event = sign_approval(&human_keys, &payload);
+
+        // Signature verification is the caller's job; a tampered event fails it.
+        let mut tampered = event.clone();
+        tampered.content = tampered.content.replace("plan-123", "plan-999");
+        assert!(verify_event_integrity(&tampered).is_err());
+
+        // A different human npub is not the signer of this Approval.
+        let outsider_npub = npub(&Keys::generate());
+        assert!(validate_brain_approval_event(&event, &outsider_npub).is_err());
+
+        // An event whose tags drift from its payload is rejected even when
+        // the signature itself verifies.
+        let template = brain_approval_event_template(&payload, 1_780_000_000).unwrap();
+        let mut drifted_template = template.clone();
+        drifted_template
+            .tags
+            .push(vec!["extra".to_owned(), "tag".to_owned()]);
+        let drifted = sign_brain_event_template(&human_keys, &drifted_template).unwrap();
+        verify_event_integrity(&drifted).unwrap();
+        assert!(validate_brain_approval_event(&drifted, &human_npub).is_err());
+
+        // A non-canonical payload encoding is rejected even when signed.
+        let non_canonical = sign_app_event(
+            &human_keys,
+            payload.canonical_json().replace(',', ", "),
+            template.tags.clone(),
+        );
+        verify_event_integrity(&non_canonical).unwrap();
+        assert!(validate_brain_approval_event(&non_canonical, &human_npub).is_err());
+
+        // Wrong event kind is rejected.
+        let wrong_kind = EventBuilder::new(Kind::Custom(27_235), payload.canonical_json())
+            .custom_created_at(Timestamp::from_secs(1_780_000_000))
+            .finalize(&human_keys)
+            .unwrap();
+        assert!(validate_brain_approval_event(&wrong_kind, &human_npub).is_err());
     }
 }

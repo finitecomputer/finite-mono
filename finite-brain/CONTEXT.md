@@ -155,6 +155,18 @@ with another Brain. Cancellation applies only while pending; acceptance consumes
 the invitation and later Folder Access Revocation is a separate administrative
 operation. _Avoid_: Share Link, Folder Share.
 
+### Pending Grant Wrap
+
+A server-side marker recording that a Principal gained Folder entitlement
+without receiving a wrapped Folder Key Grant — at Brain Invitation commit, at
+invitation acceptance, or when an ensure-access repair writes Membership. Any
+client that holds the current Folder Key discovers the markers on sync (the
+sync surfaces show them only to admin-standing identities), wraps the key for
+the waiting recipients, and the server clears the markers when the grants
+validate. A marker is a delivery hint, never a gate: sync proceeds without
+completing wraps, and a marker for a Folder the client cannot open is
+skipped. _Avoid_: Key Request, Access Ticket.
+
 ### Mount Offer
 
 A pending, single-use offer to connect one source Folder to one named
@@ -704,3 +716,50 @@ A compatibility boundary where FiniteBrain does not carry legacy route,
 storage, client, or migration behavior forward. Hard-cut work may import data
 through explicit new-format flows such as OKF, but it does not preserve old v1
 runtime compatibility as a feature requirement.
+
+### Principal
+
+Any keypair that can hold access in a Brain: a human's chat device, an agent,
+a Brain UI browser signer, or a CLI identity. Humans are never required to
+know their Principal's npub exists.
+
+### Grant
+
+A signed record giving a Principal a role in a Brain or Folder. Grants are
+immutable facts carrying Provenance (who delegated, via which invitation or
+approval, at what roster state) and are the only access records in the system.
+
+### Provenance
+
+The origin metadata stamped on a Grant: the delegating Principal, the
+invitation or approval it came from, and the roster state at write time.
+Membership views are rendered from Provenance; nothing else needs to be stored
+about "how a Principal got here."
+
+### Signer Tier
+
+The policy level an action requires of its signer: content read/write by any
+content-granted Principal; member administration by any admin-granted
+Principal (including the Brain UI browser signer); authority delegation and
+ownership-class actions require the human chat client's signature.
+
+### Approval Card
+
+The single human signing surface, rendered in chat. A service or agent relays
+the resulting signed approval; Brain validates the signature plus the account
+binding via Finite Identity. Brain never watches chat rooms and never judges
+intent.
+
+### Permanent Departure Fact
+
+A durable, replayable, monotonic record emitted by SaaS Core when an account
+or agent permanently departs. Brain consumes facts with a last-applied
+revision cursor and applies each exactly once with Folder Key rotation.
+Temporary runtime lifecycle never produces one.
+
+### Recovery Set
+
+Principals designated in advance who hold dormant takeover authority over a
+Brain, activated only by provable total admin loss (Permanent Departure Facts
+covering every admin). Recovery is provable, never claimed; losing access to
+keys is not, by itself, a departure.

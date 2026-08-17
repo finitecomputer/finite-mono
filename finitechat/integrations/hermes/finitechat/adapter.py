@@ -480,6 +480,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         super().__init__(config, _finite_platform())
         extra = getattr(config, "extra", {}) or {}
         self.home = str(extra.get("home") or os.getenv("FINITECHAT_HOME") or "").strip()
+        # Shared with the module-level post_tool_call hook so fbrain's
+        # markers and this adapter's sends observe one pending set.
+        self._brain_approval_filings = _BRAIN_APPROVAL_FILINGS
         # Optional room filter; by default the adapter serves every room the
         # Agent Principal has joined through MLS Add + Welcome.
         self.room_id = str(extra.get("room_id") or os.getenv("FINITECHAT_ROOM_ID") or "").strip()
@@ -655,9 +658,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         payload = self._send_payload(chat_id, content, reply_to, metadata)
+        drained = self._attach_brain_approval_metadata(payload)
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
+        self._finish_brain_approval_drain(drained)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
         if message_id:
             self._remember_outbound_message_route(
@@ -736,9 +741,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             "finalize": bool(finalize),
             "metadata": {},
         }
+        drained = (
+            self._attach_brain_approval_metadata(payload) if finalize and kind == "message" else []
+        )
         result = await self._finitechat_json("edit", payload, timeout=30)
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
+        self._finish_brain_approval_drain(drained)
         edited_message_id = str(result.data.get("message_id") or message_id)
         self._remember_outbound_message_route(str(message_id), conversation_id, segment_id, kind)
         if edited_message_id:
@@ -1390,6 +1399,31 @@ class FiniteChatAdapter(BasePlatformAdapter):
         meta["_finitechat_kind"] = "media"
         return await self.send(chat_id=chat_id, content=body, reply_to=reply_to, metadata=meta)
 
+    def _attach_brain_approval_metadata(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Ride unreported brain approval filings on a final user-visible
+        delivery, as the reference-only `metadata.approve` envelope.
+
+        Only final deliveries (kind message, status complete) carry the
+        question: commentary, tool progress, and streaming partials never do.
+        Returns the drained filings; the caller marks them reported once the
+        delivery is accepted.
+        """
+        if str(payload.get("kind")) != "message" or str(payload.get("status")) != "complete":
+            return []
+        filings = self._brain_approval_filings.take_pending()
+        if not filings:
+            return []
+        meta = payload.setdefault("metadata", {})
+        if not isinstance(meta, dict) or "approve" in meta:
+            return []
+        meta["approve"] = _brain_approval_metadata(filings)
+        return filings
+
+    def _finish_brain_approval_drain(self, drained: list[dict[str, Any]]) -> None:
+        if not drained:
+            return
+        self._brain_approval_filings.mark_reported({filing["requestId"] for filing in drained})
+
     def _send_payload(
         self,
         chat_id: str,
@@ -2011,6 +2045,116 @@ def _infer_finitechat_status(content: str) -> str:
     return "running" if "▉" in str(content or "") else "complete"
 
 
+BRAIN_APPROVAL_FILED_MARKER = re.compile(
+    r"finite-brain-approval-filed"
+    r" brain=(?P<brain>[a-z0-9][a-z0-9_-]{0,127})"
+    r" request=(?P<request>[A-Za-z0-9][A-Za-z0-9_-]{0,127})"
+)
+# Tool results can be large; bound the scan so a huge output never stalls the hook.
+BRAIN_APPROVAL_MARKER_SCAN_BYTES = 2 * 1024 * 1024
+# fbrain's approval requests expire after 15 minutes; a filing older than
+# that must not ride a much later delivery.
+BRAIN_APPROVAL_FILING_MAX_AGE_SECS = 20 * 60
+
+
+def _tool_result_text(result: Any) -> str:
+    """Best-effort text of a terminal tool result, never raising."""
+    try:
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            text = result
+            try:
+                result = json.loads(result)
+            except ValueError:
+                return text
+        if isinstance(result, dict):
+            for key in ("output", "stdout", "result", "text", "content"):
+                value = result.get(key)
+                if isinstance(value, str):
+                    return value
+            return json.dumps(result)
+        return str(result)
+    except Exception:  # observer hook must never raise
+        return ""
+
+
+class _BrainApprovalFilings:
+    """In-memory bridge from fbrain's stdout marker to the next final delivery.
+
+    ``fbrain`` prints one ``finite-brain-approval-filed brain=<id>
+    request=<id>`` trailer line per filed approval request; the terminal
+    tool's ``post_tool_call`` result carries that output here. The agent's
+    next final user-visible delivery drains the filings as the
+    reference-only ``metadata.approve`` envelope.
+
+    Everything degrades to "no card": marker absent, result unparsable, hook
+    never fired, filing stale, or the runtime restarted before the final
+    delivery — the request stays durable server-side and
+    ``fbrain approvals list`` remains the authoritative fallback. No
+    filesystem or config-directory coupling, and no chat send is ever
+    affected by this broker.
+    """
+
+    def __init__(self, max_pending: int = 64) -> None:
+        self._lock = threading.Lock()
+        self._pending: list[dict[str, Any]] = []
+        self._max_pending = max(1, max_pending)
+
+    def after_tool_call(self, **kwargs: Any) -> None:
+        try:
+            if str(kwargs.get("tool_name") or "") != "terminal":
+                return
+            text = _tool_result_text(kwargs.get("result"))[:BRAIN_APPROVAL_MARKER_SCAN_BYTES]
+            if not text:
+                return
+            found = [
+                {"brainId": match["brain"], "requestId": match["request"], "filedAt": time.time()}
+                for match in BRAIN_APPROVAL_FILED_MARKER.finditer(text)
+            ]
+            if not found:
+                return
+            with self._lock:
+                known = {filing["requestId"] for filing in self._pending}
+                for filing in found:
+                    if filing["requestId"] not in known:
+                        self._pending.append(filing)
+                        known.add(filing["requestId"])
+                del self._pending[: -self._max_pending]
+        except Exception:  # observer hook must never raise
+            logger.debug("brain approval marker scan failed", exc_info=True)
+
+    def take_pending(self) -> list[dict[str, Any]]:
+        """Snapshot the filings that may ride the next final delivery."""
+        now = time.time()
+        with self._lock:
+            self._pending = [
+                filing
+                for filing in self._pending
+                if now - float(filing.get("filedAt", 0)) <= BRAIN_APPROVAL_FILING_MAX_AGE_SECS
+            ]
+            return [dict(filing) for filing in self._pending]
+
+    def mark_reported(self, request_ids: set[str]) -> None:
+        if not request_ids:
+            return
+        with self._lock:
+            self._pending = [
+                filing for filing in self._pending if filing["requestId"] not in request_ids
+            ]
+
+
+def _brain_approval_metadata(requests: list[dict[str, Any]]) -> dict[str, Any]:
+    """The reference-only approve envelope: no approval payload ever rides."""
+    return {
+        "service": "brain",
+        "requests": [
+            {"brainId": request["brainId"], "requestId": request["requestId"]}
+            for request in requests
+        ],
+    }
+
+
 def _local_attachment(path: str, kind: str) -> dict[str, Any]:
     local_path = Path(path)
     return {
@@ -2143,12 +2287,16 @@ def _finite_platform() -> Platform:
         return Platform.LOCAL
 
 
+_BRAIN_APPROVAL_FILINGS = _BrainApprovalFilings()
+
+
 def register(ctx) -> None:
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         requester_context = _RequesterContextBroker()
         register_hook("pre_tool_call", requester_context.before_tool_call)
         register_hook("post_tool_call", requester_context.after_tool_call)
+        register_hook("post_tool_call", _BRAIN_APPROVAL_FILINGS.after_tool_call)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",

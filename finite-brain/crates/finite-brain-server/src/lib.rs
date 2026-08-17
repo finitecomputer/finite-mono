@@ -13,31 +13,31 @@ use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, Stat
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 #[cfg(test)]
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation,
-    BootstrapSmokeSummary, BrainId, BrainKind, CoreError, CryptoRecordError, DisplayName,
-    EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
-    FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
-    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
-    RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
+    CoreError, CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder,
+    Folder, FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
+    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
+    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
     bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
     bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
     validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder,
-    EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
-    FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PersonalAgentFolderRotation,
+    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, DepartureFactApplication,
+    DeparturePrincipalKind, EmailInviteBootstrapScopeFolder, EncryptedBrainExport,
+    FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
+    GrantFolderAccessOutcome, IdentityAlias, LinkStatus, MountedFolderProjection,
+    MountedFolderState, PendingGrantWrap, PersonalAgentFolderRotation,
     SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
     StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
     StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
-    VisibleBrainRole,
+    VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -50,11 +50,15 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod contracts;
+mod departure_consumer;
 mod object_records;
 mod protected_routes;
 mod responses;
 
 pub use contracts::*;
+#[cfg(test)]
+pub(crate) use departure_consumer::poll_departure_facts_once;
+pub use departure_consumer::spawn_departure_fact_consumer;
 pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
@@ -74,22 +78,9 @@ const APP_SPECIFIC_KIND: u16 = 30_078;
 const NIP05_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const NIP05_READ_TIMEOUT_SECONDS: u64 = 5;
 const FINITE_VIP_NIP05_PREFIX: &str = "https://finite.vip/";
-const SECP256K1_ORDER_HEX: &str =
-    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
 
 type Nip05Fetcher =
     Arc<dyn Fn(&Nip05WellKnownRequest) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
-
-fn normalized_smoke_nip07_secret(secret_hex: impl Into<String>) -> Result<String, String> {
-    let value = secret_hex.into().trim().to_ascii_lowercase();
-    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err("FINITE_BRAIN_SMOKE_NIP07_SECRET must be 64 hex characters".to_owned());
-    }
-    if value.chars().all(|character| character == '0') || value.as_str() >= SECP256K1_ORDER_HEX {
-        return Err("FINITE_BRAIN_SMOKE_NIP07_SECRET must be a valid secp256k1 secret".to_owned());
-    }
-    Ok(value)
-}
 
 fn normalized_smoke_email_proofs(value: impl AsRef<str>) -> Result<BTreeSet<String>, String> {
     let mut emails = BTreeSet::new();
@@ -113,16 +104,6 @@ pub struct HealthStatus {
     pub status: String,
     pub core_crate: String,
     pub store_crate: String,
-}
-
-/// Public Product Client runtime config.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProductClientConfigResponse {
-    pub public_base_url: String,
-    pub auth_scheme: String,
-    pub http_auth_kind: u16,
-    pub default_brain_id: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -156,7 +137,6 @@ pub struct ServerState {
     nip05_fetcher: Nip05Fetcher,
     email_proof_verifier: Option<EmailProofVerifier>,
     invite_mailer: Option<BrainInviteMailer>,
-    smoke_nip07_signer_secret: Option<Arc<str>>,
     agent_bootstrap_authorities: Option<AgentBootstrapAuthorities>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
@@ -248,7 +228,6 @@ impl ServerState {
             nip05_fetcher: default_nip05_fetcher(),
             email_proof_verifier: None,
             invite_mailer: None,
-            smoke_nip07_signer_secret: None,
             agent_bootstrap_authorities: None,
             brain_updates,
         }
@@ -403,17 +382,8 @@ impl ServerState {
         self
     }
 
-    /// Enable a local Product Client NIP-07 shim for browser smoke tests.
-    pub fn with_smoke_nip07_signer(
-        mut self,
-        secret_hex: impl Into<String>,
-    ) -> Result<Self, String> {
-        self.smoke_nip07_signer_secret =
-            Some(Arc::<str>::from(normalized_smoke_nip07_secret(secret_hex)?));
-        Ok(self)
-    }
-
-    /// Enable an explicit local email-proof allowlist for browser smoke tests.
+    /// Enable an explicit local email-proof allowlist for local acceptance
+    /// servers (used instead of the real identity authority).
     pub fn with_smoke_email_proofs(mut self, emails: impl AsRef<str>) -> Result<Self, String> {
         let allowed = Arc::new(normalized_smoke_email_proofs(emails)?);
         self.email_proof_verifier = Some(Arc::new(move |email, _actor| {
@@ -617,58 +587,6 @@ pub fn router_with_state(state: ServerState) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
-        .route("/smoke/bootstrap", get(bootstrap_smoke_handler))
-        .route("/smoke/ui", get(smoke_ui_handler))
-        .route("/smoke/ui.css", get(smoke_ui_css_handler))
-        .route("/smoke/ui.js", get(smoke_ui_js_handler))
-        .route("/client", get(product_client_handler))
-        .route("/client/app.css", get(product_client_css_handler))
-        .route("/client/app.js", get(product_client_js_handler))
-        .route(
-            "/client/fonts/funnel-display-500.ttf",
-            get(product_client_funnel_display_500_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-display-600.ttf",
-            get(product_client_funnel_display_600_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-display-700.ttf",
-            get(product_client_funnel_display_700_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-400.ttf",
-            get(product_client_funnel_sans_400_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-500.ttf",
-            get(product_client_funnel_sans_500_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-600.ttf",
-            get(product_client_funnel_sans_600_font_handler),
-        )
-        .route(
-            "/client/fonts/funnel-sans-700.ttf",
-            get(product_client_funnel_sans_700_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-400.ttf",
-            get(product_client_jetbrains_mono_400_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-500.ttf",
-            get(product_client_jetbrains_mono_500_font_handler),
-        )
-        .route(
-            "/client/fonts/jetbrains-mono-600.ttf",
-            get(product_client_jetbrains_mono_600_font_handler),
-        )
-        .route(
-            "/client/smoke-nip07.js",
-            get(product_client_smoke_nip07_js_handler),
-        )
-        .route("/client/config.json", get(product_client_config_handler))
         .merge(signed_routes)
         .fallback(api_route_not_found_handler)
         .layer(middleware::from_fn_with_state(
@@ -694,6 +612,7 @@ fn normal_signed_api_router() -> Router<ServerState> {
             get(list_brains_handler).post(create_brain_handler),
         )
         .route("/identities/resolve", post(resolve_identity_handler))
+        .route("/my-invitations", get(list_my_invitations_handler))
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
         .route(
@@ -719,8 +638,32 @@ fn normal_signed_api_router() -> Router<ServerState> {
                 .layer(DefaultBodyLimit::max(MAX_COLLABORATION_REQUEST_BODY_BYTES)),
         )
         .route(
+            "/brains/{brain_id}/ensure-access",
+            post(ensure_access_handler),
+        )
+        .route(
             "/brains/{brain_id}/invitations",
             get(list_brain_invitations_handler).post(create_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/preflight",
+            post(preflight_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/commit",
+            post(commit_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/approval-requests",
+            get(list_approval_requests_handler).post(create_approval_request_handler),
+        )
+        .route(
+            "/brains/{brain_id}/approval-requests/{request_id}/deny",
+            post(deny_approval_request_handler),
+        )
+        .route(
+            "/brains/{brain_id}/approvals",
+            post(submit_approval_handler),
         )
         .route(
             "/brain-invitation-links/{invite_code}",
@@ -754,6 +697,14 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}",
             axum::routing::delete(delete_folder_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/invitations/preflight",
+            post(preflight_folder_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/invitations/commit",
+            post(commit_folder_invitation_handler),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/invitations",
@@ -831,6 +782,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
             axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
+            axum::routing::post(complete_pending_wraps_handler),
         )
 }
 
@@ -1590,6 +1545,40 @@ fn public_invite_instructions_text() -> String {
         .to_owned()
 }
 
+fn npub_invite_instructions_text(
+    state: &ServerState,
+    invitation: &StoredBrainInvitation,
+) -> Option<String> {
+    let target_npub = invitation.user_id.as_ref()?;
+    let public_base = state.public_base_url.trim_end_matches('/');
+    Some(format!(
+        "FiniteBrain public invite instructions\n\n\
+         This is an npub-targeted FiniteBrain invitation: it can be accepted only by \
+         the Nostr key whose npub matches the target below. This public page is safe \
+         to read without authentication. It intentionally omits the Brain identity, \
+         Folder identity, access scope, inviter identity, Folder Keys, bootstrap \
+         plaintext, and encrypted invite structure.\n\n\
+         Target npub: {target}\n\
+         Invitation id: {id}\n\n\
+         Workflow:\n\
+         1. Act with the Nostr key that matches the target npub above; no other key \
+         can accept this invitation.\n\
+         2. Run the accept command, authenticated as that key, against this Brain \
+         server:\n   fbrain invite brain accept --id {id} --server {public_base}\n\
+         3. The equivalent authenticated route is:\n   POST \
+         {public_base}/v1/invitations/{id}/accept\n\
+         4. Keep any URL fragment or inviteSecret value client-side. Never paste it \
+         into server-visible request bodies, query strings, logs, analytics \
+         redirects, email replies, or issue trackers.\n\n\
+         This page resolves only while the invitation can still be accepted. Once \
+         the invitation is accepted, expired, or revoked, this URL returns the same \
+         generic unavailable response as an unknown invite code; ask the inviter for \
+         a fresh invitation.\n",
+        target = target_npub.as_str(),
+        id = invitation.id,
+    ))
+}
+
 fn access_label(access: FolderAccessMode) -> &'static str {
     match access {
         FolderAccessMode::Owner => "owner",
@@ -2166,6 +2155,8 @@ where
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
         enrich_metadata_identities(&store, &mut response)?;
+        attach_pending_approvals(&store, &mut response, &brain_id)?;
+        attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
     };
     Ok(response)
@@ -2769,8 +2760,8 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL,
-        CONTENT_TYPE, ORIGIN,
+        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE,
+        ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
@@ -3054,517 +3045,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smoke_bootstrap_route_returns_core_summary() {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/bootstrap")
-                    .body(Body::empty())
-                    .expect("valid request"),
-            )
-            .await
-            .expect("bootstrap route response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = to_bytes(response.into_body(), 4096)
-            .await
-            .expect("bootstrap body");
-        let summary: BootstrapSmokeSummary = serde_json::from_slice(&body).expect("bootstrap json");
-
-        assert_eq!(
-            summary,
-            finite_brain_core::smoke_bootstrap_summary().expect("smoke bootstrap summary")
-        );
-    }
-
-    #[tokio::test]
-    async fn smoke_ui_serves_static_assets_and_sqlite_flow_works() {
-        let temp_dir = tempfile::TempDir::new().expect("temp sqlite dir");
-        let db_path = temp_dir.path().join("smoke-ui.sqlite3");
-        let router = sqlite_test_router(&db_path);
-
-        let ui_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui")
-                    .body(Body::empty())
-                    .expect("valid ui request"),
-            )
-            .await
-            .expect("ui response");
-        assert_eq!(ui_response.status(), StatusCode::OK);
-        let ui_body = to_bytes(ui_response.into_body(), 16 * 1024)
-            .await
-            .expect("ui body");
-        let ui_body = std::str::from_utf8(&ui_body).expect("ui utf8");
-        assert!(ui_body.contains("Development only"));
-        assert!(ui_body.contains("FiniteBrain Smoke UI"));
-        assert!(ui_body.contains("Brain and Folder Invitations"));
-        assert!(ui_body.contains("Connections and mounts"));
-        assert!(ui_body.contains("href=\"/client\""));
-        assert!(ui_body.contains("Open client"));
-
-        let css_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui.css")
-                    .body(Body::empty())
-                    .expect("valid css request"),
-            )
-            .await
-            .expect("css response");
-        assert_eq!(css_response.status(), StatusCode::OK);
-        let css_body = to_bytes(css_response.into_body(), 16 * 1024)
-            .await
-            .expect("css body");
-        let css_body = std::str::from_utf8(&css_body).expect("css utf8");
-        assert!(css_body.contains(".topbar"));
-
-        let js_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/smoke/ui.js")
-                    .body(Body::empty())
-                    .expect("valid js request"),
-            )
-            .await
-            .expect("js response");
-        assert_eq!(js_response.status(), StatusCode::OK);
-        let js_body = to_bytes(js_response.into_body(), 256 * 1024)
-            .await
-            .expect("js body");
-        let js_body = std::str::from_utf8(&js_body).expect("js utf8");
-        assert!(js_body.contains("bootstrapButton"));
-        assert!(js_body.contains("createShareLinkButton"));
-        assert!(js_body.contains("mountsButton"));
-
-        let keys = Keys::generate();
-        let create = post_brain(
-            router.clone(),
-            &keys,
-            &create_brain_body("smoke", "organization"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(create.status(), StatusCode::OK);
-
-        let reopened = sqlite_test_router(&db_path);
-        let metadata = get_metadata(reopened.clone(), &keys, "smoke", TEST_NOW).await;
-        assert_eq!(metadata.status(), StatusCode::OK);
-        let metadata: BrainMetadataResponse = read_json(metadata).await;
-        assert_eq!(metadata.brain_id, "smoke");
-        assert!(metadata.folders.is_empty());
-
-        let sync_bootstrap = authed_request(
-            reopened,
-            &keys,
-            "GET",
-            "/v1/brains/smoke/sync/bootstrap",
-            None,
-            TEST_NOW,
-        )
-        .await;
-        assert_eq!(sync_bootstrap.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn product_client_serves_spine_assets_and_config() {
-        let router = test_router();
-
-        let client_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client")
-                    .body(Body::empty())
-                    .expect("valid client request"),
-            )
-            .await
-            .expect("client response");
-        assert_eq!(client_response.status(), StatusCode::OK);
-        assert_eq!(
-            client_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let client_body = to_bytes(client_response.into_body(), 64 * 1024)
-            .await
-            .expect("client body");
-        let client_body = std::str::from_utf8(&client_body).expect("client utf8");
-        assert!(client_body.contains("obsidian-shell"));
-        assert!(!client_body.contains("obsidian-titlebar"));
-        assert!(!client_body.contains("traffic-lights"));
-        assert!(!client_body.contains("titlebarTabLabel"));
-        assert!(!client_body.contains("titlebarBrainLabel"));
-        assert!(!client_body.contains("pageTabButton"));
-        assert!(!client_body.contains("graphTabButton"));
-        assert!(!client_body.contains("titlebarNewTabButton"));
-        assert!(client_body.contains("sidebar-primary-nav"));
-        assert!(!client_body.contains("app-ribbon"));
-        assert!(client_body.contains("file-sidebar"));
-        assert!(client_body.contains("Connect securely"));
-        assert!(client_body.contains("Brain locked"));
-        assert!(!client_body.contains("Connect signer"));
-        assert!(!client_body.contains("Connect account"));
-        assert!(!client_body.contains("Session locked"));
-        assert!(client_body.contains("resumeSessionButton"));
-        assert!(client_body.contains("lockSessionButton"));
-        assert!(!client_body.contains("Open accessible brain"));
-        assert!(!client_body.contains("brainControlDetails"));
-        assert!(!client_body.contains("brainSelect"));
-        assert!(client_body.contains("sessionAccountBrainButton"));
-        assert!(client_body.contains("brainSwitcherMenu"));
-        assert!(client_body.contains("manageBrainsModal"));
-        assert!(client_body.contains("settingsManageBrainsButton"));
-        assert!(client_body.contains("readerFolderList"));
-        assert!(client_body.contains("searchSidebarPanel"));
-        assert!(client_body.contains("commandPalette"));
-        assert!(client_body.contains("Quick switcher"));
-        assert!(client_body.contains("graph-floating-controls"));
-        assert!(client_body.contains("ribbonGraphButton"));
-        assert!(!client_body.contains("editorToolbar"));
-        assert!(!client_body.contains("inline-editor-toolbar"));
-        assert!(!client_body.contains("data-editor-command"));
-        assert!(client_body.contains("readerPageContent"));
-        assert!(client_body.contains("aria-label=\"Page reader\""));
-        assert!(client_body.contains("aria-label=\"Graph View\""));
-        assert!(client_body.contains("aria-label=\"Search pages\""));
-        assert!(!client_body.contains("graphFilterInput"));
-        assert!(!client_body.contains("aria-label=\"Filter graph\""));
-        assert!(client_body.contains("accessFolderButton"));
-        assert!(client_body.contains("accessInspector"));
-        assert!(client_body.contains("accessWhoHasList"));
-        assert!(client_body.contains("accessAdvancedSection"));
-        assert!(!client_body.contains("accessChangeMode"));
-        assert!(!client_body.contains("accessBrainViewButton"));
-        assert!(!client_body.contains("accessFolderViewButton"));
-        assert!(!client_body.contains("accessBrainPanel"));
-        assert!(!client_body.contains("brainSwitchList"));
-        assert!(!client_body.contains("removeFolderAccessButton"));
-        assert!(!client_body.contains("folderKeyInput"));
-        assert!(!client_body.contains("okfBundleInput"));
-        assert!(!client_body.contains("encryptDraftButton"));
-        assert!(client_body.contains("createBrainInvitationButton"));
-        assert!(client_body.contains("acceptBrainInvitationButton"));
-        assert!(client_body.contains("revokeBrainInvitationButton"));
-        assert!(client_body.contains("brainInviteUrlOutput"));
-        assert!(client_body.contains("copyBrainInviteUrlButton"));
-        assert!(client_body.contains("Copy private invite link"));
-        assert!(client_body.contains("savePageButton"));
-        assert!(!client_body.contains("readerModeButton"));
-        assert!(client_body.contains("Edit Markdown"));
-        assert!(!client_body.contains("syncBootstrapButton"));
-        assert!(client_body.contains("Graph View"));
-        assert!(client_body.contains("Zoom in"));
-        assert!(client_body.contains("Reset zoom"));
-        assert!(client_body.contains("Enter full screen"));
-        assert!(client_body.contains("contextMenu"));
-        assert!(client_body.contains("/client/app.js"));
-        assert!(!client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
-        assert!(!client_body.contains("/client/smoke-nip07.js"));
-        assert!(!client_body.contains("Page Loop"));
-        assert!(!client_body.contains("OKF Import"));
-        assert!(!client_body.contains("Plan OKF import"));
-
-        let config_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/config.json")
-                    .body(Body::empty())
-                    .expect("valid config request"),
-            )
-            .await
-            .expect("config response");
-        assert_eq!(config_response.status(), StatusCode::OK);
-        assert_eq!(
-            config_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let config: ProductClientConfigResponse = read_json(config_response).await;
-        assert_eq!(
-            config,
-            ProductClientConfigResponse {
-                public_base_url: TEST_BASE_URL.to_owned(),
-                auth_scheme: "Nostr".to_owned(),
-                http_auth_kind: 27_235,
-                default_brain_id: "personal".to_owned(),
-            }
-        );
-
-        let css_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/app.css")
-                    .body(Body::empty())
-                    .expect("valid client css request"),
-            )
-            .await
-            .expect("client css response");
-        assert_eq!(css_response.status(), StatusCode::OK);
-        assert_eq!(
-            css_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let css_body = to_bytes(css_response.into_body(), 128 * 1024)
-            .await
-            .expect("client css body");
-        let css_body = std::str::from_utf8(&css_body).expect("client css utf8");
-        assert!(css_body.contains("font-family: \"Funnel Sans\""));
-        assert!(css_body.contains("font-family: \"Funnel Display\""));
-        assert!(css_body.contains("font-family: \"JetBrains Mono\""));
-        assert!(css_body.contains("/client/fonts/funnel-sans-400.ttf"));
-        assert!(css_body.contains("/client/fonts/funnel-display-600.ttf"));
-        assert!(css_body.contains("/client/fonts/jetbrains-mono-400.ttf"));
-        assert!(css_body.contains("@media (prefers-color-scheme: light)"));
-        assert!(css_body.contains("--font-sans:"));
-        assert!(css_body.contains("--font-display:"));
-        assert!(css_body.contains("--font-mono:"));
-        assert!(css_body.contains("--status-success:"));
-        assert!(css_body.contains("--status-warning:"));
-        assert!(css_body.contains("--status-error:"));
-        assert!(css_body.contains(".obsidian-shell"));
-        assert!(!css_body.contains(".obsidian-titlebar"));
-        assert!(!css_body.contains(".traffic-light"));
-        assert!(!css_body.contains(".titlebar-tab"));
-        assert!(css_body.contains(".sidebar-primary-nav"));
-        assert!(!css_body.contains(".app-ribbon"));
-        assert!(css_body.contains(".brain-picker"));
-        assert!(css_body.contains(".brain-create-row"));
-        assert!(css_body.contains(".folder-option-button"));
-        assert!(css_body.contains(".obsidian-folder-button"));
-        assert!(css_body.contains(".context-menu"));
-        assert!(css_body.contains(".graph-stage"));
-        assert!(css_body.contains(".graph-floating-controls"));
-        assert!(!css_body.contains(".graph-icon-button"));
-        assert!(!css_body.contains(".graph-controls"));
-        assert!(css_body.contains(".graph-canvas.is-hovering"));
-        assert!(css_body.contains(".node.hover-active"));
-        assert!(css_body.contains(".edge.hover-connected"));
-        assert!(!css_body.contains("\n.access-inspector {"));
-        assert!(css_body.contains("\n.access-inspector-new {"));
-        assert!(!css_body.contains(".access-badge"));
-        assert!(css_body.contains(".access-content-panel"));
-        assert!(css_body.contains(".brain-invite-url-output"));
-        assert!(!css_body.contains(".access-view-switch"));
-        assert!(!css_body.contains(".okf-controls"));
-        assert!(css_body.contains(".session-security-status"));
-
-        let js_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client/app.js")
-                    .body(Body::empty())
-                    .expect("valid client js request"),
-            )
-            .await
-            .expect("client js response");
-        assert_eq!(js_response.status(), StatusCode::OK);
-        assert_eq!(
-            js_response.headers().get(CACHE_CONTROL).unwrap(),
-            "no-store, max-age=0"
-        );
-        let js_body = to_bytes(js_response.into_body(), 512 * 1024)
-            .await
-            .expect("client js body");
-        let js_body = std::str::from_utf8(&js_body).expect("client js utf8");
-        assert!(js_body.contains("window.FiniteBrainProductClient"));
-        assert!(js_body.contains("deriveSignerState"));
-        assert!(js_body.contains("parseOkfBundle"));
-        assert!(js_body.contains("prepareOkfImportWrites"));
-        assert!(js_body.contains("buildAuthEventTemplate"));
-        assert!(js_body.contains("buildPageWriteRequest"));
-        assert!(js_body.contains("workspaceChromeState"));
-        assert!(js_body.contains("visibleBrainOptions"));
-        assert!(js_body.contains("personalBrainIdForPubkey"));
-        assert!(js_body.contains("accessBadgesForFolder"));
-        assert!(js_body.contains("accessActionRoute"));
-        assert!(js_body.contains("openManageBrainsModal"));
-        assert!(js_body.contains("removeFolderAccessFromPanel"));
-        assert!(!js_body.contains("removeFolderAccessButton"));
-        assert!(js_body.contains("readerFolderRows"));
-        assert!(js_body.contains("readerPageRows"));
-        assert!(js_body.contains("buildGraphProjection"));
-        assert!(js_body.contains("graphLayout"));
-        assert!(js_body.contains("graphStats"));
-        assert!(js_body.contains("graphNeighborIds"));
-        assert!(js_body.contains("setGraphHover"));
-        assert!(js_body.contains("createSessionKeyring"));
-        assert!(js_body.contains("clearSessionSecretsAndPlaintext"));
-        assert!(js_body.contains("copyToClipboard"));
-        assert!(js_body.contains("copyBrainInviteUrl"));
-        assert!(js_body.contains("sessionStatusView"));
-        assert!(js_body.contains("sessionGrantOpeningAllowed"));
-        assert!(js_body.contains("extractPageLinks"));
-        assert!(js_body.contains("openFolderObject"));
-        assert!(js_body.contains("mergeSyncProjection"));
-        assert!(js_body.contains("metadataFolderRows"));
-        assert!(js_body.contains("kind: 27235"));
-        assert!(js_body.contains("kind: APP_EVENT_KIND"));
-        assert!(js_body.contains("/metadata"));
-
-        let smoke_signer_response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/client/smoke-nip07.js")
-                    .body(Body::empty())
-                    .expect("valid smoke signer request"),
-            )
-            .await
-            .expect("smoke signer response");
-        assert_eq!(smoke_signer_response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn product_client_serves_local_dashboard_fonts() {
-        let router = test_router();
-        let fonts = [
-            (
-                "/client/fonts/funnel-display-500.ttf",
-                32_880,
-                "d820e428132e2622a7d175a74a826748bff68d113e7aec79b6f3545e86ff20f2",
-            ),
-            (
-                "/client/fonts/funnel-display-600.ttf",
-                32_864,
-                "e37cbfefbb7a762fe2b69e43e12c7e840d81452d1fdc6fc3ecf0b0ec7605b3af",
-            ),
-            (
-                "/client/fonts/funnel-display-700.ttf",
-                32_812,
-                "c61b735d94ac0bcd32904da436e3003f99804d09ee81ea3bea6690b180ea7a1b",
-            ),
-            (
-                "/client/fonts/funnel-sans-400.ttf",
-                32_988,
-                "d9cd65b22ca457dee2310777973cb3b77e55d28866cc574018a77cd593d5d0d6",
-            ),
-            (
-                "/client/fonts/funnel-sans-500.ttf",
-                32_964,
-                "ed6bdb3b1d1fbe7bf38f702e64c6f99ab8b324a30bee2a4fca591da57505289c",
-            ),
-            (
-                "/client/fonts/funnel-sans-600.ttf",
-                33_004,
-                "f23f08c47901e39db4c1ae4f212c88f43ed0b6037d1252f9d589807ff6a023b5",
-            ),
-            (
-                "/client/fonts/funnel-sans-700.ttf",
-                32_892,
-                "56a1277e3f904bd9543e533e1e6656c88f2e46738e1c6d1da438709323e7e87e",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-400.ttf",
-                112_172,
-                "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-500.ttf",
-                112_204,
-                "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160",
-            ),
-            (
-                "/client/fonts/jetbrains-mono-600.ttf",
-                112_160,
-                "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8",
-            ),
-        ];
-
-        for (path, expected_len, expected_sha256) in fonts {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(path)
-                        .body(Body::empty())
-                        .expect("valid font request"),
-                )
-                .await
-                .expect("font response");
-            assert_eq!(response.status(), StatusCode::OK, "{path}");
-            assert_eq!(
-                response.headers().get(CONTENT_TYPE).unwrap(),
-                "font/ttf",
-                "{path}"
-            );
-            assert_eq!(
-                response.headers().get(CACHE_CONTROL).unwrap(),
-                "no-store, max-age=0",
-                "{path}"
-            );
-            let body = to_bytes(response.into_body(), 128 * 1024)
-                .await
-                .expect("font body");
-            assert_eq!(body.len(), expected_len, "{path}");
-            assert_eq!(
-                format!("{:x}", Sha256::digest(&body)),
-                expected_sha256,
-                "{path}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn product_client_smoke_nip07_signer_is_explicitly_opt_in() {
-        let router = router_with_state(
-            test_state()
-                .with_smoke_nip07_signer(
-                    "0000000000000000000000000000000000000000000000000000000000000001",
-                )
-                .expect("valid smoke signer secret"),
-        );
-
-        let client_response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/client")
-                    .body(Body::empty())
-                    .expect("valid client request"),
-            )
-            .await
-            .expect("client response");
-        assert_eq!(client_response.status(), StatusCode::OK);
-        let client_body = read_text_with_limit(client_response, 64 * 1024).await;
-        assert!(client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
-        assert!(client_body.contains("/client/smoke-nip07.js"));
-        assert!(client_body.contains("/client/app.js"));
-
-        let smoke_signer_response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/client/smoke-nip07.js")
-                    .body(Body::empty())
-                    .expect("valid smoke signer request"),
-            )
-            .await
-            .expect("smoke signer response");
-        assert_eq!(smoke_signer_response.status(), StatusCode::OK);
-        let smoke_signer_body = read_text_with_limit(smoke_signer_response, 32 * 1024).await;
-        assert!(smoke_signer_body.contains("createLocalNip07ProviderFromSecret"));
-        assert!(smoke_signer_body.contains("__FINITE_BRAIN_SMOKE_NIP07__"));
-        assert!(smoke_signer_body.contains("__FINITE_BRAIN_SET_SMOKE_NIP07_SECRET__"));
-        assert!(smoke_signer_body.contains("smokeNip07Secret"));
-        assert!(!smoke_signer_body.contains("sessionStorage"));
-        assert!(smoke_signer_body.contains("typeof window.history?.replaceState !== \"function\""));
-        assert!(smoke_signer_body.contains("window.history.replaceState"));
-        assert!(!smoke_signer_body.contains("history?.replaceState?."));
-        assert!(
-            smoke_signer_body
-                .contains("0000000000000000000000000000000000000000000000000000000000000001")
-        );
-    }
-
-    #[tokio::test]
     async fn smoke_email_proof_verifier_is_explicit_and_allowlisted() {
         let actor = UserId::new(npub(&Keys::generate())).expect("valid actor npub");
 
@@ -3624,6 +3104,9 @@ mod tests {
             created_at: "2026-07-07T12:00:00Z".to_owned(),
             updated_at: "2026-07-07T12:00:00Z".to_owned(),
             accepted_at: None,
+            origin_ref: None,
+            origin_kind: finite_brain_store::ProvenanceOriginKind::Invitation,
+            roster_revision: None,
             duplicate_accept: false,
         };
 
@@ -3728,6 +3211,125 @@ mod tests {
             .await
             .expect("v1 response");
         assert_error(rejected, StatusCode::FORBIDDEN, "Nostr auth URL mismatch").await;
+    }
+
+    #[tokio::test]
+    async fn ensure_access_repairs_membership_and_reports_grant_gaps() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let admin_npub = npub(&admin_keys);
+        let router = test_router();
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Membership is missing: the signed AddMember proof is required.
+        let missing_event = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(missing_event.status(), StatusCode::BAD_REQUEST);
+
+        let ensured = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(
+                serde_json::json!({
+                    "targetNpub": member_npub,
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        "ensure-access-add-member",
+                        AdminAccessAction::AddMember,
+                        None,
+                        Some(member_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(ensured.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(ensured).await;
+        assert_eq!(receipt.membership, "added");
+        assert_eq!(receipt.brain_role, "member");
+        assert_eq!(receipt.state, "grantsMissing");
+        assert_eq!(receipt.missing_count, 1);
+        assert_eq!(receipt.folders.len(), 1);
+        assert_eq!(receipt.folders[0].folder_id, "getting-started");
+        assert_eq!(receipt.folders[0].grant, EnsureAccessGrantState::Missing);
+
+        // Re-running is safe: the Membership reports as already in place.
+        let again = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(again.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(again).await;
+        assert_eq!(receipt.membership, "alreadyMember");
+        assert_eq!(receipt.state, "grantsMissing");
+
+        // A fully set-up admin is entitled to every Folder and reports
+        // complete: both Folders have a current grant for them.
+        let admin_receipt = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": admin_npub }).to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(admin_receipt.status(), StatusCode::OK);
+        let receipt: EnsureAccessResponse = read_json(admin_receipt).await;
+        assert_eq!(receipt.membership, "alreadyMember");
+        assert_eq!(receipt.brain_role, "admin");
+        assert_eq!(receipt.state, "complete");
+        assert_eq!(receipt.missing_count, 0);
+        assert_eq!(receipt.folders.len(), 2);
+        assert!(
+            receipt
+                .folders
+                .iter()
+                .all(|folder| folder.grant == EnsureAccessGrantState::Present)
+        );
+
+        // Non-admin callers are rejected.
+        let outsider = Keys::generate();
+        let forbidden = authed_request(
+            router,
+            &outsider,
+            "POST",
+            "/v1/brains/acme/ensure-access",
+            Some(serde_json::json!({ "targetNpub": member_npub }).to_string()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -5688,6 +5290,265 @@ mod tests {
         let accepted: BrainInvitationResponse = read_json(accept).await;
         assert_eq!(accepted.status, "accepted");
         assert!(accepted.duplicate_accept);
+    }
+
+    #[tokio::test]
+    async fn my_invitations_lists_only_the_callers_pending_invitations() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let outsider_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        let invite_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(invite_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invite).await;
+
+        // An expired npub invitation for the same target lives on a second
+        // Brain (pending npub invitations are singletons per Brain and target).
+        let expired_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme-expired", "organization"),
+            TEST_NOW + 2,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(expired_brain.status(), StatusCode::OK);
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme-expired").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(target_npub.clone()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let list = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/my-invitations",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: MyInvitationListResponse = read_json(list).await;
+        assert_eq!(list.invitations.len(), 2);
+        let mine = &list.invitations[0];
+        assert_eq!(mine.id, invitation.id);
+        assert_eq!(mine.invite_code, invitation.invite_code);
+        assert_eq!(mine.brain_id, "acme");
+        assert_eq!(mine.brain_display_name, "Acme");
+        assert_eq!(mine.inviter_display, npub(&admin_keys));
+        assert_eq!(mine.folder_scope, vec!["getting-started".to_owned()]);
+        assert_eq!(mine.expires_at, "2026-06-04T20:26:40Z");
+        assert!(!mine.expired);
+        assert!(
+            mine.public_instructions_url
+                .as_deref()
+                .unwrap()
+                .ends_with(&format!(
+                    "/v1/brain-invitation-links/{}/llms.txt",
+                    invitation.invite_code
+                ))
+        );
+        assert_eq!(mine.origin_kind, "invitation");
+        assert_eq!(mine.origin_ref, None);
+
+        // Expired invitations stay visible with an explicit marker instead of
+        // silently disappearing or masquerading as pending.
+        let expired = &list.invitations[1];
+        assert_eq!(expired.id, "invitation-expired");
+        assert_eq!(expired.brain_id, "acme-expired");
+        assert!(expired.expired);
+
+        // Identity-hiding: non-targets (including the inviting admin) see an
+        // empty list, not an error.
+        for keys in [&outsider_keys, &admin_keys] {
+            let other = authed_request(
+                router.clone(),
+                keys,
+                "GET",
+                "/v1/my-invitations",
+                None,
+                TEST_NOW + 4,
+            )
+            .await;
+            assert_eq!(other.status(), StatusCode::OK);
+            let other: MyInvitationListResponse = read_json(other).await;
+            assert!(other.invitations.is_empty());
+        }
+
+        // Accepting consumes the invitation; it drops out of the list while
+        // the expired one remains visible with its marker.
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let after = authed_request(
+            router,
+            &target_keys,
+            "GET",
+            "/v1/my-invitations",
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(after.status(), StatusCode::OK);
+        let after: MyInvitationListResponse = read_json(after).await;
+        assert_eq!(after.invitations.len(), 1);
+        assert_eq!(after.invitations[0].id, "invitation-expired");
+        assert!(after.invitations[0].expired);
+    }
+
+    #[tokio::test]
+    async fn my_invitations_requires_authentication() {
+        let router = test_router();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/my-invitations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+    }
+
+    #[tokio::test]
+    async fn brain_invitation_list_marks_expired_pending_invitations() {
+        let admin_keys = Keys::generate();
+        let live_keys = Keys::generate();
+        let expired_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&live_keys),
+                    "expiresAt": "2026-06-04T20:26:40Z",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let live: BrainInvitationResponse = read_json(invite).await;
+        assert!(!live.expired);
+
+        // A pending invitation whose expiry has already passed.
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(npub(&expired_keys)).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let list = authed_request(
+            router,
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/invitations",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: BrainInvitationListResponse = read_json(list).await;
+        assert_eq!(list.invitations.len(), 2);
+        let by_id = list
+            .invitations
+            .iter()
+            .map(|invitation| (invitation.id.as_str(), invitation))
+            .collect::<BTreeMap<_, _>>();
+        let live_row = by_id.get(live.id.as_str()).unwrap();
+        assert!(!live_row.expired);
+        let expired_row = by_id.get("invitation-expired").unwrap();
+        assert!(expired_row.expired);
+        assert_eq!(
+            expired_row.status, "pending",
+            "expired is computed at read; the stored status is never mutated"
+        );
     }
 
     #[tokio::test]
@@ -8630,6 +8491,284 @@ mod tests {
         assert_eq!(listed.invitations[0].status, "accepted");
     }
 
+    async fn unauthed_get(router: Router, path: &str) -> axum::response::Response {
+        // No AUTHORIZATION header: pins the public, unauthenticated posture of
+        // the llms.txt surface.
+        router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("valid unauthenticated request"),
+            )
+            .await
+            .expect("unauthenticated response")
+    }
+
+    async fn create_npub_invitation(
+        router: Router,
+        admin_keys: &Keys,
+        target_npub: &str,
+    ) -> BrainInvitationResponse {
+        let create_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        let create = authed_request(
+            router,
+            admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(create_body),
+            TEST_NOW,
+        )
+        .await;
+        if create.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(create).await;
+            panic!("npub invitation create failed: {}", body.error);
+        }
+        read_json_with_limit(create, 128 * 1024).await
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_public_instructions_serve_accept_steps_while_pending() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let admin_npub = npub(&admin_keys);
+        let target_npub = npub(&target_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invitation = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+
+        // Sentinel: the advertised public URL resolves instead of 404ing.
+        assert_eq!(
+            invitation.public_instructions_url.as_deref(),
+            Some(format!("{TEST_BASE_URL}{}", invitation.public_instructions_path).as_str())
+        );
+        let public_instructions = unauthed_get(router, &invitation.public_instructions_path).await;
+        assert_eq!(public_instructions.status(), StatusCode::OK);
+        assert_eq!(
+            public_instructions
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let public_instructions = read_text(public_instructions).await;
+        assert!(public_instructions.contains("npub-targeted FiniteBrain invitation"));
+        assert!(public_instructions.contains(&target_npub));
+        assert!(public_instructions.contains(&invitation.id));
+        assert!(public_instructions.contains(&format!(
+            "fbrain invite brain accept --id {} --server {TEST_BASE_URL}",
+            invitation.id
+        )));
+        assert!(public_instructions.contains(&format!(
+            "POST {TEST_BASE_URL}/v1/invitations/{}/accept",
+            invitation.id
+        )));
+
+        // Negative content assertions against known-sensitive fixture values.
+        for forbidden in [
+            admin_npub.as_str(),
+            "acme",
+            "Acme",
+            "getting-started",
+            "restricted",
+            invitation.invite_code.as_str(),
+            "bootstrapWrappedEventJson",
+            "bootstrapPayloadHash",
+            invitation.accept_path.as_str(),
+        ] {
+            assert!(
+                !public_instructions.contains(forbidden),
+                "npub public instructions leaked {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_public_instructions_hide_terminal_expired_and_unknown_codes() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let other_target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let other_target_npub = npub(&other_target_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Accepted invitation: resolves while pending, unavailable afterwards.
+        let accepted = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+        let pending_instructions =
+            unauthed_get(router.clone(), &accepted.public_instructions_path).await;
+        assert_eq!(pending_instructions.status(), StatusCode::OK);
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!("/v1/invitations/{}/accept", accepted.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        assert_error(
+            unauthed_get(router.clone(), &accepted.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Revoked invitation: unavailable.
+        let revoked = create_npub_invitation(router.clone(), &admin_keys, &other_target_npub).await;
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            &format!("/v1/invitations/{}", revoked.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+        assert_error(
+            unauthed_get(router.clone(), &revoked.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Expired-but-pending invitation: unavailable (fail-closed clock).
+        {
+            let mut store = state.store.lock().expect("store mutex");
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(other_target_npub.clone()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&admin_keys)).unwrap(),
+                    "2026-05-15T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .expect("expired invitation fixture");
+        }
+        assert_error(
+            unauthed_get(
+                router.clone(),
+                "/v1/brain-invitation-links/invite-expired/llms.txt",
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+
+        // Unknown code: identity-hiding posture unchanged.
+        assert_error(
+            unauthed_get(
+                router,
+                "/v1/brain-invitation-links/invite-never-existed/llms.txt",
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn npub_invitation_llms_txt_walk_grants_membership_end_to_end() {
+        // The 2026-08-11 repro: create an npub invite, open its llms.txt with
+        // zero auth, follow the printed accept command as the target, and land
+        // as a Brain member.
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invitation = create_npub_invitation(router.clone(), &admin_keys, &target_npub).await;
+
+        let public_instructions = unauthed_get(
+            router.clone(),
+            invitation
+                .public_instructions_url
+                .as_deref()
+                .expect("public instructions url")
+                .strip_prefix(TEST_BASE_URL)
+                .expect("public instructions url is on the test base"),
+        )
+        .await;
+        assert_eq!(public_instructions.status(), StatusCode::OK);
+        let public_instructions = read_text(public_instructions).await;
+        assert!(public_instructions.contains(&target_npub));
+
+        // Follow the page verbatim: parse the invitation id and server URL out
+        // of the printed accept command rather than trusting the create
+        // response.
+        let accept_command = public_instructions
+            .lines()
+            .find(|line| line.contains("fbrain invite brain accept --id "))
+            .expect("instructions print the accept command");
+        let invitation_id = accept_command
+            .split("--id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("accept command carries an invitation id");
+        let server = accept_command
+            .split("--server ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("accept command carries a server url");
+        assert_eq!(server, TEST_BASE_URL);
+        assert!(invitation_id.starts_with("invitation-"));
+
+        let accept_route = format!("{server}/v1/invitations/{invitation_id}/accept");
+        let accept_route = accept_route
+            .strip_prefix(TEST_BASE_URL)
+            .expect("accept route is on the test base");
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            accept_route,
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+
+        let metadata = get_metadata(router.clone(), &target_keys, "acme", TEST_NOW).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(metadata.members.contains(&target_npub));
+
+        // After acceptance the page falls back to the generic unavailable
+        // response instead of revealing anything.
+        assert_error(
+            unauthed_get(router, &invitation.public_instructions_path).await,
+            StatusCode::NOT_FOUND,
+            "brain invitation unavailable",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn email_brain_invitation_creates_bootstrap_and_claims_access_without_secret() {
         let admin_keys = Keys::generate();
@@ -8788,6 +8927,9 @@ mod tests {
             );
         }
         assert!(public_instructions.contains("inviteSecret"));
+        // The email variant is pinned byte-for-byte: the npub work must not
+        // change the email proof workflow text.
+        assert_eq!(public_instructions, public_invite_instructions_text());
 
         let proof_created_at = format_unix_timestamp(TEST_NOW).unwrap();
         let post_proof_body = serde_json::json!({
@@ -10531,6 +10673,1105 @@ mod tests {
         ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
     }
 
+    #[tokio::test]
+    async fn folder_plan_invitation_cohort_fans_out_share_links_idempotently() {
+        let admin_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let agent_npub = npub(&agent_keys);
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_friend",
+            "humanMailbox": "friend@example.com",
+            "rosterRevision": 1,
+            "agents": [
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": agent_npub,
+                    "status": "active",
+                }
+            ],
+        });
+        // The single-shot authority mock serves one response per accept, so
+        // the resolution triple repeats once per preflight.
+        let mut core_responses = Vec::new();
+        let mut identity_responses = vec![(
+            404_u16,
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({}),
+        )];
+        for _ in 0..3 {
+            core_responses.push(("/api/core/v1/brain/account-agent-roster", roster.clone()));
+            identity_responses.push((
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": human_npub,
+                }),
+            ));
+            identity_responses.push((
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ));
+        }
+        let (core_url, _core_server) = spawn_json_authority(core_responses);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(identity_responses);
+        let state = test_state()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let create_folder_body = serde_json::json!({
+            "folderId": "strategy",
+            "name": "Strategy",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "strategy",
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-strategy-admin-v1", 1, npub(&admin_keys).as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "change_create_strategy_cohort",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("strategy"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_folder = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders",
+            Some(create_folder_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(create_folder.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let plan: FolderInvitationPreflightResponse = read_json(preflight).await;
+        assert_eq!(plan.folder_id, "strategy");
+        assert_eq!(plan.current_key_version, 1);
+        assert_eq!(plan.plan.human.npub.as_deref(), Some(human_npub.as_str()));
+        assert_eq!(plan.plan.agents.len(), 1);
+
+        let participants = |prefix: &'static str| {
+            vec![
+                serde_json::json!({
+                    "recipientNpub": human_npub,
+                    "grant": folder_key_grant_value(
+                        &format!("grant-{prefix}-human-v1"),
+                        1,
+                        human_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        &format!("change_{prefix}_human"),
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(human_npub.as_str()),
+                        Some(1),
+                    ),
+                }),
+                serde_json::json!({
+                    "recipientNpub": agent_npub,
+                    "grant": folder_key_grant_value(
+                        &format!("grant-{prefix}-agent-v1"),
+                        1,
+                        agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        &format!("change_{prefix}_agent"),
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(agent_npub.as_str()),
+                        Some(1),
+                    ),
+                }),
+            ]
+        };
+        let commit_body = serde_json::json!({
+            "planId": plan.plan.plan_id,
+            "planHash": plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": participants("cohort"),
+        })
+        .to_string();
+        let commit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(commit_body),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: FolderInvitationPlanCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "ok");
+        assert_eq!(committed.invitations.len(), 2);
+        assert!(committed.duplicate_recipient_npubs.is_empty());
+        let mut recipients = committed
+            .invitations
+            .iter()
+            .map(|invitation| invitation.recipient_npub.clone())
+            .collect::<Vec<_>>();
+        recipients.sort();
+        let mut expected = vec![agent_npub.clone(), human_npub.clone()];
+        expected.sort();
+        assert_eq!(recipients, expected);
+
+        // Same mailbox, same Folder: the retry returns the original links.
+        let retry_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        if retry_preflight.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(retry_preflight).await;
+            panic!("retry preflight failed: {}", body.error);
+        }
+        let retry_plan: FolderInvitationPreflightResponse = read_json(retry_preflight).await;
+        let retry_body = serde_json::json!({
+            "planId": retry_plan.plan.plan_id,
+            "planHash": retry_plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": participants("retry"),
+        })
+        .to_string();
+        let retry = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(retry_body),
+            TEST_NOW + 5,
+        )
+        .await;
+        if retry.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(retry).await;
+            panic!("retry commit failed: {}", body.error);
+        }
+        let retried: FolderInvitationPlanCommitResponse = read_json(retry).await;
+        assert_eq!(retried.invitations.len(), 2);
+        assert_eq!(retried.duplicate_recipient_npubs.len(), 2);
+
+        // The participant set must match the plan exactly.
+        let mismatch_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 6,
+        )
+        .await;
+        let mismatch_plan: FolderInvitationPreflightResponse = read_json(mismatch_preflight).await;
+        let mismatch_body = serde_json::json!({
+            "planId": mismatch_plan.plan.plan_id,
+            "planHash": mismatch_plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": vec![serde_json::json!({
+                "recipientNpub": human_npub,
+                "grant": folder_key_grant_value("grant-mismatch-human-v1", 1, human_npub.as_str()),
+                "accessChangeEvent": admin_event(
+                    &admin_keys,
+                    "acme",
+                    "change_mismatch_human",
+                    AdminAccessAction::GrantFolderAccess,
+                    Some("strategy"),
+                    Some(human_npub.as_str()),
+                    Some(1),
+                ),
+            })],
+        })
+        .to_string();
+        let mismatch = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(mismatch_body),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invitation_preflight_resolves_human_and_agents_with_explicit_exclusions() {
+        let admin_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let agent_one_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let agent_one_npub = npub(&agent_one_keys);
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_friend",
+            "humanMailbox": "friend@example.com",
+            "rosterRevision": 3,
+            "agents": [
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": agent_one_npub,
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-two@finite.vip",
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-three@finite.vip",
+                    "agentNpub": npub(&Keys::generate()),
+                    "status": "paused",
+                    "placementRunnerClass": "kata",
+                },
+            ],
+        });
+        let (core_url, _core_server) =
+            spawn_json_authority(vec![("/api/core/v1/brain/account-agent-roster", roster)]);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": human_npub,
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_one_npub,
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+        ]);
+        let state = test_state()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let plan: InvitationPreflightResponse = read_json(preflight).await;
+        assert!(!plan.plan_id.is_empty());
+        assert!(plan.plan_hash.starts_with("sha256:"));
+        assert_eq!(plan.human.email, "friend@example.com");
+        assert_eq!(plan.human.npub.as_deref(), Some(human_npub.as_str()));
+        assert_eq!(plan.roster_revision, Some(3));
+        assert_eq!(plan.agents.len(), 1);
+        assert_eq!(plan.agents[0].managed_agent_email, "agent-one@finite.vip");
+        assert_eq!(
+            plan.agents[0].agent_npub.as_deref(),
+            Some(agent_one_npub.as_str())
+        );
+        assert_eq!(plan.exclusions.len(), 2);
+        assert_eq!(plan.exclusions[0].ref_, "agent-two@finite.vip");
+        assert_eq!(plan.exclusions[0].reason, "agent npub is not resolvable");
+        assert_eq!(plan.exclusions[1].ref_, "agent-three@finite.vip");
+        assert_eq!(
+            plan.exclusions[1].reason,
+            "agent is not active in the account roster"
+        );
+        assert!(plan.supersedes_plan_id.is_none());
+
+        // A second preflight for a non-admin is rejected.
+        let stranger = Keys::generate();
+        let forbidden = authed_request(
+            router,
+            &stranger,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invitation_preflight_fails_closed_without_authorities() {
+        let admin_keys = Keys::generate();
+        let router = router_with_state(test_state());
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    struct PlanFixture {
+        admin_keys: Keys,
+        human_keys: Keys,
+        agent_one_keys: Keys,
+        agent_two_keys: Keys,
+        state: ServerState,
+    }
+
+    impl PlanFixture {
+        fn new() -> Self {
+            Self {
+                admin_keys: Keys::generate(),
+                human_keys: Keys::generate(),
+                agent_one_keys: Keys::generate(),
+                agent_two_keys: Keys::generate(),
+                state: test_state(),
+            }
+        }
+
+        fn human_npub(&self) -> String {
+            npub(&self.human_keys)
+        }
+
+        fn agent_one_npub(&self) -> String {
+            npub(&self.agent_one_keys)
+        }
+
+        fn agent_two_npub(&self) -> String {
+            npub(&self.agent_two_keys)
+        }
+
+        fn roster(&self, revision: i64, agents: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "workosUserId": "user_workos_friend",
+                "humanMailbox": "friend@example.com",
+                "rosterRevision": revision,
+                "agents": agents,
+            })
+        }
+
+        fn full_roster_agents(&self) -> serde_json::Value {
+            serde_json::json!([
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": self.agent_one_npub(),
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+                {
+                    "managedAgentEmail": "agent-two@finite.vip",
+                    "agentNpub": self.agent_two_npub(),
+                    "status": "active",
+                    "placementRunnerClass": "kata",
+                },
+            ])
+        }
+    }
+
+    async fn plan_fixture_router(
+        mut fixture: PlanFixture,
+        core_responses: Vec<(u16, &'static str, serde_json::Value)>,
+        identity_responses: Vec<(u16, &'static str, serde_json::Value)>,
+    ) -> (PlanFixture, Router) {
+        let (core_url, _core_server) = spawn_json_authority_with_status(core_responses);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(identity_responses);
+        let state = fixture
+            .state
+            .clone()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        fixture.state = state.clone();
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &fixture.admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        (fixture, router)
+    }
+
+    async fn run_preflight(router: &Router, fixture: &PlanFixture) -> InvitationPreflightResponse {
+        run_preflight_at(router, fixture, TEST_NOW + 1).await
+    }
+
+    async fn run_preflight_at(
+        router: &Router,
+        fixture: &PlanFixture,
+        now: u64,
+    ) -> InvitationPreflightResponse {
+        let preflight = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            now,
+        )
+        .await;
+        let status = preflight.status();
+        let body = read_text(preflight).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_creates_per_principal_invitations_and_honors_reduced_set() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.agents.len(), 2);
+        assert!(plan.exclusions.is_empty());
+
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                    "reducedSet": ["agent-two@finite.vip"],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.plan_id, plan.plan_id);
+        assert_eq!(committed.roster_revision, Some(3));
+        assert_eq!(committed.invitations.len(), 2);
+        assert!(committed.skipped.is_empty());
+        assert_eq!(committed.invitations[0].ref_, "friend@example.com");
+        assert_eq!(committed.invitations[0].npub, fixture.human_npub());
+        assert_eq!(committed.invitations[1].ref_, "agent-one@finite.vip");
+        assert_eq!(committed.invitations[1].npub, fixture.agent_one_npub());
+        for entry in &committed.invitations {
+            assert_eq!(entry.invitation.target_kind, "npub");
+            assert_eq!(entry.invitation.status, "pending");
+        }
+
+        // Commit provenance is recorded on the invitations.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            for entry in &committed.invitations {
+                let invitation = store.load_brain_invitation(&entry.invitation.id).unwrap();
+                assert_eq!(
+                    invitation.origin_ref.as_deref(),
+                    Some(plan.plan_id.as_str())
+                );
+                assert_eq!(invitation.roster_revision, Some(3));
+            }
+        }
+
+        // A second commit of the same plan is refused.
+        let recommit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(recommit.status(), StatusCode::CONFLICT);
+
+        // Acceptance of a still-active agent invitation is not narrowed, and
+        // stamps member provenance from the plan.
+        let accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[1].invitation.invite_code
+        );
+        let accept = authed_request(
+            router.clone(),
+            &fixture.agent_one_keys,
+            "POST",
+            &accept_path,
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+        assert!(accepted.narrowed.is_none());
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let provenance = store
+                .member_provenance(
+                    &BrainId::new("acme").unwrap(),
+                    &UserId::new(fixture.agent_one_npub()).unwrap(),
+                )
+                .unwrap()
+                .expect("member provenance is recorded");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::invitation(
+                    UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    plan.plan_id.clone(),
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_rejects_plan_hash_mismatch() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![(
+            200,
+            "/api/core/v1/brain/account-agent-roster",
+            fixture.roster(3, fixture.full_roster_agents()),
+        )];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": "sha256:tampered",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_supersedes_expired_pending_invitation() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+
+        // The earlier invite lapsed: a pending-but-expired invitation for the
+        // same (Brain, target) still occupies the singleton index.
+        {
+            let mut store = fixture.state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-expired",
+                    &UserId::new(fixture.human_npub()).unwrap(),
+                    "invite-expired",
+                    "/v1/brain-invitation-links/invite-expired/accept",
+                    &[],
+                    &UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    "2026-05-02T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let plan = run_preflight(&router, &fixture).await;
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.invitations.len(), 1);
+        assert_eq!(committed.invitations[0].npub, fixture.human_npub());
+        assert_ne!(committed.invitations[0].invitation.id, "invitation-expired");
+        assert_eq!(
+            committed.superseded_invitation_ids,
+            vec!["invitation-expired".to_owned()]
+        );
+
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let old = store.load_brain_invitation("invitation-expired").unwrap();
+            assert_eq!(old.status, LinkStatus::Revoked);
+            let new = store
+                .load_brain_invitation(&committed.invitations[0].invitation.id)
+                .unwrap();
+            assert_eq!(new.status, LinkStatus::Pending);
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_returns_fresh_preflight_on_roster_drift() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(4, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(4, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.roster_revision, Some(3));
+
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::CONFLICT);
+        let fresh: InvitationPreflightResponse = read_json(commit).await;
+        assert_eq!(fresh.roster_revision, Some(4));
+        assert_eq!(
+            fresh.supersedes_plan_id.as_deref(),
+            Some(plan.plan_id.as_str())
+        );
+        assert_ne!(fresh.plan_id, plan.plan_id);
+        assert_eq!(fresh.agents.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn plan_linked_acceptance_narrows_permanently_departed_participants() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            // Acceptance re-checks: agent-one has permanently departed.
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(
+                    4,
+                    serde_json::json!([
+                        {
+                            "managedAgentEmail": "agent-two@finite.vip",
+                            "agentNpub": fixture.agent_two_npub(),
+                            "status": "active",
+                            "placementRunnerClass": "kata",
+                        },
+                    ]),
+                ),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(
+                    4,
+                    serde_json::json!([
+                        {
+                            "managedAgentEmail": "agent-two@finite.vip",
+                            "agentNpub": fixture.agent_two_npub(),
+                            "status": "active",
+                            "placementRunnerClass": "kata",
+                        },
+                    ]),
+                ),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+
+        let commit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.invitations.len(), 3);
+
+        // The human accepts: the roster moved, agent-one is excluded with an
+        // explicit narrowed result, and nothing is added or substituted.
+        let human_accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[0].invitation.invite_code
+        );
+        let accept = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            &human_accept_path,
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accept).await;
+        assert_eq!(accepted.status, "accepted");
+        let narrowed = accepted.narrowed.expect("acceptance reports narrowing");
+        assert_eq!(narrowed.roster_revision, Some(4));
+        assert_eq!(narrowed.exclusions.len(), 1);
+        assert_eq!(narrowed.exclusions[0].ref_, "agent-one@finite.vip");
+        assert_eq!(
+            narrowed.exclusions[0].reason,
+            "permanently departed the account roster"
+        );
+
+        // The departed agent's invitation is refused outright.
+        let agent_accept_path = format!(
+            "/v1/brain-invitation-links/{}/accept",
+            committed.invitations[1].invitation.invite_code
+        );
+        let accept = authed_request(
+            router,
+            &fixture.agent_one_keys,
+            "POST",
+            &agent_accept_path,
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::GONE);
+    }
+
     fn personal_test_state(owner_keys: &Keys, agent_keys: &Keys) -> ServerState {
         let mut store = BrainStore::open_in_memory().unwrap();
         let owner_npub = UserId::new(npub(owner_keys)).unwrap();
@@ -10835,11 +12076,6 @@ mod tests {
                 .is_empty()
         );
         server.join().unwrap();
-    }
-
-    fn sqlite_test_router(path: &std::path::Path) -> Router {
-        let store = BrainStore::open(path).unwrap();
-        router_with_state(ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60))
     }
 
     async fn router_with_test_org_folders(keys: &Keys) -> Router {
@@ -11649,5 +12885,1621 @@ mod tests {
             "expected error containing {contains:?}, got {:?}",
             body.error
         );
+    }
+
+    fn departure_test_state_with_member(
+        member_keys: &Keys,
+        member_email: Option<&str>,
+    ) -> ServerState {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
+        let brain_id = output.brain.id.clone();
+        let grants = grants_for_required(&output.required_key_grants, &brain_id, "npub-admin");
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+        let member = UserId::new(npub(member_keys)).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        if let Some(email) = member_email {
+            let now = test_rfc3339();
+            store
+                .record_identity_alias(&IdentityAlias {
+                    npub: member,
+                    hex_public_key: NostrPublicKey::from_protocol(member_keys.public_key())
+                        .to_hex(),
+                    preferred_nip05: Some(email.to_owned()),
+                    nip05_verified_at: Some(now.clone()),
+                    nip05_relays: Vec::new(),
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn departure_page(facts: serde_json::Value, max_revision: i64) -> serde_json::Value {
+        serde_json::json!({ "facts": facts, "maxRevision": max_revision })
+    }
+
+    fn departure_fact_json(
+        revision: i64,
+        account_id: &str,
+        principal_kind: &str,
+        principal_ref: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "revision": revision,
+            "accountId": account_id,
+            "principalKind": principal_kind,
+            "principalRef": principal_ref,
+            "departedAt": "2026-06-24T00:00:00Z",
+            "reason": "retired",
+        })
+    }
+
+    fn acme_brain_id() -> BrainId {
+        BrainId::new("acme").unwrap()
+    }
+
+    fn assert_member_gone(state: &ServerState, member_npub: &str) {
+        let store = state.store.lock().unwrap();
+        let stored = store.load_brain(&acme_brain_id()).unwrap();
+        assert!(
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == member_npub),
+            "departed principal must lose Brain Membership"
+        );
+    }
+
+    fn assert_member_present(state: &ServerState, member_npub: &str) {
+        let store = state.store.lock().unwrap();
+        let stored = store.load_brain(&acme_brain_id()).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == member_npub),
+            "failed polls must not touch Brain Membership"
+        );
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_applies_agent_fact_through_identity_binding() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({
+                "agentNpub": agent_npub,
+                "managedAgentEmail": "agent@finite.vip",
+            }),
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    1,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                1,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &agent_npub);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 1);
+        let ledger = store.departure_revocations(&acme_brain_id()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].principal_kind, DeparturePrincipalKind::Agent);
+        assert_eq!(ledger[0].principal_ref, "agent@finite.vip");
+        assert_eq!(ledger[0].fact_revision, 1);
+        assert_eq!(ledger[0].origin_kind.as_str(), "departure");
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_applies_human_fact_through_user_resolution() {
+        let human_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/user-resolution",
+            serde_json::json!({
+                "workosUserId": "user_workos_human",
+                "userNpub": human_npub,
+            }),
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    4,
+                    "user_workos_human",
+                    "human",
+                    "human@finite.computer"
+                )]),
+                4,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&human_keys, None)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &human_npub);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 4);
+        let ledger = store.departure_revocations(&acme_brain_id()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].principal_kind, DeparturePrincipalKind::Human);
+        assert_eq!(ledger[0].account_id, "user_workos_human");
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_resolves_deleted_agent_through_local_alias() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        // The retired agent's NIP-05 name and Identity binding are both gone;
+        // no agent-resolution call is made, so the identity server sees zero
+        // requests.
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": {} }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    2,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                2,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &agent_npub);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_tolerates_core_outage_and_routine_routes_continue() {
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let (core_url, core_server) = spawn_authority_response(AuthorityTestResponse::Status);
+        let state = departure_test_state_with_member(&member_keys, Some("agent@finite.vip"))
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                "http://127.0.0.1:9",
+                "identity-token",
+            );
+
+        let error = poll_departure_facts_once(&state).await.unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(store.departure_fact_cursor().unwrap(), 0);
+        }
+        assert_member_present(&state, &member_npub);
+
+        // Routine authorization never consults Core: reads keep working while
+        // the consumer cannot reach it.
+        let response = authed_request(
+            router_with_state(state),
+            &member_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let visible: VisibleBrainsResponse = read_json(response).await;
+        assert_eq!(visible.brains.len(), 1);
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_replay_after_success_is_a_no_op() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let agent_resolution = serde_json::json!({
+            "agentNpub": agent_npub,
+            "managedAgentEmail": "agent@finite.vip",
+        });
+        // The second poll fetches an empty page and never re-resolves, so the
+        // identity server only answers the first poll's agent resolution.
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/agent-resolution",
+            agent_resolution,
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/departure-facts",
+                departure_page(
+                    serde_json::json!([departure_fact_json(
+                        1,
+                        "user_workos_owner",
+                        "agent",
+                        "agent@finite.vip"
+                    )]),
+                    1,
+                ),
+            ),
+            (
+                "/api/core/v1/brain/departure-facts",
+                departure_page(serde_json::json!([]), 1),
+            ),
+        ]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        assert_eq!(poll_departure_facts_once(&state).await.unwrap(), 1);
+        // Polling again finds no new facts and changes nothing.
+        assert_eq!(poll_departure_facts_once(&state).await.unwrap(), 0);
+
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.departure_fact_cursor().unwrap(), 1);
+        assert_eq!(
+            store.departure_revocations(&acme_brain_id()).unwrap().len(),
+            1
+        );
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_leaves_cursor_when_identity_resolution_fails() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        let identifier = Nip05Identifier::parse("agent@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let (identity_url, identity_server) =
+            spawn_authority_response(AuthorityTestResponse::Malformed);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    1,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@finite.vip"
+                )]),
+                1,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@finite.vip"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let error = poll_departure_facts_once(&state).await.unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                store.departure_fact_cursor().unwrap(),
+                0,
+                "cursor must not advance past an unapplied fact"
+            );
+            assert!(
+                store
+                    .departure_revocations(&acme_brain_id())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_member_present(&state, &agent_npub);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_consumer_only_spawns_with_authorities() {
+        assert!(spawn_departure_fact_consumer(&test_state()).is_none());
+        let state = test_state().with_agent_bootstrap_authorities(
+            "http://127.0.0.1:9",
+            "core-token",
+            "http://127.0.0.1:9",
+            "identity-token",
+        );
+        let handle = spawn_departure_fact_consumer(&state)
+            .expect("consumer spawns when authorities are configured");
+        handle.abort();
+    }
+
+    fn approval_test_state(admin_keys: &Keys) -> ServerState {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let admin_npub = npub(admin_keys);
+        let output = bootstrap_organization_brain("acme", "Acme", &admin_npub).unwrap();
+        let brain_id = output.brain.id.clone();
+        let grants = grants_for_required(&output.required_key_grants, &brain_id, &admin_npub);
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn signed_approval_event_json(
+        keys: &Keys,
+        payload: &finite_brain_core::BrainApprovalPayload,
+    ) -> String {
+        let template = finite_brain_core::brain_approval_event_template(payload, TEST_NOW).unwrap();
+        let event = finite_brain_core::sign_brain_event_template(keys, &template).unwrap();
+        serde_json::to_string(&event).unwrap()
+    }
+
+    fn delegation_approval_payload(
+        human_npub: &str,
+        target_npubs: Vec<String>,
+        nonce: &str,
+        expires_at: u64,
+    ) -> finite_brain_core::BrainApprovalPayload {
+        finite_brain_core::BrainApprovalPayload {
+            version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: human_npub.to_owned(),
+            action: finite_brain_core::BRAIN_APPROVAL_ACTION_DELEGATION_GRANT.to_owned(),
+            brain_id: "acme".to_owned(),
+            plan_id: None,
+            target_npubs,
+            nonce: nonce.to_owned(),
+            expires_at,
+        }
+    }
+
+    async fn create_approval_request(
+        router: &Router,
+        keys: &Keys,
+        body: serde_json::Value,
+        created_at: u64,
+    ) -> axum::response::Response {
+        authed_request(
+            router.clone(),
+            keys,
+            "POST",
+            "/v1/brains/acme/approval-requests",
+            Some(body.to_string()),
+            created_at,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn approval_request_lifecycle_is_pending_then_denied_with_requester_scoping() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let state = approval_test_state(&admin_keys);
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .add_member(&acme_brain_id(), &UserId::new(npub(&member_keys)).unwrap())
+                .unwrap();
+        }
+        let router = router_with_state(state.clone());
+
+        // A member files a delegation-grant request.
+        let created = create_approval_request(
+            &router,
+            &member_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let member_request: ApprovalRequestResponse = read_json(created).await;
+        assert_eq!(member_request.status, "pending");
+        assert_eq!(member_request.action, "delegation-grant");
+        assert_eq!(member_request.requested_by_npub, npub(&member_keys));
+        assert_eq!(member_request.expires_at, TEST_NOW + 900);
+        assert_eq!(member_request.nonce.len(), 32);
+        assert_eq!(member_request.payload["action"], "delegation-grant");
+        assert_eq!(member_request.payload["brainId"], "acme");
+        assert_eq!(member_request.payload["nonce"], member_request.nonce);
+
+        // An admin files a second request; list visibility is scoped.
+        let admin_created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [npub(&Keys::generate())],
+            }),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(admin_created.status(), StatusCode::OK);
+        let admin_request: ApprovalRequestResponse = read_json(admin_created).await;
+
+        let member_list = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        let member_list: ApprovalRequestListResponse = read_json(member_list).await;
+        assert_eq!(member_list.requests.len(), 1);
+        assert_eq!(member_list.requests[0].id, member_request.id);
+        let admin_list = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        let admin_list: ApprovalRequestListResponse = read_json(admin_list).await;
+        assert_eq!(admin_list.requests.len(), 2);
+
+        // Outsiders can neither file, list, nor deny.
+        let outsider_create = create_approval_request(
+            &router,
+            &outsider_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [npub(&Keys::generate())],
+            }),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(outsider_create.status(), StatusCode::FORBIDDEN);
+        let outsider_list = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "GET",
+            "/v1/brains/acme/approval-requests",
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(outsider_list.status(), StatusCode::FORBIDDEN);
+
+        // The requester denies their own card; terminal state is exactly-once.
+        let denied = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                member_request.id
+            ),
+            None,
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::OK);
+        let denied: ApprovalRequestResponse = read_json(denied).await;
+        assert_eq!(denied.status, "denied");
+        assert_eq!(
+            denied.resolved_by_npub.as_deref(),
+            Some(npub(&member_keys).as_str())
+        );
+        let deny_again = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                member_request.id
+            ),
+            None,
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(deny_again.status(), StatusCode::CONFLICT);
+
+        // A member cannot deny another principal's card; an admin can.
+        let member_deny_admin = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                admin_request.id
+            ),
+            None,
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(member_deny_admin.status(), StatusCode::FORBIDDEN);
+        let admin_deny = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            &format!(
+                "/v1/brains/acme/approval-requests/{}/deny",
+                admin_request.id
+            ),
+            None,
+            TEST_NOW + 10,
+        )
+        .await;
+        assert_eq!(admin_deny.status(), StatusCode::OK);
+
+        // A denied card can never be approved: its artifact is rejected.
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub],
+            &member_request.nonce,
+            member_request.expires_at,
+        );
+        let artifact = signed_approval_event_json(&admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": member_request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 11,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::CONFLICT);
+
+        // Malformed actions fail closed at request time.
+        for body in [
+            serde_json::json!({ "action": "open-brain" }),
+            serde_json::json!({ "action": "invite-commit" }),
+            serde_json::json!({ "action": "invite-commit", "planId": "plan-missing" }),
+            serde_json::json!({ "action": "delegation-grant" }),
+            serde_json::json!({ "action": "delegation-grant", "targetNpubs": ["not-an-npub"] }),
+        ] {
+            let rejected =
+                create_approval_request(&router, &admin_keys, body.clone(), TEST_NOW + 12).await;
+            assert!(
+                matches!(
+                    rejected.status(),
+                    StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+                ),
+                "{body} must be rejected, got {}",
+                rejected.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_grant_approval_applies_with_provenance_and_replay_guards() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let state = approval_test_state(&admin_keys);
+        let router = router_with_state(state.clone());
+
+        let created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+
+        // The pending card is visible in admin metadata; members do not see it.
+        let metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 2).await;
+        let metadata: serde_json::Value = read_json(metadata).await;
+        assert_eq!(
+            metadata["pendingApprovals"][0]["id"],
+            serde_json::json!(request.id)
+        );
+
+        // The human signs exactly the pending payload and relays it.
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub.clone()],
+            &request.nonce,
+            request.expires_at,
+        );
+        let artifact = signed_approval_event_json(&admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::OK);
+        let applied: ApprovalSubmissionResponse = read_json(submit).await;
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.action, "delegation-grant");
+        assert_eq!(applied.request_id.as_deref(), Some(request.id.as_str()));
+        assert_eq!(
+            applied.result,
+            serde_json::json!({ "grantedNpubs": [target_npub] })
+        );
+
+        // The grant carries approval provenance; the card resolved approved.
+        {
+            let store = state.store.lock().unwrap();
+            let stored = store.load_brain(&acme_brain_id()).unwrap();
+            assert!(
+                stored
+                    .brain
+                    .admins
+                    .contains(&UserId::new(target_npub.clone()).unwrap())
+            );
+            let provenance = store
+                .member_provenance(&acme_brain_id(), &UserId::new(target_npub.clone()).unwrap())
+                .unwrap()
+                .expect("approval grant provenance is recorded");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::approval(
+                    UserId::new(npub(&admin_keys)).unwrap(),
+                    applied.approval_event_id.clone(),
+                )
+            );
+            let resolved = store.load_brain_approval_request(&request.id).unwrap();
+            assert_eq!(
+                resolved.status,
+                finite_brain_store::ApprovalRequestStatus::Approved
+            );
+            assert_eq!(
+                resolved.approval_event_id.as_deref(),
+                Some(applied.approval_event_id.as_str())
+            );
+            assert!(
+                store
+                    .approval_nonce_seen(&acme_brain_id(), &request.nonce)
+                    .unwrap()
+            );
+        }
+
+        // The resolved card leaves the pending list.
+        let metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 4).await;
+        let metadata: serde_json::Value = read_json(metadata).await;
+        assert!(metadata.get("pendingApprovals").is_none());
+
+        // Replay of the same artifact fails closed.
+        let replay = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+
+        // A new request for an existing admin is a conflict, not a no-op.
+        let duplicate = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn approval_submission_rejects_bad_signature_scope_expiry_and_standing() {
+        let admin_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let state = approval_test_state(&admin_keys);
+        let router = router_with_state(state.clone());
+
+        let created = create_approval_request(
+            &router,
+            &admin_keys,
+            serde_json::json!({
+                "action": "delegation-grant",
+                "targetNpubs": [target_npub],
+            }),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+        let payload = delegation_approval_payload(
+            &npub(&admin_keys),
+            vec![target_npub.clone()],
+            &request.nonce,
+            request.expires_at,
+        );
+
+        // Bad signature: any content tampering breaks event integrity.
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&signed_approval_event_json(&admin_keys, &payload)).unwrap();
+        tampered["content"] = serde_json::json!(
+            tampered["content"]
+                .as_str()
+                .unwrap()
+                .replace("acme", "ecma")
+        );
+        let bad_signature = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": tampered.to_string(),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(
+            bad_signature,
+            StatusCode::BAD_REQUEST,
+            "signature is invalid",
+        )
+        .await;
+
+        // Wrong scope: a valid artifact for another brain is rejected here.
+        let wrong_scope = finite_brain_core::BrainApprovalPayload {
+            brain_id: "other".to_owned(),
+            ..payload.clone()
+        };
+        let wrong_scope = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &wrong_scope),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_error(wrong_scope, StatusCode::BAD_REQUEST, "different brain").await;
+
+        // Expired artifact: the signed expiry has passed.
+        let expired = finite_brain_core::BrainApprovalPayload {
+            expires_at: TEST_NOW - 1,
+            ..payload.clone()
+        };
+        let expired = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &expired),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_error(expired, StatusCode::GONE, "expired").await;
+
+        // Artifact that does not match the pending request is rejected.
+        let mismatched = finite_brain_core::BrainApprovalPayload {
+            nonce: "ff".repeat(16),
+            ..payload.clone()
+        };
+        let mismatched = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&admin_keys, &mismatched),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(
+            mismatched,
+            StatusCode::BAD_REQUEST,
+            "does not match the pending request",
+        )
+        .await;
+
+        // A correctly shaped artifact signed by a non-admin human is rejected.
+        let outsider_payload = finite_brain_core::BrainApprovalPayload {
+            human_npub: npub(&outsider_keys),
+            ..payload.clone()
+        };
+        let wrong_signer = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&outsider_keys, &outsider_payload),
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_error(wrong_signer, StatusCode::FORBIDDEN, "admin standing").await;
+
+        // None of the rejections consumed the nonce or touched the card.
+        let store = state.store.lock().unwrap();
+        assert!(
+            !store
+                .approval_nonce_seen(&acme_brain_id(), &request.nonce)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .load_brain_approval_request(&request.id)
+                .unwrap()
+                .status,
+            finite_brain_store::ApprovalRequestStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_commit_approval_executes_commit_with_approval_provenance() {
+        let fixture = PlanFixture::new();
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        assert_eq!(plan.agents.len(), 2);
+
+        // The agent asks a human to approve committing the plan.
+        let created = create_approval_request(
+            &router,
+            &fixture.admin_keys,
+            serde_json::json!({
+                "action": "invite-commit",
+                "planId": plan.plan_id,
+            }),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let request: ApprovalRequestResponse = read_json(created).await;
+        assert_eq!(request.payload["planId"], serde_json::json!(plan.plan_id));
+
+        // The human signs the invite-commit approval; the relay submits it.
+        let payload = finite_brain_core::BrainApprovalPayload {
+            version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+            human_npub: npub(&fixture.admin_keys),
+            action: finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+            brain_id: "acme".to_owned(),
+            plan_id: Some(plan.plan_id.clone()),
+            target_npubs: Vec::new(),
+            nonce: request.nonce.clone(),
+            expires_at: request.expires_at,
+        };
+        let artifact = signed_approval_event_json(&fixture.admin_keys, &payload);
+        let submit = authed_request(
+            router.clone(),
+            &fixture.agent_one_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::OK);
+        let applied: ApprovalSubmissionResponse = read_json(submit).await;
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.action, "invite-commit");
+        let commit: InvitationCommitResponse =
+            serde_json::from_value(applied.result.clone()).unwrap();
+        assert_eq!(commit.status, "committed");
+        assert_eq!(commit.plan_id, plan.plan_id);
+        assert_eq!(commit.invitations.len(), 3);
+
+        // The committed invitations carry approval provenance keyed by the
+        // signed artifact's event id.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            for entry in &commit.invitations {
+                let invitation = store.load_brain_invitation(&entry.invitation.id).unwrap();
+                assert_eq!(
+                    invitation.origin_kind,
+                    finite_brain_store::ProvenanceOriginKind::Approval
+                );
+                assert_eq!(
+                    invitation.origin_ref.as_deref(),
+                    Some(applied.approval_event_id.as_str())
+                );
+            }
+            let plan_row = store
+                .load_brain_invitation_plan(&plan.plan_id)
+                .unwrap()
+                .unwrap();
+            assert!(plan_row.committed);
+            assert_eq!(
+                store
+                    .load_brain_approval_request(&request.id)
+                    .unwrap()
+                    .status,
+                finite_brain_store::ApprovalRequestStatus::Approved
+            );
+        }
+
+        // Acceptance stamps approval member provenance through the request's
+        // durable plan link, with roster narrowing intact.
+        let human_invitation = &commit.invitations[0].invitation;
+        let accept = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                human_invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let provenance = store
+                .member_provenance(
+                    &acme_brain_id(),
+                    &UserId::new(fixture.human_npub()).unwrap(),
+                )
+                .unwrap()
+                .expect("approval-committed acceptance stamps provenance");
+            assert_eq!(
+                provenance,
+                finite_brain_store::MemberProvenance::approval(
+                    UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    applied.approval_event_id.clone(),
+                )
+            );
+        }
+
+        // Resubmission and re-request both fail closed.
+        let resubmit = authed_request(
+            router.clone(),
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": artifact,
+                    "requestId": request.id,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(resubmit.status(), StatusCode::CONFLICT);
+        let re_request = create_approval_request(
+            &router,
+            &fixture.admin_keys,
+            serde_json::json!({
+                "action": "invite-commit",
+                "planId": plan.plan_id,
+            }),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(re_request.status(), StatusCode::CONFLICT);
+
+        // An artifact signed by a non-admin human cannot commit the plan.
+        let outsider_payload = finite_brain_core::BrainApprovalPayload {
+            human_npub: npub(&fixture.human_keys),
+            nonce: "ee".repeat(16),
+            ..payload.clone()
+        };
+        let wrong_signer = authed_request(
+            router.clone(),
+            &fixture.human_keys,
+            "POST",
+            "/v1/brains/acme/approvals",
+            Some(
+                serde_json::json!({
+                    "approvalEventJson": signed_approval_event_json(&fixture.human_keys, &outsider_payload),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_error(wrong_signer, StatusCode::FORBIDDEN, "admin standing").await;
+    }
+
+    async fn admin_metadata(
+        router: &Router,
+        keys: &Keys,
+        brain_id: &str,
+        now: u64,
+    ) -> serde_json::Value {
+        let response = authed_request(
+            router.clone(),
+            keys,
+            "GET",
+            &format!("/v1/brains/{brain_id}/metadata"),
+            None,
+            now,
+        )
+        .await;
+        let status = response.status();
+        let body = read_text(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn duplicate_approval_reuses_pending_invitations_and_records_results() {
+        let fixture = PlanFixture::new();
+        let mut core_responses = Vec::new();
+        let mut identity_responses = vec![(
+            404,
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({}),
+        )];
+        for _ in 0..2 {
+            core_responses.extend(vec![
+                (
+                    200,
+                    "/api/core/v1/brain/account-agent-roster",
+                    fixture.roster(3, fixture.full_roster_agents()),
+                );
+                3
+            ]);
+            identity_responses.extend(vec![
+                (
+                    200,
+                    "/api/v1/operator/brain/user-resolution",
+                    serde_json::json!({
+                        "workosUserId": "user_workos_friend",
+                        "userNpub": fixture.human_npub(),
+                    }),
+                ),
+                (
+                    200,
+                    "/api/v1/operator/brain/agent-resolution",
+                    serde_json::json!({
+                        "agentNpub": fixture.agent_one_npub(),
+                        "managedAgentEmail": "agent-one@finite.vip",
+                    }),
+                ),
+                (
+                    200,
+                    "/api/v1/operator/brain/agent-resolution",
+                    serde_json::json!({
+                        "agentNpub": fixture.agent_two_npub(),
+                        "managedAgentEmail": "agent-two@finite.vip",
+                    }),
+                ),
+            ]);
+        }
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+
+        async fn approve_plan(
+            router: &Router,
+            fixture: &PlanFixture,
+            plan_id: &str,
+            step: u64,
+        ) -> (ApprovalSubmissionResponse, InvitationCommitResponse) {
+            let created = create_approval_request(
+                router,
+                &fixture.admin_keys,
+                serde_json::json!({
+                    "action": "invite-commit",
+                    "planId": plan_id,
+                }),
+                TEST_NOW + step,
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let request: ApprovalRequestResponse = read_json(created).await;
+            let payload = finite_brain_core::BrainApprovalPayload {
+                version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+                human_npub: npub(&fixture.admin_keys),
+                action: finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+                brain_id: "acme".to_owned(),
+                plan_id: Some(plan_id.to_owned()),
+                target_npubs: Vec::new(),
+                nonce: request.nonce.clone(),
+                expires_at: request.expires_at,
+            };
+            let artifact = signed_approval_event_json(&fixture.admin_keys, &payload);
+            let submit = authed_request(
+                router.clone(),
+                &fixture.agent_one_keys,
+                "POST",
+                "/v1/brains/acme/approvals",
+                Some(
+                    serde_json::json!({
+                        "approvalEventJson": artifact,
+                        "requestId": request.id,
+                    })
+                    .to_string(),
+                ),
+                TEST_NOW + step + 1,
+            )
+            .await;
+            let status = submit.status();
+            let body = read_text(submit).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let applied: ApprovalSubmissionResponse = serde_json::from_str(&body).unwrap();
+            let commit: InvitationCommitResponse =
+                serde_json::from_value(applied.result.clone()).unwrap();
+            (applied, commit)
+        }
+
+        // First approval commits three pending invitations.
+        let first_plan = run_preflight(&router, &fixture).await;
+        let (_first_applied, first_commit) =
+            approve_plan(&router, &fixture, &first_plan.plan_id, 2).await;
+        assert_eq!(first_commit.status, "committed");
+        assert_eq!(first_commit.invitations.len(), 3);
+        assert!(first_commit.skipped.is_empty());
+        let first_ids: Vec<&str> = first_commit
+            .invitations
+            .iter()
+            .map(|entry| entry.invitation.id.as_str())
+            .collect();
+
+        // A second approval for the same roster (a re-filed request whose
+        // card fell on the floor, or a duplicate filing) must be idempotent:
+        // it reuses the live pending invitations instead of colliding on the
+        // (brain, target) singleton.
+        let second_plan = run_preflight_at(&router, &fixture, TEST_NOW + 20).await;
+        let (second_applied, second_commit) =
+            approve_plan(&router, &fixture, &second_plan.plan_id, 10).await;
+        assert_eq!(second_applied.status, "applied");
+        assert_eq!(second_commit.status, "committed");
+        assert_eq!(second_commit.invitations.len(), 3);
+        assert_eq!(second_commit.skipped.len(), 3);
+        assert!(
+            second_commit
+                .skipped
+                .iter()
+                .all(|skipped| skipped.reason.contains("already invited"))
+        );
+        let second_ids: Vec<&str> = second_commit
+            .invitations
+            .iter()
+            .map(|entry| entry.invitation.id.as_str())
+            .collect();
+        assert_eq!(first_ids, second_ids);
+
+        // The resolved request records its result invitations so a member
+        // agent can observe the outcome from `approvals list --all`.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let requests = store
+                .list_brain_approval_requests(&acme_brain_id())
+                .unwrap();
+            let approved: Vec<&finite_brain_store::StoredBrainApprovalRequest> = requests
+                .iter()
+                .filter(|request| {
+                    request.status == finite_brain_store::ApprovalRequestStatus::Approved
+                })
+                .collect();
+            assert_eq!(approved.len(), 2);
+            for request in approved {
+                let recorded = request
+                    .result_invitations
+                    .as_ref()
+                    .expect("approved request records result invitations");
+                assert_eq!(recorded.len(), 3);
+                for id in recorded {
+                    assert!(first_ids.contains(&id.as_str()));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_wraps_are_admin_gated_and_complete_through_the_grant_batch() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target_npub = npub(&target_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // Invitation commit records the pending wraps: the All-Members Folder
+        // plus the invited Restricted Folder.
+        let invite = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": target_npub,
+                    "initialFolderAccess": ["restricted"],
+                    "expiresAt": "2026-06-04T20:26:40Z",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invite).await;
+
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 20).await;
+        let wraps = metadata["pendingWraps"].as_array().unwrap();
+        assert_eq!(wraps.len(), 2, "{metadata}");
+        assert!(wraps.iter().all(|wrap| wrap["recipientNpub"] == target_npub
+            && wrap["reason"] == "invitation"
+            && wrap["keyVersion"] == 1));
+        let marked_folders = wraps
+            .iter()
+            .map(|wrap| wrap["folderId"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            marked_folders,
+            std::collections::BTreeSet::from([
+                "getting-started".to_owned(),
+                "restricted".to_owned()
+            ])
+        );
+
+        // Accept keeps the markers; the acceptant's own metadata stays clean
+        // of the admin-only field.
+        let accept = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            &format!(
+                "/v1/brain-invitation-links/{}/accept",
+                invitation.invite_code
+            ),
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(accept.status(), StatusCode::OK);
+        let member_metadata = admin_metadata(&router, &target_keys, "acme", TEST_NOW + 21).await;
+        assert!(
+            member_metadata.get("pendingWraps").is_none(),
+            "non-admin metadata must not carry pendingWraps: {member_metadata}"
+        );
+
+        // The sync bootstrap shows the wraps to the admin but not the member.
+        let admin_bootstrap = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/sync/bootstrap",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(admin_bootstrap.status(), StatusCode::OK);
+        let admin_bootstrap: serde_json::Value = read_json(admin_bootstrap).await;
+        assert_eq!(
+            admin_bootstrap["pendingWraps"].as_array().unwrap().len(),
+            2,
+            "{admin_bootstrap}"
+        );
+        let member_bootstrap = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/sync/bootstrap",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(member_bootstrap.status(), StatusCode::OK);
+        let member_bootstrap: serde_json::Value = read_json(member_bootstrap).await;
+        assert!(
+            member_bootstrap.get("pendingWraps").is_none(),
+            "non-admin bootstrap must not carry pendingWraps: {member_bootstrap}"
+        );
+
+        // The encrypted export rides the same admin gate.
+        let admin_export = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 24,
+        )
+        .await;
+        assert_eq!(admin_export.status(), StatusCode::OK);
+        let admin_export: serde_json::Value = read_json(admin_export).await;
+        assert_eq!(
+            admin_export["pendingWraps"].as_array().unwrap().len(),
+            2,
+            "{admin_export}"
+        );
+        let member_export = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 25,
+        )
+        .await;
+        assert_eq!(member_export.status(), StatusCode::OK);
+        let member_export: serde_json::Value = read_json(member_export).await;
+        assert!(
+            member_export.get("pendingWraps").is_none(),
+            "non-admin export must not carry pendingWraps: {member_export}"
+        );
+
+        // The member cannot complete wraps.
+        let forbidden = authed_request(
+            router.clone(),
+            &target_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(serde_json::json!({ "grants": [] }).to_string()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        // A grant for an unmarked recipient fails closed and leaves the
+        // markers untouched.
+        let stranger_npub = npub(&Keys::generate());
+        let wrong_recipient = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-stranger",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &stranger_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(wrong_recipient.status(), StatusCode::BAD_REQUEST);
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 22).await;
+        assert_eq!(metadata["pendingWraps"].as_array().unwrap().len(), 2);
+
+        // The marked recipient's wrap completes and clears the marker.
+        let complete = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-target",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &target_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(complete.status(), StatusCode::OK);
+        let receipt: CompletePendingWrapsResponse = read_json(complete).await;
+        assert_eq!(receipt.outcome, "completed");
+        assert_eq!(receipt.completed_count, 1);
+        assert_eq!(receipt.completed_recipients, vec![target_npub.clone()]);
+
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 23).await;
+        let wraps = metadata["pendingWraps"].as_array().unwrap();
+        assert_eq!(wraps.len(), 1, "{metadata}");
+        assert_eq!(wraps[0]["folderId"], "getting-started");
+
+        // The recipient can now open the grant from the export.
+        let export = authed_request(
+            router.clone(),
+            &target_keys,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(export.status(), StatusCode::OK);
+        let export: EncryptedBrainExportResponse = read_json(export).await;
+        let folder_key = folder_key_from_export_grant(&target_keys, &export, "restricted");
+        assert_eq!(folder_key, "d3JhcC1rZXk");
+
+        // Replay is a no-op.
+        let replay = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/restricted/pending-wraps",
+            Some(
+                serde_json::json!({
+                    "grants": [real_folder_key_grant_value(
+                        "grant-restricted-target",
+                        1,
+                        &admin_keys,
+                        "acme",
+                        "restricted",
+                        &target_npub,
+                        "d3JhcC1rZXk",
+                    )],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: CompletePendingWrapsResponse = read_json(replay).await;
+        assert_eq!(replay.outcome, "noPendingWraps");
+        assert_eq!(replay.completed_count, 0);
     }
 }

@@ -2262,6 +2262,22 @@ struct OpenBrainGrantPayloadInput {
     wrapped_event_json: String,
 }
 
+/// Scoped Brain action a human key holder approves by signing a
+/// `finite-brain-approval-v1` artifact (ADR-0046). The device always binds
+/// its own user's npub as `humanNpub`; callers cannot name another signer.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApproveBrainActionInput {
+    brain_id: String,
+    action: String,
+    #[serde(default)]
+    plan_id: Option<String>,
+    #[serde(default)]
+    target_npubs: Vec<String>,
+    nonce: String,
+    expires_at: u64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WrapBrainGrantPayloadInput {
@@ -2401,6 +2417,41 @@ async fn execute_brain_identity_provider_operation(
                     sign_brain_event_template(&keys, &input.event_template).map_err(|error| {
                         HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
                     })?;
+                serde_json::to_value(event).map_err(HostedDeviceError::from)
+            }
+            "approveBrainAction" => {
+                let input: ApproveBrainActionInput = serde_json::from_value(request.input)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                let human_npub = NostrPublicKey::from_protocol(keys.public_key())
+                    .to_npub()
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| {
+                        HostedDeviceError::Task(format!("system clock is invalid: {error}"))
+                    })?
+                    .as_secs();
+                let payload = finite_brain_core::BrainApprovalPayload {
+                    version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+                    human_npub,
+                    action: input.action,
+                    brain_id: input.brain_id,
+                    plan_id: input.plan_id,
+                    target_npubs: input.target_npubs,
+                    nonce: input.nonce,
+                    expires_at: input.expires_at,
+                };
+                let template = finite_brain_core::brain_approval_event_template(&payload, now)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                let event = sign_brain_event_template(&keys, &template).map_err(|error| {
+                    HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                })?;
                 serde_json::to_value(event).map_err(HostedDeviceError::from)
             }
             "openGrantPayload" => {

@@ -47,7 +47,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0017_rfc3339_reads.sql"),
     "\n",
-    include_str!("../migrations/0018_finite_private_5x_profile.sql")
+    include_str!("../migrations/0018_finite_private_5x_profile.sql"),
+    "\n",
+    include_str!("../migrations/0019_brain_agent_departure_facts.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -754,6 +756,108 @@ pub struct BrainAgentAccount {
     pub managed_agent_email: String,
     pub verified_email: String,
     pub status: String,
+}
+
+/// Account lookup for the Brain roster endpoint (ADR-0046): any one of the
+/// WorkOS user id, the verified human mailbox, or a Managed Agent Email
+/// resolves the account. Lookup precedence is the field order below.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountRosterLookup {
+    pub workos_user_id: Option<String>,
+    pub email: Option<String>,
+    pub managed_agent_email: Option<String>,
+}
+
+impl BrainAccountRosterLookup {
+    pub fn is_empty(&self) -> bool {
+        self.workos_user_id.is_none() && self.email.is_none() && self.managed_agent_email.is_none()
+    }
+}
+
+/// One account-owned, identity-provisioned agent on the roster. Temporary
+/// runtime health never removes an agent; only a Permanent Departure does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountAgentRosterEntry {
+    pub managed_agent_email: String,
+    /// Core does not durably store the Agent Principal npub today; the field
+    /// stays in the contract so Brain can consume it once Core learns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_npub: Option<String>,
+    pub status: String,
+    pub placement_runner_class: RunnerClass,
+}
+
+/// The authoritative account agent roster: who owns which agents, plus a
+/// per-account monotonic revision bumped on every membership change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountAgentRoster {
+    pub workos_user_id: String,
+    pub human_mailbox: String,
+    pub roster_revision: i64,
+    pub agents: Vec<BrainAccountAgentRosterEntry>,
+    /// Permanent departures are replayed through the departure-facts endpoint
+    /// with a last-applied-revision cursor; the roster itself never inlines
+    /// them, so this is always empty.
+    pub departed: Vec<BrainAgentDepartureFact>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrainDeparturePrincipalKind {
+    Human,
+    Agent,
+}
+
+impl BrainDeparturePrincipalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrainDepartureReason {
+    Retired,
+    Deleted,
+    Unlinked,
+}
+
+impl BrainDepartureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retired => "retired",
+            Self::Deleted => "deleted",
+            Self::Unlinked => "unlinked",
+        }
+    }
+}
+
+/// One durable, replayable Permanent Departure Fact (ADR-0046). `revision` is
+/// the global monotonic cursor Brain stores as last-applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAgentDepartureFact {
+    pub revision: i64,
+    pub account_id: String,
+    pub principal_kind: BrainDeparturePrincipalKind,
+    pub principal_ref: String,
+    pub departed_at: String,
+    pub reason: BrainDepartureReason,
+}
+
+/// A cursor page of departure facts plus the global maximum revision, so a
+/// consumer with no new facts still learns how far the log has advanced.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAgentDepartureFactsPage {
+    pub facts: Vec<BrainAgentDepartureFact>,
+    pub max_revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

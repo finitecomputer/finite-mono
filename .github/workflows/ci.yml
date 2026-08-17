@@ -647,89 +647,31 @@ jobs:
           done
 
   brain-product-matrix:
-    name: Brain full-product matrix
+    name: Brain acceptance matrix
     needs:
       - changes
-      - hermes-bridge
-      - nix-service-packages
     if: needs.changes.outputs.run_brain_product_matrix == 'true'
     runs-on: depot-ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Containerized failures preserve root-owned diagnostics. Use a fresh
-          # checkout per attempt so those artifacts cannot poison checkout.
-          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-      - uses: depot/setup-action@v1
-        with:
-          oidc: true
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
-      - name: Build Brain matrix Nix outputs
-        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-
-          nix build --accept-flake-config --no-link --print-build-logs --print-out-paths --option builders '' \
-            .#packages.x86_64-linux.devfinity \
-            .#packages.x86_64-linux.hermes-agent-runtime \
-            .#packages.x86_64-linux.hermes-agent-runtime-python
-      - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
-        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-        env:
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          DEPOT_DISABLE_OTEL: "1"
-          DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE: depot
-        run: |
-          if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
-            exit 1
-          fi
-          nix develop --accept-flake-config --command just brain-product-matrix
-      - name: Remove canceled matrix runtime
-        if: always()
-        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          state_prefix="$PWD/.local-state/brain-product-matrix-"
-          docker ps -aq \
-            --filter label=computer.finite.v2.runtime=true \
-            --filter label=computer.finite.v2.source_host_id=devfinity-docker |
-          while read -r container; do
-            while read -r source; do
-              case "$source" in
-                "$state_prefix"*) docker rm -f "$container"; break ;;
-              esac
-            done < <(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container")
-          done
-      - name: Upload boundary report and failure logs
+      - name: Readiness contract, notification cursor, supervisor discovery, and collaboration acceptance
+        run: nix develop --accept-flake-config --command just brain-product-matrix
+      - name: Upload collaboration report and failure logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: brain-product-matrix
-          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
+          path: target/brain-product-matrix
           if-no-files-found: error
-      - name: Remove Brain matrix checkout
-        if: always()
-        env:
-          CHECKOUT_PATH: ${{ github.workspace }}/brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          expected="$GITHUB_WORKSPACE/brain-matrix-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          if [[ "$CHECKOUT_PATH" != "$expected" || "$CHECKOUT_PATH" == "$GITHUB_WORKSPACE" ]]; then
-            printf 'refusing unexpected checkout cleanup target: %s\n' "$CHECKOUT_PATH" >&2
-            exit 64
-          fi
-          if [[ -e "$CHECKOUT_PATH" ]]; then
-            sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
-          fi
 
   ci-gate:
     name: CI gate

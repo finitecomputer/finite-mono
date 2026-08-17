@@ -154,11 +154,16 @@ pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(),
         "send" => {
             let room_id = required_option(&mut args, "--room-id")?;
             let text = required_option(&mut args, "--text")?;
+            let metadata_json = take_option(&mut args, "--metadata-json")?;
             reject_extra_args(&args)?;
             write_state(
                 output,
                 runtime
-                    .dispatch_and_wait(AppAction::SendMessage { room_id, text })
+                    .dispatch_and_wait(AppAction::SendMessage {
+                        room_id,
+                        text,
+                        metadata_json,
+                    })
                     .map_err(map_core_error)?,
             )
         }

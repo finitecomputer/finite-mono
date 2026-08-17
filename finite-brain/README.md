@@ -101,10 +101,12 @@ rm "$FBRAIN_CONFIG_DIR/auth.json"
 
 ### Email Proof
 
-When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
 `fbrain auth login EMAIL` requests an email challenge and
 `fbrain auth redeem EMAIL TOKEN` proves that email with the shared Finite
-identity. For `@finite.vip` emails, redemption binds the email to the current
+identity against the public finite-identity Authority
+(`https://identity.finite.vip`, overridable with
+`FINITE_IDENTITY_AUTHORITY`). For `@finite.vip` emails, redemption binds the
+email to the current
 Local Identity Key in finite-identity and returns the NIP-05 identifier for
 that email. Run this binding flow only when the email and current key identify
 the same Principal. An agent must not redeem a human's email to inherit the

@@ -82,6 +82,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
             },
             conflicts: Vec::new(),
             blocked: vec!["no Brain Working Tree found".to_owned()],
+            pending_wraps: None,
         });
     };
     let state = read_agent_state(&root)?;
@@ -117,6 +118,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         },
         conflicts: open_conflicts,
         blocked,
+        pending_wraps: None,
     })
 }
 

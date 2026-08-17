@@ -88,6 +88,7 @@ export type HostedChatMessage = {
   text: string;
   display_content: string;
   rich_text_json?: string;
+  metadata_json?: string;
   reply_to_message_id?: string | null;
   is_mine: boolean;
   outbound_delivery?: HostedChatOutboundDelivery | null;
@@ -223,14 +224,22 @@ export type HostedChatAction =
         display_name: string;
       };
     }
-  | { SendMessage: { room_id: string; text: string } }
-  | { SendTopicMessage: { room_id: string; topic_id: string; text: string } }
+  | { SendMessage: { room_id: string; text: string; metadata_json?: string | null } }
+  | {
+      SendTopicMessage: {
+        room_id: string;
+        topic_id: string;
+        text: string;
+        metadata_json?: string | null;
+      };
+    }
   | {
       SendChatMessage: {
         room_id: string;
         topic_id: string;
         chat_id: string;
         text: string;
+        metadata_json?: string | null;
       };
     }
   | { LoadOlderMessages: { room_id: string; before_message_id: string; limit: number } }
@@ -251,7 +260,8 @@ export type BrainIdentityProviderRequest = {
     | "authorizeHttpRequest"
     | "authorizeBrainEvent"
     | "openGrantPayload"
-    | "wrapGrantPayload";
+    | "wrapGrantPayload"
+    | "approveBrainAction";
   input: unknown;
 };
 

@@ -2,6 +2,96 @@ use crate::*;
 
 impl BrainStore {
     pub(crate) fn apply_migrations(&mut self) -> Result<(), StoreError> {
+        self.apply_migrations_through_v22()?;
+        let v23_applied = {
+            let tx = self.conn.transaction()?;
+            let applied = migration_applied(&tx, 23)?;
+            tx.commit()?;
+            applied
+        };
+        if !v23_applied {
+            // SCHEMA_V23 rebuilds folder_key_grants and brain_members to extend
+            // their provenance origin CHECKs. The rebuild is only safe with
+            // legacy_alter_table=ON (so the RENAMEs do not rewrite folder_access
+            // and brain_admins foreign keys toward the retired table names) and
+            // foreign_keys=OFF (so the DROPs do not cascade into those children).
+            // Neither pragma can change inside a transaction, so V23 runs as its
+            // own guarded step outside the main migration transaction.
+            self.conn.pragma_update(None, "legacy_alter_table", "ON")?;
+            self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let result = (|| -> Result<(), StoreError> {
+                let tx = self.conn.transaction()?;
+                tx.execute_batch(SCHEMA_V23)?;
+                tx.execute(
+                    "INSERT INTO brain_departure_fact_cursor (id, last_applied_revision, updated_at) VALUES (1, 0, ?1)",
+                    params![MIGRATION_TIMESTAMP],
+                )?;
+                tx.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![23, MIGRATION_TIMESTAMP],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            self.conn.pragma_update(None, "foreign_keys", "ON")?;
+            self.conn.pragma_update(None, "legacy_alter_table", "OFF")?;
+            result?;
+            let violations: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations > 0 {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "schema V23 table rebuild left foreign key violations".to_owned(),
+                });
+            }
+        }
+
+        // V24 is additive only (one new column with a default plus new
+        // tables), so it runs inside an ordinary migration transaction.
+        let tx = self.conn.transaction()?;
+        if !migration_applied(&tx, 24)? {
+            tx.execute_batch(SCHEMA_V24)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![24, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        // V25 is additive only (one new marker table), so it runs inside the
+        // same ordinary migration transaction.
+        if !migration_applied(&tx, 25)? {
+            tx.execute_batch(SCHEMA_V25)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![25, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        // V26 is additive only (one nullable column), same ordinary path.
+        if !migration_applied(&tx, 26)? {
+            tx.execute_batch(SCHEMA_V26)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![26, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        // V27 is additive only (one nullable column recording the committed
+        // invitation ids of an approved request), same ordinary path.
+        if !migration_applied(&tx, 27)? {
+            tx.execute_batch(SCHEMA_V27)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![27, MIGRATION_TIMESTAMP],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn apply_migrations_through_v22(&mut self) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
             r#"
@@ -195,10 +285,277 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 22)? {
+            tx.execute_batch(SCHEMA_V22)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![22, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 }
+
+const SCHEMA_V25: &str = r#"
+-- Pending Grant Wraps: the JOIN side of the departure pending-rotation
+-- pattern. When a Principal gains Folder entitlement without receiving a
+-- wrapped Folder Key Grant (invitation commit, invitation accept, or an
+-- ensure-access membership repair), the server records one marker per
+-- (Brain, Folder, recipient, key version). Key-holding clients discover the
+-- markers on sync, wrap the current Folder Key for the waiting recipients,
+-- and the markers clear when the grants validate. A marker never blocks
+-- anything: it is a delivery hint, not a gate.
+CREATE TABLE brain_pending_grant_wraps (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    reason TEXT NOT NULL
+        CHECK (reason IN ('invitation', 'accept', 'ensure-access', 'bootstrap')),
+    created_at TEXT NOT NULL,
+    UNIQUE (brain_id, folder_id, recipient_npub, key_version),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX brain_pending_grant_wraps_by_brain
+    ON brain_pending_grant_wraps(brain_id, folder_id);
+"#;
+
+const SCHEMA_V26: &str = r#"
+-- Folder-scoped Invitation Plans: one row per mailbox+Folder preview for
+-- cohort Folder invitations. NULL keeps a plan Brain-scoped (membership);
+-- a non-NULL value scopes its commit to per-principal Folder share links
+-- for exactly that Folder.
+ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
+"#;
+
+const SCHEMA_V27: &str = r#"
+ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
+"#;
+
+const SCHEMA_V24: &str = r#"
+-- ADR-0046 Approval artifacts: npub-bound invitations remember whether they
+-- were committed directly by an admin ('invitation') or through a signed
+-- finite-brain-approval-v1 Approval Card ('approval'). Existing rows stay
+-- 'invitation', matching the provenance their accepts already stamp.
+ALTER TABLE brain_invitations
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'invitation'
+CHECK (origin_kind IN ('invitation', 'approval'));
+
+-- Pending human Approval requests: an agent or the UI submits the action
+-- payload, the server mints the nonce and expiry, and a human key holder
+-- signs exactly this payload. The request row is the durable link from the
+-- signed approval event id back to the plan it committed.
+CREATE TABLE brain_approval_requests (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('invite-commit', 'delegation-grant')),
+    payload_json TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    requested_by_npub TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied')),
+    approval_event_id TEXT,
+    resolved_by_npub TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (brain_id, nonce),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX brain_approval_requests_by_event
+    ON brain_approval_requests(brain_id, approval_event_id);
+
+-- Replay protection for applied Approvals: one row per consumed
+-- (brain_id, nonce), recorded in the same critical section as the mutation
+-- the approval authorized.
+CREATE TABLE brain_approval_nonces (
+    brain_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    approval_event_id TEXT NOT NULL,
+    signer_npub TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('invite-commit', 'delegation-grant')),
+    applied_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, nonce),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
+
+const SCHEMA_V23: &str = r#"
+-- ADR-0046 Permanent Departure Facts. Brain consumes Core's durable,
+-- monotonic departure log from a last-applied-revision cursor. The cursor
+-- advances only inside the per-fact revocation transaction, so after any
+-- crash it always trails the facts whose revocations actually committed.
+CREATE TABLE brain_departure_fact_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_applied_revision INTEGER NOT NULL DEFAULT 0
+        CHECK (last_applied_revision >= 0),
+    updated_at TEXT NOT NULL
+);
+
+-- Revocation ledger: the departure fact is the authority record for every
+-- service-issued revocation, with the fact revision recorded. One row per
+-- affected Brain per fact; ids are deterministic so replay never duplicates.
+CREATE TABLE brain_principal_revocations (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    departed_npub TEXT,
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('human', 'agent')),
+    principal_ref TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    fact_revision INTEGER NOT NULL CHECK (fact_revision > 0),
+    origin_kind TEXT NOT NULL DEFAULT 'departure'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    UNIQUE (brain_id, fact_revision, principal_ref),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+-- Folders the departed Principal could read keep their current key until a
+-- remaining admin's client re-wraps; the server never sees plaintext keys.
+-- A marker tracks the key version that still needs rotation-on-replay.
+CREATE TABLE brain_departure_pending_rotations (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    marked_at_revision INTEGER NOT NULL CHECK (marked_at_revision > 0),
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, folder_id),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+-- Extend the V22 provenance origin CHECKs with 'departure' so rotation grants
+-- written during departure replay can be stamped with their true origin.
+-- SQLite cannot alter a column CHECK, so both tables are rebuilt following
+-- the V6/V9 pattern; existing rows are copied verbatim and stay valid. The
+-- migration runner applies this batch with legacy_alter_table=ON and
+-- foreign_keys=OFF (neither pragma can change inside a transaction), which
+-- stops the RENAMEs from rewriting folder_access and brain_admins foreign
+-- keys toward the retired table names and stops the DROPs from cascading.
+ALTER TABLE folder_key_grants RENAME TO folder_key_grants_v22;
+ALTER TABLE brain_members RENAME TO brain_members_v22;
+
+CREATE TABLE folder_key_grants (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    issuer_npub TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    format TEXT NOT NULL CHECK (format = 'NIP-59'),
+    wrapped_event_json TEXT NOT NULL,
+    access_change_event_json TEXT,
+    created_at TEXT NOT NULL,
+    delegated_by_npub TEXT,
+    origin_kind TEXT NOT NULL DEFAULT 'direct'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT,
+    roster_revision INTEGER
+        CHECK (roster_revision IS NULL OR roster_revision >= 0),
+    UNIQUE (brain_id, folder_id, key_version, recipient_npub),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+INSERT INTO folder_key_grants (
+    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+    wrapped_event_json, access_change_event_json, created_at,
+    delegated_by_npub, origin_kind, origin_ref, roster_revision
+)
+SELECT
+    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+    wrapped_event_json, access_change_event_json, created_at,
+    delegated_by_npub, origin_kind, origin_ref, roster_revision
+FROM folder_key_grants_v22;
+
+DROP TABLE folder_key_grants_v22;
+
+CREATE TABLE brain_members (
+    brain_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    delegated_by_npub TEXT,
+    origin_kind TEXT NOT NULL DEFAULT 'direct'
+        CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap', 'departure')),
+    origin_ref TEXT,
+    PRIMARY KEY (brain_id, user_id),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+INSERT INTO brain_members (
+    brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+)
+SELECT
+    brain_id, user_id, delegated_by_npub, origin_kind, origin_ref
+FROM brain_members_v22;
+
+DROP TABLE brain_members_v22;
+"#;
+
+const SCHEMA_V22: &str = r#"
+-- ADR-0046 Grant Provenance: every access record carries who delegated it,
+-- which invitation or approval it came from, and the account roster state at
+-- write time. Defaults keep pre-existing rows valid as 'direct' origins.
+ALTER TABLE folder_key_grants
+ADD COLUMN delegated_by_npub TEXT;
+
+ALTER TABLE folder_key_grants
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'direct'
+CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap'));
+
+ALTER TABLE folder_key_grants
+ADD COLUMN origin_ref TEXT;
+
+ALTER TABLE folder_key_grants
+ADD COLUMN roster_revision INTEGER
+CHECK (roster_revision IS NULL OR roster_revision >= 0);
+
+ALTER TABLE brain_members
+ADD COLUMN delegated_by_npub TEXT;
+
+ALTER TABLE brain_members
+ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'direct'
+CHECK (origin_kind IN ('direct', 'invitation', 'approval', 'bootstrap'));
+
+ALTER TABLE brain_members
+ADD COLUMN origin_ref TEXT;
+
+-- Plan-linked invitations remember which Invitation Plan resolved them and at
+-- what account roster revision, so acceptance can re-check and narrow only.
+ALTER TABLE brain_invitations
+ADD COLUMN origin_ref TEXT;
+
+ALTER TABLE brain_invitations
+ADD COLUMN roster_revision INTEGER
+CHECK (roster_revision IS NULL OR roster_revision >= 0);
+
+-- Immutable Invitation Plans: the resolved invite set previewed at preflight
+-- and committed as per-principal Brain Invitations. A plan is not a stored
+-- cohort entity; it grants nothing by itself and only records the resolution
+-- the inviter committed to.
+CREATE TABLE brain_invitation_plans (
+    id TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    inviter_npub TEXT NOT NULL,
+    workos_user_id TEXT,
+    human_email TEXT NOT NULL,
+    human_npub TEXT,
+    agents_json TEXT NOT NULL,
+    exclusions_json TEXT NOT NULL,
+    roster_revision INTEGER
+        CHECK (roster_revision IS NULL OR roster_revision >= 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'committed')),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
 
 const SCHEMA_V21: &str = r#"
 -- V6 created this index before V10 renamed vault_invitations to
@@ -1429,6 +1786,195 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migration_adds_provenance_columns_with_direct_defaults() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        for (table, expected) in [
+            (
+                "folder_key_grants",
+                vec![
+                    "delegated_by_npub",
+                    "origin_kind",
+                    "origin_ref",
+                    "roster_revision",
+                ],
+            ),
+            (
+                "brain_members",
+                vec!["delegated_by_npub", "origin_kind", "origin_ref"],
+            ),
+            ("brain_invitations", vec!["origin_ref", "roster_revision"]),
+        ] {
+            let mut statement = store
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            for column in expected {
+                assert!(
+                    columns.iter().any(|existing| existing == column),
+                    "{table} is missing provenance column {column}"
+                );
+            }
+        }
+
+        let plans_table_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'brain_invitation_plans'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(plans_table_count, 1);
+    }
+
+    #[test]
+    fn migration_v23_adds_departure_tables_and_extends_origin_checks() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        for table in [
+            "brain_departure_fact_cursor",
+            "brain_principal_revocations",
+            "brain_departure_pending_rotations",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing V23 table {table}");
+        }
+        let cursor: i64 = store
+            .conn
+            .query_row(
+                "SELECT last_applied_revision FROM brain_departure_fact_cursor WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 0);
+
+        // The rebuilt V22 tables accept the new 'departure' origin kind and
+        // keep rejecting unknown kinds.
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('origin-check', 'organization', 'Origin Check', NULL, '2026-06-23T00:00:00Z');
+                INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id, parent_folder_key,
+                    path, current_key_version, shared_folder_source, setup_incomplete, created_at
+                ) VALUES (
+                    'origin-check', 'ops', 'Ops', 'vault_ops', 'admin_only', NULL, '',
+                    'ops', 1, 0, 0, '2026-06-23T00:00:00Z'
+                );
+                INSERT INTO brain_members (brain_id, user_id, origin_kind)
+                VALUES ('origin-check', 'npub-admin', 'departure');
+                INSERT INTO folder_key_grants (
+                    id, brain_id, folder_id, key_version, issuer_npub, recipient_npub,
+                    format, wrapped_event_json, created_at, origin_kind
+                ) VALUES (
+                    'grant-departure-origin', 'origin-check', 'ops', 1, 'npub-admin', 'npub-admin',
+                    'NIP-59', '{}', '2026-06-23T00:00:00Z', 'departure'
+                );
+                "#,
+            )
+            .unwrap();
+        for statement in [
+            "INSERT INTO brain_members (brain_id, user_id, origin_kind)
+             VALUES ('origin-check', 'npub-other', 'bogus')",
+            "INSERT INTO folder_key_grants (
+                id, brain_id, folder_id, key_version, issuer_npub, recipient_npub,
+                format, wrapped_event_json, created_at, origin_kind
+             ) VALUES (
+                'grant-bogus-origin', 'origin-check', 'ops', 1, 'npub-admin', 'npub-admin',
+                'NIP-59', '{}', '2026-06-23T00:00:00Z', 'bogus'
+             )",
+        ] {
+            assert!(
+                store.conn.execute(statement, []).is_err(),
+                "origin CHECK must reject bogus kinds: {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_v25_adds_pending_grant_wraps_table() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'brain_pending_grant_wraps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing V25 table brain_pending_grant_wraps");
+
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('wraps-check', 'organization', 'Wraps Check', NULL, '2026-06-23T00:00:00Z');
+                INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id, parent_folder_key,
+                    path, current_key_version, shared_folder_source, setup_incomplete, created_at
+                ) VALUES (
+                    'wraps-check', 'ops', 'Ops', 'vault_ops', 'admin_only', NULL, '',
+                    'ops', 1, 0, 0, '2026-06-23T00:00:00Z'
+                );
+                INSERT INTO brain_pending_grant_wraps (
+                    brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                ) VALUES (
+                    'wraps-check', 'ops', 'npub-member', 1, 'invitation', '2026-06-23T00:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+        // Duplicate (brain, folder, recipient, key version) markers are ignored
+        // by the marker write path and rejected by the table itself.
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_pending_grant_wraps (
+                        brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                     ) VALUES (
+                        'wraps-check', 'ops', 'npub-member', 1, 'accept', '2026-06-24T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the UNIQUE constraint must reject duplicate markers"
+        );
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_pending_grant_wraps (
+                        brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                     ) VALUES (
+                        'wraps-check', 'ops', 'npub-member', 2, 'bogus', '2026-06-24T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the reason CHECK must reject unknown kinds"
+        );
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -1571,7 +2117,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 21);
+        assert_eq!(latest_version, 27);
 
         let old_table_count: i64 = store
             .conn

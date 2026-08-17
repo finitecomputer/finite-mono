@@ -61,25 +61,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    let smoke_nip07_secret = std::env::var("FINITE_BRAIN_SMOKE_NIP07_SECRET")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let smoke_email_proofs = std::env::var("FINITE_BRAIN_SMOKE_EMAIL_PROOFS")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    if smoke_email_proofs.is_some() && identity_authority_url.is_some() {
-        return Err(
-            "FINITE_BRAIN_SMOKE_EMAIL_PROOFS cannot be combined with FINITE_IDENTITY_AUTHORITY"
-                .into(),
-        );
-    }
-    if smoke_email_proofs.is_some() && smoke_nip07_secret.is_none() {
-        return Err(
-            "FINITE_BRAIN_SMOKE_EMAIL_PROOFS requires FINITE_BRAIN_SMOKE_NIP07_SECRET".into(),
-        );
-    }
     let listener = tokio::net::TcpListener::bind(address).await?;
 
     println!("FiniteBrain smoke server listening on http://{address}");
@@ -122,24 +103,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    if let Some(secret) = smoke_nip07_secret {
-        state = state.with_smoke_nip07_signer(secret).map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid FINITE_BRAIN_SMOKE_NIP07_SECRET: {error}"),
-            )
-        })?;
-    }
-    if let Some(email_proofs) = smoke_email_proofs {
-        state = state
-            .with_smoke_email_proofs(email_proofs)
-            .map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("invalid FINITE_BRAIN_SMOKE_EMAIL_PROOFS: {error}"),
-                )
-            })?;
-    }
     if let Ok(mailer) = std::env::var("FINITE_BRAIN_INVITE_MAILER") {
         match mailer.trim() {
             "" | "none" => {}
@@ -163,7 +126,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let router = finite_brain_server::router_with_state(state);
+    let router = finite_brain_server::router_with_state(state.clone());
+    // Consume Core's Permanent Departure Facts in the background; no-op when
+    // the Core/Identity authorities are not configured. Routine authorization
+    // never depends on it.
+    finite_brain_server::spawn_departure_fact_consumer(&state);
     axum::serve(listener, router).await?;
 
     Ok(())
