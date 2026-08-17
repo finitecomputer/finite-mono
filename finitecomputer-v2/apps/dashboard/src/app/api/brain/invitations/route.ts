@@ -5,13 +5,13 @@ import {
   hostedSignedBrainRequest,
 } from "@/lib/brain-hosted-client";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
-import { requestOriginMatchesHost } from "@/lib/http-headers";
+import { requestOriginSameOrNone } from "@/lib/http-headers";
 
 const NO_STORE = { "cache-control": "no-store" };
 
 /// The account's pending Brain invitations (the invitation card's data).
 export async function GET(request: Request) {
-  if (!requestOriginMatchesHost(request)) {
+  if (!requestOriginSameOrNone(request)) {
     return Response.json({ error: "Invitations require the dashboard." }, { status: 403, headers: NO_STORE });
   }
   const account = await getAccountAuthContext();

@@ -42,7 +42,15 @@ function approvalLabel(card: ApprovalCard) {
   return card.action;
 }
 
-export function BrainActionCards({ className }: { className?: string }) {
+export function BrainActionCards({
+  className,
+  onSendMessage,
+}: {
+  className?: string;
+  /// Sends the user's choice into the conversation stream as their own
+  /// message — the approval's durable in-band record.
+  onSendMessage?: (text: string) => Promise<void>;
+}) {
   const [approvals, setApprovals] = useState<ApprovalCard[]>([]);
   const [invitations, setInvitations] = useState<InvitationCard[]>([]);
   const [unavailable, setUnavailable] = useState(false);
@@ -82,7 +90,13 @@ export function BrainActionCards({ className }: { className?: string }) {
   }, [refresh]);
 
   const act = useCallback(
-    async (key: string, path: string, body: unknown, onDone: () => void) => {
+    async (
+      key: string,
+      path: string,
+      body: unknown,
+      onDone: () => void,
+      choiceMessage?: string
+    ) => {
       setCardState((state) => ({ ...state, [key]: "working" }));
       setCardError((errors) => ({ ...errors, [key]: "" }));
       try {
@@ -95,6 +109,14 @@ export function BrainActionCards({ className }: { className?: string }) {
           const error = await response.json().catch(() => ({}));
           throw new Error(error.error ?? `HTTP ${response.status}`);
         }
+        if (choiceMessage && onSendMessage) {
+          try {
+            await onSendMessage(choiceMessage);
+          } catch {
+            // The action executed; the conversation record is best-effort
+            // until message metadata carries the artifact natively.
+          }
+        }
         setCardState((state) => ({ ...state, [key]: "done" }));
         onDone();
       } catch (error) {
@@ -105,7 +127,7 @@ export function BrainActionCards({ className }: { className?: string }) {
         }));
       }
     },
-    []
+    [onSendMessage]
   );
 
   if (
@@ -158,7 +180,8 @@ export function BrainActionCards({ className }: { className?: string }) {
                       requestId: card.id,
                       payload: card.payload,
                     },
-                    () => void refresh()
+                    () => void refresh(),
+                    `Approved: ${approvalLabel(card).toLowerCase()} for ${card.brainName}`
                   )
                 }
               >
@@ -177,7 +200,8 @@ export function BrainActionCards({ className }: { className?: string }) {
                     key,
                     "/api/brain/approvals/deny",
                     { brainId: card.brainId, requestId: card.id },
-                    () => void refresh()
+                    () => void refresh(),
+                    `Dismissed: ${approvalLabel(card).toLowerCase()} for ${card.brainName}`
                   )
                 }
               >
@@ -220,7 +244,8 @@ export function BrainActionCards({ className }: { className?: string }) {
                     key,
                     "/api/brain/invitations/accept",
                     { inviteCode: card.inviteCode },
-                    () => void refresh()
+                    () => void refresh(),
+                    `Joined ${card.ref ?? card.brainId ?? "a Brain"}`
                   )
                 }
               >

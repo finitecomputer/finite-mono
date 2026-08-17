@@ -924,7 +924,6 @@ export function HostedWebChat({
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
-                <BrainActionCards className="finite-chat__brain-cards" />
                 {selectedRoom && selectionPending && !hasRenderableChatContent ? (
                   <ChatLoading label="Opening chat…" />
                 ) : null}
@@ -970,6 +969,22 @@ export function HostedWebChat({
                     {activityLabel && !waitingToolRollupId
                       ? <LiveActivity label={activityLabel} />
                       : null}
+                    <BrainActionCards
+                      className="finite-chat__brain-cards"
+                      onSendMessage={
+                        selectedRoom
+                          ? (text) =>
+                              dispatch(
+                                messageAction(
+                                  selectedRoom.room_id,
+                                  text,
+                                  selectedTopic,
+                                  selectedChat
+                                )
+                              ).then(() => undefined)
+                          : undefined
+                      }
+                    />
                   </div>
                 ) : null}
               </div>

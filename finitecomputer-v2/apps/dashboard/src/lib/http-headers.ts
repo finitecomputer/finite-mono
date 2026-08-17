@@ -38,6 +38,13 @@ export function browserVisibleRequestOrigin(
   }
 }
 
+/** GET requests omit Origin when same-origin; absent means not cross-origin. */
+export function requestOriginSameOrNone(request: Request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  return requestOriginMatchesHost(request);
+}
+
 /** Compare Origin to the browser-visible request host, including its port. */
 export function requestOriginMatchesHost(request: Request) {
   const origin = request.headers.get("origin");

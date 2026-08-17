@@ -5357,7 +5357,7 @@ button.finite-chat__folder-summary {
 .finite-chat__brain-cards {
   display: grid;
   gap: 8px;
-  padding: 0 16px;
+  padding: 0 16px 12px;
 }
 
 .finite-brain-cards {

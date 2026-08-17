@@ -57,6 +57,18 @@ function nonceHex() {
   return randomBytes(16).toString("hex");
 }
 
+export function brainPublicOrigin(value = process.env.FC_BRAIN_PUBLIC_ORIGIN) {
+  const candidate = value?.trim().replace(/\/$/u, "");
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 export async function hostedSignedBrainRequest(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -65,7 +77,10 @@ export async function hostedSignedBrainRequest(
   path: string,
   bodyText = ""
 ): Promise<unknown> {
-  const url = `${brainOrigin}${path}`;
+  // The Brain server validates the signed u-tag against its PUBLIC origin;
+  // the request travels to the upstream URL.
+  const publicOrigin = brainPublicOrigin() ?? brainOrigin;
+  const url = `${publicOrigin}${path}`;
   const tags: string[][] = [
     ["u", url],
     ["method", method.toUpperCase()],
@@ -87,11 +102,11 @@ export async function hostedSignedBrainRequest(
     config,
     account,
     { version: "finite-brain-identity-provider-v1", operation: "authorizeHttpRequest", input },
-    brainOrigin
+    publicOrigin
   )) as { event?: unknown };
   const eventJson = (signed as { event?: unknown }).event ?? signed;
   const authorization = `Nostr ${Buffer.from(JSON.stringify(eventJson), "utf8").toString("base64")}`;
-  const response = await fetch(url, {
+  const response = await fetch(`${brainOrigin}${path}`, {
     method: method.toUpperCase(),
     cache: "no-store",
     headers: {
