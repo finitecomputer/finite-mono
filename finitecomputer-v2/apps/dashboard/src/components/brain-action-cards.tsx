@@ -45,11 +45,15 @@ function approvalLabel(card: ApprovalCard) {
 export function BrainActionCards({
   className,
   onSendMessage,
+  revision = 0,
 }: {
   className?: string;
   /// Sends the user's choice into the conversation stream as their own
   /// message — the approval's durable in-band record.
   onSendMessage?: (text: string) => Promise<void>;
+  /// Changes when the conversation updates (new messages); cards refetch
+  /// so a freshly filed request appears without a manual page refresh.
+  revision?: number;
 }) {
   const [approvals, setApprovals] = useState<ApprovalCard[]>([]);
   const [invitations, setInvitations] = useState<InvitationCard[]>([]);
@@ -65,7 +69,15 @@ export function BrainActionCards({
       ]);
       if (approvalsResponse.ok) {
         const body = await approvalsResponse.json();
-        setApprovals(Array.isArray(body.approvals) ? body.approvals : []);
+        const now = Date.now();
+        const pending = (
+          Array.isArray(body.approvals) ? body.approvals : []
+        ) as ApprovalCard[];
+        setApprovals(
+          pending
+            .filter((card) => card.expiresAt * 1000 > now)
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        );
       } else if (approvalsResponse.status !== 401 && approvalsResponse.status !== 503) {
         setUnavailable(true);
       }
@@ -87,6 +99,13 @@ export function BrainActionCards({
 
   useEffect(() => {
     void refresh();
+  }, [refresh, revision]);
+
+  // A filing can happen with no chat activity in this tab; poll lightly
+  // while cards are mounted so requests stream in on their own.
+  useEffect(() => {
+    const timer = setInterval(() => void refresh(), 20_000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   const act = useCallback(

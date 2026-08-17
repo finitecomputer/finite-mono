@@ -971,6 +971,7 @@ export function HostedWebChat({
                       : null}
                     <BrainActionCards
                       className="finite-chat__brain-cards"
+                      revision={messages.length}
                       onSendMessage={
                         selectedRoom
                           ? (text) =>
