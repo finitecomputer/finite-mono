@@ -1769,6 +1769,18 @@ fn built_fbrain_process_cli_invite_approval_roundtrip() {
     let plan_id = requested["payload"]["planId"].as_str().unwrap().to_owned();
     assert!(!plan_id.is_empty());
 
+    // The filing is recorded for the Runtime chat adapter: the agent's next
+    // final delivery carries metadata.approve naming this request.
+    let outbox_text =
+        std::fs::read_to_string(home_member.join("fbrain-config").join("approval-outbox.jsonl"))
+            .expect("member filing writes the approval outbox");
+    assert!(
+        outbox_text
+            .lines()
+            .any(|line| line.contains(&request_id) && line.contains("brain-approval-filed")),
+        "approval outbox names the filed request: {outbox_text}"
+    );
+
     // The admin sees the pending request and approves it from the CLI; the
     // chat approval card submits the identical artifact route.
     let listed = json_of(
