@@ -77,6 +77,16 @@ impl BrainStore {
                 params![26, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V27 is additive only (one nullable column recording the committed
+        // invitation ids of an approved request), same ordinary path.
+        if !migration_applied(&tx, 27)? {
+            tx.execute_batch(SCHEMA_V27)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![27, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -320,6 +330,10 @@ const SCHEMA_V26: &str = r#"
 -- a non-NULL value scopes its commit to per-principal Folder share links
 -- for exactly that Folder.
 ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
+"#;
+
+const SCHEMA_V27: &str = r#"
+ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2103,7 +2117,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 26);
+        assert_eq!(latest_version, 27);
 
         let old_table_count: i64 = store
             .conn

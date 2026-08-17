@@ -3775,12 +3775,28 @@ fn find_approval_request(
     )))
 }
 
-/// Record a filed Approval Request for the Runtime chat adapter: the next
-/// final delivery in this environment carries `metadata.approve` naming the
-/// request, so the human's chat surfaces the question in-stream. Best-effort
-/// by design — the filing itself is already durable server-side and
-/// `fbrain approvals list` remains the authoritative fallback.
-pub(crate) fn append_approval_filing_notice(env: &CliEnvironment, response: &serde_json::Value) {
+/// The machine-readable trailer the Runtime chat adapter scans for in
+/// terminal tool results: one line per filed Approval Request. The next
+/// final delivery in that Runtime carries `metadata.approve` naming the
+/// request, so the human's chat surfaces the question in-stream. Emitted on
+/// stderr always — stdout must stay pure JSON in `--json` mode — and on
+/// stdout in human mode; the PTY merges both streams into the tool result,
+/// and the adapter dedupes by request id. Best-effort by design: the filing
+/// itself is already durable server-side and `fbrain approvals list` remains
+/// the authoritative fallback.
+pub(crate) fn emit_approval_filing_marker(brain_id: &str, request_id: &str, json: bool) {
+    let marker = format!("finite-brain-approval-filed brain={brain_id} request={request_id}");
+    eprintln!("{marker}");
+    if !json {
+        // Human mode has no JSON on stdout to corrupt; repeating the marker
+        // there also survives stdout-only tool capture.
+        println!("{marker}");
+    }
+}
+
+/// Extract (brainId, requestId) from a filed-approval response and emit the
+/// adapter marker for it.
+pub(crate) fn append_approval_filing_notice(json: bool, response: &serde_json::Value) {
     let Some(request_id) = response.get("id").and_then(|id| id.as_str()) else {
         return;
     };
@@ -3791,29 +3807,7 @@ pub(crate) fn append_approval_filing_notice(env: &CliEnvironment, response: &ser
     else {
         return;
     };
-    let filed_at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default();
-    let notice = serde_json::json!({
-        "version": 1,
-        "kind": "brain-approval-filed",
-        "brainId": brain_id,
-        "requestId": request_id,
-        "filedAtUnix": filed_at_unix,
-    });
-    let outbox = env.config_dir.join("approval-outbox.jsonl");
-    let appended = fs::create_dir_all(&env.config_dir).and_then(|()| {
-        use std::io::Write as _;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&outbox)?;
-        writeln!(file, "{notice}")
-    });
-    if let Err(error) = appended {
-        eprintln!("fbrain: could not record approval filing for chat delivery: {error}");
-    }
+    emit_approval_filing_marker(brain_id, request_id, json);
 }
 
 fn list_approvals<W: Write>(
@@ -4778,7 +4772,7 @@ fn write_plan_or_email_invite_create<W: Write>(
                 &format!("/v1/brains/{brain_id}/approval-requests"),
                 Some(serde_json::json!({ "action": "invite-commit", "target": email })),
             )?;
-            append_approval_filing_notice(env, &response);
+            append_approval_filing_notice(json, &response);
             if json {
                 write_json(output, &response)
             } else {

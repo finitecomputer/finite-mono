@@ -1115,6 +1115,8 @@ pub struct StoredBrainApprovalRequest {
     pub created_at: String,
     /// Last update timestamp.
     pub updated_at: String,
+    /// Invitation ids an approved invite-commit produced, if any.
+    pub result_invitations: Option<Vec<String>>,
 }
 
 /// Stored npub-bound singleton Folder Share Link.
@@ -5071,6 +5073,7 @@ mod tests {
             resolved_by_npub: None,
             created_at: "2026-06-23T00:00:00.000Z".to_owned(),
             updated_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            result_invitations: None,
         }
     }
 

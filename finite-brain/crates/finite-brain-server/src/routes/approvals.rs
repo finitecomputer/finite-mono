@@ -41,6 +41,7 @@ pub(crate) fn approval_request_response(
         approval_event_id: request.approval_event_id.clone(),
         resolved_by_npub: request.resolved_by_npub.as_ref().map(ToString::to_string),
         created_at: request.created_at.clone(),
+        resulting_invitations: request.result_invitations.clone(),
         updated_at: request.updated_at.clone(),
     })
 }
@@ -359,6 +360,7 @@ pub(crate) async fn create_approval_request_handler(
             resolved_by_npub: None,
             created_at: created_at.clone(),
             updated_at: created_at.clone(),
+            result_invitations: None,
         };
         let created = {
             let mut store = state.store.lock().map_err(lock_error)?;
@@ -594,16 +596,34 @@ pub(crate) async fn submit_approval_handler(
             )
             .await?
             {
-                PlanCommitResult::Committed(commit) => Ok(Json(ApprovalSubmissionResponse {
-                    status: "applied".to_owned(),
-                    action: payload.action.clone(),
-                    approval_event_id,
-                    request_id: approval_request.map(|request| request.id),
-                    result: serde_json::to_value(commit).map_err(|_| {
-                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
-                    })?,
-                })
-                .into_response()),
+                PlanCommitResult::Committed(commit) => {
+                    if let Some(request) = approval_request.as_ref() {
+                        let invitation_ids: Vec<String> = commit
+                            .invitations
+                            .iter()
+                            .map(|principal| principal.invitation.id.clone())
+                            .collect();
+                        let mut store = state.store.lock().map_err(lock_error)?;
+                        store.record_brain_approval_result_invitations(
+                            &request.id,
+                            &invitation_ids,
+                            &server_timestamp(&state),
+                        )?;
+                    }
+                    Ok(Json(ApprovalSubmissionResponse {
+                        status: "applied".to_owned(),
+                        action: payload.action.clone(),
+                        approval_event_id,
+                        request_id: approval_request.map(|request| request.id),
+                        result: serde_json::to_value(commit).map_err(|_| {
+                            ApiError::new(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "internal server error",
+                            )
+                        })?,
+                    })
+                    .into_response())
+                }
                 // Roster drift: the fresh preflight is persisted; the human
                 // must request and sign a new approval for it.
                 PlanCommitResult::Drifted(preflight) => {

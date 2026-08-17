@@ -1747,41 +1747,41 @@ fn built_fbrain_process_cli_invite_approval_roundtrip() {
         String::from_utf8_lossy(&member_added.stderr)
     );
 
-    let requested = json_of(
-        "member invite brain create",
-        &run_server(
-            &home_member,
-            &[
-                "invite",
-                "brain",
-                "create",
-                "--brain",
-                "roundtrip-org",
-                "--target",
-                "bob@example.com",
-                "--json",
-            ],
-        ),
+    let member_filing_output = run_server(
+        &home_member,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "--brain",
+            "roundtrip-org",
+            "--target",
+            "bob@example.com",
+            "--json",
+        ],
     );
+    let requested_stdout = member_filing_output.stdout.clone();
+    let requested_stderr = member_filing_output.stderr.clone();
+    let requested = json_of("member invite brain create", &member_filing_output);
     assert_eq!(requested["status"], "pending");
     assert_eq!(requested["action"], "invite-commit");
     let request_id = requested["id"].as_str().unwrap().to_owned();
     let plan_id = requested["payload"]["planId"].as_str().unwrap().to_owned();
     assert!(!plan_id.is_empty());
 
-    // The filing is recorded for the Runtime chat adapter: the agent's next
-    // final delivery carries metadata.approve naming this request.
-    let outbox_text = std::fs::read_to_string(
-        home_member
-            .join("fbrain-config")
-            .join("approval-outbox.jsonl"),
-    )
-    .expect("member filing writes the approval outbox");
+    // The filing emits the Runtime chat adapter's stderr marker: the agent's
+    // next final delivery carries metadata.approve naming this request, and
+    // stdout stays pure JSON for --json consumers.
+    let marker = format!("finite-brain-approval-filed brain=roundtrip-org request={request_id}");
     assert!(
-        outbox_text
-            .lines()
-            .any(|line| line.contains(&request_id) && line.contains("brain-approval-filed")),
-        "approval outbox names the filed request: {outbox_text}"
+        String::from_utf8_lossy(&requested_stderr).contains(&marker),
+        "json-mode filing emits the stderr marker: {}",
+        String::from_utf8_lossy(&requested_stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&requested_stdout).contains("finite-brain-approval-filed"),
+        "json-mode stdout stays pure JSON: {}",
+        String::from_utf8_lossy(&requested_stdout)
     );
 
     // The admin sees the pending request and approves it from the CLI; the

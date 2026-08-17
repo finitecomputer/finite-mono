@@ -675,6 +675,30 @@ pub(crate) async fn execute_invitation_plan_commit(
                 });
                 continue;
             }
+            // A duplicate approval (or an approval racing a direct invite)
+            // reuses the target's live pending invitation instead of
+            // colliding on the (Brain, target) singleton: re-issuing is
+            // idempotent, the request still resolves, and no second
+            // delivery handle is minted.
+            if let Some(existing) = store
+                .pending_brain_invitation_for_target(brain_id, &target)?
+                // Only a still-live invitation is reused; a lapsed one falls
+                // through to the supersede path below.
+                .filter(|existing| existing.expires_at.as_str() > created_at.as_str())
+            {
+                let mut response = brain_invitation_response(existing);
+                attach_invitation_public_url(state, &mut response);
+                invitations.push(CommittedPrincipalInvitation {
+                    ref_: ref_.clone(),
+                    npub: npub.clone(),
+                    invitation: response,
+                });
+                skipped.push(CommitSkippedPrincipal {
+                    ref_: ref_.clone(),
+                    reason: "already invited (pending invitation reused)".to_owned(),
+                });
+                continue;
+            }
             // Re-invite after expiry supersedes the stale delivery handle
             // instead of colliding on the pending (Brain, target) singleton.
             superseded_invitation_ids.extend(store.revoke_expired_pending_brain_invitations(

@@ -480,9 +480,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         super().__init__(config, _finite_platform())
         extra = getattr(config, "extra", {}) or {}
         self.home = str(extra.get("home") or os.getenv("FINITECHAT_HOME") or "").strip()
-        # fbrain files approval requests into this Runtime's config dir; the
-        # next final delivery carries them as metadata.approve (chat cards).
-        self._brain_approval_outbox = _brain_approval_outbox_path()
+        # Shared with the module-level post_tool_call hook so fbrain's
+        # markers and this adapter's sends observe one pending set.
+        self._brain_approval_filings = _BRAIN_APPROVAL_FILINGS
         # Optional room filter; by default the adapter serves every room the
         # Agent Principal has joined through MLS Add + Welcome.
         self.room_id = str(extra.get("room_id") or os.getenv("FINITECHAT_ROOM_ID") or "").strip()
@@ -1410,10 +1410,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """
         if str(payload.get("kind")) != "message" or str(payload.get("status")) != "complete":
             return []
-        outbox = self._brain_approval_outbox
-        if outbox is None or not outbox.exists():
-            return []
-        filings = _brain_approval_filings(outbox)
+        filings = self._brain_approval_filings.take_pending()
         if not filings:
             return []
         meta = payload.setdefault("metadata", {})
@@ -1425,13 +1422,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
     def _finish_brain_approval_drain(self, drained: list[dict[str, Any]]) -> None:
         if not drained:
             return
-        outbox = self._brain_approval_outbox
-        if outbox is None:
-            return
-        with contextlib.suppress(OSError):
-            _mark_brain_approval_filings_reported(
-                outbox, {filing["requestId"] for filing in drained}
-            )
+        self._brain_approval_filings.mark_reported({filing["requestId"] for filing in drained})
 
     def _send_payload(
         self,
@@ -2054,86 +2045,103 @@ def _infer_finitechat_status(content: str) -> str:
     return "running" if "▉" in str(content or "") else "complete"
 
 
-BRAIN_APPROVAL_OUTBOX_NAME = "approval-outbox.jsonl"
-# fbrain's approval requests expire after 15 minutes; a stale unattached
-# filing should not ride a much later delivery.
-BRAIN_APPROVAL_OUTBOX_MAX_AGE_SECS = 20 * 60
+BRAIN_APPROVAL_FILED_MARKER = re.compile(
+    r"finite-brain-approval-filed"
+    r" brain=(?P<brain>[a-z0-9][a-z0-9_-]{0,127})"
+    r" request=(?P<request>[A-Za-z0-9][A-Za-z0-9_-]{0,127})"
+)
+# Tool results can be large; bound the scan so a huge output never stalls the hook.
+BRAIN_APPROVAL_MARKER_SCAN_BYTES = 2 * 1024 * 1024
+# fbrain's approval requests expire after 15 minutes; a filing older than
+# that must not ride a much later delivery.
+BRAIN_APPROVAL_FILING_MAX_AGE_SECS = 20 * 60
 
 
-def _brain_approval_outbox_path() -> Path | None:
-    """Mirror fbrain's config-dir precedence exactly (environment.rs)."""
-    explicit = os.getenv("FBRAIN_CONFIG_DIR", "").strip()
-    if explicit:
-        return Path(explicit) / BRAIN_APPROVAL_OUTBOX_NAME
-    finite_home = os.getenv("FINITE_HOME", "").strip()
-    if finite_home:
-        return Path(finite_home) / "fbrain" / BRAIN_APPROVAL_OUTBOX_NAME
-    home = os.getenv("HOME", "").strip()
-    if home:
-        return Path(home) / ".finitebrain" / "fbrain" / BRAIN_APPROVAL_OUTBOX_NAME
-    return None
-
-
-def _brain_approval_filings(path: Path) -> list[dict[str, Any]]:
-    """Fresh brain-approval-filed notices awaiting a delivery to ride."""
+def _tool_result_text(result: Any) -> str:
+    """Best-effort text of a terminal tool result, never raising."""
     try:
-        raw_lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    now = time.time()
-    pending: list[dict[str, Any]] = []
-    for raw in raw_lines:
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        try:
-            notice = json.loads(stripped)
-        except ValueError:
-            continue
-        if not isinstance(notice, dict) or notice.get("kind") != "brain-approval-filed":
-            continue
-        brain_id = _string_or_none(notice.get("brainId"))
-        request_id = _string_or_none(notice.get("requestId"))
-        filed_at = notice.get("filedAtUnix")
-        if not brain_id or not request_id:
-            continue
-        if (
-            isinstance(filed_at, int | float)
-            and now - float(filed_at) > BRAIN_APPROVAL_OUTBOX_MAX_AGE_SECS
-        ):
-            continue
-        pending.append({"brainId": brain_id, "requestId": request_id})
-    return pending
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            text = result
+            try:
+                result = json.loads(result)
+            except ValueError:
+                return text
+        if isinstance(result, dict):
+            for key in ("output", "stdout", "result", "text", "content"):
+                value = result.get(key)
+                if isinstance(value, str):
+                    return value
+            return json.dumps(result)
+        return str(result)
+    except Exception:  # observer hook must never raise
+        return ""
 
 
-def _mark_brain_approval_filings_reported(path: Path, request_ids: set[str]) -> None:
-    """Drop the drained notices, preserving lines appended meanwhile."""
-    try:
-        current = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    survivors: list[str] = []
-    drained = False
-    for raw in current:
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        request_id: str | None = None
+class _BrainApprovalFilings:
+    """In-memory bridge from fbrain's stdout marker to the next final delivery.
+
+    ``fbrain`` prints one ``finite-brain-approval-filed brain=<id>
+    request=<id>`` trailer line per filed approval request; the terminal
+    tool's ``post_tool_call`` result carries that output here. The agent's
+    next final user-visible delivery drains the filings as the
+    reference-only ``metadata.approve`` envelope.
+
+    Everything degrades to "no card": marker absent, result unparsable, hook
+    never fired, filing stale, or the runtime restarted before the final
+    delivery — the request stays durable server-side and
+    ``fbrain approvals list`` remains the authoritative fallback. No
+    filesystem or config-directory coupling, and no chat send is ever
+    affected by this broker.
+    """
+
+    def __init__(self, max_pending: int = 64) -> None:
+        self._lock = threading.Lock()
+        self._pending: list[dict[str, Any]] = []
+        self._max_pending = max(1, max_pending)
+
+    def after_tool_call(self, **kwargs: Any) -> None:
         try:
-            notice = json.loads(stripped)
-        except ValueError:
-            notice = None
-        if isinstance(notice, dict) and notice.get("kind") == "brain-approval-filed":
-            request_id = _string_or_none(notice.get("requestId"))
-        if request_id is not None and request_id in request_ids:
-            drained = True
-            continue
-        survivors.append(stripped)
-    if not drained:
-        return
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_text("\n".join(survivors) + ("\n" if survivors else ""), encoding="utf-8")
-    temp.replace(path)
+            if str(kwargs.get("tool_name") or "") != "terminal":
+                return
+            text = _tool_result_text(kwargs.get("result"))[:BRAIN_APPROVAL_MARKER_SCAN_BYTES]
+            if not text:
+                return
+            found = [
+                {"brainId": match["brain"], "requestId": match["request"], "filedAt": time.time()}
+                for match in BRAIN_APPROVAL_FILED_MARKER.finditer(text)
+            ]
+            if not found:
+                return
+            with self._lock:
+                known = {filing["requestId"] for filing in self._pending}
+                for filing in found:
+                    if filing["requestId"] not in known:
+                        self._pending.append(filing)
+                        known.add(filing["requestId"])
+                del self._pending[: -self._max_pending]
+        except Exception:  # observer hook must never raise
+            logger.debug("brain approval marker scan failed", exc_info=True)
+
+    def take_pending(self) -> list[dict[str, Any]]:
+        """Snapshot the filings that may ride the next final delivery."""
+        now = time.time()
+        with self._lock:
+            self._pending = [
+                filing
+                for filing in self._pending
+                if now - float(filing.get("filedAt", 0)) <= BRAIN_APPROVAL_FILING_MAX_AGE_SECS
+            ]
+            return [dict(filing) for filing in self._pending]
+
+    def mark_reported(self, request_ids: set[str]) -> None:
+        if not request_ids:
+            return
+        with self._lock:
+            self._pending = [
+                filing for filing in self._pending if filing["requestId"] not in request_ids
+            ]
 
 
 def _brain_approval_metadata(requests: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2279,12 +2287,16 @@ def _finite_platform() -> Platform:
         return Platform.LOCAL
 
 
+_BRAIN_APPROVAL_FILINGS = _BrainApprovalFilings()
+
+
 def register(ctx) -> None:
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         requester_context = _RequesterContextBroker()
         register_hook("pre_tool_call", requester_context.before_tool_call)
         register_hook("post_tool_call", requester_context.after_tool_call)
+        register_hook("post_tool_call", _BRAIN_APPROVAL_FILINGS.after_tool_call)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",

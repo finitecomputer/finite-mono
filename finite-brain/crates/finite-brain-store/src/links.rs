@@ -258,6 +258,28 @@ impl BrainStore {
             })
     }
 
+    /// Load the pending Brain Invitation for one target principal, if any.
+    /// The (brain, target) pending singleton makes this the delivery handle
+    /// a duplicate commit must reuse rather than collide with.
+    pub fn pending_brain_invitation_for_target(
+        &self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+    ) -> Result<Option<StoredBrainInvitation>, StoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{BRAIN_INVITATION_SELECT} \
+                     WHERE brain_id = ?1 AND user_id = ?2 AND status = 'pending' \
+                     ORDER BY created_at DESC LIMIT 1"
+                ),
+                params![brain_id.as_str(), user_id.as_str()],
+                brain_invitation_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// Load one Brain Invitation by invite code without applying recipient availability rules.
     pub fn load_brain_invitation_by_code(
         &self,

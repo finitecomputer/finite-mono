@@ -903,6 +903,11 @@ pub struct ApprovalRequestResponse {
     pub resolved_by_npub: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Invitation ids an approved invite-commit produced. Lets members —
+    /// whose agents cannot list org-brain invitations — observe their
+    /// filing's outcome through `approvals list --all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_invitations: Option<Vec<String>>,
 }
 
 /// Approval Request list response.

@@ -3,7 +3,7 @@ use crate::*;
 const APPROVAL_REQUEST_SELECT: &str = r#"
     SELECT id, brain_id, action, payload_json, nonce, expires_at_unix,
            requested_by_npub, status, approval_event_id, resolved_by_npub,
-           created_at, updated_at
+           created_at, updated_at, result_invitations_json
     FROM brain_approval_requests
 "#;
 
@@ -31,6 +31,9 @@ fn approval_request_from_row(
             .map_err(to_from_sql_error(9, rusqlite::types::Type::Text))?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        result_invitations: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|encoded| serde_json::from_str(&encoded).ok()),
     })
 }
 
@@ -184,6 +187,31 @@ impl BrainStore {
             return Err(nonce_conflict("approval request is already resolved"));
         }
         self.load_brain_approval_request(request_id)
+    }
+
+    /// Record the committed invitation ids an approved request produced, so
+    /// members (whose agents cannot list org-brain invitations) can still
+    /// observe their filing's outcome through `approvals list --all`.
+    pub fn record_brain_approval_result_invitations(
+        &mut self,
+        request_id: &str,
+        invitation_ids: &[String],
+        updated_at: &str,
+    ) -> Result<(), StoreError> {
+        let encoded =
+            serde_json::to_string(invitation_ids).map_err(|error| StoreError::BrokenInvariant {
+                reason: format!("approval result invitations did not serialize: {error}"),
+            })?;
+        let updated = self.conn.execute(
+            "UPDATE brain_approval_requests SET result_invitations_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![request_id, encoded, updated_at],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::UnavailableLink {
+                kind: "brain approval request",
+            });
+        }
+        Ok(())
     }
 
     /// True when this approval nonce was already consumed on this Brain.

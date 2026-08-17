@@ -11185,17 +11185,27 @@ mod tests {
     }
 
     async fn run_preflight(router: &Router, fixture: &PlanFixture) -> InvitationPreflightResponse {
+        run_preflight_at(router, fixture, TEST_NOW + 1).await
+    }
+
+    async fn run_preflight_at(
+        router: &Router,
+        fixture: &PlanFixture,
+        now: u64,
+    ) -> InvitationPreflightResponse {
         let preflight = authed_request(
             router.clone(),
             &fixture.admin_keys,
             "POST",
             "/v1/brains/acme/invitations/preflight",
             Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
-            TEST_NOW + 1,
+            now,
         )
         .await;
-        assert_eq!(preflight.status(), StatusCode::OK);
-        read_json(preflight).await
+        let status = preflight.status();
+        let body = read_text(preflight).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
     }
 
     #[tokio::test]
@@ -14061,6 +14071,171 @@ mod tests {
         let body = read_text(response).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn duplicate_approval_reuses_pending_invitations_and_records_results() {
+        let fixture = PlanFixture::new();
+        let mut core_responses = Vec::new();
+        let mut identity_responses = vec![(
+            404,
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({}),
+        )];
+        for _ in 0..2 {
+            core_responses.extend(vec![
+                (
+                    200,
+                    "/api/core/v1/brain/account-agent-roster",
+                    fixture.roster(3, fixture.full_roster_agents()),
+                );
+                3
+            ]);
+            identity_responses.extend(vec![
+                (
+                    200,
+                    "/api/v1/operator/brain/user-resolution",
+                    serde_json::json!({
+                        "workosUserId": "user_workos_friend",
+                        "userNpub": fixture.human_npub(),
+                    }),
+                ),
+                (
+                    200,
+                    "/api/v1/operator/brain/agent-resolution",
+                    serde_json::json!({
+                        "agentNpub": fixture.agent_one_npub(),
+                        "managedAgentEmail": "agent-one@finite.vip",
+                    }),
+                ),
+                (
+                    200,
+                    "/api/v1/operator/brain/agent-resolution",
+                    serde_json::json!({
+                        "agentNpub": fixture.agent_two_npub(),
+                        "managedAgentEmail": "agent-two@finite.vip",
+                    }),
+                ),
+            ]);
+        }
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+
+        async fn approve_plan(
+            router: &Router,
+            fixture: &PlanFixture,
+            plan_id: &str,
+            step: u64,
+        ) -> (ApprovalSubmissionResponse, InvitationCommitResponse) {
+            let created = create_approval_request(
+                router,
+                &fixture.admin_keys,
+                serde_json::json!({
+                    "action": "invite-commit",
+                    "planId": plan_id,
+                }),
+                TEST_NOW + step,
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let request: ApprovalRequestResponse = read_json(created).await;
+            let payload = finite_brain_core::BrainApprovalPayload {
+                version: finite_brain_core::BRAIN_APPROVAL_VERSION.to_owned(),
+                human_npub: npub(&fixture.admin_keys),
+                action: finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT.to_owned(),
+                brain_id: "acme".to_owned(),
+                plan_id: Some(plan_id.to_owned()),
+                target_npubs: Vec::new(),
+                nonce: request.nonce.clone(),
+                expires_at: request.expires_at,
+            };
+            let artifact = signed_approval_event_json(&fixture.admin_keys, &payload);
+            let submit = authed_request(
+                router.clone(),
+                &fixture.agent_one_keys,
+                "POST",
+                "/v1/brains/acme/approvals",
+                Some(
+                    serde_json::json!({
+                        "approvalEventJson": artifact,
+                        "requestId": request.id,
+                    })
+                    .to_string(),
+                ),
+                TEST_NOW + step + 1,
+            )
+            .await;
+            let status = submit.status();
+            let body = read_text(submit).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let applied: ApprovalSubmissionResponse = serde_json::from_str(&body).unwrap();
+            let commit: InvitationCommitResponse =
+                serde_json::from_value(applied.result.clone()).unwrap();
+            (applied, commit)
+        }
+
+        // First approval commits three pending invitations.
+        let first_plan = run_preflight(&router, &fixture).await;
+        let (_first_applied, first_commit) =
+            approve_plan(&router, &fixture, &first_plan.plan_id, 2).await;
+        assert_eq!(first_commit.status, "committed");
+        assert_eq!(first_commit.invitations.len(), 3);
+        assert!(first_commit.skipped.is_empty());
+        let first_ids: Vec<&str> = first_commit
+            .invitations
+            .iter()
+            .map(|entry| entry.invitation.id.as_str())
+            .collect();
+
+        // A second approval for the same roster (a re-filed request whose
+        // card fell on the floor, or a duplicate filing) must be idempotent:
+        // it reuses the live pending invitations instead of colliding on the
+        // (brain, target) singleton.
+        let second_plan = run_preflight_at(&router, &fixture, TEST_NOW + 20).await;
+        let (second_applied, second_commit) =
+            approve_plan(&router, &fixture, &second_plan.plan_id, 10).await;
+        assert_eq!(second_applied.status, "applied");
+        assert_eq!(second_commit.status, "committed");
+        assert_eq!(second_commit.invitations.len(), 3);
+        assert_eq!(second_commit.skipped.len(), 3);
+        assert!(
+            second_commit
+                .skipped
+                .iter()
+                .all(|skipped| skipped.reason.contains("already invited"))
+        );
+        let second_ids: Vec<&str> = second_commit
+            .invitations
+            .iter()
+            .map(|entry| entry.invitation.id.as_str())
+            .collect();
+        assert_eq!(first_ids, second_ids);
+
+        // The resolved request records its result invitations so a member
+        // agent can observe the outcome from `approvals list --all`.
+        {
+            let store = fixture.state.store.lock().unwrap();
+            let requests = store
+                .list_brain_approval_requests(&acme_brain_id())
+                .unwrap();
+            let approved: Vec<&finite_brain_store::StoredBrainApprovalRequest> = requests
+                .iter()
+                .filter(|request| {
+                    request.status == finite_brain_store::ApprovalRequestStatus::Approved
+                })
+                .collect();
+            assert_eq!(approved.len(), 2);
+            for request in approved {
+                let recorded = request
+                    .result_invitations
+                    .as_ref()
+                    .expect("approved request records result invitations");
+                assert_eq!(recorded.len(), 3);
+                for id in recorded {
+                    assert!(first_ids.contains(&id.as_str()));
+                }
+            }
+        }
     }
 
     #[tokio::test]
