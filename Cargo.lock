@@ -1533,7 +1533,6 @@ name = "finitechat-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64",
  "finitechat-blob",
  "finitechat-delivery",
  "finitechat-http",
@@ -1541,7 +1540,6 @@ dependencies = [
  "finitechat-transport",
  "futures-util",
  "nostr",
- "p256",
  "reqwest",
  "rusqlite",
  "serde",
