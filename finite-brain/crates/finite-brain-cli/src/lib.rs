@@ -4378,6 +4378,142 @@ fn claim_email_folder_invitation<W: Write>(
     write_command_response(output, json, &claimed)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_plan_or_email_folder_invite_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+    raw_target: &str,
+    expires_at: &str,
+) -> Result<(), CliError> {
+    let classic_fallback = |output: &mut W| -> Result<(), CliError> {
+        let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
+        write_email_invite_create(
+            output,
+            json,
+            env,
+            args,
+            &route,
+            brain_id,
+            raw_target,
+            std::slice::from_ref(&folder_id.to_owned()),
+            expires_at,
+            true,
+        )
+    };
+    let email = canonical_invite_email(raw_target)?;
+    let preflight_route =
+        format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/preflight");
+    let plan = match signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({ "target": email })),
+    ) {
+        Ok(plan) => plan,
+        Err(CliError::HttpStatus { status: 403, .. }) => {
+            return Err(CliError::HttpStatus {
+                status: 403,
+                body: "cohort Folder invitations require Brain admin standing (the key-holding                        committer); ask your admin, or wait for the chat approval card escalation"
+                    .to_owned(),
+            });
+        }
+        Err(CliError::HttpStatus { status: 502, .. })
+        | Err(CliError::HttpStatus { status: 503, .. }) => {
+            return classic_fallback(output);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut principals: Vec<String> = Vec::new();
+    if let Some(human_npub) = plan
+        .get("human")
+        .and_then(|human| human.get("npub"))
+        .and_then(|npub| npub.as_str())
+        .filter(|npub| !npub.is_empty())
+    {
+        principals.push(human_npub.to_owned());
+    }
+    if let Some(agents) = plan.get("agents").and_then(|agents| agents.as_array()) {
+        for agent in agents {
+            if let Some(agent_npub) = agent.get("agentNpub").and_then(|v| v.as_str()) {
+                principals.push(agent_npub.to_owned());
+            }
+        }
+    }
+    if principals.is_empty() {
+        // No Finite account for this email: the one-time Folder invitation.
+        return classic_fallback(output);
+    }
+    let key_version = plan
+        .get("currentKeyVersion")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| CliError::HttpStatus {
+            status: 200,
+            body: "folder plan preflight response has no currentKeyVersion".to_owned(),
+        })?;
+    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
+    let folder_key = opened_folder_key(&session_keys, brain_id, folder_id, key_version)?;
+    let auth = load_signer(env)?;
+    let mut participants = Vec::with_capacity(principals.len());
+    for target in &principals {
+        let event = admin_access_change_event(
+            env,
+            brain_id,
+            AdminAccessAction::GrantFolderAccess,
+            Some(folder_id),
+            Some(target),
+            Some(key_version),
+        )?;
+        let grant = folder_key_grant_request(
+            &auth,
+            brain_id,
+            folder_id,
+            key_version,
+            target,
+            &folder_key,
+            env,
+        )?;
+        participants.push(serde_json::json!({
+            "recipientNpub": target,
+            "grant": grant,
+            "accessChangeEvent": event,
+        }));
+    }
+    let commit_route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/commit");
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &commit_route,
+        Some(serde_json::json!({
+            "planId": plan.get("planId").cloned().unwrap_or(serde_json::Value::Null),
+            "planHash": plan.get("planHash").cloned().unwrap_or(serde_json::Value::Null),
+            "expiresAt": expires_at,
+            "participants": participants,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        write_command_response(output, false, &response)?;
+        let invited = response
+            .get("invitations")
+            .and_then(|invitations| invitations.as_array())
+            .map(|invitations| invitations.len())
+            .unwrap_or_default();
+        writeln!(
+            output,
+            "invited {invited} principal(s) to folder {folder_id}; they accept with `fbrain invite folder accept --id <invitation-id>`"
+        )?;
+        Ok(())
+    }
+}
+
 fn folder_invites<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -4402,18 +4538,15 @@ fn folder_invites<W: Write>(
                 None
             };
             if invite_email_like(&raw_target) && resolved_target.is_none() {
-                let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
-                return write_email_invite_create(
+                return write_plan_or_email_folder_invite_create(
                     output,
                     json,
                     env,
                     args,
-                    &route,
                     &brain_id,
+                    &folder_id,
                     &raw_target,
-                    std::slice::from_ref(&folder_id),
                     &expires_at,
-                    true,
                 );
             }
             let target = resolved_target
@@ -9316,10 +9449,22 @@ mod tests {
         )
         .unwrap();
 
-        let response: Value = serde_json::from_slice(&output).unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap_or_else(|error| {
+            panic!(
+                "output was: {:?} ({error})",
+                String::from_utf8_lossy(&output)
+            )
+        });
         let invite_secret = response["inviteSecret"].as_str().unwrap();
         let requests = server.join().unwrap();
-        let (_, body) = &requests[2];
+        // The email path folder-preflights the account first; the
+        // unregistered mailbox falls through to the classic one-time path.
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/folders/getting-started/invitations/preflight")
+        );
+        let (_, body) = &requests[3];
         assert!(!body.contains(invite_secret));
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["target"], "new-person@example.com");

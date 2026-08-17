@@ -68,6 +68,15 @@ impl BrainStore {
                 params![25, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V26 is additive only (one nullable column), same ordinary path.
+        if !migration_applied(&tx, 26)? {
+            tx.execute_batch(SCHEMA_V26)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![26, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -303,6 +312,14 @@ CREATE TABLE brain_pending_grant_wraps (
 
 CREATE INDEX brain_pending_grant_wraps_by_brain
     ON brain_pending_grant_wraps(brain_id, folder_id);
+"#;
+
+const SCHEMA_V26: &str = r#"
+-- Folder-scoped Invitation Plans: one row per mailbox+Folder preview for
+-- cohort Folder invitations. NULL keeps a plan Brain-scoped (membership);
+-- a non-NULL value scopes its commit to per-principal Folder share links
+-- for exactly that Folder.
+ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2086,7 +2103,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 25);
+        assert_eq!(latest_version, 26);
 
         let old_table_count: i64 = store
             .conn

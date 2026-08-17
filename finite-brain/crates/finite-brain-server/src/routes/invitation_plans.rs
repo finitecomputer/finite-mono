@@ -309,7 +309,27 @@ pub(crate) fn persist_invitation_plan(
     inviter_npub: &UserId,
     resolution: PlanResolution,
 ) -> Result<StoredInvitationPlan, ApiError> {
-    persist_invitation_plan_with_salt(state, brain_id, inviter_npub, resolution, None)
+    // Plan ids are deterministic over (brain, inviter, mailbox, hash,
+    // folder, second): two preflights inside one second collide on the
+    // unique constraint. Retry with a salt instead of surfacing a 409.
+    let mut last_error = None;
+    for attempt in 0..3_u8 {
+        let salt = (attempt > 0).then(|| format!("preflight-{attempt}"));
+        match persist_invitation_plan_with_salt(
+            state,
+            brain_id,
+            inviter_npub,
+            resolution.clone(),
+            None,
+            salt.as_deref(),
+        ) {
+            Ok(plan) => return Ok(plan),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+    }))
 }
 
 /// `unique_salt` separates otherwise identical plans created within the same
@@ -320,19 +340,31 @@ pub(crate) fn persist_invitation_plan_with_salt(
     brain_id: &BrainId,
     inviter_npub: &UserId,
     resolution: PlanResolution,
+    folder_scope: Option<&FolderId>,
     unique_salt: Option<&str>,
 ) -> Result<StoredInvitationPlan, ApiError> {
     let created_at = server_timestamp(state);
     let expires_at = timestamp_plus_seconds(state, PLAN_COMMIT_WINDOW_SECONDS);
-    let plan_hash = resolution_plan_hash(brain_id, inviter_npub, &resolution);
+    let mut plan_hash = resolution_plan_hash(brain_id, inviter_npub, &resolution);
     let mut id_parts = [
         brain_id.as_str(),
         inviter_npub.as_str(),
         resolution.human_email.as_str(),
-        plan_hash.as_str(),
         created_at.as_str(),
     ]
     .to_vec();
+    if let Some(folder_id) = folder_scope {
+        // Folder scoping must change both the hash (a Folder plan and a
+        // membership plan for one mailbox never share a commit identity) and
+        // the derived id.
+        plan_hash = generated_link_id(
+            "plan-folder",
+            &[brain_id.as_str(), folder_id.as_str(), plan_hash.as_str()],
+            32,
+        );
+        id_parts.insert(3, folder_id.as_str());
+    }
+    id_parts.insert(3, plan_hash.as_str());
     if let Some(salt) = unique_salt {
         id_parts.push(salt);
     }
@@ -368,6 +400,7 @@ pub(crate) fn persist_invitation_plan_with_salt(
             })
             .collect(),
         roster_revision: resolution.roster_revision,
+        folder_id: folder_scope.cloned(),
         committed: false,
         expires_at,
         created_at: created_at.clone(),
@@ -377,7 +410,7 @@ pub(crate) fn persist_invitation_plan_with_salt(
     Ok(store.create_brain_invitation_plan(&plan)?)
 }
 
-fn preflight_response(
+pub(crate) fn preflight_response(
     plan: StoredInvitationPlan,
     supersedes_plan_id: Option<String>,
 ) -> InvitationPreflightResponse {

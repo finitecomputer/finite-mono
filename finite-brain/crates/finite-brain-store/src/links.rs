@@ -1055,9 +1055,10 @@ impl BrainStore {
                 INSERT INTO brain_invitation_plans (
                     id, brain_id, plan_hash, inviter_npub, workos_user_id,
                     human_email, human_npub, agents_json, exclusions_json,
-                    roster_revision, status, expires_at, created_at, updated_at
+                    roster_revision, status, expires_at, created_at, updated_at,
+                    folder_id
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)
                 "#,
                 params![
                     plan.id,
@@ -1076,7 +1077,8 @@ impl BrainStore {
                         "pending"
                     },
                     plan.expires_at,
-                    plan.created_at
+                    plan.created_at,
+                    plan.folder_id.as_ref().map(FolderId::as_str)
                 ],
             )
             .map_err(map_insert_error("brain_invitation_plan_id", &plan.id))?;
@@ -1096,7 +1098,8 @@ impl BrainStore {
                 r#"
                 SELECT id, brain_id, plan_hash, inviter_npub, workos_user_id,
                        human_email, human_npub, agents_json, exclusions_json,
-                       roster_revision, status, expires_at, created_at, updated_at
+                       roster_revision, status, expires_at, created_at, updated_at,
+                       folder_id
                 FROM brain_invitation_plans
                 WHERE id = ?1
                 "#,
@@ -1167,6 +1170,11 @@ fn invitation_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredI
             )
         })?,
         roster_revision: row.get(9)?,
+        folder_id: row
+            .get::<_, Option<String>>(14)?
+            .map(FolderId::new)
+            .transpose()
+            .map_err(to_from_sql_error(14, rusqlite::types::Type::Text))?,
         committed: match status.as_str() {
             "pending" => false,
             "committed" => true,

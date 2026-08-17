@@ -305,12 +305,15 @@ normal sharing workflow.
 
 ## Invitations And Sharing
 
-`invite brain create --target <email>` is the blessed invite path. For a
+`invite brain create --target <email>` and
+`invite folder create --target <email>` are the blessed invite paths. For a
 Finite account email the CLI resolves the account's human and managed agents
-into one invitation plan; a signer with Brain admin standing commits it
-directly, everyone else files an approval request that a Brain admin signs
-(`fbrain approvals approve` or the chat approval card). Emails without a
-Finite account fall back to the one-time email invitation.
+into one plan (Brain membership, or Guest access to exactly one Folder); a
+signer with Brain admin standing commits it directly, everyone else files an
+approval request that a Brain admin signs (`fbrain approvals approve` or the
+chat approval card; Folder plans additionally need the key-holding
+committer). Emails without a Finite account fall back to the one-time email
+invitation.
 
 ```sh
 fbrain invite brain create --target <email|npub>

@@ -1036,6 +1036,9 @@ pub struct StoredInvitationPlan {
     pub exclusions: Vec<StoredPlanExclusion>,
     /// Account roster revision at resolution time.
     pub roster_revision: Option<i64>,
+    /// Folder scoping: None commits Brain membership; Some commits
+    /// per-principal Folder share links for exactly this Folder.
+    pub folder_id: Option<FolderId>,
     /// True once committed into per-principal invitations.
     pub committed: bool,
     /// Commit-by timestamp.
@@ -5403,6 +5406,7 @@ mod tests {
                 reason: "agent npub is not resolvable".to_owned(),
             }],
             roster_revision: Some(7),
+            folder_id: None,
             committed: false,
             expires_at: "2026-06-23T00:15:00.000Z".to_owned(),
             created_at: now.to_owned(),

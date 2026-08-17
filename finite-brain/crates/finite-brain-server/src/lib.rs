@@ -699,6 +699,14 @@ fn normal_signed_api_router() -> Router<ServerState> {
             axum::routing::delete(delete_folder_handler),
         )
         .route(
+            "/brains/{brain_id}/folders/{folder_id}/invitations/preflight",
+            post(preflight_folder_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/invitations/commit",
+            post(commit_folder_invitation_handler),
+        )
+        .route(
             "/brains/{brain_id}/folders/{folder_id}/invitations",
             get(list_folder_share_links_handler).post(create_folder_invitation_handler),
         )
@@ -10663,6 +10671,274 @@ mod tests {
     fn test_state() -> ServerState {
         let store = BrainStore::open_in_memory().unwrap();
         ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    #[tokio::test]
+    async fn folder_plan_invitation_cohort_fans_out_share_links_idempotently() {
+        let admin_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let human_npub = npub(&human_keys);
+        let agent_npub = npub(&agent_keys);
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_friend",
+            "humanMailbox": "friend@example.com",
+            "rosterRevision": 1,
+            "agents": [
+                {
+                    "managedAgentEmail": "agent-one@finite.vip",
+                    "agentNpub": agent_npub,
+                    "status": "active",
+                }
+            ],
+        });
+        // The single-shot authority mock serves one response per accept, so
+        // the resolution triple repeats once per preflight.
+        let mut core_responses = Vec::new();
+        let mut identity_responses = vec![(
+            404_u16,
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({}),
+        )];
+        for _ in 0..3 {
+            core_responses.push(("/api/core/v1/brain/account-agent-roster", roster.clone()));
+            identity_responses.push((
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": human_npub,
+                }),
+            ));
+            identity_responses.push((
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ));
+        }
+        let (core_url, _core_server) = spawn_json_authority(core_responses);
+        let (identity_url, _identity_server) = spawn_json_authority_with_status(identity_responses);
+        let state = test_state()
+            .with_nip05_failure("no nip05 document in tests")
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let create_folder_body = serde_json::json!({
+            "folderId": "strategy",
+            "name": "Strategy",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "strategy",
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-strategy-admin-v1", 1, npub(&admin_keys).as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "change_create_strategy_cohort",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("strategy"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_folder = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders",
+            Some(create_folder_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(create_folder.status(), StatusCode::OK);
+
+        let preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let plan: FolderInvitationPreflightResponse = read_json(preflight).await;
+        assert_eq!(plan.folder_id, "strategy");
+        assert_eq!(plan.current_key_version, 1);
+        assert_eq!(plan.plan.human.npub.as_deref(), Some(human_npub.as_str()));
+        assert_eq!(plan.plan.agents.len(), 1);
+
+        let participants = |prefix: &'static str| {
+            vec![
+                serde_json::json!({
+                    "recipientNpub": human_npub,
+                    "grant": folder_key_grant_value(
+                        &format!("grant-{prefix}-human-v1"),
+                        1,
+                        human_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        &format!("change_{prefix}_human"),
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(human_npub.as_str()),
+                        Some(1),
+                    ),
+                }),
+                serde_json::json!({
+                    "recipientNpub": agent_npub,
+                    "grant": folder_key_grant_value(
+                        &format!("grant-{prefix}-agent-v1"),
+                        1,
+                        agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        &format!("change_{prefix}_agent"),
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(agent_npub.as_str()),
+                        Some(1),
+                    ),
+                }),
+            ]
+        };
+        let commit_body = serde_json::json!({
+            "planId": plan.plan.plan_id,
+            "planHash": plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": participants("cohort"),
+        })
+        .to_string();
+        let commit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(commit_body),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: FolderInvitationPlanCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "ok");
+        assert_eq!(committed.invitations.len(), 2);
+        assert!(committed.duplicate_recipient_npubs.is_empty());
+        let mut recipients = committed
+            .invitations
+            .iter()
+            .map(|invitation| invitation.recipient_npub.clone())
+            .collect::<Vec<_>>();
+        recipients.sort();
+        let mut expected = vec![agent_npub.clone(), human_npub.clone()];
+        expected.sort();
+        assert_eq!(recipients, expected);
+
+        // Same mailbox, same Folder: the retry returns the original links.
+        let retry_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        if retry_preflight.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(retry_preflight).await;
+            panic!("retry preflight failed: {}", body.error);
+        }
+        let retry_plan: FolderInvitationPreflightResponse = read_json(retry_preflight).await;
+        let retry_body = serde_json::json!({
+            "planId": retry_plan.plan.plan_id,
+            "planHash": retry_plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": participants("retry"),
+        })
+        .to_string();
+        let retry = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(retry_body),
+            TEST_NOW + 5,
+        )
+        .await;
+        if retry.status() != StatusCode::OK {
+            let body: ApiErrorBody = read_json(retry).await;
+            panic!("retry commit failed: {}", body.error);
+        }
+        let retried: FolderInvitationPlanCommitResponse = read_json(retry).await;
+        assert_eq!(retried.invitations.len(), 2);
+        assert_eq!(retried.duplicate_recipient_npubs.len(), 2);
+
+        // The participant set must match the plan exactly.
+        let mismatch_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/preflight",
+            Some(serde_json::json!({ "target": "friend@example.com" }).to_string()),
+            TEST_NOW + 6,
+        )
+        .await;
+        let mismatch_plan: FolderInvitationPreflightResponse = read_json(mismatch_preflight).await;
+        let mismatch_body = serde_json::json!({
+            "planId": mismatch_plan.plan.plan_id,
+            "planHash": mismatch_plan.plan.plan_hash,
+            "expiresAt": "2026-06-04T20:26:40Z",
+            "participants": vec![serde_json::json!({
+                "recipientNpub": human_npub,
+                "grant": folder_key_grant_value("grant-mismatch-human-v1", 1, human_npub.as_str()),
+                "accessChangeEvent": admin_event(
+                    &admin_keys,
+                    "acme",
+                    "change_mismatch_human",
+                    AdminAccessAction::GrantFolderAccess,
+                    Some("strategy"),
+                    Some(human_npub.as_str()),
+                    Some(1),
+                ),
+            })],
+        })
+        .to_string();
+        let mismatch = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations/commit",
+            Some(mismatch_body),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

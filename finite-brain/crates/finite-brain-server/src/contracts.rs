@@ -991,6 +991,48 @@ pub struct CreateFolderInvitationRequest {
     pub expires_at: String,
 }
 
+/// Folder-scoped invitation plan preview: the cohort resolution plus the
+/// Folder the commit will grant Guest access to.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInvitationPreflightResponse {
+    #[serde(flatten)]
+    pub plan: InvitationPreflightResponse,
+    pub folder_id: String,
+    pub current_key_version: u32,
+}
+
+/// One per-principal Folder invitation inside a cohort Folder plan commit.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInvitationPlanParticipant {
+    pub recipient_npub: String,
+    pub grant: FolderKeyGrantRequest,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Cohort Folder plan commit: the committing key holder supplies one signed
+/// access-change event and one wrapped Folder Key Grant per included
+/// principal; the server fans the share links out atomically.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInvitationPlanCommitRequest {
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub expires_at: String,
+    pub participants: Vec<FolderInvitationPlanParticipant>,
+}
+
+/// Folder plan commit result: one share link per included principal.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInvitationPlanCommitResponse {
+    pub status: String,
+    pub plan_id: String,
+    pub invitations: Vec<FolderInvitationResponse>,
+    pub duplicate_recipient_npubs: Vec<String>,
+}
+
 /// Folder Invitation response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -265,6 +265,7 @@ pub(crate) async fn create_approval_request_handler(
                         &brain_id,
                         &actor_user_id,
                         resolution.clone(),
+                        None,
                         salt.as_deref(),
                     ) {
                         Ok(plan) => {

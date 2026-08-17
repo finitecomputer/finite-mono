@@ -69,6 +69,7 @@ rewrite actually serves.
 | --- | --- | --- | --- |
 | Invite by email → plan → per-principal | `invite brain create` (#543) | approval card **pending** | CLI done |
 | Invite by npub / one-time email invite | `invite brain create` | none | OK |
+| Cohort folder invite (mailbox → one Folder, per-principal guests) | `invite folder create --target <email>` | card escalation pending | CLI done (#444 v1) |
 | Accept invitation | `invite brain accept` | invitation card **missing** | CLI done |
 | Discover my invitations | `invite brain list` (`my-invitations`) | none | OK |
 | Revoke invitation | `invite brain revoke` | none | OK |
@@ -110,7 +111,7 @@ tested. Two standing gaps:
 | #441 | umbrella: cohorts + multi-agent Personal Brains | ADR-0046 roster facts + plans (rewrite) |
 | #442 | preview everyone included by a mailbox invitation | ✓ preflight (#489, auto in #543's CLI path) |
 | #443 | invite and accept a ready cohort into a Brain | ✓ CLI roundtrip (#543); human accept surface pending |
-| #444 | invite a cohort into one Folder | ✗ folder invitations are still single-target (classic path); no folder plan machinery |
+| #444 | invite a cohort into one Folder | ✓ folder-scoped plans + per-principal share links (CLI key-holder path); approval-card escalation pending with the card |
 | #445 | shared Account Invitation Inbox | ✓ `my-invitations` (CLI); human surface pending |
 | #446 | approve a reduced participant set | partial: server `reducedSet` ✓; no CLI exclusion flag |
 | #447 | narrow acceptance after an agent departs | ✓ server acceptance narrowing + departure facts |
@@ -139,7 +140,8 @@ export→restore, folder rename.
 Orphaned by the client deletion (#540): asset-aware OKF import, graph
 view/replay — both need a new home (agent-side import verb, viewer Phase 3).
 
-Rewrite debt from the closed first attempt: #444 (cohort folder invites),
-#455 (chat peer-agent management), #458 (invitation conversion/cutover),
-#459 (restore story) — the four cohort stories the ADR-0046 rewrite has not
-re-served.
+Rewrite debt from the closed first attempt: #455 (chat peer-agent
+management), #458 (decided: skip — the rewrite is additive, not cutover; one
+compatibility test instead), #459 (decided: fold into the #527 restore drill
+plus a slice act). #444 landed as folder-scoped plans with per-principal
+share links; its approval-card escalation rides the card work.
