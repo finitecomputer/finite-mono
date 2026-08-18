@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish Core-recorded Runtime artifact metrics for the Grafana MVP."""
+"""Publish Core-recorded Runtime artifact metrics for the monitoring MVP."""
 
 from __future__ import annotations
 

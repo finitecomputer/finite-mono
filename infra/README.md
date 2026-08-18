@@ -77,7 +77,7 @@ infra/
     smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
-  monitoring/  # external monitoring definitions and self-hosted stack config
+  monitoring/  # external monitoring dashboards and NixOS receiver docs
   tinfoil/     # pins + notes for the public Tinfoil satellite repos (measured enclaves)
   runbooks/    # per-service: deploy, rollback, backup/restore, break-glass
 ```

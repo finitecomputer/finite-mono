@@ -19,7 +19,7 @@ OUTPUT_NAMES = (
     "run_nix_checks",
     "run_skills_check",
     "run_search_check",
-    "run_self_hosted_monitoring_contract",
+    "run_monitoring_nixos_contract",
     "run_finite_status_contract",
     "run_nix_service_packages",
     "run_devfinity_smoke",
@@ -50,17 +50,25 @@ GLOBAL_SUFFIXES = (
     ".sql",
 )
 
-MONITORING_PREFIX = "infra/monitoring/self-hosted/"
+MONITORING_PREFIX = "infra/monitoring/"
 # CI diffs use --no-renames, so this keeps this family move focused while the
 # deleted old paths are still visible in the PR.
-MOVED_SELF_HOSTED_MONITORING_PATHS = {
+MOVED_MONITORING_PATHS = {
+    "infra/nixos/scripts/finite_runtime_metrics.py",
+    "infra/nixos/tests/test_finite_runtime_metrics.py",
     "scripts/check_self_hosted_monitoring_contract.py",
+    "scripts/check_monitoring_nixos_contract.py",
     "scripts/finite_runtime_metrics.py",
     "scripts/tests/test_finite_runtime_metrics.py",
 }
 RUNTIME_METRICS_SOURCE_PATHS = {
     "infra/monitoring/self-hosted/scripts/finite_runtime_metrics.py",
+    "infra/nixos/scripts/finite_runtime_metrics.py",
     "scripts/finite_runtime_metrics.py",
+}
+MONITORING_NIXOS_PATHS = {
+    "infra/nixos/hosts/finite-monitoring/default.nix",
+    "infra/nixos/modules/monitoring-vps.nix",
 }
 RUNTIME_IMAGE_CONTRACT_PREFIX = "finitecomputer-v2/deploy/finite-computer/images/"
 IDENTITY_EDGE_CONTRACT_PREFIX = "finite-identity/scripts/"
@@ -113,7 +121,7 @@ class HarnessSelection:
     run_nix_checks: bool = False
     run_skills_check: bool = False
     run_search_check: bool = False
-    run_self_hosted_monitoring_contract: bool = False
+    run_monitoring_nixos_contract: bool = False
     run_finite_status_contract: bool = False
     run_nix_service_packages: bool = False
     run_devfinity_smoke: bool = False
@@ -225,8 +233,14 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.select_all()
         return
 
-    if is_self_hosted_monitoring_path(path) or path in MOVED_SELF_HOSTED_MONITORING_PATHS:
-        apply_self_hosted_monitoring_path(selection, path)
+    if is_monitoring_path(path) or path in MOVED_MONITORING_PATHS:
+        apply_monitoring_path(selection, path)
+        return
+
+    if path in MONITORING_NIXOS_PATHS:
+        apply_monitoring_path(selection, path)
+        selection.run_nix_checks = True
+        selection.run_nix_service_packages = True
         return
 
     if is_finite_skills_executable_doc(path):
@@ -291,12 +305,12 @@ def is_global_path(path: str) -> bool:
     )
 
 
-def is_self_hosted_monitoring_path(path: str) -> bool:
+def is_monitoring_path(path: str) -> bool:
     return path.startswith(MONITORING_PREFIX)
 
 
-def apply_self_hosted_monitoring_path(selection: HarnessSelection, path: str) -> None:
-    selection.run_self_hosted_monitoring_contract = True
+def apply_monitoring_path(selection: HarnessSelection, path: str) -> None:
+    selection.run_monitoring_nixos_contract = True
     if path in RUNTIME_METRICS_SOURCE_PATHS:
         selection.run_finite_status_contract = True
         selection.run_nix_checks = True
