@@ -421,3 +421,90 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
         AppRoomState::Connected
     );
 }
+
+/// Regression for the poison-entry incident class: a one-shot `room-status`
+/// (and a plain `app state` read) must report persisted state WITHOUT
+/// dispatching StartRuntime or taking the store's writer lease, so it is safe
+/// while a resident `hermes serve` owns the store.
+#[test]
+fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
+    ensure_test_finite_home();
+    let dir = tempfile::tempdir().unwrap();
+    let now = test_now();
+    let now_arg = now.to_string();
+    let server_url = spawn_live_http_server(&dir.path().join("server.sqlite3"));
+    let agent_home = dir.path().join("agent").display().to_string();
+
+    cli_json(&[
+        "hermes",
+        "--home",
+        &agent_home,
+        "init",
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--skip-agent-profile",
+        "--json",
+    ]);
+    let created = cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "create-room",
+        "--display-name",
+        "Status Room",
+    ]);
+    let room_id = created["selected_room_id"].as_str().unwrap().to_owned();
+
+    // A resident service sharing the agent home's identity holds the writer
+    // lease for the rest of the test.
+    let _resident = FiniteChatRuntime::open(OpenOptions {
+        data_dir: agent_home.clone(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: None,
+        now_unix_seconds: Some(now),
+    })
+    .expect("resident runtime opens");
+
+    let status = cli_json(&[
+        "hermes",
+        "--home",
+        &agent_home,
+        "room-status",
+        "--room-id",
+        &room_id,
+        "--json",
+    ]);
+    assert_eq!(status["room_id"], room_id);
+    assert_eq!(status["state"], "connected");
+    assert_eq!(status["connected"], true);
+    assert_eq!(status["member_count"], 1);
+
+    let state = cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "state",
+    ]);
+    assert!(
+        state["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room["room_id"] == room_id)
+    );
+}

@@ -144,12 +144,16 @@ pub enum FiniteChatCoreError {
     Delivery { reason: String },
     #[error("server rejected delivery: {reason}")]
     ServerRejected { reason: String },
+    #[error("server idempotency conflict: {reason}")]
+    IdempotencyConflict { reason: String },
     #[error("store error: {reason}")]
     Store { reason: String },
     #[error("profile error: {reason}")]
     Profile { reason: String },
     #[error("lock poisoned")]
     LockPoisoned,
+    #[error("this runtime opened the client store read-only and cannot change state")]
+    ReadOnly,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
@@ -893,6 +897,10 @@ struct CoreState {
     fixed_now_unix_seconds: Option<u64>,
     store: SqliteClientStore,
     device: FiniteChatDevice,
+    /// A read-only core holds no writer lease and must never mutate the
+    /// store; one-shot diagnostics open this way so they can run alongside a
+    /// resident service that owns the store.
+    read_only: bool,
 }
 
 #[derive(uniffi::Object)]
@@ -1279,7 +1287,28 @@ pub fn finite_sites_native_viewer_session_proof(
 impl FiniteChatRuntime {
     #[uniffi::constructor]
     pub fn open(options: OpenOptions) -> Result<Arc<Self>, FiniteChatCoreError> {
-        let core = CoreState::open(options)?;
+        Self::open_with_mode(options, false)
+    }
+
+    /// Open a diagnostics-only runtime: holds no writer lease on the client
+    /// store, never mutates it, and rejects every dispatched action. Safe to
+    /// run alongside a resident service that owns the store.
+    #[uniffi::constructor]
+    pub fn open_read_only(options: OpenOptions) -> Result<Arc<Self>, FiniteChatCoreError> {
+        Self::open_with_mode(options, true)
+    }
+}
+
+impl FiniteChatRuntime {
+    fn open_with_mode(
+        options: OpenOptions,
+        read_only: bool,
+    ) -> Result<Arc<Self>, FiniteChatCoreError> {
+        let core = if read_only {
+            CoreState::open_read_only(options)?
+        } else {
+            CoreState::open(options)?
+        };
         let runtime_state = AppRuntimeState::new(core)?;
         let initial_state = runtime_state.app.clone();
         let shared_state = Arc::new(Mutex::new(initial_state.clone()));
@@ -1298,7 +1327,10 @@ impl FiniteChatRuntime {
             listening: AtomicBool::new(false),
         }))
     }
+}
 
+#[uniffi::export]
+impl FiniteChatRuntime {
     pub fn state(&self) -> Result<AppState, FiniteChatCoreError> {
         let state = self
             .shared_state
@@ -2246,10 +2278,14 @@ impl AppRuntimeState {
         // Additive migration for control events saved by builds from before
         // target staging existed. Current runtime sync already stages each
         // chunk in the same SQLite transaction that advances the room cursor.
+        // Read-only opens skip the migration: they never write.
         for event in all_stored_events
             .iter()
             .filter(|event| provisional_room_ids.contains(&event.room_id))
         {
+            if core.read_only {
+                break;
+            }
             if let Some(bootstrap) = device_link_bootstrap_from_stored_event(event) {
                 let _ = core
                     .store
@@ -2282,9 +2318,13 @@ impl AppRuntimeState {
             if delivered_local_messages
                 .contains(&(message.room_id.clone(), message.message_id.clone()))
             {
-                core.store
-                    .delete_app_outbox_message(&owner, &message.room_id, &message.message_id)
-                    .map_err(store_error)?;
+                // Read-only opens project the same visible state but leave the
+                // durable cleanup to the writer.
+                if !core.read_only {
+                    core.store
+                        .delete_app_outbox_message(&owner, &message.room_id, &message.message_id)
+                        .map_err(store_error)?;
+                }
             } else {
                 visible_outbox.push(message);
             }
@@ -2420,14 +2460,16 @@ impl AppRuntimeState {
             state.persist_app_state()?;
         }
         state.load_profile_cache()?;
-        let mut bootstrap_selection = None;
-        for pending in ready_link_bootstraps {
-            if let Some(accepted) = state.finish_link_device_bootstrap(pending)? {
-                bootstrap_selection = bootstrap_selection.or(accepted.canonical_selection);
+        if !state.core.read_only {
+            let mut bootstrap_selection = None;
+            for pending in ready_link_bootstraps {
+                if let Some(accepted) = state.finish_link_device_bootstrap(pending)? {
+                    bootstrap_selection = bootstrap_selection.or(accepted.canonical_selection);
+                }
             }
-        }
-        if let Some(selection) = bootstrap_selection {
-            state.apply_link_device_bootstrap_selection(selection)?;
+            if let Some(selection) = bootstrap_selection {
+                state.apply_link_device_bootstrap_selection(selection)?;
+            }
         }
         Ok(state)
     }
@@ -2475,6 +2517,9 @@ impl AppRuntimeState {
         action: AppAction,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
+        if self.core.read_only {
+            return Err(FiniteChatCoreError::ReadOnly);
+        }
         self.app.toast = None;
         self.core.refresh_device_clock()?;
         match action {
@@ -7010,6 +7055,11 @@ impl AppRuntimeState {
     }
 
     fn persist_room_projection(&mut self, room_id: &str) -> Result<(), FiniteChatCoreError> {
+        // Read-only opens report the repaired projection but leave the
+        // durable write to the writer.
+        if self.core.read_only {
+            return Ok(());
+        }
         let Some(room) = self.room(room_id).cloned() else {
             return Ok(());
         };
@@ -7027,6 +7077,11 @@ impl AppRuntimeState {
     }
 
     fn persist_app_state(&mut self) -> Result<(), FiniteChatCoreError> {
+        // Read-only opens report the repaired projection but leave the
+        // durable write to the writer.
+        if self.core.read_only {
+            return Ok(());
+        }
         let owner = self.core.device.device_ref().clone();
         let stored = StoredAppState {
             selected_room_id: self.app.selected_room_id.clone(),
@@ -7210,6 +7265,13 @@ impl AppRuntimeState {
         if !self.room_is_connected(room_id) || self.topic_exists(room_id, HOME_TOPIC_ID) {
             return Ok(());
         }
+        if self.room_is_provisional_for_device_link(room_id) {
+            // A provisional device-link room inherits the home topic from the
+            // bootstrap history once the transfer completes; firing here
+            // would append (or, under the deterministic key, conflict on) a
+            // duplicate ConversationCreate on every sync tick.
+            return Ok(());
+        }
         let metadata = ConversationMetadataV1 {
             title: Some(HOME_TOPIC_TITLE.to_owned()),
             description: None,
@@ -7218,14 +7280,51 @@ impl AppRuntimeState {
         };
         metadata.validate_limits().map_err(client_error)?;
         let payload = serde_json::to_vec(&metadata).map_err(client_error)?;
-        let event = self.core.send_application_event(
+        let idempotency_key = home_topic_idempotency_key(room_id, self.core.device.device_ref());
+        match self.core.send_application_event_with_idempotency_key(
             room_id,
             DurableAppEventKind::ConversationCreate,
             Some(HOME_TOPIC_ID.to_owned()),
             &payload,
-            "home-topic",
-        )?;
-        self.apply_projection_events(vec![event])?;
+            idempotency_key.clone(),
+        ) {
+            Ok(event) => self.apply_projection_events(vec![event])?,
+            Err(FiniteChatCoreError::IdempotencyConflict { .. }) => {
+                // The deterministic key proves this device already published
+                // the room's home topic; the local projection lost the entry
+                // (e.g. the event cache was pruned). A sender cannot decrypt
+                // its own MLS application entries, so the log cannot restore
+                // it — adopt the deterministic metadata locally instead of
+                // appending a second entry the room might never process. The
+                // adoption is in-memory only: nothing fabricated lands in the
+                // durable event history.
+                let adopted = StoredAppEvent {
+                    room_id: room_id.to_owned(),
+                    seq: self
+                        .core
+                        .device
+                        .last_applied_seq(room_id)
+                        .map_err(client_error)?,
+                    message_id: format!("adopted-{idempotency_key}"),
+                    sender: self.core.device.device_ref().clone(),
+                    plaintext: encode_application_event(
+                        DurableAppEventKind::ConversationCreate,
+                        Some(HOME_TOPIC_ID.to_owned()),
+                        &payload,
+                    )?,
+                    timestamp_unix_seconds: self.core.now_unix_seconds()?,
+                };
+                self.apply_projection_events(vec![adopted])?;
+                if !self.topic_exists(room_id, HOME_TOPIC_ID) {
+                    return Err(FiniteChatCoreError::ServerRejected {
+                        reason: format!(
+                            "room '{room_id}' already holds this device's home topic entry, but the local projection could not adopt it"
+                        ),
+                    });
+                }
+            }
+            Err(error) => return Err(error),
+        }
         Ok(())
     }
 
@@ -7884,6 +7983,14 @@ fn recover_or_create_device_state(
 
 impl CoreState {
     fn open(options: OpenOptions) -> Result<Self, FiniteChatCoreError> {
+        Self::open_with_mode(options, false)
+    }
+
+    fn open_read_only(options: OpenOptions) -> Result<Self, FiniteChatCoreError> {
+        Self::open_with_mode(options, true)
+    }
+
+    fn open_with_mode(options: OpenOptions, read_only: bool) -> Result<Self, FiniteChatCoreError> {
         let requested_device_id = options.device_id.trim().to_owned();
         if requested_device_id.is_empty() {
             return Err(FiniteChatCoreError::Client {
@@ -7893,9 +8000,11 @@ impl CoreState {
         let explicit_account_secret = options.account_secret_hex.is_some();
 
         let data_dir = PathBuf::from(options.data_dir);
-        fs::create_dir_all(&data_dir).map_err(|error| FiniteChatCoreError::Filesystem {
-            reason: format!("failed to create {}: {error}", data_dir.display()),
-        })?;
+        if !read_only {
+            fs::create_dir_all(&data_dir).map_err(|error| FiniteChatCoreError::Filesystem {
+                reason: format!("failed to create {}: {error}", data_dir.display()),
+            })?;
+        }
 
         let account_secret = resolve_account_secret(options.account_secret_hex.as_deref())?;
         let fixed_now_unix_seconds = options.now_unix_seconds;
@@ -7908,15 +8017,28 @@ impl CoreState {
             credential_not_after_unix_seconds: now
                 .saturating_add(DEFAULT_CREDENTIAL_VALIDITY_SECONDS),
         };
-        let mut store = SqliteClientStore::open(
-            data_dir.join(CLIENT_STORE_FILE),
+        let store_options =
             SqliteClientStoreOptions::from_nostr_secret(&account_secret, &config.device_id)
-                .map_err(store_error)?,
-        )
-        .map_err(store_error)?;
+                .map_err(store_error)?;
+        let mut store = if read_only {
+            SqliteClientStore::open_read_only(data_dir.join(CLIENT_STORE_FILE), store_options)
+                .map_err(store_error)?
+        } else {
+            SqliteClientStore::open(data_dir.join(CLIENT_STORE_FILE), store_options)
+                .map_err(store_error)?
+        };
         let device = match store.load_device(config.clone()) {
             Ok(device) => device,
             Err(finitechat_client::ClientStoreError::DeviceStateNotFound { .. }) => {
+                if read_only {
+                    return Err(FiniteChatCoreError::Store {
+                        reason: format!(
+                            "client store {} has no state for device '{}' and was opened read-only; nothing can be minted without the writer lease",
+                            data_dir.join(CLIENT_STORE_FILE).display(),
+                            requested_device_id,
+                        ),
+                    });
+                }
                 let (next_store, recovered_config) = recover_or_create_device_state(
                     &data_dir,
                     &account_secret,
@@ -7937,6 +8059,7 @@ impl CoreState {
             fixed_now_unix_seconds,
             store,
             device,
+            read_only,
         })
     }
 
@@ -8667,9 +8790,17 @@ impl CoreState {
             .map(str::to_owned)
             .unwrap_or_else(|| self.server_url.clone());
         let mut delivery = self.delivery_for(&room_server_url);
-        let accepted = delivery
-            .append_event(&request, kind.delivery_policy())
-            .map_err(delivery_error)?;
+        let accepted = match delivery.append_event(&request, kind.delivery_policy()) {
+            Ok(accepted) => accepted,
+            Err(error) if is_idempotency_conflict_rejection(&error) => {
+                return Err(FiniteChatCoreError::IdempotencyConflict {
+                    reason: format!(
+                        "room '{room_id}' already holds a different entry under this idempotency key"
+                    ),
+                });
+            }
+            Err(error) => return Err(delivery_error(error)),
+        };
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -12047,6 +12178,37 @@ fn delivery_error(error: impl std::fmt::Display) -> FiniteChatCoreError {
     FiniteChatCoreError::Delivery {
         reason: error.to_string(),
     }
+}
+
+/// Deterministic idempotency key for one device's home-topic create in one
+/// room. A double-fire by the same device (the poison-entry incident class:
+/// two processes sharing one store, or a restarted writer whose local
+/// projection predates the entry) dedupes at the server: an identical request
+/// replays the original acceptance, and a ratchet-diverged one fails closed
+/// with an idempotency conflict instead of appending an unprocessable second
+/// entry. The sender is part of the key because a member that joined after
+/// the topic was created cannot decrypt the earlier entry and must publish
+/// its own ConversationCreate to learn the topic.
+fn home_topic_idempotency_key(room_id: &str, sender: &DeviceRef) -> String {
+    format!(
+        "home-topic:{room_id}:{}:{}",
+        sender.account_id, sender.device_id
+    )
+}
+
+/// The server answers a reused idempotency key naming a different payload
+/// with 409 `idempotency_conflict`; an exact replay returns the original
+/// acceptance instead.
+fn is_idempotency_conflict_rejection(
+    error: &HttpRuntimeDeliveryError<ReqwestHttpRuntimeTransportError>,
+) -> bool {
+    matches!(
+        error,
+        HttpRuntimeDeliveryError::Transport(ReqwestHttpRuntimeTransportError::Server {
+            status,
+            body,
+        }) if status.as_u16() == 409 && body.contains("\"idempotency_conflict\"")
+    )
 }
 
 fn send_delivery_error(
@@ -21319,5 +21481,172 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("live HTTP test server did not become healthy at {health_url}");
+    }
+
+    /// Open a core with an explicit account secret, so two data dirs can hold
+    /// the same logical device (the two-writers incident setup).
+    fn open_test_core_with_account(
+        dir: impl AsRef<Path>,
+        server_url: &str,
+        device_id: &str,
+        account_seed: &str,
+    ) -> CoreState {
+        CoreState::open(OpenOptions {
+            data_dir: dir.as_ref().to_string_lossy().into_owned(),
+            server_url: server_url.to_owned(),
+            device_id: device_id.to_owned(),
+            account_secret_hex: Some(test_account_secret_hex(account_seed)),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn read_only_runtime_reports_persisted_state_and_rejects_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let writer = FiniteChatRuntime::open(options.clone()).unwrap();
+        let created = writer
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Main".to_owned(),
+            })
+            .expect("writer creates a room");
+        let room_id = created.selected_room_id.clone().expect("room selected");
+
+        // The resident writer still holds the store and its lease; a
+        // read-only runtime opens alongside it, reports persisted state, and
+        // refuses every dispatched action.
+        let reader = FiniteChatRuntime::open_read_only(options).unwrap();
+        let state = reader.state().unwrap();
+        assert!(state.rooms.iter().any(|room| room.room_id == room_id));
+        let error = reader
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect_err("read-only runtime rejects actions");
+        assert!(matches!(error, FiniteChatCoreError::ReadOnly));
+    }
+
+    /// Snapshot a data dir's client store through the SQLite backup API
+    /// (WAL-safe), producing a second data dir with identical device state:
+    /// the "two writers, one logical device" incident setup. The writer-lease
+    /// sidecar is deliberately not copied.
+    fn copy_client_store(data_dir: &Path, target_dir: &Path) {
+        fs::create_dir_all(target_dir).unwrap();
+        let source = rusqlite::Connection::open(data_dir.join(CLIENT_STORE_FILE)).unwrap();
+        let mut target = rusqlite::Connection::open(target_dir.join(CLIENT_STORE_FILE)).unwrap();
+        let backup = rusqlite::backup::Backup::new(&source, &mut target).unwrap();
+        backup
+            .run_to_completion(64, std::time::Duration::from_millis(0), None)
+            .unwrap();
+    }
+
+    fn open_app_runtime_state_with_account(
+        dir: impl AsRef<Path>,
+        server_url: &str,
+        device_id: &str,
+        account_seed: &str,
+    ) -> AppRuntimeState {
+        AppRuntimeState::new(open_test_core_with_account(
+            dir,
+            server_url,
+            device_id,
+            account_seed,
+        ))
+        .unwrap()
+    }
+
+    fn room_application_entry_count(state: &AppRuntimeState, room_id: &str) -> usize {
+        let owner = state.core.device.device_ref().clone();
+        let page = state
+            .core
+            .home_delivery()
+            .sync_events(room_id, &owner, 0)
+            .unwrap();
+        page.entries
+            .iter()
+            .filter(|entry| entry.kind == LogEntryKind::Application)
+            .count()
+    }
+
+    /// The poison-entry regression: one logical device (same account+device
+    /// identity, store snapshot from before the first fire) fires
+    /// `ensure_home_topic` twice with a ratchet that has diverged from the
+    /// snapshot. Both fires use the same deterministic idempotency key, so
+    /// the second produces a different ciphertext under a key the server
+    /// already holds: the server answers 409 idempotency_conflict and the
+    /// stale writer adopts the existing topic locally instead of appending
+    /// an application ciphertext the room can never process.
+    ///
+    /// Note the double-fire cannot be an exact replay: MLS message creation
+    /// injects fresh randomness, so even a same-state re-fire differs from
+    /// the recorded request and conflicts. Adopting locally is safe because
+    /// the deterministic key proves the conflicting entry is this device's
+    /// own earlier home-topic create — and a sender cannot decrypt its own
+    /// MLS application entries, so the log cannot restore it.
+    #[test]
+    fn diverged_double_fired_home_topic_adopts_instead_of_poisoning_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let room_id = "room-home-topic-fail-closed";
+
+        let mut alice = open_test_core_with_account(
+            dir.path().join("alice"),
+            &server_url,
+            "alice-ios",
+            "home-topic-fail-closed-alice",
+        );
+        alice
+            .bootstrap_room(room_id, Some("Fail Closed".to_owned()))
+            .unwrap();
+        drop(alice);
+        copy_client_store(&dir.path().join("alice"), &dir.path().join("alice-stale"));
+
+        let mut first = open_app_runtime_state_with_account(
+            dir.path().join("alice"),
+            &server_url,
+            "alice-ios",
+            "home-topic-fail-closed-alice",
+        );
+        // Advance the ratchet past the snapshot before firing the home topic.
+        first
+            .core
+            .send_application_event(
+                room_id,
+                DurableAppEventKind::ChatMessage,
+                None,
+                &encode_text_message_payload("first", None).unwrap(),
+                "chat",
+            )
+            .unwrap();
+        first.ensure_home_topic(room_id).unwrap();
+        assert!(first.topic_exists(room_id, HOME_TOPIC_ID));
+
+        let mut second = open_app_runtime_state_with_account(
+            dir.path().join("alice-stale"),
+            &server_url,
+            "alice-ios",
+            "home-topic-fail-closed-alice",
+        );
+        assert!(second.room_is_connected(room_id));
+        assert!(!second.topic_exists(room_id, HOME_TOPIC_ID));
+        second
+            .ensure_home_topic(room_id)
+            .expect("the ratchet-diverged double-fire adopts the existing topic");
+        assert!(
+            second.topic_exists(room_id, HOME_TOPIC_ID),
+            "the stale writer adopts its own earlier home topic locally"
+        );
+
+        assert_eq!(
+            room_application_entry_count(&first, room_id),
+            2,
+            "only the chat message and the single home topic entry exist"
+        );
     }
 }

@@ -1345,6 +1345,7 @@ dependencies = [
  "finitechat-proto",
  "finitechat-server",
  "finitechat-transport",
+ "fs4",
  "openmls",
  "openmls_basic_credential",
  "openmls_memory_storage",
