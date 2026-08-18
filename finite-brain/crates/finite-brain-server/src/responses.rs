@@ -139,6 +139,7 @@ pub(crate) fn metadata_response_with_mounts(
         collaborator_readiness: Vec::new(),
         pending_approvals: Vec::new(),
         pending_wraps: Vec::new(),
+        pending_viewer_wraps: Vec::new(),
     }
 }
 
@@ -403,6 +404,7 @@ pub(crate) fn mounted_folder_responses(
 pub(crate) fn encrypted_brain_export_response_with_wraps(
     export: EncryptedBrainExport,
     pending_wraps: Vec<PendingGrantWrapResponse>,
+    pending_viewer_wraps: Vec<PendingViewerWrapResponse>,
 ) -> EncryptedBrainExportResponse {
     EncryptedBrainExportResponse {
         version: export.version,
@@ -469,6 +471,7 @@ pub(crate) fn encrypted_brain_export_response_with_wraps(
                 .collect(),
         },
         pending_wraps,
+        pending_viewer_wraps,
     }
 }
 

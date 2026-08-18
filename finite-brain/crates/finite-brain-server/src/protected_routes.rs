@@ -20,7 +20,7 @@ use crate::{
     ApiError, FINITEBRAIN_NOSTR_HEADER, NOSTR_AUTHORIZATION_HEADER, ServerState, lock_error,
 };
 
-pub(crate) fn cors_allowed_origins_from_public_base_url(public_base_url: &str) -> BTreeSet<String> {
+pub fn cors_allowed_origins_from_public_base_url(public_base_url: &str) -> BTreeSet<String> {
     let mut origins = BTreeSet::from([public_base_url.to_owned()]);
     if let Some((scheme, rest)) = public_base_url.split_once("://") {
         let host = rest.split('/').next().unwrap_or(rest);

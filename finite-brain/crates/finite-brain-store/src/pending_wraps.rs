@@ -2,8 +2,12 @@ use crate::*;
 
 impl BrainStore {
     /// Pending Folder Key wraps for one Brain, ordered by Folder then
-    /// recipient. Key-holding clients use this to discover who still needs a
-    /// wrapped current Folder Key; it is a delivery hint, never a gate.
+    /// recipient, EXCLUDING viewer-session markers: this feeds the
+    /// grant-batch completion path, whose recipients must become grant
+    /// rows — viewer sessions complete into key-delivery records instead
+    /// (`pending_viewer_session_wraps`). Key-holding clients use this to
+    /// discover who still needs a wrapped current Folder Key; it is a
+    /// delivery hint, never a gate.
     pub fn pending_grant_wraps(
         &self,
         brain_id: &BrainId,
@@ -12,7 +16,7 @@ impl BrainStore {
             r#"
             SELECT brain_id, folder_id, recipient_npub, key_version, reason, created_at
             FROM brain_pending_grant_wraps
-            WHERE brain_id = ?1
+            WHERE brain_id = ?1 AND reason != 'viewer-session'
             ORDER BY folder_id ASC, recipient_npub ASC, key_version ASC
             "#,
         )?;

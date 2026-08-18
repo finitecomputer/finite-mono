@@ -471,7 +471,9 @@ fn upsert_current_object(
     Ok(())
 }
 
-fn stored_sync_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSyncRecord> {
+pub(crate) fn stored_sync_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredSyncRecord> {
     let record_type = row.get::<_, String>(2)?;
     let folder_id = row.get::<_, Option<String>>(3)?;
     let object_id = row.get::<_, Option<String>>(4)?;

@@ -30,6 +30,9 @@ mod personal_agents;
 mod schema;
 mod shared_folders;
 mod sync_records;
+mod viewer_sessions;
+
+pub use viewer_sessions::{ViewerSessionRequest, ViewerWrapCompletion};
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
 const MAX_PULL_LIMIT: u64 = 1_000;
@@ -642,6 +645,10 @@ pub enum PendingGrantWrapReason {
     EnsureAccess,
     /// Reserved for bootstrap flows that defer wrapping.
     Bootstrap,
+    /// A viewer session asked for the Folder Key wrapped to an ephemeral
+    /// npub (brain:// live viewer). Completing it writes a key-delivery
+    /// record, never a grant row.
+    ViewerSession,
 }
 
 impl PendingGrantWrapReason {
@@ -651,6 +658,7 @@ impl PendingGrantWrapReason {
             Self::Accept => "accept",
             Self::EnsureAccess => "ensure-access",
             Self::Bootstrap => "bootstrap",
+            Self::ViewerSession => "viewer-session",
         }
     }
 }
@@ -664,6 +672,7 @@ impl TryFrom<&str> for PendingGrantWrapReason {
             "accept" => Ok(Self::Accept),
             "ensure-access" => Ok(Self::EnsureAccess),
             "bootstrap" => Ok(Self::Bootstrap),
+            "viewer-session" => Ok(Self::ViewerSession),
             _ => Err(StoreError::BrokenInvariant {
                 reason: format!("unknown pending grant wrap reason {value}"),
             }),
@@ -686,6 +695,99 @@ pub struct PendingGrantWrap {
     pub key_version: u32,
     /// Why the marker was recorded.
     pub reason: PendingGrantWrapReason,
+    /// Mark timestamp.
+    pub created_at: String,
+}
+
+/// Lifecycle of a stored viewer session, derived from the row plus the
+/// read-time clock: `revoked_at` wins, then `expires_at`, then the column.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ViewerSessionStatus {
+    /// Recorded, waiting for a key-holding client to complete the wrap.
+    Pending,
+    /// Wrap delivered; readable while unexpired and unrevoked.
+    Ready,
+    /// TTL elapsed.
+    Expired,
+    /// Explicitly revoked through the access surface.
+    Revoked,
+}
+
+impl ViewerSessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+/// One viewer session key-delivery record (brain:// live viewer). NOT a
+/// grant: the entitlement is the requester's existing Folder access, which
+/// the read route re-checks on every request; this row only carries the
+/// wrapped Folder Key envelope addressed to the ephemeral npub, plus TTL
+/// and revocation state.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredViewerSession {
+    /// Deterministic id (stable across renewals of the same key version).
+    pub id: String,
+    /// Brain holding the Folder.
+    pub brain_id: BrainId,
+    /// Folder the session may read.
+    pub folder_id: FolderId,
+    /// Ephemeral viewer principal the Folder Key was wrapped to.
+    pub ephemeral_npub: UserId,
+    /// Principal whose Folder access justified the session.
+    pub requester_npub: UserId,
+    /// Folder Key version the wrap targets.
+    pub key_version: u32,
+    /// Requested TTL in seconds, clamped by the server at request time.
+    pub requested_ttl_secs: u64,
+    /// NIP-44 wrapped Folder Key payload, present once completed.
+    pub wrapped_key_payload: Option<String>,
+    /// npub of the key-holding client that completed the wrap.
+    pub completed_by_npub: Option<UserId>,
+    /// Request timestamp.
+    pub created_at: String,
+    /// Expiry timestamp (pending deadline until completed, then the TTL).
+    pub expires_at: String,
+    /// Revocation timestamp.
+    pub revoked_at: Option<String>,
+}
+
+impl StoredViewerSession {
+    /// Derive the effective status at read time.
+    pub fn status_at(&self, now: &str) -> ViewerSessionStatus {
+        if self.revoked_at.is_some() {
+            return ViewerSessionStatus::Revoked;
+        }
+        if timestamp_expired(&self.expires_at, now) {
+            return ViewerSessionStatus::Expired;
+        }
+        match self.wrapped_key_payload.is_some() {
+            true => ViewerSessionStatus::Ready,
+            false => ViewerSessionStatus::Pending,
+        }
+    }
+}
+
+/// A pending viewer-session wrap as seen by a key-holding client: the
+/// marker plus the principal whose Folder access justified the request, so
+/// the client can apply its own completion policy.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PendingViewerSessionWrap {
+    /// Brain holding the Folder.
+    pub brain_id: BrainId,
+    /// Folder id.
+    pub folder_id: FolderId,
+    /// Ephemeral viewer principal waiting for the wrapped Folder Key.
+    pub ephemeral_npub: UserId,
+    /// Principal whose Folder access justified the session.
+    pub requester_npub: UserId,
+    /// Folder Key version that was current when marked.
+    pub key_version: u32,
     /// Mark timestamp.
     pub created_at: String,
 }
@@ -11203,6 +11305,275 @@ mod tests {
         assert_eq!(
             pending_wrap_folders(&store, &brain_id, &member),
             BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
+        );
+    }
+
+    #[test]
+    fn viewer_session_request_marks_wrap_and_completes_into_delivery_record() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("private-project").unwrap();
+        let owner = UserId::new("npub-admin").unwrap();
+        let ephemeral = UserId::new("npub-ephemeral").unwrap();
+
+        let session = store
+            .create_viewer_session_request(ViewerSessionRequest {
+                brain_id: brain_id.clone(),
+                folder_id: folder_id.clone(),
+                ephemeral_npub: ephemeral.clone(),
+                requester_npub: owner.clone(),
+                key_version: 1,
+                requested_ttl_secs: 3600,
+                now: "2026-08-18T00:00:00Z".to_owned(),
+                pending_expires_at: "2026-08-19T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            session.status_at("2026-08-18T00:00:01Z"),
+            ViewerSessionStatus::Pending
+        );
+        assert!(session.wrapped_key_payload.is_none());
+
+        // The marker is discoverable by key-holding clients with the
+        // requester principal attached, and never in the grant-batch list.
+        let pending = store.pending_viewer_session_wraps(&brain_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].ephemeral_npub, ephemeral);
+        assert_eq!(pending[0].requester_npub, owner);
+        assert_eq!(pending[0].key_version, 1);
+        assert!(store.pending_grant_wraps(&brain_id).unwrap().is_empty());
+
+        let completed = store
+            .complete_viewer_session(
+                &brain_id,
+                &folder_id,
+                ViewerWrapCompletion {
+                    ephemeral_npub: ephemeral.clone(),
+                    key_version: 1,
+                    wrapped_key_payload: "nip44-payload".to_owned(),
+                    completed_by_npub: owner.clone(),
+                    expires_at: "2026-08-18T01:00:00Z".to_owned(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            completed.status_at("2026-08-18T00:30:00Z"),
+            ViewerSessionStatus::Ready
+        );
+        assert_eq!(
+            completed.wrapped_key_payload.as_deref(),
+            Some("nip44-payload")
+        );
+        assert_eq!(completed.completed_by_npub.as_ref(), Some(&owner));
+        // Completion consumes the marker; replays fail closed.
+        assert!(
+            store
+                .pending_viewer_session_wraps(&brain_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            store.complete_viewer_session(
+                &brain_id,
+                &folder_id,
+                ViewerWrapCompletion {
+                    ephemeral_npub: ephemeral.clone(),
+                    key_version: 1,
+                    wrapped_key_payload: "nip44-payload".to_owned(),
+                    completed_by_npub: owner.clone(),
+                    expires_at: "2026-08-18T02:00:00Z".to_owned(),
+                },
+            ),
+            Err(StoreError::BrokenInvariant { .. })
+        ));
+
+        // The live-session lookup is the read route's session tier.
+        let live = store
+            .live_viewer_session_for(&brain_id, &folder_id, &ephemeral, "2026-08-18T00:30:00Z")
+            .unwrap()
+            .expect("unexpired ready session");
+        assert_eq!(live.id, completed.id);
+        // TTL elapsed → not live.
+        assert!(
+            store
+                .live_viewer_session_for(&brain_id, &folder_id, &ephemeral, "2026-08-18T01:00:01Z")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .has_live_viewer_session_for_brain(
+                    &brain_id,
+                    ephemeral.as_str(),
+                    "2026-08-18T00:30:00Z"
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_live_viewer_session_for_brain(
+                    &brain_id,
+                    ephemeral.as_str(),
+                    "2026-08-18T01:00:01Z"
+                )
+                .unwrap()
+        );
+
+        // Revocation is key hygiene: revoked rows never count as live.
+        let revoked = store
+            .revoke_viewer_session(&brain_id, &completed.id, "2026-08-18T00:40:00Z")
+            .unwrap();
+        assert_eq!(
+            revoked.status_at("2026-08-18T00:40:01Z"),
+            ViewerSessionStatus::Revoked
+        );
+        assert!(
+            store
+                .live_viewer_session_for(&brain_id, &folder_id, &ephemeral, "2026-08-18T00:40:01Z")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn viewer_session_renewal_extends_expiry_and_keeps_the_same_id() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("private-project").unwrap();
+        let owner = UserId::new("npub-admin").unwrap();
+        let ephemeral = UserId::new("npub-ephemeral").unwrap();
+
+        let first = store
+            .create_viewer_session_request(ViewerSessionRequest {
+                brain_id: brain_id.clone(),
+                folder_id: folder_id.clone(),
+                ephemeral_npub: ephemeral.clone(),
+                requester_npub: owner.clone(),
+                key_version: 1,
+                requested_ttl_secs: 3600,
+                now: "2026-08-18T00:00:00Z".to_owned(),
+                pending_expires_at: "2026-08-19T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        store
+            .complete_viewer_session(
+                &brain_id,
+                &folder_id,
+                ViewerWrapCompletion {
+                    ephemeral_npub: ephemeral.clone(),
+                    key_version: 1,
+                    wrapped_key_payload: "wrap-1".to_owned(),
+                    completed_by_npub: owner.clone(),
+                    expires_at: "2026-08-18T01:10:00Z".to_owned(),
+                },
+            )
+            .unwrap();
+
+        // Silent renew: the same ephemeral key requests again before expiry.
+        let renewed = store
+            .create_viewer_session_request(ViewerSessionRequest {
+                brain_id: brain_id.clone(),
+                folder_id: folder_id.clone(),
+                ephemeral_npub: ephemeral.clone(),
+                requester_npub: owner.clone(),
+                key_version: 1,
+                requested_ttl_secs: 7200,
+                now: "2026-08-18T01:00:00Z".to_owned(),
+                pending_expires_at: "2026-08-19T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(renewed.id, first.id, "renewal keeps the deterministic id");
+        assert_eq!(renewed.requested_ttl_secs, 7200);
+        // The old wrap keeps serving until the renewal completes…
+        assert_eq!(
+            renewed.status_at("2026-08-18T01:00:01Z"),
+            ViewerSessionStatus::Ready
+        );
+        // …and the renewal marker is visible to the agent.
+        assert_eq!(
+            store.pending_viewer_session_wraps(&brain_id).unwrap().len(),
+            1
+        );
+        store
+            .complete_viewer_session(
+                &brain_id,
+                &folder_id,
+                ViewerWrapCompletion {
+                    ephemeral_npub: ephemeral.clone(),
+                    key_version: 1,
+                    wrapped_key_payload: "wrap-2".to_owned(),
+                    completed_by_npub: owner.clone(),
+                    expires_at: "2026-08-18T03:01:00Z".to_owned(),
+                },
+            )
+            .unwrap();
+        let extended = store.viewer_session(&first.id).unwrap().unwrap();
+        assert_eq!(extended.wrapped_key_payload.as_deref(), Some("wrap-2"));
+        assert_eq!(extended.expires_at, "2026-08-18T03:01:00Z");
+    }
+
+    #[test]
+    fn revoke_clears_a_still_pending_marker() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("private-project").unwrap();
+        let owner = UserId::new("npub-admin").unwrap();
+        let ephemeral = UserId::new("npub-ephemeral").unwrap();
+
+        let session = store
+            .create_viewer_session_request(ViewerSessionRequest {
+                brain_id: brain_id.clone(),
+                folder_id: folder_id.clone(),
+                ephemeral_npub: ephemeral.clone(),
+                requester_npub: owner.clone(),
+                key_version: 1,
+                requested_ttl_secs: 3600,
+                now: "2026-08-18T00:00:00Z".to_owned(),
+                pending_expires_at: "2026-08-19T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        store
+            .revoke_viewer_session(&brain_id, &session.id, "2026-08-18T00:01:00Z")
+            .unwrap();
+        assert!(
+            store
+                .pending_viewer_session_wraps(&brain_id)
+                .unwrap()
+                .is_empty()
+        );
+        // Completing a revoked pending request fails closed…
+        assert!(matches!(
+            store.complete_viewer_session(
+                &brain_id,
+                &folder_id,
+                ViewerWrapCompletion {
+                    ephemeral_npub: ephemeral.clone(),
+                    key_version: 1,
+                    wrapped_key_payload: "late-wrap".to_owned(),
+                    completed_by_npub: owner.clone(),
+                    expires_at: "2026-08-18T00:02:00Z".to_owned(),
+                },
+            ),
+            Err(StoreError::BrokenInvariant { .. })
+        ));
+        // …and a fresh request after revocation re-marks cleanly (new key
+        // version or new tab = new session).
+        let again = store
+            .create_viewer_session_request(ViewerSessionRequest {
+                brain_id: brain_id.clone(),
+                folder_id: folder_id.clone(),
+                ephemeral_npub: ephemeral.clone(),
+                requester_npub: owner.clone(),
+                key_version: 2,
+                requested_ttl_secs: 3600,
+                now: "2026-08-18T00:03:00Z".to_owned(),
+                pending_expires_at: "2026-08-19T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        assert_ne!(again.id, session.id);
+        assert_eq!(
+            store.pending_viewer_session_wraps(&brain_id).unwrap().len(),
+            1
         );
     }
 }

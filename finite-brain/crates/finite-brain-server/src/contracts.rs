@@ -69,6 +69,11 @@ pub struct BrainMetadataResponse {
     /// the wraps. Older clients ignore the field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_wraps: Vec<PendingGrantWrapResponse>,
+    /// Pending viewer-session wraps (ephemeral browser keys waiting for a
+    /// wrapped Folder Key). Populated only when the requester holds Brain
+    /// admin standing; older clients ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_viewer_wraps: Vec<PendingViewerWrapResponse>,
 }
 
 /// One Folder Key wrap a key-holding client can complete for a waiting
@@ -80,6 +85,127 @@ pub struct PendingGrantWrapResponse {
     pub recipient_npub: String,
     pub key_version: u32,
     pub reason: String,
+    pub created_at: String,
+}
+
+/// Request to mint a viewer session: the requesting principal (authenticated
+/// by NIP-98) asks for the Folder Key wrapped to an ephemeral browser key.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateViewerSessionRequest {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub ephemeral_npub: String,
+    #[serde(default)]
+    pub requested_ttl_secs: Option<u64>,
+}
+
+/// Viewer session state for the browser poll and the admin access surface.
+/// `wrappedKeyPayload` is NIP-44 ciphertext addressed to the ephemeral key;
+/// the server stores and relays it blind.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerSessionResponse {
+    pub id: String,
+    pub brain_id: String,
+    pub folder_id: String,
+    pub ephemeral_npub: String,
+    pub requester_npub: String,
+    pub key_version: u32,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapped_key_payload: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_by_npub: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+}
+
+/// Viewer sessions of one Brain for the admin access surface.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerSessionListResponse {
+    pub sessions: Vec<ViewerSessionResponse>,
+}
+
+/// One viewer-session wrap completion from a key-holding client: the
+/// NIP-44 wrapped Folder Key addressed to the ephemeral npub.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteViewerWrapRequest {
+    pub ephemeral_npub: String,
+    pub key_version: u32,
+    pub wrapped_key_payload: String,
+}
+
+/// Batch viewer-session wrap completion for one Folder.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteViewerWrapsRequest {
+    #[serde(default)]
+    pub wraps: Vec<CompleteViewerWrapRequest>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteViewerWrapsResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub outcome: String,
+    pub completed_count: usize,
+    pub completed_ephemerals: Vec<String>,
+}
+
+/// Query parameters for the encrypted-read route. `after=0` is the initial
+/// fetch (subject to the live-view size caps); `after>0` is a delta page.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize)]
+pub struct FolderViewRecordsQuery {
+    #[serde(default)]
+    pub after: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+/// One encrypted Folder record for the viewer: sequence plus the record's
+/// encrypted envelope. Object revisions carry ciphertext; tombstones do not.
+/// Control records never appear.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerRecordResponse {
+    pub sequence: u64,
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderViewRecordsResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub after_sequence: u64,
+    pub latest_sequence: u64,
+    pub records: Vec<ViewerRecordResponse>,
+    pub count: usize,
+    pub has_more: bool,
+    pub session_expires_at: String,
+}
+
+/// Pending viewer-session wrap marker for admin surfaces: the ephemeral
+/// recipient plus the principal whose Folder access justified the request.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingViewerWrapResponse {
+    pub folder_id: String,
+    pub ephemeral_npub: String,
+    pub requester_npub: String,
+    pub key_version: u32,
     pub created_at: String,
 }
 
@@ -246,6 +372,11 @@ pub struct EncryptedBrainExportResponse {
     /// ignore the field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_wraps: Vec<PendingGrantWrapResponse>,
+    /// Pending viewer-session wraps (ephemeral browser keys waiting for a
+    /// wrapped Folder Key). Populated only when the requester holds Brain
+    /// admin standing; older clients ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_viewer_wraps: Vec<PendingViewerWrapResponse>,
 }
 
 /// Brain summary in an encrypted export.
@@ -329,6 +460,11 @@ pub struct SyncBootstrapResponse {
     /// ignore the field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_wraps: Vec<PendingGrantWrapResponse>,
+    /// Pending viewer-session wraps (ephemeral browser keys waiting for a
+    /// wrapped Folder Key). Populated only when the requester holds Brain
+    /// admin standing; older clients ignore the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_viewer_wraps: Vec<PendingViewerWrapResponse>,
 }
 
 /// Batch completion request for pending grant wraps: one opaque NIP-59 grant

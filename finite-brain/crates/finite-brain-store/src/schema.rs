@@ -98,6 +98,17 @@ impl BrainStore {
                 params![28, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V29 admits the 'viewer-session' pending-wrap reason (table rebuild;
+        // SQLite cannot ALTER a CHECK) and adds the brain_viewer_sessions
+        // key-delivery records for the brain:// live viewer.
+        if !migration_applied(&tx, 29)? {
+            tx.execute_batch(SCHEMA_V29)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![29, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -345,6 +356,69 @@ ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
 
 const SCHEMA_V27: &str = r#"
 ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
+"#;
+
+const SCHEMA_V29: &str = r#"
+-- V29: viewer sessions (brain:// live viewer, plan Phase 2). Two changes:
+--
+-- 1. brain_pending_grant_wraps admits the 'viewer-session' reason. A viewer
+--    session request marks one marker whose recipient is the ephemeral
+--    viewer npub; key-holding clients complete it by wrapping the Folder
+--    Key to that npub. SQLite cannot ALTER a CHECK, so the table is rebuilt
+--    in place (create-copy-drop-rename) preserving rows and the brain index.
+--
+-- 2. brain_viewer_sessions: the key-delivery records themselves. Per the
+--    two-tier ruling these are NOT grant rows: the entitlement is the
+--    requester's existing Folder access, re-checked on every read; this row
+--    only delivers a wrapped key to an ephemeral principal and carries the
+--    TTL/revocation key hygiene. Machine consumers (Sites live views) will
+--    arrive later as real grant rows with zero route changes.
+CREATE TABLE brain_pending_grant_wraps_v29 (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    recipient_npub TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    reason TEXT NOT NULL
+        CHECK (reason IN ('invitation', 'accept', 'ensure-access', 'bootstrap', 'viewer-session')),
+    created_at TEXT NOT NULL,
+    UNIQUE (brain_id, folder_id, recipient_npub, key_version),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+INSERT INTO brain_pending_grant_wraps_v29
+    SELECT brain_id, folder_id, recipient_npub, key_version, reason, created_at
+    FROM brain_pending_grant_wraps;
+
+DROP TABLE brain_pending_grant_wraps;
+ALTER TABLE brain_pending_grant_wraps_v29 RENAME TO brain_pending_grant_wraps;
+
+-- The original by-brain index dies with the table drop above; recreate it
+-- under its canonical name for the rebuilt table.
+CREATE INDEX brain_pending_grant_wraps_by_brain
+    ON brain_pending_grant_wraps(brain_id, folder_id);
+
+CREATE TABLE brain_viewer_sessions (
+    id TEXT PRIMARY KEY,
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    ephemeral_npub TEXT NOT NULL,
+    requester_npub TEXT NOT NULL,
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    requested_ttl_secs INTEGER NOT NULL CHECK (requested_ttl_secs > 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'ready')),
+    wrapped_key_payload TEXT,
+    completed_by_npub TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    UNIQUE (brain_id, folder_id, ephemeral_npub, key_version),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX brain_viewer_sessions_by_ephemeral
+    ON brain_viewer_sessions(ephemeral_npub);
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2546,6 +2620,118 @@ mod tests {
     }
 
     #[test]
+    fn migration_v29_rebuilds_pending_wraps_reason_and_adds_viewer_sessions() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        // Seed a pre-V29 marker to prove the rebuild preserves rows.
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('v29-check', 'organization', 'V29 Check', NULL, '2026-06-23T00:00:00Z');
+                INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id, parent_folder_key,
+                    path, current_key_version, shared_folder_source, setup_incomplete, created_at
+                ) VALUES (
+                    'v29-check', 'ops', 'Ops', 'vault_ops', 'admin_only', NULL, '',
+                    'ops', 1, 0, 0, '2026-06-23T00:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_pending_grant_wraps (
+                    brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                ) VALUES ('v29-check', 'ops', 'npub-member', 1, 'invitation', '2026-06-23T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        // The viewer-session reason is admitted…
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_pending_grant_wraps (
+                    brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                ) VALUES ('v29-check', 'ops', 'npub-ephemeral', 1, 'viewer-session', '2026-08-18T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        // …unknown reasons still fail…
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_pending_grant_wraps (
+                        brain_id, folder_id, recipient_npub, key_version, reason, created_at
+                    ) VALUES ('v29-check', 'ops', 'npub-other', 1, 'bogus', '2026-08-18T00:00:00Z')",
+                    [],
+                )
+                .is_err(),
+            "the rebuilt reason CHECK must still reject unknown kinds"
+        );
+        // …and the pre-existing row survived the rebuild.
+        let preserved: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM brain_pending_grant_wraps
+                 WHERE reason = 'invitation' AND recipient_npub = 'npub-member'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved, 1,
+            "the V29 rebuild must preserve existing markers"
+        );
+
+        // Viewer session rows enforce their own shape.
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_viewer_sessions (
+                    id, brain_id, folder_id, ephemeral_npub, requester_npub,
+                    key_version, requested_ttl_secs, status,
+                    wrapped_key_payload, completed_by_npub, created_at, expires_at, revoked_at
+                ) VALUES (
+                    'session-v29', 'v29-check', 'ops', 'npub-ephemeral', 'npub-owner',
+                    1, 3600, 'ready', 'c2VjdXJl', 'npub-owner',
+                    '2026-08-18T00:00:00Z', '2026-08-18T01:00:00Z', NULL
+                )",
+                [],
+            )
+            .unwrap();
+        for statement in [
+            "INSERT INTO brain_viewer_sessions (
+                id, brain_id, folder_id, ephemeral_npub, requester_npub,
+                key_version, requested_ttl_secs, status,
+                wrapped_key_payload, completed_by_npub, created_at, expires_at, revoked_at
+             ) VALUES (
+                'session-bogus-status', 'v29-check', 'ops', 'npub-ephemeral2', 'npub-owner',
+                1, 3600, 'expired', 'c2VjdXJl', 'npub-owner',
+                '2026-08-18T00:00:00Z', '2026-08-18T01:00:00Z', NULL
+             )",
+            "INSERT INTO brain_viewer_sessions (
+                id, brain_id, folder_id, ephemeral_npub, requester_npub,
+                key_version, requested_ttl_secs, status,
+                wrapped_key_payload, completed_by_npub, created_at, expires_at, revoked_at
+             ) VALUES (
+                'session-bogus-dup', 'v29-check', 'ops', 'npub-ephemeral', 'npub-owner',
+                1, 3600, 'pending', NULL, NULL,
+                '2026-08-18T00:00:00Z', '2026-08-18T01:00:00Z', NULL
+             )",
+        ] {
+            assert!(
+                store.conn.execute(statement, []).is_err(),
+                "viewer session CHECK/UNIQUE must reject: {statement}"
+            );
+        }
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -2688,7 +2874,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 28);
+        assert_eq!(latest_version, 29);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(

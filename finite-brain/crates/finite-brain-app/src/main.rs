@@ -1,6 +1,43 @@
 use std::error::Error;
 use std::net::SocketAddr;
 
+/// Parse `FINITE_BRAIN_CORS_ALLOWED_ORIGINS` as a comma-separated list of
+/// additional browser origins (scheme://host[:port]) allowed to call the
+/// public router cross-origin — the dashboard the brain:// viewer lives in.
+/// Unset or empty keeps the public-base-url-derived allowlist; malformed
+/// entries fail closed (the whole variable is rejected).
+fn cors_allowed_origins_override(value: Option<String>) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let entries = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let valid = entry
+                .strip_prefix("http://")
+                .or_else(|| entry.strip_prefix("https://"))
+                .is_some_and(|rest| {
+                    !rest.is_empty()
+                        && !rest.contains('/')
+                        && !entry.contains('?')
+                        && !entry.contains('#')
+                });
+            if valid {
+                Ok(entry.to_owned())
+            } else {
+                Err(format!("invalid CORS origin: {entry}"))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if entries.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(entries))
+    }
+}
+
 /// Parse `FINITE_BRAIN_PROTECTED_RATE_LIMIT` as `max_requests:window_seconds`.
 /// Unset or empty keeps the production defaults; malformed values fail closed.
 fn protected_rate_limit_override(value: Option<String>) -> Result<Option<(u32, u64)>, String> {
@@ -66,7 +103,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("FiniteBrain smoke server listening on http://{address}");
 
     let mut state =
-        finite_brain_server::server_state_with_sqlite_path(database_path, public_base_url)?;
+        finite_brain_server::server_state_with_sqlite_path(database_path, public_base_url.clone())?;
+    if let Some(origins) =
+        cors_allowed_origins_override(std::env::var("FINITE_BRAIN_CORS_ALLOWED_ORIGINS").ok())
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid FINITE_BRAIN_CORS_ALLOWED_ORIGINS: {error}"),
+                )
+            })?
+    {
+        // Union with the base-url-derived defaults so same-origin tooling
+        // keeps working alongside the dashboard origin.
+        let defaults =
+            finite_brain_server::cors_allowed_origins_from_public_base_url(&public_base_url);
+        let merged = defaults.into_iter().chain(origins).collect::<Vec<_>>();
+        state = state.with_cors_allowed_origins(merged);
+    }
     if let Some((max_requests, window_seconds)) =
         protected_rate_limit_override(std::env::var("FINITE_BRAIN_PROTECTED_RATE_LIMIT").ok())
             .map_err(|error| {
@@ -138,7 +191,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::protected_rate_limit_override;
+    use super::{cors_allowed_origins_override, protected_rate_limit_override};
+
+    #[test]
+    fn cors_allowed_origins_unset_or_empty_keeps_defaults() {
+        assert_eq!(cors_allowed_origins_override(None).unwrap(), None);
+        assert_eq!(
+            cors_allowed_origins_override(Some(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            cors_allowed_origins_override(Some("   ".to_owned())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cors_allowed_origins_parses_http_and_https_origins() {
+        assert_eq!(
+            cors_allowed_origins_override(Some("http://localhost:3000".to_owned())).unwrap(),
+            Some(vec!["http://localhost:3000".to_owned()])
+        );
+        assert_eq!(
+            cors_allowed_origins_override(Some(
+                "http://localhost:3000, https://dashboard.finite.chat ".to_owned()
+            ))
+            .unwrap(),
+            Some(vec![
+                "http://localhost:3000".to_owned(),
+                "https://dashboard.finite.chat".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn cors_allowed_origins_rejects_malformed_entries() {
+        for value in [
+            "dashboard.finite.chat",
+            "http://host/path",
+            "https://host?q=1",
+            "ftp://host",
+            "http://",
+        ] {
+            assert!(
+                cors_allowed_origins_override(Some(value.to_owned())).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
 
     #[test]
     fn protected_rate_limit_unset_or_empty_keeps_defaults() {

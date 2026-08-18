@@ -310,6 +310,7 @@ pub(crate) async fn brain_metadata_handler(
         if actor_is_admin {
             attach_pending_approvals(&store, &mut response, &brain_id)?;
             attach_pending_wraps(&store, &mut response, &brain_id)?;
+            attach_pending_viewer_wraps(&store, &mut response, &brain_id)?;
         }
     }
     Ok(Json(response))
@@ -325,15 +326,18 @@ pub(crate) async fn encrypted_brain_export_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor_id = UserId::new(actor.clone())?;
     let brain_id = BrainId::new(brain_id)?;
-    let (export, pending_wraps) = {
+    let (export, pending_wraps, pending_viewer_wraps) = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_metadata_visible(&stored, &actor)?;
         let export = store.encrypted_brain_export(&brain_id, &actor_id)?;
         // Pending grant wraps ride the export only for key-holding clients
         // (Brain admin standing); everyone else gets the export exactly as
-        // before and older clients ignore the field.
-        let pending_wraps = if ensure_brain_admin(&stored, &actor).is_ok() {
+        // before and older clients ignore the field. Pending viewer-session
+        // wraps ride the same admin gate so the agent daemon can complete
+        // them on sync.
+        let is_admin = ensure_brain_admin(&stored, &actor).is_ok();
+        let pending_wraps = if is_admin {
             store
                 .pending_grant_wraps(&brain_id)?
                 .into_iter()
@@ -342,11 +346,27 @@ pub(crate) async fn encrypted_brain_export_handler(
         } else {
             Vec::new()
         };
-        (export, pending_wraps)
+        let pending_viewer_wraps = if is_admin {
+            store
+                .pending_viewer_session_wraps(&brain_id)?
+                .into_iter()
+                .map(|wrap| PendingViewerWrapResponse {
+                    folder_id: wrap.folder_id.to_string(),
+                    ephemeral_npub: wrap.ephemeral_npub.to_string(),
+                    requester_npub: wrap.requester_npub.to_string(),
+                    key_version: wrap.key_version,
+                    created_at: wrap.created_at,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        (export, pending_wraps, pending_viewer_wraps)
     };
     Ok(Json(encrypted_brain_export_response_with_wraps(
         export,
         pending_wraps,
+        pending_viewer_wraps,
     )))
 }
 

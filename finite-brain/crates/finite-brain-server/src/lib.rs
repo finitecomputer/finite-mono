@@ -19,11 +19,12 @@ use axum::{Json, Router};
 #[cfg(test)]
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
-    CoreError, CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder,
-    Folder, FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
-    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
-    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation,
+    BRAIN_CAPACITY_ENVELOPE, BrainId, BrainKind, CoreError, CryptoRecordError, DisplayName,
+    EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
+    FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
+    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
+    RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
     bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
     bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
     validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
@@ -36,7 +37,8 @@ use finite_brain_store::{
     MountedFolderState, PendingGrantWrap, PersonalAgentFolderRotation,
     SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
     StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
-    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
+    StoredSharedFolderInvitation, StoredSyncRecord, StoredViewerSession, SyncRecordInput,
+    SyncRecordType, ViewerSessionRequest, ViewerSessionStatus, ViewerWrapCompletion, VisibleBrain,
     VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
@@ -62,9 +64,8 @@ pub use departure_consumer::spawn_departure_fact_consumer;
 pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
-use protected_routes::{
-    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware, validate_request_auth,
-};
+pub use protected_routes::cors_allowed_origins_from_public_base_url;
+use protected_routes::{cors_allowlist_middleware, validate_request_auth};
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
 const DEFAULT_MAX_AUTH_SKEW_SECONDS: u64 = 60;
@@ -280,10 +281,21 @@ impl ServerState {
         let Ok(store) = self.store.lock() else {
             return false;
         };
-        store
+        if store
             .load_brain(&brain_id)
             .ok()
             .is_some_and(|stored| ensure_metadata_visible(&stored, actor).is_ok())
+        {
+            return true;
+        }
+        // Viewer-session tier: ephemeral browser keys holding a live
+        // (pending or ready) session for this Brain see its change signal
+        // so the pane can follow updates without a roster entry.
+        let now = format_unix_timestamp(self.auth_now_unix_seconds())
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+        store
+            .has_live_viewer_session_for_brain(&brain_id, actor, &now)
+            .unwrap_or(false)
     }
 
     /// Override the auth validation clock for deterministic tests.
@@ -613,6 +625,26 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route("/identities/resolve", post(resolve_identity_handler))
         .route("/my-invitations", get(list_my_invitations_handler))
+        .route(
+            "/viewer-session-requests",
+            post(create_viewer_session_request_handler),
+        )
+        .route(
+            "/viewer-session-requests/{request_id}",
+            get(get_viewer_session_request_handler),
+        )
+        .route(
+            "/brains/{brain_id}/viewer-sessions",
+            get(list_viewer_sessions_handler),
+        )
+        .route(
+            "/brains/{brain_id}/viewer-sessions/{session_id}/revoke",
+            post(revoke_viewer_session_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/records",
+            get(folder_view_records_handler),
+        )
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
         .route(
@@ -786,6 +818,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
             axum::routing::post(complete_pending_wraps_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/viewer-session-wraps",
+            axum::routing::post(complete_pending_viewer_wraps_handler),
         )
 }
 
@@ -14577,5 +14613,586 @@ mod tests {
         let replay: CompletePendingWrapsResponse = read_json(replay).await;
         assert_eq!(replay.outcome, "noPendingWraps");
         assert_eq!(replay.completed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn viewer_session_flow_is_blind_from_request_to_live_read() {
+        use finite_nostr::{decrypt_nip44, encrypt_nip44};
+
+        let admin_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let ephemeral_keys = Keys::generate();
+        let ephemeral_npub = npub(&ephemeral_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // One known-plaintext object in the All-Members folder, encrypted
+        // under the well-known test Folder Key.
+        let plaintext = "viewer live page";
+        let write = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/acme/folders/getting-started/objects/obj_000000000501",
+            Some(object_write_body(
+                &admin_keys,
+                RevisionFixture {
+                    brain_id: "acme",
+                    folder_id: "getting-started",
+                    object_id: "obj_000000000501",
+                    operation: FolderObjectOperation::Create,
+                    revision: 1,
+                    base_revision: None,
+                    key_version: 1,
+                    content: plaintext,
+                    nonce: 7,
+                    record_type: false,
+                },
+            )),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(write.status(), StatusCode::OK);
+
+        // The owner mints a viewer session for the ephemeral key.
+        let request = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/viewer-session-requests",
+            Some(
+                serde_json::json!({
+                    "brainId": "acme",
+                    "folderId": "getting-started",
+                    "ephemeralNpub": ephemeral_npub,
+                    "requestedTtlSecs": 3600,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(request.status(), StatusCode::OK);
+        let session: ViewerSessionResponse = read_json(request).await;
+        assert_eq!(session.status, "pending");
+        assert!(session.wrapped_key_payload.is_none());
+        let session_id = session.id.clone();
+
+        // Outsiders cannot mint sessions for Folders they cannot see.
+        let outsider_request = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "POST",
+            "/v1/viewer-session-requests",
+            Some(
+                serde_json::json!({
+                    "brainId": "acme",
+                    "folderId": "getting-started",
+                    "ephemeralNpub": npub(&outsider_keys),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(outsider_request.status(), StatusCode::FORBIDDEN);
+
+        // The marker is admin-visible on metadata with the requester.
+        let metadata = admin_metadata(&router, &admin_keys, "acme", TEST_NOW + 20).await;
+        let viewer_wraps = metadata["pendingViewerWraps"].as_array().unwrap();
+        assert_eq!(viewer_wraps.len(), 1, "{metadata}");
+        assert_eq!(viewer_wraps[0]["ephemeralNpub"], ephemeral_npub);
+        assert_eq!(viewer_wraps[0]["requesterNpub"], npub(&admin_keys));
+        assert_eq!(viewer_wraps[0]["folderId"], "getting-started");
+
+        // The ephemeral key polls its own request; outsiders fail closed.
+        let pending = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            &format!("/v1/viewer-session-requests/{session_id}"),
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending: ViewerSessionResponse = read_json(pending).await;
+        assert_eq!(pending.status, "pending");
+        let forbidden = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "GET",
+            &format!("/v1/viewer-session-requests/{session_id}"),
+            None,
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        // The key-holding client (owner) wraps the Folder Key to the
+        // ephemeral npub with NIP-44; the server relays it blind.
+        let folder_key = FolderKey::from_bytes([9; 32]);
+        let wrapped_key = encrypt_nip44(
+            admin_keys.secret_key(),
+            NostrPublicKey::parse(&ephemeral_npub).unwrap(),
+            folder_key.to_base64(),
+        )
+        .unwrap();
+        assert_ne!(wrapped_key, folder_key.to_base64());
+        let complete = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/getting-started/viewer-session-wraps",
+            Some(
+                serde_json::json!({
+                    "wraps": [{
+                        "ephemeralNpub": ephemeral_npub,
+                        "keyVersion": 1,
+                        "wrappedKeyPayload": wrapped_key,
+                    }]
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(complete.status(), StatusCode::OK);
+        let receipt: CompleteViewerWrapsResponse = read_json(complete).await;
+        assert_eq!(receipt.outcome, "completed");
+        assert_eq!(receipt.completed_count, 1);
+
+        // Non-admins cannot complete wraps.
+        let outsider_complete = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/getting-started/viewer-session-wraps",
+            Some(
+                serde_json::json!({
+                    "wraps": [{
+                        "ephemeralNpub": npub(&outsider_keys),
+                        "keyVersion": 1,
+                        "wrappedKeyPayload": wrapped_key,
+                    }]
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(outsider_complete.status(), StatusCode::FORBIDDEN);
+
+        // The poll now carries the wrapped key; the ephemeral key unwraps
+        // the Folder Key in memory.
+        let ready = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            &format!("/v1/viewer-session-requests/{session_id}"),
+            None,
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(ready.status(), StatusCode::OK);
+        let ready: ViewerSessionResponse = read_json(ready).await;
+        assert_eq!(ready.status, "ready");
+        let delivered = ready.wrapped_key_payload.clone().unwrap();
+        let unwrapped = decrypt_nip44(
+            ephemeral_keys.secret_key(),
+            NostrPublicKey::parse(&ready.completed_by_npub.clone().unwrap()).unwrap(),
+            delivered,
+        )
+        .unwrap();
+        assert_eq!(unwrapped, folder_key.to_base64());
+
+        // The encrypted-read route returns only this Folder's object
+        // records as ciphertext.
+        let records = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(records.status(), StatusCode::OK);
+        let records: FolderViewRecordsResponse = read_json(records).await;
+        let body_text = serde_json::to_string(&records).unwrap();
+        assert_eq!(records.count, 1);
+        assert!(!records.has_more);
+        let record = &records.records[0];
+        assert_eq!(record.record_type, "folder_object_revision");
+        assert_eq!(record.object_id.as_deref(), Some("obj_000000000501"));
+        let envelope =
+            EncryptedFolderObjectEnvelope::from_json(record.ciphertext.as_deref().unwrap())
+                .unwrap();
+        let aad = FolderObjectAad {
+            brain_id: BrainId::new("acme").unwrap(),
+            folder_id: FolderId::new("getting-started").unwrap(),
+            object_id: ObjectId::new("obj_000000000501").unwrap(),
+            key_version: 1,
+        };
+        let decrypted =
+            String::from_utf8(open_folder_object(&folder_key, &aad, &envelope).unwrap()).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Server blindness: no response in the flow ever contained the
+        // plaintext page or the unwrapped Folder Key.
+        assert!(!body_text.contains(plaintext));
+        assert!(!body_text.contains(&folder_key.to_base64()));
+        let ready_text = serde_json::to_string(&ready).unwrap();
+        assert!(!ready_text.contains(&folder_key.to_base64()));
+
+        // Outsiders get nothing from the read route.
+        let outsider_read = authed_request(
+            router.clone(),
+            &outsider_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 10,
+        )
+        .await;
+        assert_eq!(outsider_read.status(), StatusCode::FORBIDDEN);
+
+        // The ephemeral key counts for the SSE change signal; outsiders
+        // do not.
+        assert!(state.actor_can_see_brain(&ephemeral_npub, "acme"));
+        assert!(!state.actor_can_see_brain(&npub(&outsider_keys), "acme"));
+    }
+
+    #[tokio::test]
+    async fn viewer_session_honest_states_expired_revoked_and_access_recheck() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let ephemeral_keys = Keys::generate();
+        let ephemeral_npub = npub(&ephemeral_keys);
+        let member_npub = npub(&member_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+
+        // A plain member holds access to the All-Members folder and may
+        // mint their own viewer session (grill #2: principal-based).
+        let add_member_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "v1-add-member-viewer",
+                AdminAccessAction::AddMember,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let add_member = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{member_npub}"),
+            Some(add_member_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(add_member.status(), StatusCode::OK);
+        let request = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/viewer-session-requests",
+            Some(
+                serde_json::json!({
+                    "brainId": "acme",
+                    "folderId": "getting-started",
+                    "ephemeralNpub": ephemeral_npub,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(request.status(), StatusCode::OK);
+        let session: ViewerSessionResponse = read_json(request).await;
+        let session_id = session.id.clone();
+
+        // The member is not an admin: the completion route is closed to
+        // them, the owner completes instead.
+        let member_complete = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/getting-started/viewer-session-wraps",
+            Some(
+                serde_json::json!({
+                    "wraps": [{
+                        "ephemeralNpub": ephemeral_npub,
+                        "keyVersion": 1,
+                        "wrappedKeyPayload": "d3JhcC1rZXk",
+                    }]
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(member_complete.status(), StatusCode::FORBIDDEN);
+        let complete = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/getting-started/viewer-session-wraps",
+            Some(
+                serde_json::json!({
+                    "wraps": [{
+                        "ephemeralNpub": ephemeral_npub,
+                        "keyVersion": 1,
+                        "wrappedKeyPayload": "d3JhcC1rZXk",
+                    }]
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(complete.status(), StatusCode::OK);
+
+        // Live read works while the session and the underlying access hold.
+        let read = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+
+        // Underlying access revoked: the route re-checks the requester's
+        // Folder access on every request, so the derived session stops
+        // working even though the session row is still live.
+        // Departure through the store API directly: the ceremony around the
+        // HTTP route is not under test here, the read route's re-check is.
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .remove_member(
+                    &BrainId::new("acme").unwrap(),
+                    &UserId::new(member_npub.clone()).unwrap(),
+                )
+                .unwrap();
+        }
+        let read_after_departure = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(read_after_departure.status(), StatusCode::FORBIDDEN);
+
+        // Re-admit the member, renew the session, then complete the
+        // renewal with a lapsed expiry straight through the store (the
+        // route computes expiry from the server clock, which is pinned in
+        // tests): honest "expired" state on both the poll and the read
+        // route.
+        let readd_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "v1-readd-member-viewer",
+                AdminAccessAction::AddMember,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let readd = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{member_npub}"),
+            Some(readd_body),
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(readd.status(), StatusCode::OK);
+        let renew_for_expiry = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/viewer-session-requests",
+            Some(
+                serde_json::json!({
+                    "brainId": "acme",
+                    "folderId": "getting-started",
+                    "ephemeralNpub": ephemeral_npub,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 17,
+        )
+        .await;
+        assert_eq!(renew_for_expiry.status(), StatusCode::OK);
+        {
+            let mut store = state.store.lock().unwrap();
+            store
+                .complete_viewer_session(
+                    &BrainId::new("acme").unwrap(),
+                    &FolderId::new("getting-started").unwrap(),
+                    ViewerWrapCompletion {
+                        ephemeral_npub: UserId::new(ephemeral_npub.clone()).unwrap(),
+                        key_version: 1,
+                        wrapped_key_payload: "d3JhcC1rZXk".to_owned(),
+                        completed_by_npub: UserId::new(npub(&admin_keys)).unwrap(),
+                        expires_at: "1970-01-01T00:00:00Z".to_owned(),
+                    },
+                )
+                .unwrap();
+        }
+        let expired_status = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            &format!("/v1/viewer-session-requests/{session_id}"),
+            None,
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(expired_status.status(), StatusCode::OK);
+        let expired_status: ViewerSessionResponse = read_json(expired_status).await;
+        assert_eq!(expired_status.status, "expired");
+        let expired_read = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 10,
+        )
+        .await;
+        assert_eq!(expired_read.status(), StatusCode::FORBIDDEN);
+        let expired_body: serde_json::Value = read_json(expired_read).await;
+        assert_eq!(expired_body["error"], "viewer session expired");
+
+        // Revocation surface: the admin lists and revokes; the read route
+        // reports the honest "revoked" state.
+        let renew = authed_request(
+            router.clone(),
+            &member_keys,
+            "POST",
+            "/v1/viewer-session-requests",
+            Some(
+                serde_json::json!({
+                    "brainId": "acme",
+                    "folderId": "getting-started",
+                    "ephemeralNpub": ephemeral_npub,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 11,
+        )
+        .await;
+        assert_eq!(renew.status(), StatusCode::OK);
+        let complete_again = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/admin/brains/acme/folders/getting-started/viewer-session-wraps",
+            Some(
+                serde_json::json!({
+                    "wraps": [{
+                        "ephemeralNpub": ephemeral_npub,
+                        "keyVersion": 1,
+                        "wrappedKeyPayload": "d3JhcC1rZXk",
+                    }]
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 12,
+        )
+        .await;
+        assert_eq!(complete_again.status(), StatusCode::OK);
+
+        let list = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/viewer-sessions",
+            None,
+            TEST_NOW + 13,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: ViewerSessionListResponse = read_json(list).await;
+        assert_eq!(list.sessions.len(), 1);
+        assert_eq!(list.sessions[0].status, "ready");
+        assert_eq!(list.sessions[0].requester_npub, member_npub);
+        let member_list = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/v1/brains/acme/viewer-sessions",
+            None,
+            TEST_NOW + 14,
+        )
+        .await;
+        assert_eq!(member_list.status(), StatusCode::FORBIDDEN);
+
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            &format!("/v1/brains/acme/viewer-sessions/{session_id}/revoke"),
+            None,
+            TEST_NOW + 15,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+        let revoked: ViewerSessionResponse = read_json(revoke).await;
+        assert_eq!(revoked.status, "revoked");
+        let revoked_read = authed_request(
+            router.clone(),
+            &ephemeral_keys,
+            "GET",
+            "/v1/brains/acme/folders/getting-started/records",
+            None,
+            TEST_NOW + 16,
+        )
+        .await;
+        assert_eq!(revoked_read.status(), StatusCode::FORBIDDEN);
+        let revoked_body: serde_json::Value = read_json(revoked_read).await;
+        assert_eq!(revoked_body["error"], "viewer session revoked");
     }
 }

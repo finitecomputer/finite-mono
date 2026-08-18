@@ -8,6 +8,7 @@ pub(crate) mod invitation_plans;
 pub(crate) mod objects_sync;
 pub(crate) mod public;
 pub(crate) mod sharing;
+pub(crate) mod viewer_sessions;
 
 pub(crate) use agent_access::*;
 pub(crate) use approvals::*;
@@ -19,3 +20,4 @@ pub(crate) use invitation_plans::*;
 pub(crate) use objects_sync::*;
 pub(crate) use public::*;
 pub(crate) use sharing::*;
+pub(crate) use viewer_sessions::*;

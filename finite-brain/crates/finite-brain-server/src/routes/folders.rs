@@ -420,6 +420,29 @@ pub(crate) fn attach_pending_wraps(
     Ok(())
 }
 
+/// Attach the pending viewer-session wrap markers to a metadata response.
+/// Callers gate on Brain admin standing before calling this; the markers
+/// name the waiting ephemeral keys and the principal whose access
+/// justified each request.
+pub(crate) fn attach_pending_viewer_wraps(
+    store: &BrainStore,
+    response: &mut BrainMetadataResponse,
+    brain_id: &BrainId,
+) -> Result<(), ApiError> {
+    response.pending_viewer_wraps = store
+        .pending_viewer_session_wraps(brain_id)?
+        .into_iter()
+        .map(|wrap| PendingViewerWrapResponse {
+            folder_id: wrap.folder_id.to_string(),
+            ephemeral_npub: wrap.ephemeral_npub.to_string(),
+            requester_npub: wrap.requester_npub.to_string(),
+            key_version: wrap.key_version,
+            created_at: wrap.created_at,
+        })
+        .collect();
+    Ok(())
+}
+
 pub(crate) async fn remove_folder_access_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
