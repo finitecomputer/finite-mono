@@ -152,5 +152,48 @@ class RuntimeImageContractTests(unittest.TestCase):
         self.assertTrue(any("reject mutable" in item for item in self.violations()))
 
 
+BUILDER_SCRIPT = ROOT / "finitecomputer-v2/scripts/build_runtime_image.py"
+builder_spec = importlib.util.spec_from_file_location("build_runtime_image", BUILDER_SCRIPT)
+assert builder_spec is not None and builder_spec.loader is not None
+build_runtime_image = importlib.util.module_from_spec(builder_spec)
+sys.modules[builder_spec.name] = build_runtime_image
+builder_spec.loader.exec_module(build_runtime_image)
+
+
+class RuntimeImageBuildContextTests(unittest.TestCase):
+    """The staged build context must never carry the repo .dockerignore.
+
+    stage_repo copies the monorepo into the context ROOT, where a copied
+    .dockerignore becomes active for the builder. Its `**/node_modules` rule
+    then strips the vendored node_modules inside the staged Nix store
+    (.finite-hermes-nix-store), breaking npm/npx and the Playwright CLI at
+    image build time (first #525 image build, 2026-08-18).
+    """
+
+    def test_dockerignore_is_excluded_from_staged_context(self) -> None:
+        self.assertIn(".dockerignore", build_runtime_image.BUILD_EXCLUDES)
+
+    def test_stage_repo_drops_dockerignore_and_repo_node_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "repo"
+            context = Path(temp) / "ctx"
+            source.mkdir()
+            (source / ".dockerignore").write_text("**/node_modules\n", encoding="utf-8")
+            (source / "apps/web/node_modules/leftpad").mkdir(parents=True)
+            (source / "apps/web/node_modules/leftpad/index.js").write_text("//\n", encoding="utf-8")
+            (source / "package.json").write_text("{}\n", encoding="utf-8")
+
+            build_runtime_image.stage_repo(source, context)
+
+            self.assertFalse((context / ".dockerignore").exists())
+            self.assertFalse((context / "apps/web/node_modules").exists())
+            self.assertTrue((context / "package.json").is_file())
+
+        # The Nix store is staged AFTER stage_repo by stage_store_paths with a
+        # plain `rsync -a` (no exclude list), so its vendored node_modules
+        # survive — provided no .dockerignore in the context root re-excludes
+        # them at build time, which the first assertion pins.
+
+
 if __name__ == "__main__":
     unittest.main()
