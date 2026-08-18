@@ -119,8 +119,17 @@ sqlite3 "$out/finite-brain.sqlite3" 'SELECT count(*) FROM brains;'
 rm -rf "$out"
 ```
 
-For point-in-time recovery add `-timestamp 2026-08-12T00:00:00Z` (retention:
-snapshots every 24 h, 168 h kept).
+For point-in-time recovery add `-timestamp 2026-08-12T00:00:00Z` (snapshots
+every 24 h). NOTE 2026-08-18: remote retention enforcement is DISABLED
+(`retention.enabled = false` in the per-db replicate configs) because the
+Latitude credential cannot delete — its S3-compatible layer 403s
+`DeleteObjects`, which made pruning permanent AccessDenied noise after the
+2026-08-12 wave. Replica growth is unbounded by litestream and accepted for
+now on this DR-only lane; all historical LTX files remain in the bucket, so
+point-in-time restore depth is currently limited only by the 2026-08-12
+replication start, not by the documented-but-inert 168 h window. Revisit if
+Latitude ever offers a delete-capable credential or a safe bucket lifecycle
+rule.
 
 **EXERCISED 2026-08-13** (post-#490-deploy verification): full restore from
 the chi bucket to `/data/tmp` in **35 s**, `PRAGMA integrity_check` = ok,

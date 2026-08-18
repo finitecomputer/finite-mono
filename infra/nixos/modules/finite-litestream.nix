@@ -64,6 +64,17 @@ let
   replicateConfigFor = db:
     settingsFormat.generate "litestream-${db.name}.yml" {
       addr = db.metricsAddress;
+      # Retention enforcement DISABLED (litestream >= 0.5.8): the Latitude
+      # credential cannot delete (its S3-compatible layer 403s DeleteObjects),
+      # so pruning expired L0 files only produced permanent AccessDenied noise
+      # (2026-08-12 wave). Decision 2026-08-18: accept unbounded replica
+      # growth on this DR-only lane rather than chase a delete-capable
+      # credential; snapshots and compaction still run, only remote deletes
+      # stop. The snapshot.retention value below stays as documentation of
+      # the intended window if this is ever re-enabled.
+      retention = {
+        enabled = false;
+      };
       snapshot = {
         interval = "24h";
         retention = "168h";
