@@ -503,8 +503,36 @@ def run_model_smoke(
     ]
     raise SmokeFailure(
         f"expected Hermes reply {expected!r} not found; recent messages={sample!r}\n"
-        f"agent container logs (tail):\n{agent_log_tail(agent_container)}"
+        f"agent container logs (tail):\n{agent_log_tail(agent_container)}\n"
+        # The observation side fails silently without this (2026-08-18 depot
+        # hunt): the user runtime's full last view shows whether the room
+        # wedged (stale unread/topics) or the reply landed in another topic.
+        f"user last state (bounded):\n{_bounded_state_summary(last_state)}"
     )
+
+
+def _bounded_state_summary(state: dict[str, Any] | None, limit: int = 4000) -> str:
+    if not state:
+        return "(none)"
+    summary = {
+        "status": state.get("status"),
+        "selected_room_id": state.get("selected_room_id"),
+        "selected_topic_id": state.get("selected_topic_id"),
+        "selected_chat_id": state.get("selected_chat_id"),
+        "rooms": [
+            {
+                "room_id": room.get("room_id"),
+                "status": room.get("status"),
+                "unread_count": room.get("unread_count"),
+                "last_message_preview": room.get("last_message_preview"),
+            }
+            for room in (state.get("rooms") or [])
+        ],
+        "topics": state.get("topics"),
+        "message_count": len(state.get("messages") or []),
+    }
+    rendered = json.dumps(summary, sort_keys=True)
+    return rendered[:limit]
 
 
 def write_stop_script(path: Path, *, container: str, volumes: list[str]) -> None:

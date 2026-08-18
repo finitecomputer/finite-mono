@@ -53,7 +53,10 @@ runtime_exec() {
   fi
 }
 
-wait_for_brain_runtime_ready_after_restart /workspace/brain 2
+# Budget is generous on purpose: the converging stub needs three poll rounds,
+# and on a loaded CI runner each round can take ~1s of wall clock. A 2s budget
+# raced the poll cadence and flaked (2026-08-18, PR #570 run 32173170068).
+wait_for_brain_runtime_ready_after_restart /workspace/brain 6
 if (( runtime_exec_calls < 9 )); then
   echo "readiness gate did not wait for both daemon and sync convergence" >&2
   exit 1
@@ -85,7 +88,9 @@ runtime_exec() {
   fi
   printf '{"brains":[]}\n'
 }
-wait_for_brain_dependency_ready "FiniteBrain reset dependency" 2
+# Same flake class as above: the stub converges on the third poll round, so
+# the budget must comfortably exceed two full poll+exec rounds under CI load.
+wait_for_brain_dependency_ready "FiniteBrain reset dependency" 5
 if (( runtime_exec_calls != 3 )); then
   echo "dependency gate did not wait for Runtime-to-Brain reachability" >&2
   exit 1
