@@ -1,0 +1,49 @@
+description: Finite skill A/B web-design spot check
+
+prompts:
+  - "{{brief}}"
+
+providers:
+  - id: file://./providers/web-design-skill-provider.mjs
+    label: skill-a website-building-finite
+    config:
+      variant: skill-a
+      skillPath: ../skills/software-development/website-building-finite/SKILL.md
+      outputDir: ./runs/latest/artifacts
+      maxOutputTokens: 5000
+  - id: file://./providers/web-design-skill-provider.mjs
+    label: skill-b impeccable-finite
+    config:
+      variant: skill-b
+      skillPath: ../skills/software-development/impeccable-finite/SKILL.md
+      outputDir: ./runs/latest/artifacts
+      maxOutputTokens: 5000
+
+tests:
+  - description: Dense operator dashboard
+    vars:
+      caseId: operator-dashboard
+      title: Dense operator dashboard
+      brief: |
+        Build the first screen of a browser dashboard for a renewable-energy
+        operations team. It should help operators scan turbine health, open
+        incidents, weather risk, and dispatch status. The interface should feel
+        like a serious daily-use tool, not a marketing page.
+
+  - description: Product landing page
+    vars:
+      caseId: product-landing
+      title: Product landing page
+      brief: |
+        Build a landing page for "Slate Relay", a developer tool that turns
+        fragmented deploy logs into a clean incident timeline. The audience is
+        senior platform engineers. Avoid generic SaaS hero tropes.
+
+  - description: Onboarding empty state
+    vars:
+      caseId: onboarding-empty-state
+      title: Onboarding empty state
+      brief: |
+        Build the initial empty state for a collaborative research workspace.
+        A new user has no projects yet. The screen should create confidence,
+        explain the next action, and avoid feeling like a blank admin template.

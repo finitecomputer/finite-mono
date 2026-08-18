@@ -7,3 +7,19 @@ default:
 # Validates the shared skill tree
 check:
     scripts/check-static.sh
+
+# Installs local dependencies and Chromium for the skill A/B harness
+ab-setup:
+    cd ab-testing && pnpm install --frozen-lockfile && pnpm run browsers
+
+# Runs the local Promptfoo + Playwright skill A/B harness
+ab-test:
+    cd ab-testing && pnpm run ab
+
+# Serves the review UI with prompt/skill editing and regeneration APIs
+ab-serve:
+    cd ab-testing && pnpm run serve
+
+# Runs the skill A/B harness for one custom build prompt
+ab-test-prompt prompt:
+    cd ab-testing && pnpm run ab:prompt -- {{ quote(prompt) }}

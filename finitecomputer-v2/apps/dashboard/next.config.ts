@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 import path from "node:path";
 
+const tsconfigPath = process.env.NEXT_TSCONFIG_PATH?.trim();
+
 const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR?.trim() || ".next",
   output: "standalone",
@@ -8,6 +10,7 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.resolve(/* turbopackIgnore: true */ __dirname, "../../.."),
   },
+  ...(tsconfigPath ? { typescript: { tsconfigPath } } : {}),
 };
 
 export default nextConfig;

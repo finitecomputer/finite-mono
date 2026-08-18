@@ -10,7 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -25,6 +25,26 @@ use workos_fixture::{
 pub enum ProcessComposeMode {
     Tui,
     Headless,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunConfig {
+    pub label: String,
+    pub output_file: PathBuf,
+    pub prompt_file: PathBuf,
+    pub reply_timeout_ms: Option<u64>,
+    pub runtime_output_path: Option<String>,
+    pub skill_file: PathBuf,
+    pub workspace: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PreparedAgentRun {
+    output_file: PathBuf,
+    prompt_file: PathBuf,
+    runtime_output_path: String,
+    skill_bundle_dir: PathBuf,
+    workspace: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +385,7 @@ pub struct Stack {
     workos_mode: WorkosMode,
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
+    runtime_image_ref: String,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +397,7 @@ struct Ports {
     hosted_web_device: u16,
     finitesites: u16,
     finite_identity: u16,
+    finite_identity_public: u16,
     finite_brain: u16,
     finite_private_limiter: u16,
     workos_fixture: u16,
@@ -393,11 +415,23 @@ impl Stack {
         let pids_dir = run_dir.join("pids");
         let process_compose_control_dir = process_compose_control_dir(&run_dir);
         let port_offset = optional_env_u16("DEVFINITY_PORT_OFFSET", 0)?;
-        let runtime_agent_port = optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?;
+        let runtime_agent_port = if std::env::var("DEVFINITY_RUNTIME_AGENT_PORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?
+        } else {
+            offset_port(18080, port_offset)?
+        };
         let apple_container_name_prefix = std::env::var("DEVFINITY_APPLE_CONTAINER_NAME_PREFIX")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "finite-devfinity".to_string());
+        let runtime_image_ref = std::env::var("DEVFINITY_RUNTIME_IMAGE_REF")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| RUNTIME_IMAGE_REF.to_string());
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
@@ -415,6 +449,7 @@ impl Stack {
                 hosted_web_device: offset_port(38918, port_offset)?,
                 finitesites: offset_port(18789, port_offset)?,
                 finite_identity: offset_port(18788, port_offset)?,
+                finite_identity_public: offset_port(8791, port_offset)?,
                 finite_brain: offset_port(18790, port_offset)?,
                 finite_private_limiter: offset_port(18002, port_offset)?,
                 workos_fixture: offset_port(14199, port_offset)?,
@@ -434,6 +469,7 @@ impl Stack {
             workos_mode: WorkosMode::Fixture,
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
+            runtime_image_ref,
         })
     }
 
@@ -589,6 +625,7 @@ impl Stack {
             self.remove_secret_files();
         } else {
             self.write_secret_files()?;
+            self.write_dashboard_tsconfig()?;
         }
         self.write_env_file()?;
         self.write_postgres_script()?;
@@ -796,7 +833,7 @@ impl Stack {
                 "  host route: {} ({})",
                 self.apple_host_access.runtime_host, self.apple_host_access.source
             );
-            println!("  image:      {RUNTIME_IMAGE_REF}");
+            println!("  image:      {}", self.runtime_image_ref);
         }
         println!();
         println!("  env file:   {}", self.run_dir.join("env").display());
@@ -842,6 +879,107 @@ impl Stack {
 
     pub fn run_wrapped_command(&self, command: &[String]) -> Result<ExitCode> {
         self.run_wrapped_command_inner(command, None)
+    }
+
+    pub fn run_client_command(&self, command: &[String]) -> Result<ExitCode> {
+        self.run_client_command_with_env(command, &[])
+    }
+
+    fn run_client_command_with_env(
+        &self,
+        command: &[String],
+        env: &[(&'static str, String)],
+    ) -> Result<ExitCode> {
+        if command.is_empty() {
+            bail!("client command cannot be empty");
+        }
+        let env_file = self.run_dir.join("env");
+        if !env_file.is_file() {
+            bail!(
+                "devfinity env file {} does not exist; start the stack first with `devfinity --state-dir {} up`",
+                env_file.display(),
+                self.state_dir.display()
+            );
+        }
+
+        let script = ". \"$1\"; shift; exec \"$@\"";
+        println!("running devfinity client command: {}", shell_words(command));
+        let mut child_command = Command::new("bash");
+        child_command
+            .arg("-c")
+            .arg(script)
+            .arg("devfinity-exec")
+            .arg(&env_file)
+            .args(command)
+            .current_dir(&self.repo_root)
+            .env("DEVFINITY_ENV_FILE", &env_file);
+        child_command.envs(env.iter().map(|(name, value)| (*name, value)));
+        scrub_devfinity_secrets(&mut child_command);
+        let status = child_command.status().with_context(|| {
+            format!(
+                "failed to run devfinity client command `{}`",
+                shell_words(command)
+            )
+        })?;
+        Ok(status_to_exit_code(status))
+    }
+
+    pub fn run_agent_job(&self, config: AgentRunConfig) -> Result<ExitCode> {
+        let driver = self.agent_run_driver_command();
+        self.run_agent_job_with_driver(config, &driver)
+    }
+
+    fn run_agent_job_with_driver(
+        &self,
+        config: AgentRunConfig,
+        driver_command: &[String],
+    ) -> Result<ExitCode> {
+        if driver_command.is_empty() {
+            bail!("agent-run driver command cannot be empty");
+        }
+        let prepared = self.prepare_agent_run(&config)?;
+        let mut env = vec![
+            (
+                "DEVFINITY_AGENT_RUN_LABEL",
+                if config.label.trim().is_empty() {
+                    "agent-run".to_string()
+                } else {
+                    config.label.clone()
+                },
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_OUTPUT_FILE",
+                prepared.output_file.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_PROMPT_FILE",
+                prepared.prompt_file.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_RUNTIME_OUTPUT_PATH",
+                prepared.runtime_output_path,
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR",
+                prepared.skill_bundle_dir.display().to_string(),
+            ),
+            (
+                "DEVFINITY_AGENT_RUN_WORKSPACE",
+                prepared.workspace.display().to_string(),
+            ),
+        ];
+        if let Some(timeout) = config.reply_timeout_ms {
+            env.push(("DEVFINITY_AGENT_RUN_REPLY_TIMEOUT_MS", timeout.to_string()));
+        }
+
+        let code = self.run_client_command_with_env(driver_command, &env)?;
+        if code == ExitCode::SUCCESS && !prepared.output_file.is_file() {
+            bail!(
+                "devfinity agent-run driver exited successfully but did not write {}",
+                prepared.output_file.display()
+            );
+        }
+        Ok(code)
     }
 
     pub fn run_wrapped_command_with_postgres_port_reservation(
@@ -1669,6 +1807,7 @@ wait "$postgres_pid"
                 concat!(
                     "exec {} serve ",
                     "--data {} --external-base-url {} --listen 127.0.0.1:{} ",
+                    "--public-listen 127.0.0.1:{} ",
                     "--finite-vip-domain finite.vip ",
                     "--mailer dev --dev-print-email-tokens yes"
                 ),
@@ -1676,6 +1815,7 @@ wait "$postgres_pid"
                 shell_quote(&self.finite_identity_dir().display().to_string()),
                 shell_quote(&self.finite_identity_url()),
                 self.ports.finite_identity,
+                self.ports.finite_identity_public,
             ),
         ];
 
@@ -1704,7 +1844,7 @@ wait "$postgres_pid"
     fn write_runtime_image(&self, yaml: &mut String) {
         let process = ManagedProcess::RuntimeImage;
         let report = self.runtime_image_dir().join("build-report.json");
-        let context = self.runtime_image_dir().join("context");
+        let context = self.runtime_image_context_dir();
         let engine = self.runtime_image_engine();
         let command = format!(
             concat!(
@@ -1715,7 +1855,7 @@ wait "$postgres_pid"
                 "--report {}"
             ),
             engine,
-            shell_quote(RUNTIME_IMAGE_REF),
+            shell_quote(&self.runtime_image_ref),
             shell_quote(&context.display().to_string()),
             shell_quote(&report.display().to_string()),
         );
@@ -1794,6 +1934,7 @@ wait "$postgres_pid"
 
     fn write_apple_network_probe(&self, yaml: &mut String) {
         let process = ManagedProcess::AppleNetworkProbe;
+        let probe_container_name = self.apple_network_probe_container_name();
         let mut urls = vec![
             format!("{}/health", self.runtime_finitechat_url()),
             format!("{}/api/v1/healthz", self.finitesites_api_url()),
@@ -1813,21 +1954,27 @@ wait "$postgres_pid"
         );
         let (cleanup, command) = if self.profile == StackProfile::DockerSaas {
             (
-                "docker rm --force devfinity-host-network-probe >/dev/null 2>&1 || true"
-                    .to_string(),
                 format!(
-                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(RUNTIME_IMAGE_REF),
+                    "docker rm --force {} >/dev/null 2>&1 || true",
+                    shell_quote(&probe_container_name)
+                ),
+                format!(
+                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name {} --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(&probe_container_name),
+                    shell_quote(&self.runtime_image_ref),
                     shell_quote(&probe_script),
                 ),
             )
         } else {
             (
-                "container delete --force devfinity-host-network-probe >/dev/null 2>&1 || true"
-                    .to_string(),
                 format!(
-                    "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(RUNTIME_IMAGE_REF),
+                    "container delete --force {} >/dev/null 2>&1 || true",
+                    shell_quote(&probe_container_name)
+                ),
+                format!(
+                    "exec container run --rm --name {} --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(&probe_container_name),
+                    shell_quote(&self.runtime_image_ref),
                     shell_quote(&probe_script),
                 ),
             )
@@ -1853,6 +2000,10 @@ wait "$postgres_pid"
         }
         let _ = writeln!(yaml, "    availability:");
         let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn apple_network_probe_container_name(&self) -> String {
+        format!("{}-host-network-probe", self.apple_container_name_prefix)
     }
 
     fn write_runtime_artifact(&self, yaml: &mut String) {
@@ -1892,7 +2043,7 @@ wait "$postgres_pid"
                     shell_quote(RUNTIME_ARTIFACT_ID_PREFIX)
                 ),
                 String::from("digest=\"sha256:$digest_hex\""),
-                format!("reference={}@\"$digest\"", shell_quote(RUNTIME_IMAGE_REF)),
+                format!("reference={}@\"$digest\"", shell_quote(&self.runtime_image_ref)),
                 command,
                 String::from("umask 077"),
                 format!(
@@ -1994,7 +2145,7 @@ wait "$postgres_pid"
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE",
-                    RUNTIME_IMAGE_REF.to_string(),
+                    self.runtime_image_ref.clone(),
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
@@ -2087,7 +2238,8 @@ wait "$postgres_pid"
             // Keep the long-lived local dev server isolated from production
             // and browser-test build artifacts. Next can otherwise combine
             // incompatible manifests and serve every App Router path as 404.
-            ("NEXT_DIST_DIR", ".next-devfinity".to_string()),
+            ("NEXT_DIST_DIR", self.dashboard_next_dist_dir()),
+            ("NEXT_TSCONFIG_PATH", self.dashboard_tsconfig_name()),
             (
                 "FINITECHAT_HOSTED_API_TOKEN",
                 self.hosted_web_device_token.clone(),
@@ -2758,7 +2910,7 @@ wait "$postgres_pid"
                         } else {
                             "container"
                         }),
-                        String::from("devfinity-host-network-probe"),
+                        self.apple_network_probe_container_name(),
                     ],
                     ManagedProcess::RuntimeArtifact => vec![
                         String::from("finite-saas-core"),
@@ -3016,7 +3168,7 @@ wait "$postgres_pid"
                 "runtime=http://127.0.0.1:{}",
                 self.ports.runtime_agent
             );
-            let _ = writeln!(urls, "runtime_image={RUNTIME_IMAGE_REF}");
+            let _ = writeln!(urls, "runtime_image={}", self.runtime_image_ref);
             let _ = writeln!(urls, "runtime_artifact_prefix={RUNTIME_ARTIFACT_ID_PREFIX}");
         }
         urls
@@ -3195,6 +3347,149 @@ wait "$postgres_pid"
 
     fn runtime_image_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::RuntimeImage)
+    }
+
+    fn runtime_image_context_dir(&self) -> PathBuf {
+        if self.profile == StackProfile::AppleSaas {
+            return self
+                .repo_root
+                .join("target")
+                .join("runtime-image")
+                .join("devfinity-context");
+        }
+        self.runtime_image_dir().join("context")
+    }
+
+    fn prepare_agent_run(&self, config: &AgentRunConfig) -> Result<PreparedAgentRun> {
+        let prompt_file = absolute_path(&self.repo_root, &config.prompt_file);
+        if !prompt_file.is_file() {
+            bail!(
+                "agent-run prompt file does not exist: {}",
+                prompt_file.display()
+            );
+        }
+
+        let skill_file = absolute_path(&self.repo_root, &config.skill_file);
+        if !skill_file.is_file() {
+            bail!(
+                "agent-run skill file does not exist: {}",
+                skill_file.display()
+            );
+        }
+        if skill_file.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            bail!("agent-run --skill must point at a SKILL.md file");
+        }
+
+        let label = if config.label.trim().is_empty() {
+            "agent-run"
+        } else {
+            config.label.trim()
+        };
+        let run_id = format!("{}-{}-{}", slug(label), std::process::id(), unix_millis()?);
+        let workspace = config
+            .workspace
+            .as_ref()
+            .map(|path| absolute_path(&self.repo_root, path))
+            .unwrap_or_else(|| self.run_dir.join("agent-runs").join(&run_id));
+        fs::create_dir_all(&workspace)
+            .with_context(|| format!("failed to create {}", workspace.display()))?;
+
+        let output_file = absolute_path(&self.repo_root, &config.output_file);
+        if let Some(parent) = output_file.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let skill_bundle_dir = workspace.join("skill-bundle");
+        remove_dir_all_best_effort(&skill_bundle_dir);
+        fs::create_dir_all(&skill_bundle_dir)
+            .with_context(|| format!("failed to create {}", skill_bundle_dir.display()))?;
+        let source_dir = skill_file
+            .parent()
+            .with_context(|| format!("{} has no parent directory", skill_file.display()))?;
+        let bundle_leaf = source_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(slug)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "skill".to_string());
+        copy_dir_all(source_dir, &skill_bundle_dir.join(bundle_leaf))?;
+        let skill_count = count_skill_files(&skill_bundle_dir)?;
+        if skill_count != 1 {
+            bail!(
+                "agent-run skill bundle must contain exactly one SKILL.md, found {skill_count} under {}",
+                skill_bundle_dir.display()
+            );
+        }
+
+        let runtime_output_path = config
+            .runtime_output_path
+            .clone()
+            .unwrap_or_else(|| format!("/data/workspace/devfinity-agent-runs/{run_id}/index.html"));
+
+        Ok(PreparedAgentRun {
+            output_file,
+            prompt_file,
+            runtime_output_path,
+            skill_bundle_dir,
+            workspace,
+        })
+    }
+
+    fn agent_run_driver_command(&self) -> Vec<String> {
+        let script = nonempty_env_value("DEVFINITY_AGENT_RUN_DRIVER_SCRIPT")
+            .map(|path| absolute_path(&self.repo_root, Path::new(&path)))
+            .unwrap_or_else(|| self.repo_root.join("devfinity/scripts/agent-run.mjs"));
+        vec!["node".to_string(), script.display().to_string()]
+    }
+
+    fn state_hash_hex(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.state_dir.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn dashboard_next_dist_dir(&self) -> String {
+        format!(".next/devfinity-{}", self.state_hash_hex())
+    }
+
+    fn dashboard_tsconfig_name(&self) -> String {
+        format!("tsconfig.devfinity-{}.json", self.state_hash_hex())
+    }
+
+    fn dashboard_tsconfig_file(&self) -> PathBuf {
+        self.repo_root
+            .join("finitecomputer-v2/apps/dashboard")
+            .join(self.dashboard_tsconfig_name())
+    }
+
+    fn write_dashboard_tsconfig(&self) -> Result<()> {
+        let base = self
+            .repo_root
+            .join("finitecomputer-v2/apps/dashboard/tsconfig.json");
+        let contents = fs::read_to_string(&base)
+            .with_context(|| format!("failed to read {}", base.display()))?;
+        let mut config: serde_json::Value = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", base.display()))?;
+        let include = config
+            .get_mut("include")
+            .and_then(serde_json::Value::as_array_mut)
+            .with_context(|| format!("{} must contain an include array", base.display()))?;
+        for pattern in [
+            format!("{}/types/**/*.ts", self.dashboard_next_dist_dir()),
+            format!("{}/dev/types/**/*.ts", self.dashboard_next_dist_dir()),
+        ] {
+            if !include
+                .iter()
+                .any(|entry| entry.as_str() == Some(pattern.as_str()))
+            {
+                include.push(serde_json::Value::String(pattern));
+            }
+        }
+        let path = self.dashboard_tsconfig_file();
+        fs::write(&path, serde_json::to_string_pretty(&config)? + "\n")
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
     }
 
     fn runner_dir(&self) -> PathBuf {
@@ -3704,6 +3999,57 @@ fn remove_file_best_effort(path: &Path) {
     }
 }
 
+fn remove_dir_all_best_effort(path: &Path) {
+    if path.exists()
+        && let Err(error) = fs::remove_dir_all(path)
+    {
+        eprintln!("failed to remove {}: {error}", path.display());
+    }
+}
+
+fn copy_dir_all(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target).with_context(|| format!("failed to create {}", target.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", source_path.display()))?;
+        if file_type.is_dir() {
+            copy_dir_all(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &target_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn count_skill_files(root: &Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("failed to read {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if file_type.is_dir() {
+            count += count_skill_files(&path)?;
+        } else if file_type.is_file() && entry.file_name().to_str() == Some("SKILL.md") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn check_tcp_service(process: ManagedProcess, host: &str, port: u16) -> ServiceCheck {
     match connect_tcp(host, port) {
         Ok(_) => ServiceCheck::new(process, "open", format!("tcp {host}:{port} accepted")),
@@ -4150,6 +4496,37 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+fn slug(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for byte in value.bytes() {
+        let next = if byte.is_ascii_alphanumeric() {
+            Some(byte.to_ascii_lowercase() as char)
+        } else if !last_dash {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(character) = next {
+            last_dash = character == '-';
+            out.push(character);
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "agent-run".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unix_millis() -> Result<u128> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis())
+}
+
 fn nonempty_env(name: &str) -> bool {
     nonempty_env_value(name).is_some()
 }
@@ -4552,6 +4929,135 @@ mod tests {
     }
 
     #[test]
+    fn client_command_sources_existing_stack_env() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let code = stack
+            .run_client_command(&[
+                "sh".to_string(),
+                "-c".to_string(),
+                "test \"$DEVFINITY_PROFILE\" = apple-saas && test -n \"$FC_CORE_URL\" && test \"$1\" = 'two words'".to_string(),
+                "client-test".to_string(),
+                "two words".to_string(),
+            ])
+            .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn client_command_preserves_child_exit_code() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let code = stack
+            .run_client_command(&["sh".to_string(), "-c".to_string(), "exit 23".to_string()])
+            .unwrap();
+
+        assert_eq!(code, ExitCode::from(23));
+    }
+
+    #[test]
+    fn client_command_requires_existing_env_file() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+
+        let error = stack.run_client_command(&["true".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("devfinity env file"));
+    }
+
+    #[test]
+    fn agent_job_prepares_skill_bundle_and_runs_driver_against_existing_env() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let skill_dir = files.path().join("Design Skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "name: design-test\n").unwrap();
+        fs::write(skill_dir.join("reference.txt"), "copied").unwrap();
+        let prompt_file = files.path().join("prompt.txt");
+        fs::write(&prompt_file, "Build a small page").unwrap();
+        let output_file = files.path().join("result.json");
+        let workspace = files.path().join("workspace");
+        let driver = files.path().join("driver.sh");
+        fs::write(
+            &driver,
+            r#"set -eu
+test "$DEVFINITY_PROFILE" = apple-saas
+test "$DEVFINITY_AGENT_RUN_LABEL" = skill-a
+test "$DEVFINITY_AGENT_RUN_RUNTIME_OUTPUT_PATH" = /runtime/out.html
+test -f "$DEVFINITY_AGENT_RUN_PROMPT_FILE"
+test -d "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR"
+test -d "$DEVFINITY_AGENT_RUN_WORKSPACE"
+test "$(find "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR" -name SKILL.md -type f | wc -l | tr -d ' ')" = 1
+test "$(find "$DEVFINITY_AGENT_RUN_SKILL_BUNDLE_DIR" -name reference.txt -type f | wc -l | tr -d ' ')" = 1
+printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
+"#,
+        )
+        .unwrap();
+
+        let code = stack
+            .run_agent_job_with_driver(
+                AgentRunConfig {
+                    label: "skill-a".to_string(),
+                    output_file: output_file.clone(),
+                    prompt_file,
+                    reply_timeout_ms: Some(12_345),
+                    runtime_output_path: Some("/runtime/out.html".to_string()),
+                    skill_file: skill_dir.join("SKILL.md"),
+                    workspace: Some(workspace.clone()),
+                },
+                &["sh".to_string(), driver.display().to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(output_file.is_file());
+        assert!(workspace.join("skill-bundle").exists());
+    }
+
+    #[test]
+    fn agent_job_requires_result_file_on_success() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf()).unwrap();
+        stack.ensure_dirs().unwrap();
+        stack.write_env_file().unwrap();
+
+        let skill_dir = files.path().join("skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "name: design-test\n").unwrap();
+        let prompt_file = files.path().join("prompt.txt");
+        fs::write(&prompt_file, "Build a small page").unwrap();
+
+        let error = stack
+            .run_agent_job_with_driver(
+                AgentRunConfig {
+                    label: "skill-a".to_string(),
+                    output_file: files.path().join("missing-result.json"),
+                    prompt_file,
+                    reply_timeout_ms: None,
+                    runtime_output_path: None,
+                    skill_file: skill_dir.join("SKILL.md"),
+                    workspace: Some(files.path().join("workspace")),
+                },
+                &["true".to_string()],
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not write"));
+    }
+
+    #[test]
     fn inference_source_priority_is_upstream_then_direct_then_cache() {
         assert_eq!(
             InferenceMode::from_sources(true, true, true),
@@ -4725,6 +5231,7 @@ mod tests {
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("finite-identity:"));
         assert!(yaml.contains("finite-identityd serve"));
+        assert!(yaml.contains("--public-listen 127.0.0.1:8791"));
         assert!(yaml.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
         assert!(yaml.contains("secrets/identity-authority.sh"));
         assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
@@ -4749,7 +5256,13 @@ mod tests {
                 "FINITE_SITES_VIEWER_SESSION_TOKEN=dededededededededededededededededededededededededededededededede"
             )
         );
-        assert!(yaml.contains("NEXT_DIST_DIR=.next-devfinity"));
+        let dashboard_dist_dir = stack.dashboard_next_dist_dir();
+        assert!(dashboard_dist_dir.starts_with(".next/devfinity-"));
+        assert!(yaml.contains(&format!("NEXT_DIST_DIR={dashboard_dist_dir}")));
+        assert!(yaml.contains(&format!(
+            "NEXT_TSCONFIG_PATH={}",
+            stack.dashboard_tsconfig_name()
+        )));
         assert!(yaml.contains("--listen 0.0.0.0:18789"));
         assert!(yaml.contains("--api-url 'http://host.container.internal:18789'"));
         assert!(yaml.contains("--git-url 'http://host.container.internal:18789'"));
@@ -4769,8 +5282,10 @@ mod tests {
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
         assert!(yaml.contains("apple-network-probe:"));
+        assert!(yaml.contains("finite-devfinity-test-host-network-probe"));
         assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));
+        assert!(yaml.contains("target/runtime-image/devfinity-context"));
         assert!(yaml.contains("runtime-artifact-upsert"));
         assert!(yaml.contains(".image_metadata.digest"));
         assert!(yaml.contains("digest_hex=$(jq"));

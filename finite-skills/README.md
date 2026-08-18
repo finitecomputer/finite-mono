@@ -33,6 +33,25 @@ Run from the monorepo root:
 just skills check
 ```
 
+For local human spot checks of web-design skill variants, use the Promptfoo +
+Playwright harness in `ab-testing/`:
+
+```sh
+just skills ab-setup
+just skills ab-test
+```
+
+Run `just dev inference-key` once if the local Finite Private upstream key has
+not been cached yet, then run `just skills ab-test` for product-accurate local
+Devfinity/Hermes artifacts. Use `just skills ab-test-prompt 'Build ...'` to
+compare both skill variants on one custom build prompt. Run
+`just skills ab-serve` to edit the prompt and both skill variants from the
+browser and regenerate locally. The root `just` path enters the pinned dev
+shell, which provides a Node version compatible with current Promptfoo. Use
+`SKILL_AB_RUNNER=provider` for the faster direct Finite Private approximation,
+or `SKILL_AB_PROVIDER=openai OPENAI_API_KEY=...` only when intentionally
+testing against OpenAI instead of Finite Private.
+
 The current checker is only a static floor. A Runtime image change must also
 prove that a new Agent Home discovers the bundled baseline, restart or image
 replacement leaves an already installed baseline and user-owned skills
