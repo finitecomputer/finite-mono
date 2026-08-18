@@ -75,10 +75,15 @@ function collectArtifacts() {
   for (const caseId of sortedDirs(artifactsDir)) {
     for (const variant of sortedDirs(path.join(artifactsDir, caseId))) {
       const dir = path.join(artifactsDir, caseId, variant);
-      const metadata = JSON.parse(readFileSync(path.join(dir, "metadata.json"), "utf8"));
+      const htmlPath = path.join(dir, "index.html");
+      const metadataPath = path.join(dir, "metadata.json");
+      if (!existsSync(htmlPath) || !existsSync(metadataPath)) {
+        continue;
+      }
+      const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       artifacts.push({
         caseId,
-        htmlPath: path.join(dir, "index.html"),
+        htmlPath,
         metadata,
         variant,
       });
