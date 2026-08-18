@@ -98,11 +98,12 @@ jobs:
         if: ${{ inputs.durable_home_docker_smoke }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITE_PRIVATE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
           FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
           FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
         run: |
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "The default Add/Welcome chat smoke requires the OPENROUTER_API_KEY secret." >&2
+          if [ -z "$FINITE_PRIVATE_API_KEY" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "The durable chat smoke requires the FINITE_PRIVATE_SMOKE_API_KEY secret (preferred, honest finite-private path) or OPENROUTER_API_KEY." >&2
             exit 1
           fi
           python3 -m py_compile scripts/hermes-durable-home-docker-smoke.py
