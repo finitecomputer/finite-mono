@@ -1047,9 +1047,16 @@ fn spawn_delivery_stream(bridge: BridgeClient, tx: mpsc::Sender<RuntimeCommandDe
     });
 }
 
+/// Bridge cold start reprocesses retained room history before serving, so
+/// time-to-ready scales with data size and host I/O, not just spawn speed.
+/// 2026-08-18: a ~15k-message room needed ~55s on lat3 and boot-looped
+/// against the old 30s deadline; 180s gives large rooms headroom while a
+/// truly dead bridge still fails (and is retried) within minutes.
+const BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
 async fn wait_for_bridge(bridge: &BridgeClient) -> Result<(), AgentdError> {
     let mut retry = Duration::from_millis(50);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + BRIDGE_READY_TIMEOUT;
     loop {
         if bridge.wait_until_ready().await.is_ok() {
             return Ok(());
