@@ -1310,6 +1310,7 @@ name = "finitechat-cli"
 version = "0.1.3"
 dependencies = [
  "axum",
+ "clap",
  "finite-identity",
  "finitechat-blob",
  "finitechat-client",

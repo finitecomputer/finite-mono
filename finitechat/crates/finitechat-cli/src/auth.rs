@@ -12,7 +12,9 @@ use std::io::{Read, Write};
 use finite_identity::{FiniteIdentity, IdentityPaths, ImportSecret};
 use serde::Serialize;
 
-use crate::{CliError, reject_extra_args, take_option, take_positional, write_pretty_json};
+use crate::CliError;
+use crate::cli::AuthCommand;
+use crate::write_pretty_json;
 
 /// `created_by` recorded in identities written by `auth import`.
 const IMPORT_CREATED_BY: &str = concat!("finitechat ", env!("CARGO_PKG_VERSION"), " (auth import)");
@@ -34,21 +36,10 @@ struct AuthImportSummary {
     imported: bool,
 }
 
-pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let Some(command) = take_positional(&mut args) else {
-        return Err(CliError::Usage(usage()));
-    };
-    match command.as_str() {
-        "status" => {
-            reject_extra_args(&args)?;
-            cmd_status(output)
-        }
-        "import" => {
-            let file = take_option(&mut args, "--file")?;
-            reject_extra_args(&args)?;
-            cmd_import(file.as_deref(), &mut std::io::stdin(), output)
-        }
-        _ => Err(CliError::Usage(usage())),
+pub(crate) fn run<W: Write>(command: AuthCommand, output: &mut W) -> Result<(), CliError> {
+    match command {
+        AuthCommand::Status => cmd_status(output),
+        AuthCommand::Import { file } => cmd_import(file.as_deref(), &mut std::io::stdin(), output),
     }
 }
 
@@ -119,10 +110,6 @@ fn parse_secret_input(raw: &str) -> Result<ImportSecret, CliError> {
     let trimmed = raw.trim();
     let trimmed = trimmed.strip_prefix("nostr:").unwrap_or(trimmed);
     ImportSecret::parse(trimmed).map_err(|error| CliError::Identity(error.to_string()))
-}
-
-pub(crate) fn usage() -> String {
-    "auth commands:\n  finitechat auth status\n  finitechat auth import [--file PATH]   (reads an nsec or 64-hex secret from PATH or stdin)\n  (identity location: $FINITE_HOME/identity/identity.json, else ~/.finite/identity/identity.json)".to_owned()
 }
 
 #[cfg(test)]

@@ -13,25 +13,19 @@
 
 use std::io::Write;
 
-use finitechat_client::room_log_capture::{
-    DEFAULT_MAX_CAPTURE_PAGES, RoomLogCaptureRequest, capture_room_log,
-};
+use finitechat_client::room_log_capture::{RoomLogCaptureRequest, capture_room_log};
 use finitechat_client::{HttpRuntimeDelivery, ReqwestHttpRuntimeTransport};
 use finitechat_proto::DeviceRef;
 use serde::Serialize;
 
-use crate::{
-    CliError, parse_account_secret, parse_u64, reject_extra_args, required_option, take_option,
-    take_positional,
-};
+use crate::CliError;
+use crate::cli::CaptureArgs;
+use crate::cli::CaptureCommand;
+use crate::parse_account_secret;
 
-pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let Some(command) = take_positional(&mut args) else {
-        return Err(CliError::Usage(usage()));
-    };
-    match command.as_str() {
-        "room-log" => cmd_capture_room_log(&mut args, output),
-        _ => Err(CliError::Usage(usage())),
+pub(crate) fn run<W: Write>(args: CaptureArgs, output: &mut W) -> Result<(), CliError> {
+    match args.command {
+        CaptureCommand::RoomLog(args) => cmd_capture_room_log(args, output),
     }
 }
 
@@ -44,24 +38,19 @@ struct CaptureSummary {
     out: String,
 }
 
-fn cmd_capture_room_log<W: Write>(args: &mut Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let server = required_option(args, "--server")?;
-    let room_id = required_option(args, "--room-id")?;
-    let device_id = required_option(args, "--device-id")?;
-    let account_secret_file = required_option(args, "--account-secret-file")?;
-    let out = required_option(args, "--out")?;
-    let after_seq = take_option(args, "--after-seq")?
-        .map(|value| parse_u64("--after-seq", &value))
-        .transpose()?
-        .unwrap_or(0);
-    let max_pages = take_option(args, "--max-pages")?
-        .map(|value| parse_u64("--max-pages", &value))
-        .transpose()?
-        .map(u32::try_from)
-        .transpose()
-        .map_err(|_| CliError::Usage("--max-pages must fit in a u32".to_owned()))?
-        .unwrap_or(DEFAULT_MAX_CAPTURE_PAGES);
-    reject_extra_args(args)?;
+fn cmd_capture_room_log<W: Write>(
+    args: crate::cli::CaptureRoomLogArgs,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let crate::cli::CaptureRoomLogArgs {
+        server,
+        room_id,
+        device_id,
+        account_secret_file,
+        out,
+        after_seq,
+        max_pages,
+    } = args;
 
     let secret_hex = std::fs::read_to_string(&account_secret_file).map_err(|error| {
         CliError::Runtime(format!(
@@ -121,8 +110,4 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
-}
-
-pub(crate) fn usage() -> String {
-    "capture commands (operator-only; CONTACTS the given server, read-only):\n  finitechat capture room-log --server URL --room-id ID --device-id ID --account-secret-file PATH --out PATH [--after-seq N] [--max-pages N]\n    --server: base URL of the finitechat server to capture from (required, no default)\n    --account-secret-file: file containing the 64-char lowercase hex account secret (never a CLI arg)\n    --out: output path for the CapturedRoomLogFile JSON (must not exist yet)\n    pages /sync/group as the given device until the log is complete; feed the output to `finitechat diagnose rejected-entry --room-log`".to_owned()
 }

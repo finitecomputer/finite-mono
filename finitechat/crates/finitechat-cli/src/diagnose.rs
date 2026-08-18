@@ -17,36 +17,37 @@ use finitechat_client::rejected_entry_diagnostic::{
     CapturedRoomLogFile, RejectedEntryDiagnosticRequest, run_rejected_entry_diagnostic,
 };
 
-use crate::{CliError, reject_extra_args, required_option, take_option, take_positional};
-use crate::{parse_account_secret, parse_u64, write_pretty_json};
+use crate::CliError;
+use crate::cli::DiagnoseArgs;
+use crate::cli::DiagnoseCommand;
+use crate::cli::DiagnoseRejectedEntryArgs;
+use crate::parse_account_secret;
+use crate::write_pretty_json;
 
-pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let Some(command) = take_positional(&mut args) else {
-        return Err(CliError::Usage(usage()));
-    };
-    match command.as_str() {
-        "rejected-entry" => cmd_rejected_entry(&mut args, output),
-        _ => Err(CliError::Usage(usage())),
+pub(crate) fn run<W: Write>(args: DiagnoseArgs, output: &mut W) -> Result<(), CliError> {
+    match args.command {
+        DiagnoseCommand::RejectedEntry(args) => cmd_rejected_entry(args, output),
     }
 }
 
-fn cmd_rejected_entry<W: Write>(args: &mut Vec<String>, output: &mut W) -> Result<(), CliError> {
-    let store = required_option(args, "--store")?;
-    let work_dir = required_option(args, "--work-dir")?;
-    let room_log = required_option(args, "--room-log")?;
-    let device_id = required_option(args, "--device-id")?;
-    let account_secret_hex = required_option(args, "--account-secret-hex")?;
-    let incident_alias = required_option(args, "--incident-alias")?;
-    let now_unix_seconds = take_option(args, "--now-unix-seconds")?
-        .map(|value| parse_u64("--now-unix-seconds", &value))
-        .transpose()?
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0)
-        });
-    reject_extra_args(args)?;
+fn cmd_rejected_entry<W: Write>(
+    DiagnoseRejectedEntryArgs {
+        store,
+        work_dir,
+        room_log,
+        device_id,
+        account_secret_hex,
+        incident_alias,
+        now_unix_seconds,
+    }: DiagnoseRejectedEntryArgs,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let now_unix_seconds = now_unix_seconds.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    });
 
     let capture_bytes = std::fs::read(&room_log).map_err(|error| {
         CliError::Runtime(format!("failed to read the captured room log: {error}"))
@@ -95,8 +96,4 @@ pub(crate) fn split_capture(
     };
     let target = rooms.remove(index);
     Ok((target, rooms))
-}
-
-pub(crate) fn usage() -> String {
-    "diagnose commands (operator-only; local copies only, never a server):\n  finitechat diagnose rejected-entry --store PATH --work-dir PATH --room-log PATH --device-id ID --account-secret-hex HEX --incident-alias ALIAS [--now-unix-seconds N]\n    --store: a COPY of the client store sqlite file (only read; byte-copied again internally)\n    --room-log: captured logs JSON: {\"target_room_id\": ID, \"rooms\": [{\"room_id\": ID, \"entries\": [...]}]}\n    emits the rejected-entry classification record (no identifiers, no plaintext, no ciphertext)".to_owned()
 }
