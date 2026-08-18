@@ -108,6 +108,69 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
         self.assertIn("default: true", workflow)
         self.assertIn("scripts/hermes-durable-home-docker-smoke.py", workflow)
 
+    def test_finite_private_key_selects_the_product_inference_profile(self) -> None:
+        captured: list[list[str]] = []
+        done = mock.Mock(stdout="container-id\n")
+
+        def fake_run(command: list[str], **kwargs: object) -> mock.Mock:
+            captured.append(command)
+            return done
+
+        with (
+            mock.patch.object(smoke, "docker_container_rm"),
+            mock.patch.object(smoke, "run", side_effect=fake_run),
+        ):
+            smoke.start_agent_container(
+                image="finite-agent-runtime:test",
+                container="agent-container",
+                home_volume="home-vol",
+                server_url="https://chat.example",
+                env={"FINITE_PRIVATE_API_KEY": "fpk_test"},
+            )
+        command = captured[0]
+        self.assertIn("FINITE_DEFAULT_INFERENCE_PROFILE=finite-private", command)
+        self.assertNotIn("FINITE_DEFAULT_INFERENCE_PROFILE=openrouter", command)
+
+    def test_without_finite_private_key_openrouter_profile_is_kept(self) -> None:
+        captured: list[list[str]] = []
+        done = mock.Mock(stdout="container-id\n")
+
+        def fake_run(command: list[str], **kwargs: object) -> mock.Mock:
+            captured.append(command)
+            return done
+
+        with (
+            mock.patch.object(smoke, "docker_container_rm"),
+            mock.patch.object(smoke, "run", side_effect=fake_run),
+        ):
+            smoke.start_agent_container(
+                image="finite-agent-runtime:test",
+                container="agent-container",
+                home_volume="home-vol",
+                server_url="https://chat.example",
+                env={},
+            )
+        self.assertIn("FINITE_DEFAULT_INFERENCE_PROFILE=openrouter", captured[0])
+
+    def test_reply_timeout_includes_agent_container_log_tail(self) -> None:
+        clock = iter([0.0, 0.0, 200.0])
+        with (
+            mock.patch.object(smoke, "docker_user_app", return_value={"messages": []}),
+            mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
+            mock.patch.object(smoke.time, "monotonic", side_effect=lambda: next(clock)),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            smoke.run_model_smoke(
+                image="finite-agent-runtime:test",
+                user_volume="user-vol",
+                server_url="https://chat.example",
+                room_id="room-x",
+                expected="hello",
+                env={},
+                agent_container="agent-container",
+            )
+        self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

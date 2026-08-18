@@ -17,6 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_IMAGE = "finite-agent-durable-home-smoke"
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
 MODEL_ENV_NAMES = (
+    # Preferred: the honest product path. With a Finite Private key present
+    # the smoke keeps the image's default finite-private inference profile.
+    "FINITE_PRIVATE_API_KEY",
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -27,6 +30,7 @@ MODEL_ENV_NAMES = (
     "FINITECHAT_HERMES_API_MODE",
 )
 INFERENCE_CREDENTIAL_ENV_NAMES = (
+    "FINITE_PRIVATE_API_KEY",
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -230,10 +234,12 @@ def start_agent_container(
         "--env",
         "FINITECHAT_HERMES_AGENT_DEVICE_ID=durable-docker",
         "--env",
-        # The canonical image defaults to Finite Private inference. This
-        # dispatch rung deliberately exercises the operator-supplied
-        # OpenRouter credential instead, so select that profile explicitly.
-        "FINITE_DEFAULT_INFERENCE_PROFILE=openrouter",
+        # Honest product path first: with a Finite Private key present, keep
+        # the image's default finite-private inference profile (the gateway
+        # fail-closes without the key rather than falling back). Only select
+        # the operator-supplied OpenRouter credential when no key is set.
+        "FINITE_DEFAULT_INFERENCE_PROFILE="
+        + ("finite-private" if env.get("FINITE_PRIVATE_API_KEY") else "openrouter"),
         *container_env_args(env, MODEL_ENV_NAMES),
         image,
     ]
@@ -435,6 +441,12 @@ def first_matching_mine_message_id(state: dict[str, Any], prompt: str) -> str | 
     return None
 
 
+def agent_log_tail(container: str, lines: int = 200) -> str:
+    """Best-effort agent container log tail for failure diagnosis."""
+    logs = run(["docker", "logs", "--tail", str(lines), container], check=False, timeout=30)
+    return ((logs.stdout or "") + (logs.stderr or "")).strip()
+
+
 def run_model_smoke(
     *,
     image: str,
@@ -443,6 +455,7 @@ def run_model_smoke(
     room_id: str,
     expected: str,
     env: dict[str, str],
+    agent_container: str,
     docker_extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     prompt = f"Reply with exactly: {expected}"
@@ -488,7 +501,10 @@ def run_model_smoke(
         }
         for message in ((last_state or {}).get("messages") or [])[-8:]
     ]
-    raise SmokeFailure(f"expected Hermes reply {expected!r} not found; recent messages={sample!r}")
+    raise SmokeFailure(
+        f"expected Hermes reply {expected!r} not found; recent messages={sample!r}\n"
+        f"agent container logs (tail):\n{agent_log_tail(agent_container)}"
+    )
 
 
 def write_stop_script(path: Path, *, container: str, volumes: list[str]) -> None:
@@ -614,6 +630,7 @@ def main() -> int:
             room_id=room_id,
             expected="durable docker before restart ok",
             env=env,
+            agent_container=name,
         )
         report["facts"]["model_smoke_before_restart"] = before_model
         step("model.before_restart", reply_message_id=before_model.get("reply_message_id"))
@@ -645,6 +662,7 @@ def main() -> int:
             room_id=room_id,
             expected="durable docker after restart ok",
             env=env,
+            agent_container=name,
         )
         report["facts"]["model_smoke_after_restart"] = after_model
         report["facts"]["welcome_admission_after_restart"] = True
@@ -662,6 +680,10 @@ def main() -> int:
     except Exception as exc:
         report["status"] = "failed"
         report["failure"] = str(exc)
+        # Failures leave the agent container's inner state invisible
+        # otherwise (2026-08-18: a reply-timeout gave no hint whether inbound
+        # delivery or inference failed). Keep a bounded tail in the report.
+        report["agent_log_tail"] = agent_log_tail(name)[-8000:]
         write_report()
         raise
     finally:

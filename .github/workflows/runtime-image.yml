@@ -82,6 +82,7 @@ jobs:
           DEPOT_DISABLE_OTEL: "1"
           FC_RUNTIME_IMAGE_ENGINE: depot
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITE_PRIVATE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
           FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
           FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
         run: |
@@ -145,8 +146,8 @@ jobs:
           # to be pushed. A separate smoke workflow rebuilds from the same SHA
           # and is useful preflight, but mutable package/base inputs mean it is
           # not proof of these exact bytes.
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::error::the build-once durable Runtime smoke requires OPENROUTER_API_KEY"
+          if [ -z "$FINITE_PRIVATE_API_KEY" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::the build-once durable Runtime smoke requires FINITE_PRIVATE_SMOKE_API_KEY (preferred, honest finite-private path) or OPENROUTER_API_KEY"
             exit 1
           fi
           finitechat/scripts/hermes-durable-home-docker-smoke.py \
