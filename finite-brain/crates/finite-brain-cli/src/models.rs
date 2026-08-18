@@ -268,6 +268,10 @@ pub(crate) struct SyncOnceReport {
     pub(crate) conflicts: Vec<SyncChangeReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) completed_wraps: Vec<CompletedWrapReport>,
+    /// Viewer-session wraps completed during sync: the current Folder Key
+    /// NIP-44 wrapped to waiting ephemeral browser keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) completed_viewer_wraps: Vec<CompletedWrapReport>,
 }
 
 /// One pending grant wrap this Finite Home completed during sync: the current

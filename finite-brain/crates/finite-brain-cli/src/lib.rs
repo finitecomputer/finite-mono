@@ -154,14 +154,88 @@ where
         "collaborator" => collaborators(&args[1..], &env, json, output),
         "invite" => invite(&args[1..], &env, json, output),
         "approvals" => approvals(&args[1..], &env, json, output),
+        "viewer-session" => viewer_session(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
     }
+}
+
+fn viewer_session<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("list") | Some("ls") => {
+            let brain_id = command_brain_id(args, env)?;
+            let route = format!("/v1/brains/{brain_id}/viewer-sessions");
+            let sessions =
+                serde_json::from_value(signed_json_request(env, args, "GET", &route, None)?)?;
+            if json {
+                write_json(output, &sessions)
+            } else {
+                write_viewer_session_rows(output, &sessions)
+            }
+        }
+        Some("revoke") => {
+            let brain_id = command_brain_id(args, env)?;
+            let session_id = required_option_or_positional(args, "--id", 1, "session id")?;
+            let route = format!("/v1/brains/{brain_id}/viewer-sessions/{session_id}/revoke");
+            let session: ViewerSessionRow =
+                serde_json::from_value(signed_json_request(env, args, "POST", &route, None)?)?;
+            if json {
+                write_json(output, &session)
+            } else {
+                writeln!(output, "viewer session {} revoked", session.id)?;
+                Ok(())
+            }
+        }
+        Some(other) => Err(CliError::InvalidCommand(format!("viewer-session {other}"))),
+        None => Err(CliError::MissingArgument("viewer-session action")),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerSessionRow {
+    id: String,
+    folder_id: String,
+    ephemeral_npub: String,
+    requester_npub: String,
+    status: String,
+    created_at: String,
+    expires_at: String,
+}
+
+fn write_viewer_session_rows<W: Write>(
+    output: &mut W,
+    sessions: &ViewerSessionList,
+) -> Result<(), CliError> {
+    writeln!(output, "{} viewer session(s)", sessions.sessions.len())?;
+    for session in &sessions.sessions {
+        writeln!(
+            output,
+            "session {} folder={} status={} requester={} viewer={} expires={}",
+            session.id,
+            session.folder_id,
+            session.status,
+            session.requester_npub,
+            session.ephemeral_npub,
+            session.expires_at
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ViewerSessionList {
+    sessions: Vec<ViewerSessionRow>,
 }
 
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\nviewer-session list [--brain <brain-id>]|revoke --id <session-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -1941,6 +2015,16 @@ fn sync<W: Write>(
                             writeln!(
                                 output,
                                 "- wrapped {} key for {}",
+                                wrap.folder_id, wrap.recipient_npub
+                            )?;
+                        }
+                    }
+                    if !report.completed_viewer_wraps.is_empty() {
+                        writeln!(output, "viewer sessions:")?;
+                        for wrap in &report.completed_viewer_wraps {
+                            writeln!(
+                                output,
+                                "- wrapped {} key for viewer {}",
                                 wrap.folder_id, wrap.recipient_npub
                             )?;
                         }
@@ -5225,7 +5309,7 @@ mod tests {
         encrypt_folder_object, open_folder_key_grant,
     };
     use finite_nostr::{
-        GiftWrapValidation, NostrPublicKey, decode_http_auth_header, open_gift_wrap,
+        GiftWrapValidation, NostrPublicKey, decode_http_auth_header, decrypt_nip44, open_gift_wrap,
     };
     use nostr::{Event, Keys};
     use serde_json::Value;
@@ -8626,6 +8710,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let opened = opened_export_folder_key_grants_tolerant(&auth, &export);
         assert_eq!(opened.len(), 1);
@@ -11869,6 +11954,7 @@ mod tests {
             unsupported_objects: Vec::new(),
             conflicts: Vec::new(),
             completed_wraps: Vec::new(),
+            completed_viewer_wraps: Vec::new(),
         };
 
         assert_eq!(reconcile_search_changes(&tree, &report).unwrap(), 1);
@@ -14572,6 +14658,343 @@ mod tests {
         assert_eq!(
             failed.daemon.last_error.as_deref(),
             Some("synthetic sync failure")
+        );
+    }
+
+    fn start_viewer_wrap_sync_server(
+        export_grant: Value,
+        owner_npub: Option<String>,
+        pending_viewer_wraps: Value,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/export") {
+                    let mut export = serde_json::json!({
+                        "brain": {
+                            "id": "brain",
+                            "kind": "personal",
+                            "name": "Brain",
+                            "ownerUserId": owner_npub,
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "General",
+                            "access": "owner",
+                            "currentKeyVersion": 1,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
+                        "accessState": {
+                            "members": [],
+                            "admins": []
+                        }
+                    });
+                    export["pendingViewerWraps"] = pending_viewer_wraps.clone();
+                    export.to_string()
+                } else if request_line.contains("/viewer-session-wraps") {
+                    serde_json::json!({
+                        "brainId": "brain",
+                        "folderId": "general",
+                        "outcome": "completed",
+                        "completedCount": 1,
+                        "completedEphemerals": []
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "latestSequence": 0,
+                        "objects": []
+                    })
+                    .to_string()
+                };
+                requests.push((request_line, body));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn sync_tree_for_viewer_wrap_test(tmp: &TempDir) -> (std::path::PathBuf, CliEnvironment) {
+        import_identity_secret(
+            tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: Vec::new(),
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let mut env = env_for(tmp);
+        env.cwd = tree.clone();
+        (tree, env)
+    }
+
+    #[test]
+    fn sync_now_completes_owner_viewer_wraps_with_nip44() {
+        let tmp = TempDir::new().unwrap();
+        let (tree, env) = sync_tree_for_viewer_wrap_test(&tmp);
+        let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([17; 32]);
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        let ephemeral_keys =
+            Keys::parse("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let ephemeral_npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000002");
+        let (server_url, server) = start_viewer_wrap_sync_server(
+            export_grant,
+            Some(actor_npub.clone()),
+            serde_json::json!([{
+                "folderId": "general",
+                "ephemeralNpub": ephemeral_npub,
+                "requesterNpub": actor_npub,
+                "keyVersion": 1,
+                "createdAt": "2026-08-18T00:00:00Z",
+            }]),
+            3,
+        );
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--summary", "--server", &server_url],
+            env,
+            &mut output,
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output);
+        assert!(
+            stdout.contains("viewer sessions:"),
+            "summary must report viewer wraps: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "- wrapped general key for viewer {ephemeral_npub}"
+            )),
+            "summary must name the ephemeral viewer: {stdout}"
+        );
+
+        let requests = server.join().unwrap();
+        let wrap_post = requests
+            .iter()
+            .find(|(line, _)| line.contains("/viewer-session-wraps"))
+            .expect("sync must POST the viewer wrap completion");
+        assert!(
+            wrap_post
+                .0
+                .starts_with("POST /v1/admin/brains/brain/folders/general/viewer-session-wraps"),
+            "unexpected request line: {}",
+            wrap_post.0
+        );
+        let body: Value = serde_json::from_str(&wrap_post.1).unwrap();
+        let payload = body["wraps"][0]["wrappedKeyPayload"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Server blindness starts at the client: the payload on the wire is
+        // NIP-44 ciphertext the ephemeral key — and only the ephemeral key —
+        // can open, recovering exactly the Folder Key.
+        assert_ne!(payload, folder_key.to_base64());
+        let unwrapped = decrypt_nip44(
+            ephemeral_keys.secret_key(),
+            NostrPublicKey::parse(&actor_npub).unwrap(),
+            payload,
+        )
+        .unwrap();
+        assert_eq!(unwrapped, folder_key.to_base64());
+        // The raw key never touches disk.
+        for path in [
+            ".finitebrain/agent-state.json",
+            ".finitebrain/encrypted-sync/export.json",
+            ".finitebrain/encrypted-sync/bootstrap.json",
+        ] {
+            let body = fs::read_to_string(tree.join(path)).unwrap();
+            assert!(
+                !body.contains(&folder_key.to_base64()),
+                "raw Folder Key persisted in {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_now_skips_viewer_wraps_the_owner_did_not_request() {
+        let tmp = TempDir::new().unwrap();
+        let (_tree, env) = sync_tree_for_viewer_wrap_test(&tmp);
+        let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([17; 32]);
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        let stranger_npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000003");
+        let (server_url, server) = start_viewer_wrap_sync_server(
+            export_grant,
+            Some(actor_npub.clone()),
+            serde_json::json!([{
+                "folderId": "general",
+                "ephemeralNpub": npub_for_secret("0000000000000000000000000000000000000000000000000000000000000002"),
+                "requesterNpub": stranger_npub,
+                "keyVersion": 1,
+                "createdAt": "2026-08-18T00:00:00Z",
+            }]),
+            2,
+        );
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--summary", "--server", &server_url],
+            env,
+            &mut output,
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output);
+        assert!(
+            !stdout.contains("viewer sessions:"),
+            "non-owner wraps must not complete: {stdout}"
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|(line, _)| !line.contains("/viewer-session-wraps")),
+            "no wrap POST may happen for a stranger's request"
+        );
+    }
+
+    #[test]
+    fn viewer_session_list_and_revoke_hit_the_expected_routes() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, body) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/revoke") {
+                    serde_json::json!({
+                        "id": "session-1",
+                        "brainId": "brain",
+                        "folderId": "general",
+                        "ephemeralNpub": "npub-ephemeral",
+                        "requesterNpub": "npub-owner",
+                        "keyVersion": 1,
+                        "status": "revoked",
+                        "createdAt": "2026-08-18T00:00:00Z",
+                        "expiresAt": "2026-08-18T01:00:00Z",
+                        "revokedAt": "2026-08-18T00:10:00Z"
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "sessions": [{
+                            "id": "session-1",
+                            "brainId": "brain",
+                            "folderId": "general",
+                            "ephemeralNpub": "npub-ephemeral",
+                            "requesterNpub": "npub-owner",
+                            "keyVersion": 1,
+                            "status": "ready",
+                            "createdAt": "2026-08-18T00:00:00Z",
+                            "expiresAt": "2026-08-18T01:00:00Z"
+                        }]
+                    })
+                    .to_string()
+                };
+                requests.push((request_line, body));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "viewer-session",
+                "list",
+                "--brain",
+                "brain",
+                "--server",
+                &url,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output);
+        assert!(
+            stdout.contains("session session-1 folder=general status=ready"),
+            "list must render the session row: {stdout}"
+        );
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "viewer-session",
+                "revoke",
+                "--id",
+                "session-1",
+                "--brain",
+                "brain",
+                "--server",
+                &url,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output);
+        assert!(
+            stdout.contains("viewer session session-1 revoked"),
+            "revoke must confirm: {stdout}"
+        );
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .0
+                .starts_with("GET /v1/brains/brain/viewer-sessions")
+        );
+        assert!(
+            requests[1]
+                .0
+                .starts_with("POST /v1/brains/brain/viewer-sessions/session-1/revoke")
         );
     }
 }

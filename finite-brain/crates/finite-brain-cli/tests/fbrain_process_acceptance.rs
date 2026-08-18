@@ -175,6 +175,170 @@ fn spawn_real_brain_server_with_authorities(
     (url, shutdown_tx, thread)
 }
 
+/// A real Brain server whose auth clock runs live (unlike
+/// `spawn_real_brain_server`, which pins it): viewer-session TTL expiry is
+/// a time-based honest state this suite must observe for real.
+fn spawn_real_brain_server_live_clock(
+    owner_npub: &str,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let (url_tx, url_rx) = mpsc::channel();
+    let owner_npub = owner_npub.to_owned();
+    let agent_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000006")
+            .unwrap();
+    let agent_npub = NostrPublicKey::from_protocol(agent_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let mut store = finite_brain_store::BrainStore::open_in_memory().unwrap();
+            let personal = finite_brain_core::bootstrap_personal_brain(
+                "personal-a",
+                "Personal A",
+                &owner_npub,
+            )
+            .unwrap();
+            store
+                .create_personal_brain_bootstrap(
+                    &personal,
+                    &[],
+                    &finite_brain_core::UserId::new(agent_npub).unwrap(),
+                    &finite_brain_core::UserId::new(owner_npub).unwrap(),
+                    &OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+                )
+                .unwrap();
+            let state = finite_brain_server::ServerState::new(store, url.clone());
+            let router = finite_brain_server::router_with_state(state);
+            url_tx.send(url.clone()).unwrap();
+            tokio::select! {
+                result = axum::serve(listener, router) => result.unwrap(),
+                _ = shutdown_rx => {}
+            }
+        });
+    });
+    (url_rx.recv().unwrap(), shutdown_tx, thread)
+}
+
+/// One NIP-98 signed JSON call against the real Brain server, the way the
+/// browser viewer (ephemeral key) or the dashboard (owner identity) makes
+/// them. A fresh nonce per call keeps the replay cache honest.
+fn signed_http_json(
+    keys: &Keys,
+    server_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, Value) {
+    use finite_nostr::{HttpAuthEventRequest, encode_http_auth_header, sign_http_auth_event};
+    let url = format!("{server_url}{path}");
+    let nonce = format!(
+        "{:x}",
+        Sha256::digest(
+            OffsetDateTime::now_utc()
+                .unix_timestamp_nanos()
+                .to_le_bytes()
+        )
+    );
+    let mut request = HttpAuthEventRequest::new(
+        method,
+        url.clone(),
+        OffsetDateTime::now_utc().unix_timestamp() as u64,
+    )
+    .with_nonce(nonce);
+    if let Some(body) = body {
+        request = request.with_body(body.as_bytes().to_vec());
+    }
+    let event = sign_http_auth_event(keys, &request).unwrap();
+    let authorization = encode_http_auth_header(&event);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .build();
+    let call = agent
+        .request(method, &url)
+        .set("Authorization", &authorization);
+    let result = match body {
+        Some(body) => call
+            .set("Content-Type", "application/json")
+            .send_string(body),
+        None => call.call(),
+    };
+    match result {
+        Ok(response) => {
+            let status = response.status();
+            let text = response.into_string().unwrap_or_default();
+            (
+                status,
+                serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            )
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let text = response.into_string().unwrap_or_default();
+            (
+                status,
+                serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            )
+        }
+        Err(error) => panic!("signed HTTP call failed: {error}"),
+    }
+}
+
+/// Read /v1/brain-updates as `keys` until one `brain_update` event names the
+/// Brain, or the deadline passes. Returns whether the event arrived.
+fn sse_until_brain_update(keys: &Keys, server_url: &str, brain_id: &str) -> bool {
+    use finite_nostr::{HttpAuthEventRequest, encode_http_auth_header, sign_http_auth_event};
+    use std::io::BufRead;
+    let url = format!("{server_url}/v1/brain-updates");
+    let nonce = format!("{:x}", Sha256::digest(brain_id.as_bytes()));
+    let request = HttpAuthEventRequest::new(
+        "GET",
+        url.clone(),
+        OffsetDateTime::now_utc().unix_timestamp() as u64,
+    )
+    .with_nonce(nonce);
+    let event = sign_http_auth_event(keys, &request).unwrap();
+    let authorization = encode_http_auth_header(&event);
+    // Overall timeout bounds the stream: on a healthy run the edit lands in
+    // well under a second; on failure the reader ends and we report false
+    // instead of hanging the suite.
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build();
+    let response = match agent
+        .request("GET", &url)
+        .set("Authorization", &authorization)
+        .set("Accept", "text/event-stream")
+        .call()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("sse connect failed: {error}");
+            return false;
+        }
+    };
+    let reader = std::io::BufReader::new(response.into_reader());
+    let mut event_name = String::new();
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if let Some(name) = line.strip_prefix("event:") {
+            event_name = name.trim().to_owned();
+        } else if line.starts_with("data:") && event_name == "brain_update" {
+            if line.contains(brain_id) {
+                return true;
+            }
+            event_name.clear();
+        }
+    }
+    false
+}
+
 fn spawn_real_brain_server(
     target_npub: &str,
     personal_agent_npub: &str,
@@ -4992,6 +5156,345 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
         status.get("pendingWraps").is_none(),
         "completed wraps must clear the admin signal: {status}"
     );
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn built_fbrain_viewer_session_flow_decrypts_live_and_expires() {
+    let scratch = TempDir::new().unwrap();
+    let home_a = scratch.path().join("home-a");
+    fs::create_dir_all(&home_a).unwrap();
+    let secret_path = scratch.path().join("secret-a");
+    fs::write(
+        &secret_path,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    assert!(
+        run(
+            &home_a,
+            &home_a,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret_path.to_str().unwrap(),
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    let owner_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+            .unwrap();
+    let owner_npub = NostrPublicKey::from_protocol(owner_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let ephemeral_keys =
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000005")
+            .unwrap();
+    let ephemeral_npub = NostrPublicKey::from_protocol(ephemeral_keys.public_key())
+        .to_npub()
+        .unwrap();
+
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server_live_clock(&owner_npub);
+    let run = |home: &Path, cwd: &Path, args: &[&str]| {
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        command(home, cwd)
+            .env("FBRAIN_NOW", now)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // The owner opens their Personal Brain, creates a Folder, and publishes
+    // a known-plaintext page into it.
+    let tree_a = home_a.join("personal-a-tree");
+    let opened = run(
+        &home_a,
+        &home_a,
+        &["open", "personal-a", tree_a.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let created = run(
+        &home_a,
+        &tree_a,
+        &[
+            "folder",
+            "create",
+            "viewer-folder",
+            "--access",
+            "restricted",
+            "--name",
+            "Viewer Folder",
+            "--path",
+            "Viewer Folder",
+            "--json",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let synced = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        synced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    let plaintext = "# Roadmap\n\nLive viewer Direction-3 proof.\n";
+    fs::write(tree_a.join("Viewer Folder/roadmap.md"), plaintext).unwrap();
+    let pushed = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        pushed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+
+    // Direction 1 — the browser stand-in (fixture ephemeral key) asks for a
+    // viewer session through the owner's identity.
+    let request_body = json!({
+        "brainId": "personal-a",
+        "folderId": "viewer-folder",
+        "ephemeralNpub": ephemeral_npub,
+        "requestedTtlSecs": 3600,
+    })
+    .to_string();
+    let (status, session) = signed_http_json(
+        &owner_keys,
+        &server_url,
+        "POST",
+        "/v1/viewer-session-requests",
+        Some(&request_body),
+    );
+    assert_eq!(status, 200, "viewer session request failed: {session}");
+    assert_eq!(session["status"], "pending", "{session}");
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let status_path = format!("/v1/viewer-session-requests/{session_id}");
+
+    let (status, pending) =
+        signed_http_json(&ephemeral_keys, &server_url, "GET", &status_path, None);
+    assert_eq!(status, 200, "ephemeral poll failed: {pending}");
+    assert_eq!(pending["status"], "pending", "{pending}");
+
+    // Direction 2 — the owner's daemon (any sync) completes the wrap.
+    let completed = run(&home_a, &tree_a, &["sync", "now", "--summary"]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let summary = String::from_utf8_lossy(&completed.stdout);
+    assert!(
+        summary.contains("viewer sessions:")
+            && summary.contains(&format!("viewer {ephemeral_npub}")),
+        "sync summary must report the viewer wrap: {summary}"
+    );
+
+    let (status, ready) = signed_http_json(&ephemeral_keys, &server_url, "GET", &status_path, None);
+    assert_eq!(status, 200, "ephemeral poll failed: {ready}");
+    assert_eq!(ready["status"], "ready", "{ready}");
+    let wrapped = ready["wrappedKeyPayload"].as_str().unwrap().to_owned();
+    assert_ne!(
+        wrapped,
+        Value::Null,
+        "ready sessions must carry the wrapped key"
+    );
+    let unwrapped = finite_nostr::decrypt_nip44(
+        ephemeral_keys.secret_key(),
+        NostrPublicKey::parse(&owner_npub).unwrap(),
+        wrapped,
+    )
+    .unwrap();
+    let folder_key = finite_brain_core::FolderKey::from_base64(&unwrapped).unwrap();
+
+    // Direction 3 — the encrypted read returns ciphertext the ephemeral key
+    // decrypts into the known plaintext, fully client-side.
+    let (status, records) = signed_http_json(
+        &ephemeral_keys,
+        &server_url,
+        "GET",
+        "/v1/brains/personal-a/folders/viewer-folder/records",
+        None,
+    );
+    assert_eq!(status, 200, "encrypted read failed: {records}");
+    let raw_records = records.to_string();
+    assert!(
+        !raw_records.contains("Live viewer Direction-3 proof"),
+        "server blindness: plaintext must never appear: {raw_records}"
+    );
+    assert!(
+        !raw_records.contains(&unwrapped),
+        "server blindness: the unwrapped Folder Key must never appear"
+    );
+    let record = records["records"][0].as_object().unwrap();
+    assert_eq!(record["recordType"], "folder_object_revision");
+    let envelope_json = record["ciphertext"].as_str().unwrap();
+    let envelope =
+        finite_brain_core::EncryptedFolderObjectEnvelope::from_json(envelope_json).unwrap();
+    let aad = finite_brain_core::FolderObjectAad {
+        brain_id: finite_brain_core::BrainId::new("personal-a").unwrap(),
+        folder_id: finite_brain_core::FolderId::new("viewer-folder").unwrap(),
+        object_id: finite_brain_core::ObjectId::new(record["objectId"].as_str().unwrap()).unwrap(),
+        key_version: envelope.key_version,
+    };
+    let decrypted = String::from_utf8(
+        finite_brain_core::open_folder_object(&folder_key, &aad, &envelope).unwrap(),
+    )
+    .unwrap();
+    let decrypted_json: Value = serde_json::from_str(&decrypted).unwrap();
+    assert_eq!(
+        decrypted_json["markdown"],
+        json!(plaintext),
+        "client-side decrypt must recover the known plaintext, got {decrypted}"
+    );
+    assert_eq!(decrypted_json["path"], json!("roadmap.md"));
+
+    // Live updates: the SSE change signal reaches the ephemeral key when
+    // the file is edited through the CLI in another "terminal".
+    let sse_keys = ephemeral_keys.clone();
+    let sse_server = server_url.clone();
+    let sse_thread =
+        thread::spawn(move || sse_until_brain_update(&sse_keys, &sse_server, "personal-a"));
+    thread::sleep(Duration::from_millis(300));
+    fs::write(
+        tree_a.join("Viewer Folder/roadmap.md"),
+        "# Roadmap\n\nEdited live without a reload.\n",
+    )
+    .unwrap();
+    let edited = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        edited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edited.stderr)
+    );
+    assert!(
+        sse_thread.join().unwrap(),
+        "the viewer must observe the brain_update SSE notification"
+    );
+    // The delta fetch picks up the edit without a reload.
+    let (status, delta) = signed_http_json(
+        &ephemeral_keys,
+        &server_url,
+        "GET",
+        "/v1/brains/personal-a/folders/viewer-folder/records?after=0",
+        None,
+    );
+    assert_eq!(status, 200, "delta read failed: {delta}");
+    assert!(
+        delta["records"].as_array().unwrap().len() >= 2,
+        "the edited revision must be fetchable: {delta}"
+    );
+
+    // Honest state: expiry. A renewal with a one-second TTL lapses while
+    // the tab would be open, and the read route says so exactly.
+    let renew_body = json!({
+        "brainId": "personal-a",
+        "folderId": "viewer-folder",
+        "ephemeralNpub": ephemeral_npub,
+        "requestedTtlSecs": 1,
+    })
+    .to_string();
+    let (status, _) = signed_http_json(
+        &owner_keys,
+        &server_url,
+        "POST",
+        "/v1/viewer-session-requests",
+        Some(&renew_body),
+    );
+    assert_eq!(status, 200);
+    let completed = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    thread::sleep(Duration::from_secs(2));
+    let (status, expired) = signed_http_json(
+        &ephemeral_keys,
+        &server_url,
+        "GET",
+        "/v1/brains/personal-a/folders/viewer-folder/records",
+        None,
+    );
+    assert_eq!(status, 403, "expired sessions must fail closed: {expired}");
+    assert_eq!(expired["error"], "viewer session expired");
+
+    // Honest state: revocation through the CLI access surface.
+    let renew_body = json!({
+        "brainId": "personal-a",
+        "folderId": "viewer-folder",
+        "ephemeralNpub": ephemeral_npub,
+    })
+    .to_string();
+    let (status, _) = signed_http_json(
+        &owner_keys,
+        &server_url,
+        "POST",
+        "/v1/viewer-session-requests",
+        Some(&renew_body),
+    );
+    assert_eq!(status, 200);
+    let completed = run(&home_a, &tree_a, &["sync", "now", "--json"]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let listed = run(
+        &home_a,
+        &tree_a,
+        &["viewer-session", "list", "--brain", "personal-a", "--json"],
+    );
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed["sessions"][0]["status"], "ready");
+    assert_eq!(listed["sessions"][0]["requesterNpub"], owner_npub);
+    let revoked = run(
+        &home_a,
+        &tree_a,
+        &[
+            "viewer-session",
+            "revoke",
+            "--id",
+            &session_id,
+            "--brain",
+            "personal-a",
+            "--json",
+        ],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let (status, revoked_read) = signed_http_json(
+        &ephemeral_keys,
+        &server_url,
+        "GET",
+        "/v1/brains/personal-a/folders/viewer-folder/records",
+        None,
+    );
+    assert_eq!(
+        status, 403,
+        "revoked sessions must fail closed: {revoked_read}"
+    );
+    assert_eq!(revoked_read["error"], "viewer session revoked");
 
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();

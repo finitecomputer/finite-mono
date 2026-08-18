@@ -105,6 +105,17 @@ pub(crate) fn run_working_tree_sync(
         &session_keys,
         &export,
     );
+    // Viewer-session wraps ride the same opportunistic contract: the agent
+    // (key-holding client) wraps the Folder Key to the waiting ephemeral
+    // browser key so the dashboard viewer pane can decrypt live.
+    let completed_viewer_wraps = complete_pending_viewer_wraps_for_sync(
+        env,
+        args,
+        &agent_state.brain_id,
+        &auth,
+        &session_keys,
+        &export,
+    );
     let newly_readable_keys = newly_readable_session_key_count(
         &prior_tree_state,
         &export,
@@ -289,6 +300,7 @@ pub(crate) fn run_working_tree_sync(
         remote_changes,
         unsupported_objects,
         completed_wraps,
+        completed_viewer_wraps,
     })
 }
 
@@ -357,6 +369,96 @@ fn complete_pending_grant_wraps_for_sync(
                 completed.push(CompletedWrapReport {
                     folder_id: folder_id.clone(),
                     recipient_npub: recipient.clone(),
+                });
+            }
+        }
+    }
+    completed
+}
+
+/// Opportunistically complete pending viewer-session wraps: the export
+/// tells key-holding clients which ephemeral browser keys are waiting for
+/// a wrapped current Folder Key (brain:// live viewer). v1 auto-approve
+/// rule: this Home only completes wraps the Brain owner requested;
+/// organization-brain wraps stay pending until the approval-card
+/// generalization. Best-effort by contract — the field is absent for
+/// non-admins and older servers, an unopenable Folder is skipped, and a
+/// failed completion never blocks sync.
+fn complete_pending_viewer_wraps_for_sync(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    auth: &LocalSigner,
+    session_keys: &SessionFolderKeyring,
+    export: &CliEncryptedBrainExport,
+) -> Vec<CompletedWrapReport> {
+    let owner_approved = export
+        .brain
+        .owner_user_id
+        .as_deref()
+        .is_some_and(|owner| owner == auth.npub);
+    if !owner_approved {
+        return Vec::new();
+    }
+    let mut by_folder: BTreeMap<String, Vec<&CliPendingViewerWrap>> = BTreeMap::new();
+    for wrap in &export.pending_viewer_wraps {
+        if wrap.requester_npub != auth.npub {
+            continue;
+        }
+        by_folder
+            .entry(wrap.folder_id.clone())
+            .or_default()
+            .push(wrap);
+    }
+    let mut completed = Vec::new();
+    for (folder_id, entries) in by_folder {
+        let mut wraps = Vec::with_capacity(entries.len());
+        let mut openable = true;
+        for entry in &entries {
+            let Some(folder_key) = session_keys.get(brain_id, &folder_id, entry.key_version) else {
+                openable = false;
+                break;
+            };
+            let recipient = match NostrPublicKey::parse(&entry.ephemeral_npub) {
+                Ok(recipient) => recipient,
+                Err(_) => {
+                    openable = false;
+                    break;
+                }
+            };
+            match finite_nostr::encrypt_nip44(
+                auth.keys.secret_key(),
+                recipient,
+                folder_key.to_base64(),
+            ) {
+                Ok(wrapped_key_payload) => wraps.push(serde_json::json!({
+                    "ephemeralNpub": entry.ephemeral_npub,
+                    "keyVersion": entry.key_version,
+                    "wrappedKeyPayload": wrapped_key_payload,
+                })),
+                Err(_) => {
+                    openable = false;
+                    break;
+                }
+            }
+        }
+        if !openable || wraps.is_empty() {
+            continue;
+        }
+        let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/viewer-session-wraps");
+        if signed_json_request(
+            env,
+            args,
+            "POST",
+            &route,
+            Some(serde_json::json!({ "wraps": wraps })),
+        )
+        .is_ok()
+        {
+            for entry in &entries {
+                completed.push(CompletedWrapReport {
+                    folder_id: folder_id.clone(),
+                    recipient_npub: entry.ephemeral_npub.clone(),
                 });
             }
         }
@@ -1380,8 +1482,8 @@ pub(crate) fn open_offered_folder_key(
             members: Vec::new(),
             admins: Vec::new(),
         },
-
         pending_wraps: Vec::new(),
+        pending_viewer_wraps: Vec::new(),
     };
     let plaintext = opened_export_folder_key_grants(&auth, &export)?
         .into_iter()
@@ -3295,6 +3397,22 @@ pub(crate) struct CliEncryptedBrainExport {
     /// requesters; older servers omit the field entirely.
     #[serde(default)]
     pub(crate) pending_wraps: Vec<CliPendingWrap>,
+    /// Pending viewer-session wraps (brain:// live viewer), present only
+    /// for key-holding requesters; older servers omit the field entirely.
+    #[serde(default)]
+    pub(crate) pending_viewer_wraps: Vec<CliPendingViewerWrap>,
+}
+
+/// One pending viewer-session wrap from the sync surface: an ephemeral
+/// browser key waiting for the current Folder Key, with the principal
+/// whose Folder access justified the request.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPendingViewerWrap {
+    pub(crate) folder_id: String,
+    pub(crate) ephemeral_npub: String,
+    pub(crate) requester_npub: String,
+    pub(crate) key_version: u32,
 }
 
 /// One pending grant wrap marker from the sync surface: a recipient still
@@ -3492,6 +3610,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let deleted_routes = BTreeSet::from([
             ("brain".to_owned(), "parent".to_owned()),
@@ -4024,6 +4143,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let readable = BTreeSet::from([("brain".to_owned(), "home".to_owned())]);
 
@@ -4334,6 +4454,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 7,
@@ -4535,6 +4656,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 2,
@@ -4629,6 +4751,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let empty_bootstrap = CliSyncBootstrap {
             latest_sequence: 0,
@@ -4830,6 +4953,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let source_export = CliEncryptedBrainExport {
             brain: CliExportBrain {
@@ -4853,6 +4977,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let mounted = MountedFolderMaterializeContext {
             mount: CliMountedFolder {
@@ -5013,6 +5138,7 @@ mod tests {
             },
 
             pending_wraps: Vec::new(),
+            pending_viewer_wraps: Vec::new(),
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 0,

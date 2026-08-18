@@ -881,6 +881,7 @@ pub(crate) fn reconcile_local_search_paths(
         unsupported_objects: Vec::new(),
         conflicts: Vec::new(),
         completed_wraps: Vec::new(),
+        completed_viewer_wraps: Vec::new(),
     };
     reconcile_search_changes(root, &report)
 }
