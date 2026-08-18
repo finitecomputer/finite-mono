@@ -26,6 +26,14 @@ IMAGE_ENGINES = ("docker", "depot", "apple-container")
 
 BUILD_EXCLUDES = [
     ".DS_Store",
+    # The build context is fully curated by this rsync exclude list; copying
+    # the repo's .dockerignore into the context ROOT would additionally
+    # activate its `**/node_modules` rule against the staged Nix store
+    # (.finite-hermes-nix-store), stripping the vendored node_modules that
+    # npm/npx and the Playwright CLI need at container build time (first
+    # #525 image-build failure, 2026-08-18). The context must never carry a
+    # .dockerignore of its own.
+    ".dockerignore",
     ".git",
     ".env",
     ".env.*",
