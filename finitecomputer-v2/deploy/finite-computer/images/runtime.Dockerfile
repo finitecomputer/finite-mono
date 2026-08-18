@@ -135,6 +135,12 @@ RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
 
 ENV HERMES_AGENT_STORE_PATH="${HERMES_AGENT_STORE_PATH}"
 ENV HERMES_AGENT_PYTHON_PATH="${HERMES_AGENT_PYTHON_PATH}"
+# The Nix package ships plugin manifests (plugin.yaml) under
+# share/hermes-agent/plugins, NOT in the venv's site-packages; hermes's
+# wrapper bin exports HERMES_BUNDLED_PLUGINS so discovery finds them. Bake
+# the same pointer into the image so bare-python consumers (and the
+# publication smoke's provider assertion) discover plugins identically.
+ENV HERMES_BUNDLED_PLUGINS="${HERMES_AGENT_STORE_PATH}/share/hermes-agent/plugins"
 ENV AGENT_RUNTIME_TOOLCHAIN_PATH="${AGENT_RUNTIME_TOOLCHAIN_PATH}"
 ENV AGENT_RUNTIME_TOOLCHAIN_BINS="${AGENT_RUNTIME_TOOLCHAIN_BINS}"
 ENV PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}"
