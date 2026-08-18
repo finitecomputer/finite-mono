@@ -158,17 +158,17 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
             mock.patch.object(smoke, "docker_user_app", return_value={"messages": []}),
             mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
             mock.patch.object(smoke.time, "monotonic", side_effect=lambda: next(clock)),
+            self.assertRaises(smoke.SmokeFailure) as raised,
         ):
-            with self.assertRaises(smoke.SmokeFailure) as raised:
-                smoke.run_model_smoke(
-                    image="finite-agent-runtime:test",
-                    user_volume="user-vol",
-                    server_url="https://chat.example",
-                    room_id="room-x",
-                    expected="hello",
-                    env={},
-                    agent_container="agent-container",
-                )
+            smoke.run_model_smoke(
+                image="finite-agent-runtime:test",
+                user_volume="user-vol",
+                server_url="https://chat.example",
+                room_id="room-x",
+                expected="hello",
+                env={},
+                agent_container="agent-container",
+            )
         self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
 
 
