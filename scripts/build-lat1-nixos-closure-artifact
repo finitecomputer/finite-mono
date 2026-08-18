@@ -36,6 +36,10 @@ if [[ "$current_system" != "x86_64-linux" ]]; then
 fi
 
 mkdir -p "$out_dir"
+# nix copy --to file://$cache_dir requires an absolute path: a relative
+# out_dir makes the first path segment parse as the URL authority and nix
+# fails with "Cannot parse Nix store" (first-use defect, run 32092272250).
+out_dir="$(cd "$out_dir" && pwd -P)"
 rm -rf "$out_dir/nix-cache" "$out_dir/system" "$out_dir/disko" \
   "$out_dir/manifest.json" "$out_dir/store-paths.txt" "$out_dir/closure-size.txt"
 cache_dir="$out_dir/nix-cache"
