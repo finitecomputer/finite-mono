@@ -239,6 +239,73 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             "FINITE_CONFIG_POLL_LIMIT": "100",
         }
 
+    @staticmethod
+    def _gateway_model(*, model: str, base_url: str) -> str:
+        launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            finitechat = fake_bin / "finitechat"
+            finitechat.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            finitechat.chmod(0o755)
+            capture = tmp / "capture.py"
+            capture.write_text(
+                "import os, pathlib\n"
+                "pathlib.Path(os.environ['MODEL_CAPTURE']).write_text("
+                "os.environ['FINITE_CONFIG_MODEL'])\n",
+                encoding="utf-8",
+            )
+            model_capture = tmp / "model.txt"
+            agent_home = tmp / "agent"
+            hermes_home = agent_home / "hermes-home"
+            hermes_home.mkdir(parents=True)
+            (agent_home / "config.json").write_text("{}\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "FINITECHAT_BIN": str(finitechat),
+                "FINITECHAT_HOME": str(agent_home),
+                "HERMES_HOME": str(hermes_home),
+                "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "finite-private",
+                "FINITECHAT_HERMES_MODEL": model,
+                "FINITECHAT_HERMES_BASE_URL": base_url,
+                "FINITE_PRIVATE_API_KEY": "fpk_live_test",
+                "FINITE_HERMES_CONFIG_RECONCILER": str(capture),
+                "MODEL_CAPTURE": str(model_capture),
+            }
+
+            result = subprocess.run(
+                ["bash", str(launcher), "--prepare-only"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                raise AssertionError(result.stderr)
+            return model_capture.read_text(encoding="utf-8")
+
+    def test_gateway_maps_finite_private_legacy_alias_to_deepseek(self) -> None:
+        self.assertEqual(
+            self._gateway_model(
+                model="glm-5-2",
+                base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            ),
+            "deepseek-v4-flash-0731",
+        )
+
+    def test_gateway_preserves_legacy_name_for_a_custom_endpoint(self) -> None:
+        self.assertEqual(
+            self._gateway_model(
+                model="glm-5-2",
+                base_url="https://inference.example.com/v1",
+            ),
+            "glm-5-2",
+        )
+
     def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
         reconciled = self._reconcile_config(None, self._reconciler_settings())
 
