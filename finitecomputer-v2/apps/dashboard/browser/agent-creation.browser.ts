@@ -6,6 +6,7 @@ import { rm } from "node:fs/promises";
 import { test } from "node:test";
 
 import { chromium, type Browser, type Page } from "playwright";
+import { finalizeEvent, getPublicKey, nip19, nip44 } from "nostr-tools";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
@@ -13,6 +14,10 @@ const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
 const SITES_VIEWER_SESSION_TOKEN = "browser-sites-viewer-session-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
+// Fixture "owner" identity the fake hosted device signs brain requests
+// with; the fake Brain server completes viewer wraps from the same key.
+const BROWSER_OWNER_SECRET = new Uint8Array(32).fill(0x0b);
+const BROWSER_OWNER_NPUB = nip19.npubEncode(getPublicKey(BROWSER_OWNER_SECRET));
 const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
 const PNG_BYTES = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -187,6 +192,7 @@ type HostedAuthRequest = {
 };
 
 type HostedDeviceState = {
+  brainAuthorizations: number;
   unavailable: boolean;
   updatesUnavailable: boolean;
   ownerClaimGate: Promise<void> | null;
@@ -246,6 +252,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore(() => hostedDevice.setAvailable(true));
   const sites = await startFakeSites();
+  let brain: Awaited<ReturnType<typeof startFakeBrain>> | null = null;
   let dashboard: ChildProcessWithoutNullStreams | null = null;
   let dashboardOutput = () => "";
   const paidDashboardPort = await freePort();
@@ -376,6 +383,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     await stopChildProcess(paidDashboard);
 
     const dashboardPort = await freePort();
+    brain = await startFakeBrain();
     dashboard = startDashboard(
       dashboardPort,
       core.url,
@@ -383,6 +391,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       sites.apiUrl,
       {
         runtimeRetirement: true,
+        brainUrl: brain.url,
       }
     );
     dashboardOutput = collectOutput(dashboard);
@@ -1930,6 +1939,113 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       );
       assert.deepEqual(core.state.destroyPosts, []);
     });
+
+    // brain:// live viewer (viewer plan Phase 2): the user clicks a brain://
+    // link in an agent reply and the preview pane decrypts and renders the
+    // document client-side, then follows SSE edits without a reload.
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_brain_viewer",
+          "Brain Viewer Bot",
+          hostedDevice.runtimeStatusUrl,
+          "brain-viewer-bot",
+          true,
+          true
+        ),
+      ],
+      requests: [],
+    });
+    await brain!.seedInitialDocument();
+    // A pre-seeded canonical binding keeps this scenario on the viewer
+    // itself; the binding-recovery UI has its own dedicated scenarios.
+    hostedDevice.state.agentBindings.set("project_brain_viewer", {
+      version: 1,
+      project_id: "project_brain_viewer",
+      human_account_id: hostedDevice.state.app.identity.account_id,
+      agent_account_id: "agent-account-browser",
+      agent_npub: AGENT_NPUB,
+      canonical_room_id: "room_browser_agent",
+      associated_room_ids: [],
+    });
+    hostedDevice.state.app.selected_room_id = "room_browser_agent";
+    hostedDevice.state.app.selected_topic_id = "home";
+    hostedDevice.state.app.selected_chat_id = "chat_browser_agent";
+    hostedDevice.state.app.messages.push(
+      hostedMessage(
+        "Your roadmap lives at [roadmap.md](brain://brain-a/folder-a/roadmap.md).",
+        false,
+        40
+      )
+    );
+    hostedDevice.emit();
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      const consoleLines: string[] = [];
+      page.on("console", (message) => {
+        if (message.type() === "error" || message.type() === "warning") {
+          consoleLines.push(`${message.type()}: ${message.text()}`);
+        }
+      });
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_brain-viewer-bot/chat`
+      );
+      const brainLink = page.getByRole("link", { name: "roadmap.md" }).first();
+      await brainLink.waitFor({ state: "visible", timeout: 15_000 }).catch(async (error) => {
+        throw new Error(
+          `brain link never rendered: ${String(error)}\npage: ${await pageText(page)}\ndashboard: ${dashboardOutput()}`
+        );
+      });
+      await brainLink.click();
+
+      // Honest waiting state while the agent has not completed the wrap.
+      await page
+        .getByTestId("brain-doc-status")
+        .getByText(/Waiting for your agent/u)
+        .waitFor({ state: "visible", timeout: 15_000 })
+        .catch(async (error) => {
+          const statusText = await page
+            .getByTestId("brain-doc-status")
+            .innerText()
+            .catch(() => "<no status node>");
+          throw new Error(
+            `viewer never reached the waiting state: ${String(error)}\nstatus: ${statusText}\nconsole: ${consoleLines.join(" | ").slice(-2_000)}\ndashboard: ${dashboardOutput().slice(-1_500)}`
+        );
+        });
+      assert.ok(brain!.sessionRequests >= 1, "the pane must have minted a viewer session");
+      assert.ok(
+        hostedDevice.state.brainAuthorizations >= 1,
+        "the session mint must go through the hosted device identity"
+      );
+
+      // The agent completes the wrap: the pane unwraps the folder key,
+      // decrypts the records, and renders the markdown client-side.
+      brain!.completeWrap();
+      await page
+        .getByTestId("brain-doc-content")
+        .getByText("Initial decrypted content.")
+        .waitFor({ state: "visible", timeout: 20_000 });
+
+      // Tab memory only: no key material may reach durable storage.
+      const storage = await page.evaluate(() => ({
+        local: localStorage.length,
+        session: sessionStorage.length,
+      }));
+      assert.deepEqual(storage, { local: 0, session: 0 });
+
+      // Live edit through the Brain server: SSE notification, delta fetch,
+      // decrypt, re-render — without a reload.
+      const urlBeforeEdit = page.url();
+      await brain!.pushEdit();
+      await page
+        .getByTestId("brain-doc-content")
+        .getByText("Edited live without a reload.")
+        .waitFor({ state: "visible", timeout: 20_000 });
+      assert.equal(page.url(), urlBeforeEdit, "the live update must not navigate");
+      assert.ok(
+        brain!.recordReads.some((after) => after > 0),
+        "the pane must delta-fetch records after the change signal"
+      );
+    });
   } finally {
     await browser?.close().catch(() => {});
     await Promise.all([
@@ -1939,6 +2055,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     core.server.close();
     hostedDevice.close();
     sites.server.close();
+    brain?.server.close();
     await resetDashboardDevDirs();
   }
 });
@@ -1977,6 +2094,7 @@ function startDashboard(
     stripeConfigured?: boolean;
     runtimeRetirement?: boolean;
     distDir?: string;
+    brainUrl?: string;
   } = {}
 ) {
   const adminOrganizationId = "org_browser_admin";
@@ -1999,6 +2117,12 @@ function startDashboard(
         FC_SITES_UPSTREAM_URL: sitesUrl,
         FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
         FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
+        ...(options.brainUrl
+          ? {
+              FC_BRAIN_UPSTREAM_URL: options.brainUrl,
+              FC_BRAIN_PUBLIC_ORIGIN: options.brainUrl,
+            }
+          : {}),
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
@@ -2114,9 +2238,228 @@ async function startFakeSites() {
   };
 }
 
+type FakeBrainState = {
+  wrapReady: boolean;
+  sessionRequests: number;
+  recordReads: number[];
+  sessions: Map<string, { ephemeralNpub: string; expiresAt: string }>;
+  sseClients: Set<ServerResponse>;
+  records: { sequence: number; recordType: string; objectId: string; revision: number; ciphertext: string }[];
+};
+
+/**
+ * Fake Brain server for the brain:// live viewer: NIP-98-gated routes,
+ * a pending-then-ready viewer session, Rust-format AES-256-GCM record
+ * envelopes under the well-known 0x09 test Folder Key, and an SSE change
+ * signal — with the CORS surface the browser viewer needs.
+ */
+async function startFakeBrain() {
+  const folderKey = Buffer.alloc(32, 9);
+  const folderKeyBase64 = folderKey.toString("base64");
+  const state: FakeBrainState = {
+    wrapReady: false,
+    sessionRequests: 0,
+    recordReads: [],
+    sessions: new Map(),
+    sseClients: new Set(),
+    records: [],
+  };
+  let nextSequence = 1;
+
+  async function envelope(markdown: string, objectId: string): Promise<string> {
+    const key = await crypto.subtle.importKey("raw", folderKey, "AES-GCM", false, ["encrypt"]);
+    const nonce = Buffer.alloc(12, 7);
+    const aad = Buffer.from(
+      JSON.stringify({
+        version: "finite-folder-object-v1",
+        brainId: "brain-a",
+        folderId: "folder-a",
+        objectId,
+        keyVersion: 1,
+      })
+    );
+    const ciphertext = await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce as unknown as BufferSource,
+        additionalData: aad as unknown as BufferSource,
+      },
+      key,
+      Buffer.from(
+        JSON.stringify({
+          version: "finite-folder-object-page-v1",
+          path: "roadmap.md",
+          markdown,
+        })
+      )
+    );
+    return JSON.stringify({
+      version: "finite-folder-object-v1",
+      cipher: "AES-256-GCM",
+      keyVersion: 1,
+      nonce: nonce.toString("base64"),
+      ciphertext: Buffer.from(ciphertext).toString("base64"),
+    });
+  }
+
+  const server = http.createServer(async (request, response) => {
+    const origin = String(request.headers.origin ?? "");
+    const corsHeaders: Record<string, string> = {
+      "access-control-allow-origin": origin,
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "authorization, content-type, accept",
+      "access-control-max-age": "600",
+    };
+    // The real router's CORS middleware decorates every response for
+    // allowed origins, not just preflights; mirror that.
+    const brainJson = (response: ServerResponse, status: number, body: unknown) => {
+      response.writeHead(status, { "content-type": "application/json", ...corsHeaders });
+      response.end(JSON.stringify(body));
+    };
+    if (request.method === "OPTIONS" && origin) {
+      response.writeHead(204, corsHeaders);
+      response.end();
+      return;
+    }
+    const authorization = String(request.headers.authorization ?? "");
+    const url = request.url ?? "";
+    if (!authorization.startsWith("Nostr ")) {
+      brainJson(response, 403, { error: "valid Nostr authorization is required" });
+      return;
+    }
+    if (request.method === "POST" && url === "/v1/viewer-session-requests") {
+      const body = (await readJson(request)) as Record<string, unknown>;
+      state.sessionRequests += 1;
+      const id = `session-${state.sessionRequests}`;
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      state.sessions.set(id, { ephemeralNpub: String(body.ephemeralNpub ?? ""), expiresAt });
+      brainJson(response, 200, {
+        id,
+        brainId: body.brainId,
+        folderId: body.folderId,
+        ephemeralNpub: body.ephemeralNpub,
+        requesterNpub: BROWSER_OWNER_NPUB,
+        keyVersion: 1,
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        expiresAt,
+      });
+      return;
+    }
+    const statusMatch = url.match(/^\/v1\/viewer-session-requests\/([^/]+)$/u);
+    if (request.method === "GET" && statusMatch?.[1]) {
+      const session = state.sessions.get(statusMatch[1]);
+      if (!session) {
+        brainJson(response, 404, { error: "viewer session not found" });
+        return;
+      }
+      if (!state.wrapReady) {
+        brainJson(response, 200, {
+          id: statusMatch[1],
+          status: "pending",
+          keyVersion: 1,
+          expiresAt: session.expiresAt,
+        });
+        return;
+      }
+      const ephemeralHex = (nip19.decode(session.ephemeralNpub).data ?? "") as string;
+      const wrappedKeyPayload = nip44.encrypt(
+        folderKeyBase64,
+        nip44.getConversationKey(BROWSER_OWNER_SECRET, ephemeralHex)
+      );
+      brainJson(response, 200, {
+        id: statusMatch[1],
+        status: "ready",
+        keyVersion: 1,
+        wrappedKeyPayload,
+        completedByNpub: BROWSER_OWNER_NPUB,
+        expiresAt: session.expiresAt,
+      });
+      return;
+    }
+    const recordsMatch = url.match(/^\/v1\/brains\/([^/]+)\/folders\/([^/]+)\/records/u);
+    if (request.method === "GET" && recordsMatch) {
+      const after = Number(new URL(url, "http://brain.test").searchParams.get("after") ?? 0);
+      state.recordReads.push(after);
+      const filtered = state.records.filter((record) => record.sequence > after);
+      brainJson(response, 200, {
+        brainId: recordsMatch[1],
+        folderId: recordsMatch[2],
+        afterSequence: after,
+        latestSequence: state.records.at(-1)?.sequence ?? 0,
+        records: filtered,
+        count: filtered.length,
+        hasMore: false,
+        sessionExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+      return;
+    }
+    if (request.method === "GET" && url === "/v1/brain-updates") {
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-store",
+        ...corsHeaders,
+      });
+      response.write("event: ready\ndata: {}\n\n");
+      state.sseClients.add(response);
+      request.on("close", () => {
+        state.sseClients.delete(response);
+      });
+      return;
+    }
+    brainJson(response, 404, { error: "not found" });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  return {
+    server,
+    url: `http://127.0.0.1:${address.port}`,
+    get sessionRequests() {
+      return state.sessionRequests;
+    },
+    get recordReads() {
+      return [...state.recordReads];
+    },
+    completeWrap() {
+      state.wrapReady = true;
+    },
+    async seedInitialDocument() {
+      state.records.push({
+        sequence: nextSequence,
+        recordType: "folder_object_revision",
+        objectId: "obj_000000000501",
+        revision: 1,
+        ciphertext: await envelope("# Roadmap\n\nInitial decrypted content.", "obj_000000000501"),
+      });
+      nextSequence += 1;
+    },
+    async pushEdit() {
+      state.records.push({
+        sequence: nextSequence,
+        recordType: "folder_object_revision",
+        objectId: "obj_000000000501",
+        revision: 2,
+        ciphertext: await envelope("# Roadmap\n\nEdited live without a reload.", "obj_000000000501"),
+      });
+      nextSequence += 1;
+      const frame = `event: brain_update\ndata: ${JSON.stringify({
+        brain_id: "brain-a",
+        latest_sequence: nextSequence - 1,
+        reason: "content_updated",
+      })}\n\n`;
+      for (const client of state.sseClients) {
+        client.write(frame);
+      }
+    },
+  };
+}
+
 async function startFakeHostedDevice() {
   const app = initialHostedChatState();
   const state: HostedDeviceState = {
+    brainAuthorizations: 0,
     unavailable: false,
     updatesUnavailable: false,
     ownerClaimGate: null,
@@ -2260,7 +2603,8 @@ async function handleHostedDeviceRequest(
   }
 
   const isSitesIdentityProvider = path === "/v1/sites/identity-provider";
-  if (!path.startsWith("/v1/app/") && !isSitesIdentityProvider) {
+  const isBrainIdentityProvider = path === "/v1/brain/identity-provider";
+  if (!path.startsWith("/v1/app/") && !isSitesIdentityProvider && !isBrainIdentityProvider) {
     writeJson(response, 404, { error: "not found" });
     return;
   }
@@ -2282,6 +2626,26 @@ async function handleHostedDeviceRequest(
 
   if (state.unavailable) {
     writeJson(response, 503, { error: "hosted chat is temporarily unavailable" });
+    return;
+  }
+
+  if (request.method === "POST" && isBrainIdentityProvider) {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    assert.equal(body.version, "finite-brain-identity-provider-v1");
+    assert.equal(body.operation, "authorizeHttpRequest");
+    const input = body.input as Record<string, unknown> | undefined;
+    assert.ok(input && typeof input === "object", "authorizeHttpRequest input required");
+    const event = finalizeEvent(
+      {
+        kind: Number(input.kind ?? 27_235),
+        created_at: Math.floor(Date.now() / 1000),
+        tags: (input.tags ?? []) as string[][],
+        content: typeof input.content === "string" ? input.content : "",
+      },
+      BROWSER_OWNER_SECRET
+    );
+    state.brainAuthorizations += 1;
+    writeJson(response, 200, { event });
     return;
   }
 

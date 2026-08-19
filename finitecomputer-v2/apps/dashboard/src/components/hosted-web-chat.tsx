@@ -3,14 +3,16 @@
 import type { ComponentProps } from "react";
 import {
   FormEvent,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import remarkGfm from "remark-gfm";
 import { Drawer } from "vaul";
@@ -62,7 +64,9 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
-import { chatPreviewUrls } from "@/lib/chat-preview-urls";
+import { chatBrainDocUrls, chatPreviewUrls } from "@/lib/chat-preview-urls";
+import { formatBrainDocUrl, parseBrainDocUrl, type BrainDocRef } from "@/lib/brain-doc-url";
+import { BrainDocPanel } from "@/components/brain-doc-panel";
 import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import {
@@ -130,6 +134,19 @@ type PreviewSite = {
   url: string;
 };
 
+type PreviewBrainDoc = {
+  kind: "brain-doc";
+  id: string;
+  doc: BrainDocRef;
+};
+
+type PreviewItem =
+  | (PreviewSite & { kind: "site" })
+  | PreviewBrainDoc;
+
+/** Navigation for brain:// links inside chat markdown (click = open pane). */
+const BrainDocNavContext = createContext<((doc: BrainDocRef) => void) | null>(null);
+
 export function HostedWebChat({
   initialDraft,
   machineId,
@@ -176,7 +193,7 @@ export function HostedWebChat({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
   const [showReconnectNotice, setShowReconnectNotice] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -184,7 +201,7 @@ export function HostedWebChat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingRoomRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | null>(null);
-  const latestSiteIdRef = useRef<string | null>(null);
+  const latestPreviewIdRef = useRef<string | null>(null);
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
@@ -330,7 +347,20 @@ export function HostedWebChat({
     ]
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
-  const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
+  const brainDocs = useMemo(() => brainDocsFromMessages(messages), [messages]);
+  const previewTargets = useMemo<PreviewItem[]>(
+    () => [
+      ...brainDocs.map((doc): PreviewItem => ({ kind: "brain-doc", id: doc.id, doc: doc.doc })),
+      ...sites.map((site): PreviewItem => ({ kind: "site", ...site })),
+    ],
+    [brainDocs, sites],
+  );
+  const activeTarget =
+    previewTargets.find((item) => item.id === activePreviewId) ?? previewTargets[0] ?? null;
+  const openBrainDoc = useCallback((doc: BrainDocRef) => {
+    setActivePreviewId(formatBrainDocUrl(doc));
+    setBrowserOpen(true);
+  }, []);
   const awaitingReply = pendingAgentTurns.some(
     (turn) =>
       pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
@@ -362,20 +392,23 @@ export function HostedWebChat({
   }, [activityObservedAtMs, pendingAgentTurns.length]);
 
   useEffect(() => {
-    if (sites.length === 0) {
+    if (previewTargets.length === 0) {
       setBrowserOpen(false);
-      setActiveSiteId(null);
-      latestSiteIdRef.current = null;
+      setActivePreviewId(null);
+      latestPreviewIdRef.current = null;
       return;
     }
-    const latestSiteId = sites[0]!.id;
-    if (latestSiteIdRef.current !== latestSiteId) {
-      latestSiteIdRef.current = latestSiteId;
-      setActiveSiteId(latestSiteId);
-    } else if (!activeSiteId || !sites.some((site) => site.id === activeSiteId)) {
-      setActiveSiteId(sites[0]!.id);
+    const latestPreviewId = previewTargets[0]!.id;
+    if (latestPreviewIdRef.current !== latestPreviewId) {
+      latestPreviewIdRef.current = latestPreviewId;
+      setActivePreviewId(latestPreviewId);
+    } else if (
+      !activePreviewId
+      || !previewTargets.some((item) => item.id === activePreviewId)
+    ) {
+      setActivePreviewId(previewTargets[0]!.id);
     }
-  }, [activeSiteId, sites]);
+  }, [activePreviewId, previewTargets]);
 
   useEffect(() => {
     if (!state) return;
@@ -886,6 +919,7 @@ export function HostedWebChat({
   );
 
   return (
+    <BrainDocNavContext.Provider value={openBrainDoc}>
     <div className="finite-chat finite-chat--embedded">
       <div className="finite-chat__workspace">
         <header className="finite-chat__topbar">
@@ -920,7 +954,7 @@ export function HostedWebChat({
             {showReconnectNotice ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
-            {sites.length > 0 ? (
+            {previewTargets.length > 0 ? (
               <button
                 type="button"
                 className="ocean-pill-button"
@@ -936,7 +970,7 @@ export function HostedWebChat({
 
         <Group
           orientation="horizontal"
-          className={browserOpen && activeSite ? "finite-chat__split has-browser" : "finite-chat__split"}
+          className={browserOpen && activeTarget ? "finite-chat__split has-browser" : "finite-chat__split"}
         >
           <Panel className="finite-chat__main-panel" defaultSize={browserOpen ? "54%" : "100%"} minSize="34%">
             <section className="finite-chat__main" aria-label="Web chat">
@@ -1236,39 +1270,57 @@ export function HostedWebChat({
             </section>
           </Panel>
 
-          {browserOpen && activeSite ? (
+          {browserOpen && activeTarget ? (
             <>
               <Separator className="finite-chat__preview-resizer" />
               <Panel className="finite-chat__desktop-preview-panel" defaultSize="46%" minSize="28%" maxSize="70%">
-                <BrowserPanel
-                  activeSite={activeSite}
-                  className="finite-chat__preview finite-chat__preview--desktop"
-                  machineId={machineId}
-                  onClose={() => setBrowserOpen(false)}
-                  onSelectSite={setActiveSiteId}
-                  sites={sites}
-                />
+                {activeTarget.kind === "brain-doc" ? (
+                  <BrainDocPanel
+                    className="finite-chat__preview finite-chat__preview--desktop"
+                    doc={activeTarget.doc}
+                    onClose={() => setBrowserOpen(false)}
+                  />
+                ) : (
+                  <BrowserPanel
+                    activeSite={activeTarget}
+                    className="finite-chat__preview finite-chat__preview--desktop"
+                    machineId={machineId}
+                    onClose={() => setBrowserOpen(false)}
+                    onSelectSite={setActivePreviewId}
+                    sites={sites}
+                  />
+                )}
               </Panel>
             </>
           ) : null}
         </Group>
       </div>
 
-      {activeSite && mobilePreview ? (
+      {activeTarget && mobilePreview ? (
         <Drawer.Root open={browserOpen} onOpenChange={setBrowserOpen} direction="bottom" handleOnly>
           <Drawer.Portal>
             <Drawer.Overlay className="finite-chat__preview-backdrop" />
             <Drawer.Content className="finite-chat__preview-sheet-panel" aria-describedby={undefined}>
               <Drawer.Handle className="finite-chat__sheet-handle" />
-              <Drawer.Title className="finite-chat__sheet-title">Site preview</Drawer.Title>
-              <BrowserPanel
-                activeSite={activeSite}
-                className="finite-chat__preview finite-chat__preview--sheet"
-                machineId={machineId}
-                onClose={() => setBrowserOpen(false)}
-                onSelectSite={setActiveSiteId}
-                sites={sites}
-              />
+              <Drawer.Title className="finite-chat__sheet-title">
+                {activeTarget.kind === "brain-doc" ? "Document preview" : "Site preview"}
+              </Drawer.Title>
+              {activeTarget.kind === "brain-doc" ? (
+                <BrainDocPanel
+                  className="finite-chat__preview finite-chat__preview--sheet"
+                  doc={activeTarget.doc}
+                  onClose={() => setBrowserOpen(false)}
+                />
+              ) : (
+                <BrowserPanel
+                  activeSite={activeTarget}
+                  className="finite-chat__preview finite-chat__preview--sheet"
+                  machineId={machineId}
+                  onClose={() => setBrowserOpen(false)}
+                  onSelectSite={setActivePreviewId}
+                  sites={sites}
+                />
+              )}
             </Drawer.Content>
           </Drawer.Portal>
         </Drawer.Root>
@@ -1300,6 +1352,7 @@ export function HostedWebChat({
       </Dialog>
 
     </div>
+    </BrainDocNavContext.Provider>
   );
 }
 
@@ -1482,10 +1535,26 @@ function ShareAttachmentButton({ href, name }: { href: string; name: string }) {
   return <button type="button" aria-label={`Share ${name}`} onClick={() => void navigator.share({ title: name, url: new URL(href, window.location.href).toString() }).catch(() => undefined)}><Share2Icon className="size-3.5" /></button>;
 }
 
+/**
+ * react-markdown's default transform drops unknown URI schemes, which would
+ * flatten brain:// document links into plain text; admit that scheme on top
+ * of the safe defaults so clicking opens the preview pane.
+ */
+function chatMarkdownUrlTransform(url: string) {
+  if (url.startsWith("brain://")) return url;
+  return defaultUrlTransform(url);
+}
+
 function MarkdownMessage({ text }: { text: string }) {
   return (
     <div className="finite-chat__assistant-text finite-chat__markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink, table: MarkdownTable }}>{text}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={chatMarkdownUrlTransform}
+        components={{ a: MarkdownLink, table: MarkdownTable }}
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -1495,6 +1564,24 @@ function MarkdownTable({ children, ...props }: ComponentProps<"table">) {
 }
 
 function MarkdownLink({ children, href }: ComponentProps<"a">) {
+  const openBrainDoc = useContext(BrainDocNavContext);
+  if (typeof href === "string" && href.startsWith("brain://")) {
+    const doc = parseBrainDocUrl(href);
+    if (doc) {
+      return (
+        <a
+          href={href}
+          role="link"
+          onClick={(event) => {
+            event.preventDefault();
+            openBrainDoc?.(doc);
+          }}
+        >
+          {children}
+        </a>
+      );
+    }
+  }
   return <a href={typeof href === "string" ? href : ""} target="_blank" rel="noreferrer">{children}</a>;
 }
 
@@ -1596,6 +1683,20 @@ function messageAction(roomId: string, text: string, topic: HostedChatTopic | nu
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text, metadata_json: metadataJson ?? null } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text, metadata_json: metadataJson ?? null } };
   return { SendMessage: { room_id: roomId, text, metadata_json: metadataJson ?? null } };
+}
+
+function brainDocsFromMessages(messages: HostedChatMessage[]) {
+  const seen = new Set<string>();
+  const docs: { id: string; doc: BrainDocRef }[] = [];
+  for (const message of [...messages].reverse()) {
+    for (const value of chatBrainDocUrls(messageContent(message))) {
+      const doc = parseBrainDocUrl(value);
+      if (!doc || seen.has(value)) continue;
+      seen.add(value);
+      docs.push({ id: value, doc });
+    }
+  }
+  return docs.slice(0, 8);
 }
 
 function sitesFromMessages(messages: HostedChatMessage[]) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chatPreviewUrls } from "./chat-preview-urls";
+import { chatBrainDocUrls, chatPreviewUrls } from "./chat-preview-urls";
 
 test("chat preview URLs discard trailing Markdown emphasis", () => {
   assert.deepEqual(
@@ -24,4 +24,24 @@ test("chat preview URLs preserve order and de-duplicate Markdown and prose match
     ),
     ["https://first.finite.chat/", "https://second.finite.chat/"]
   );
+});
+
+test("brain doc URLs are detected from Markdown links and prose", () => {
+  assert.deepEqual(
+    chatBrainDocUrls("See [the roadmap](brain://personal-a/team-notes/roadmap.md) for details."),
+    ["brain://personal-a/team-notes/roadmap.md"]
+  );
+  assert.deepEqual(
+    chatBrainDocUrls("Open brain://acme/docs/from-envelope.md."),
+    ["brain://acme/docs/from-envelope.md"]
+  );
+});
+
+test("brain doc URLs de-duplicate and drop trailing punctuation", () => {
+  const text = "brain://b/f/a.md and again brain://b/f/a.md.";
+  assert.deepEqual(chatBrainDocUrls(text), ["brain://b/f/a.md"]);
+});
+
+test("chat preview URLs still ignore brain scheme", () => {
+  assert.deepEqual(chatPreviewUrls("brain://b/f/a.md"), []);
 });
