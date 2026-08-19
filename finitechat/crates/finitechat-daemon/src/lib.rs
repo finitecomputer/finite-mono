@@ -837,11 +837,13 @@ impl IntoResponse for DaemonError {
             Self::Core(FiniteChatCoreError::Client { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::Profile { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::ServerRejected { .. }) => StatusCode::BAD_GATEWAY,
+            Self::Core(FiniteChatCoreError::IdempotencyConflict { .. }) => StatusCode::BAD_GATEWAY,
             Self::Core(FiniteChatCoreError::Delivery { .. }) => StatusCode::BAD_GATEWAY,
             Self::Core(FiniteChatCoreError::Filesystem { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Core(FiniteChatCoreError::Store { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Core(FiniteChatCoreError::InvalidAccountSecret) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::LockPoisoned) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Core(FiniteChatCoreError::ReadOnly) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MissingOption(_)
             | Self::NonLoopbackBind
             | Self::InvalidStartupSecrets

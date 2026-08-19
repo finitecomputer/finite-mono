@@ -36,11 +36,11 @@ use finitechat_blob::{
 };
 use finitechat_client::{
     FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, ReqwestHttpRuntimeTransport,
-    SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
+    SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent, StoredAppRoom, StoredAppRoomState,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, AppState,
-    ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, ChatMediaKind,
+    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
@@ -1454,16 +1454,11 @@ fn cmd_room_status<W: Write>(
     let room_id = args.room_id;
 
     let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
-    let state = runtime
-        .dispatch_and_wait(AppAction::OpenRoom {
-            room_id: room_id.clone(),
-        })
-        .map_err(map_core_hermes_error)?;
-    let summary = hermes_room_status_summary(&state, &room_id);
+    // Read-only on purpose: a resident `hermes serve` owns the store's
+    // writer lease, and a status read must never sync or send. A one-shot
+    // StartRuntime against the resident service's store is exactly the
+    // ratchet-divergence incident this command used to cause.
+    let summary = read_only_room_status(&home, &room_id)?;
 
     if json_mode {
         crate::write_pretty_json(output, &summary)
@@ -1481,38 +1476,100 @@ fn cmd_room_status<W: Write>(
     }
 }
 
-fn hermes_room_status_summary(state: &AppState, room_id: &str) -> HermesRoomStatusSummary {
-    let room = state.rooms.iter().find(|room| room.room_id == room_id);
-    let connected = room
-        .map(|room| room.state == AppRoomState::Connected)
-        .unwrap_or(false);
-    let details = state
-        .room_details
-        .as_ref()
-        .filter(|details| details.room_id == room_id);
-    let member_count = details.map(|details| details.members.len()).unwrap_or(0) as u32;
-    let other_member_count = details
-        .map(|details| {
-            details
-                .members
-                .iter()
-                .filter(|member| !member.current_device)
-                .count() as u32
-        })
-        .unwrap_or(0);
-    let has_counterparty_messages = state
-        .messages
-        .iter()
-        .any(|message| message.room_id == room_id && !message.is_mine);
+/// How many recent stored messages `room-status` scans for counterparty
+/// evidence; member counts are the primary pairing signal.
+const ROOM_STATUS_MESSAGE_SCAN_LIMIT: u32 = 512;
 
+fn read_only_room_status(
+    home: &AgentHome,
+    room_id: &str,
+) -> Result<HermesRoomStatusSummary, CliError> {
+    let store = open_store_read_only(&home.dir, &home.secret, &home.config.device_id)?;
+    let config = device_config(&home.secret, &home.config.device_id, now_secs());
+    let device = store
+        .load_device(config)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let owner = device.device_ref().clone();
+    let has_mls_room = device.room_mls_group_id(room_id).is_ok();
+    let stored_rooms = store
+        .load_app_rooms(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let stored_room = stored_rooms.iter().find(|room| room.room_id == room_id);
+    let (state, status) = stored_room_state_and_status(stored_room, has_mls_room);
+    let connected = state == "connected";
+    let (member_count, other_member_count) = if connected {
+        match device.room_members(room_id) {
+            Ok(members) => {
+                let other = members
+                    .iter()
+                    .filter(|member| member.device_id != owner.device_id)
+                    .count();
+                (members.len() as u32, other as u32)
+            }
+            Err(_) => (0, 0),
+        }
+    } else {
+        (0, 0)
+    };
+    let has_counterparty_messages = store
+        .load_app_messages(&owner, ROOM_STATUS_MESSAGE_SCAN_LIMIT)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+        .iter()
+        .any(|message| message.room_id == room_id && message.sender != owner);
+
+    Ok(hermes_room_status_summary(
+        room_id,
+        state,
+        status,
+        member_count,
+        other_member_count,
+        has_counterparty_messages,
+    ))
+}
+
+/// Mirror core's `app_room_from_stored` (finitechat-core): a stored
+/// Connected/Unavailable room without local MLS state is unavailable on
+/// this device, and a stored Unavailable room with MLS state has since
+/// connected; a room known only to MLS materializes as connected.
+fn stored_room_state_and_status(
+    stored_room: Option<&StoredAppRoom>,
+    has_mls_room: bool,
+) -> (String, String) {
+    match stored_room {
+        None if has_mls_room => ("connected".to_owned(), "connected".to_owned()),
+        None => ("unknown".to_owned(), "not_found".to_owned()),
+        Some(room) => {
+            let mut state = stored_app_room_state_label(room.state).to_owned();
+            let mut status = room.status.clone();
+            if matches!(
+                room.state,
+                StoredAppRoomState::Connected | StoredAppRoomState::UnavailableOnDevice
+            ) && !has_mls_room
+            {
+                state = "unavailable_on_device".to_owned();
+                status = "room is not available on this device".to_owned();
+            } else if room.state == StoredAppRoomState::UnavailableOnDevice && has_mls_room {
+                state = "connected".to_owned();
+                status = "connected".to_owned();
+            }
+            (state, status)
+        }
+    }
+}
+
+fn hermes_room_status_summary(
+    room_id: &str,
+    state: String,
+    status: String,
+    member_count: u32,
+    other_member_count: u32,
+    has_counterparty_messages: bool,
+) -> HermesRoomStatusSummary {
+    let connected = state == "connected";
     HermesRoomStatusSummary {
         room_id: room_id.to_owned(),
-        state: room
-            .map(|room| app_room_state_label(&room.state).to_owned())
-            .unwrap_or_else(|| "unknown".to_owned()),
-        status: room
-            .map(|room| room.status.clone())
-            .unwrap_or_else(|| "not_found".to_owned()),
+        state,
+        status,
         connected,
         paired: connected && (other_member_count > 0 || has_counterparty_messages),
         member_count,
@@ -1520,12 +1577,12 @@ fn hermes_room_status_summary(state: &AppState, room_id: &str) -> HermesRoomStat
     }
 }
 
-fn app_room_state_label(state: &AppRoomState) -> &'static str {
+fn stored_app_room_state_label(state: StoredAppRoomState) -> &'static str {
     match state {
-        AppRoomState::Connected => "connected",
-        AppRoomState::WaitingForApproval => "waiting_for_approval",
-        AppRoomState::Joining => "joining",
-        AppRoomState::UnavailableOnDevice => "unavailable_on_device",
+        StoredAppRoomState::Connected => "connected",
+        StoredAppRoomState::WaitingForApproval => "waiting_for_approval",
+        StoredAppRoomState::Joining => "joining",
+        StoredAppRoomState::UnavailableOnDevice => "unavailable_on_device",
     }
 }
 
@@ -3266,6 +3323,19 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
+/// Diagnostics-only store handle: never takes the writer lease and rejects
+/// every write, so it is safe alongside a resident `hermes serve`.
+fn open_store_read_only(
+    dir: &Path,
+    secret: &NostrSecretKey,
+    device_id: &str,
+) -> Result<SqliteClientStore, CliError> {
+    let options = SqliteClientStoreOptions::from_nostr_secret(secret, device_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    SqliteClientStore::open_read_only(dir.join(STORE_FILE), options)
+        .map_err(|error| CliError::Hermes(error.to_string()))
+}
+
 fn device_config(
     secret: &NostrSecretKey,
     device_id: &str,
@@ -3554,77 +3624,23 @@ mod tests {
         })
     }
 
-    fn app_state_with_room_members(member_current_device_flags: Vec<bool>) -> AppState {
-        serde_json::from_value(json!({
-            "rev": 1,
-            "identity": {
-                "account_id": "agent-account",
-                "device_id": "agent-device",
-                "account_secret_hex": "00"
-            },
-            "rooms": [{
-                "room_id": "room-main",
-                "display_name": "Main",
-                "picture": null,
-                "state": "Connected",
-                "status": "connected",
-                "user_status_text": "Connected",
-                "last_message_preview": "",
-                "unread_count": 0,
-                "can_load_older": false,
-                "is_agent_chat": false
-            }],
-            "selected_room_id": "room-main",
-            "topics": [],
-            "selected_topic_id": null,
-            "active_profile_id": null,
-            "status": "ready",
-            "toast": null,
-            "messages": [],
-            "media_gallery": null,
-            "room_details": {
-                "room_id": "room-main",
-                "display_name": "Main",
-                "picture": null,
-                "state": "Connected",
-                "status": "connected",
-                "user_status_text": "Connected",
-                "media_item_count": 0,
-                "members": member_current_device_flags
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, current_device)| {
-                        json!({
-                            "account_id": format!("account-{index}"),
-                            "device_id": format!("device-{index}"),
-                            "npub": format!("npub-{index}"),
-                            "display_name": format!("Member {index}"),
-                            "picture": null,
-                            "current_device": current_device
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-                "devices": []
-            },
-            "profiles": [],
-            "devices": [],
-            "typing_members": [],
-            "flow": {
-                "notice_text": null,
-                "notice_busy": false,
-                "scan_in_flight": false,
-                "scan_result": "None",
-                "image_upload_url": null
-            }
-        }))
-        .unwrap()
+    fn stored_main_room(state: StoredAppRoomState, status: &str) -> StoredAppRoom {
+        StoredAppRoom {
+            room_id: "room-main".to_owned(),
+            display_name: "Main".to_owned(),
+            picture: None,
+            state,
+            status: status.to_owned(),
+            local_read_seq: 0,
+        }
     }
 
     #[test]
     fn room_status_summary_pairs_connected_room_with_other_member() {
-        let state = app_state_with_room_members(vec![true, false]);
+        let stored = stored_main_room(StoredAppRoomState::Connected, "connected");
+        let (state, status) = stored_room_state_and_status(Some(&stored), true);
 
-        let summary = hermes_room_status_summary(&state, "room-main");
+        let summary = hermes_room_status_summary("room-main", state, status, 2, 1, false);
 
         assert!(summary.connected);
         assert!(summary.paired);
@@ -3635,14 +3651,33 @@ mod tests {
 
     #[test]
     fn room_status_summary_does_not_pair_without_other_member() {
-        let state = app_state_with_room_members(vec![true]);
+        let stored = stored_main_room(StoredAppRoomState::Connected, "connected");
+        let (state, status) = stored_room_state_and_status(Some(&stored), true);
 
-        let summary = hermes_room_status_summary(&state, "room-main");
+        let summary = hermes_room_status_summary("room-main", state, status, 1, 0, false);
 
         assert!(summary.connected);
         assert!(!summary.paired);
         assert_eq!(summary.member_count, 1);
         assert_eq!(summary.other_member_count, 0);
+    }
+
+    #[test]
+    fn room_status_summary_marks_stored_room_without_mls_state_unavailable() {
+        let stored = stored_main_room(StoredAppRoomState::Connected, "connected");
+
+        let (state, status) = stored_room_state_and_status(Some(&stored), false);
+
+        assert_eq!(state, "unavailable_on_device");
+        assert_eq!(status, "room is not available on this device");
+    }
+
+    #[test]
+    fn room_status_summary_reports_unknown_room_as_not_found() {
+        let (state, status) = stored_room_state_and_status(None, false);
+
+        assert_eq!(state, "unknown");
+        assert_eq!(status, "not_found");
     }
 
     #[test]

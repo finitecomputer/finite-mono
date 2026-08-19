@@ -54,7 +54,9 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -64,6 +66,7 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use thiserror::Error;
 
 pub mod rejected_entry_diagnostic;
@@ -3342,9 +3345,75 @@ pub struct SqliteClientStore {
     db_path: PathBuf,
     conn: Connection,
     options: SqliteClientStoreOptions,
+    read_only: bool,
+    // Holds the single-writer lease for the store's lifetime; dropping the
+    // last handle releases the OS lock. Read-only opens never take it.
+    _writer_lease: Option<Arc<WriterLease>>,
+}
+
+/// Advisory single-writer lease on `<db_path>.writer-lease`.
+///
+/// The OS lock (flock/LockFileEx via fs4) is per open file description, so a
+/// second process that tries to open the store for writing fails fast instead
+/// of silently sharing MLS ratchet state — the durable fix for the
+/// `mls_application_ciphertext` poison-entry incident class. Because flock
+/// would also conflict between two handles inside one process, handles share
+/// the lease through this registry (the runtime actor already serializes
+/// in-process access). The lease file is never deleted: unlinking a locked
+/// path would let a fresh inode split the lock domain.
+#[derive(Debug)]
+struct WriterLease {
+    _file: fs::File,
+}
+
+static WRITER_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<WriterLease>>>> = OnceLock::new();
+
+fn writer_lease_path(db_path: &Path) -> PathBuf {
+    let mut path = db_path.as_os_str().to_owned();
+    path.push(".writer-lease");
+    PathBuf::from(path)
+}
+
+fn acquire_writer_lease(db_path: &Path) -> Result<Arc<WriterLease>, ClientStoreError> {
+    let lease_path = writer_lease_path(db_path);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lease_path)
+        .map_err(|source| ClientStoreError::WriterLeaseIo {
+            path: lease_path.clone(),
+            source,
+        })?;
+    let registry = WRITER_LEASES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut leases = registry.lock().unwrap_or_else(|entry| entry.into_inner());
+    let key = fs::canonicalize(&lease_path).unwrap_or_else(|_| lease_path.clone());
+    if let Some(existing) = leases.get(&key).and_then(Weak::upgrade) {
+        return Ok(existing);
+    }
+    let acquired = fs4::fs_std::FileExt::try_lock_exclusive(&file).map_err(|source| {
+        ClientStoreError::WriterLeaseIo {
+            path: lease_path.clone(),
+            source,
+        }
+    })?;
+    if !acquired {
+        return Err(ClientStoreError::WriterLeaseHeld {
+            db_path: db_path.to_path_buf(),
+            lease_path,
+        });
+    }
+    let lease = Arc::new(WriterLease { _file: file });
+    leases.insert(key, Arc::downgrade(&lease));
+    Ok(lease)
 }
 
 impl SqliteClientStore {
+    /// Open the store for reading and writing, acquiring the exclusive
+    /// single-writer lease. Fails fast with
+    /// [`ClientStoreError::WriterLeaseHeld`] when another process already
+    /// writes this store.
     pub fn open(
         db_path: impl AsRef<Path>,
         options: SqliteClientStoreOptions,
@@ -3357,13 +3426,40 @@ impl SqliteClientStore {
             })?;
         }
 
+        let writer_lease = acquire_writer_lease(&db_path)?;
         let conn = open_client_store_connection(&db_path)?;
         prepare_client_store_schema(&conn)?;
         Ok(Self {
             db_path,
             conn,
             options,
+            read_only: false,
+            _writer_lease: Some(writer_lease),
         })
+    }
+
+    /// Open the store for diagnostics only. Never takes the writer lease,
+    /// never runs schema migrations, and rejects every write with
+    /// [`ClientStoreError::ReadOnly`], so it is safe to use while a resident
+    /// service owns the store. The store must already exist and be schema-
+    /// current (a writer open initializes it).
+    pub fn open_read_only(
+        db_path: impl AsRef<Path>,
+        options: SqliteClientStoreOptions,
+    ) -> Result<Self, ClientStoreError> {
+        let db_path = db_path.as_ref().to_path_buf();
+        let conn = open_read_only_client_store_connection(&db_path)?;
+        Ok(Self {
+            db_path,
+            conn,
+            options,
+            read_only: true,
+            _writer_lease: None,
+        })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn db_path(&self) -> &Path {
@@ -4486,6 +4582,11 @@ impl SqliteClientStore {
         &mut self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, ClientStoreError>,
     ) -> Result<T, ClientStoreError> {
+        if self.read_only {
+            return Err(ClientStoreError::ReadOnly {
+                path: self.db_path.clone(),
+            });
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -4589,6 +4690,14 @@ fn open_client_store_connection(db_path: &Path) -> Result<Connection, ClientStor
         PRAGMA busy_timeout = 5000;
         "#,
     )?;
+    Ok(conn)
+}
+
+/// Read-only connections must not run `journal_mode` (it rewrites the
+/// database header) or schema migrations; a writer open owns both.
+fn open_read_only_client_store_connection(db_path: &Path) -> Result<Connection, ClientStoreError> {
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     Ok(conn)
 }
 
@@ -5973,6 +6082,20 @@ pub enum ClientStoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(
+        "client store {db_path} is already open for writing by another process (writer lease {lease_path}); stop the resident finitechat service — or use its API — before running write-capable commands against this store"
+    )]
+    WriterLeaseHeld {
+        db_path: PathBuf,
+        lease_path: PathBuf,
+    },
+    #[error("failed to acquire client store writer lease {path}: {source}")]
+    WriterLeaseIo {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("client store {path} was opened read-only; write operations are rejected")]
+    ReadOnly { path: PathBuf },
     #[error("client state not found for {account_id}/{device_id}")]
     DeviceStateNotFound {
         account_id: String,
@@ -13406,5 +13529,133 @@ mod tests {
             nonce: nonce.to_vec(),
             ciphertext,
         }
+    }
+
+    fn lease_test_options(secret: &NostrSecretKey, device_id: &str) -> SqliteClientStoreOptions {
+        SqliteClientStoreOptions::from_nostr_secret(secret, device_id).unwrap()
+    }
+
+    fn lease_test_device_config(
+        secret: &NostrSecretKey,
+        device_id: &str,
+    ) -> FiniteChatDeviceConfig {
+        FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        }
+    }
+
+    #[test]
+    fn read_only_open_reads_alongside_the_writer_and_rejects_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let secret = NostrSecretKey::from_bytes([9; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "read-only-device";
+
+        let mut writer =
+            SqliteClientStore::open(&db_path, lease_test_options(&secret, device_id)).unwrap();
+        let device = FiniteChatDevice::new(lease_test_device_config(&secret, device_id)).unwrap();
+        writer.save_device_state(&device).unwrap();
+
+        // The writer holds the lease; a read-only open still works and sees
+        // the same state.
+        let mut reader =
+            SqliteClientStore::open_read_only(&db_path, lease_test_options(&secret, device_id))
+                .unwrap();
+        assert!(reader.is_read_only());
+        assert!(!writer.is_read_only());
+        let restored = reader
+            .load_device(lease_test_device_config(&secret, device_id))
+            .unwrap();
+        assert_eq!(restored.device_ref(), device.device_ref());
+        let error = reader.save_device_state(&device).unwrap_err();
+        assert!(
+            matches!(error, ClientStoreError::ReadOnly { .. }),
+            "read-only store must reject writes: {error}"
+        );
+        drop(reader);
+
+        // After the writer closes cleanly, a read-only open still works and
+        // the writer lease is free again.
+        drop(writer);
+        let reader =
+            SqliteClientStore::open_read_only(&db_path, lease_test_options(&secret, device_id))
+                .unwrap();
+        reader
+            .load_device(lease_test_device_config(&secret, device_id))
+            .unwrap();
+        drop(reader);
+        SqliteClientStore::open(&db_path, lease_test_options(&secret, device_id)).unwrap();
+    }
+
+    /// The single-writer guarantee is cross-process: re-execute this test
+    /// binary as the lease-holding child, then prove the parent cannot open
+    /// the store for writing while the child lives, can read it read-only,
+    /// and can write again once the child is gone.
+    #[test]
+    fn writer_lease_fails_fast_for_a_second_process() {
+        const CHILD_ENV: &str = "FINITECHAT_CLIENT_TEST_WRITER_LEASE_CHILD_DB";
+        if let Ok(db_path) = std::env::var(CHILD_ENV) {
+            let secret = NostrSecretKey::from_bytes([11; NOSTR_SECRET_KEY_BYTES]).unwrap();
+            let mut writer =
+                SqliteClientStore::open(&db_path, lease_test_options(&secret, "lease-child"))
+                    .unwrap();
+            let device =
+                FiniteChatDevice::new(lease_test_device_config(&secret, "lease-child")).unwrap();
+            writer.save_device_state(&device).unwrap();
+            std::fs::write(format!("{db_path}.lease-held"), b"held").unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(300));
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let secret = NostrSecretKey::from_bytes([11; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::writer_lease_fails_fast_for_a_second_process",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, &db_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let lease_held_marker = dir.path().join("client.sqlite3.lease-held");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !lease_held_marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lease-holding child never signalled readiness"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let error = match SqliteClientStore::open(&db_path, lease_test_options(&secret, "parent")) {
+            Ok(_) => panic!("a second writer open must fail fast while the child holds the lease"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ClientStoreError::WriterLeaseHeld { .. }),
+            "second writer open must fail with WriterLeaseHeld: {error}"
+        );
+
+        // Read-only opens neither need nor disturb the lease.
+        let reader =
+            SqliteClientStore::open_read_only(&db_path, lease_test_options(&secret, "lease-child"))
+                .unwrap();
+        reader
+            .load_device(lease_test_device_config(&secret, "lease-child"))
+            .unwrap();
+        drop(reader);
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        SqliteClientStore::open(&db_path, lease_test_options(&secret, "parent"))
+            .expect("the lease is released when the child process exits");
     }
 }

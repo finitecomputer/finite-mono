@@ -16,6 +16,7 @@ openmls_basic_credential.workspace = true
 openmls_memory_storage.workspace = true
 openmls_rust_crypto.workspace = true
 rusqlite.workspace = true
+fs4.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

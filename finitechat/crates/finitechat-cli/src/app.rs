@@ -12,14 +12,30 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
     // The account key always comes from the shared Finite identity
     // ($FINITE_HOME/identity/, else ~/.finite/identity/), minted on first
     // run; there is no per-invocation secret flag (see `finitechat auth`).
-    let runtime = FiniteChatRuntime::open(OpenOptions {
+    let options = OpenOptions {
         data_dir: args.data_dir,
         server_url: args.server,
         device_id: args.device_id,
         account_secret_hex: None,
         now_unix_seconds: args.now,
-    })
-    .map_err(map_core_error)?;
+    };
+    // A plain `state` read is the operator's non-mutating look at a resident
+    // service's home: open read-only so it neither takes the writer lease nor
+    // writes (StartRuntime/OpenRoom need the writer and fail fast when the
+    // resident service holds the lease).
+    let read_only = matches!(
+        &args.command,
+        AppCommand::State {
+            start_runtime: false,
+            wait_update_ms: None,
+            room_id: None,
+        }
+    );
+    let runtime = if read_only {
+        FiniteChatRuntime::open_read_only(options).map_err(map_core_error)?
+    } else {
+        FiniteChatRuntime::open(options).map_err(map_core_error)?
+    };
 
     match args.command {
         AppCommand::Identity => {
