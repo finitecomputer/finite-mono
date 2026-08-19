@@ -605,6 +605,12 @@ pub enum CoreError {
     UnrecoverableRuntimeArchiveOwnerMismatch,
     #[error("runtime has provider metadata and cannot use unrecoverable legacy archival")]
     UnrecoverableRuntimeArchiveProviderMetadataPresent,
+    #[error("the compute-absent acknowledgement is required for retired runtime offboarding")]
+    RetiredRuntimeOffboardAcknowledgementRequired,
+    #[error("retired runtime offboard owner does not match")]
+    RetiredRuntimeOffboardOwnerMismatch,
+    #[error("a verified runtime retirement receipt is required for retired runtime offboarding")]
+    RetiredRuntimeOffboardReceiptMissing,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not running")]
@@ -1621,6 +1627,35 @@ pub struct UnrecoverableRuntimeArchiveReceipt {
     pub source_machine_id: String,
     pub owner_email: String,
     pub archived_at: String,
+    pub revoked_finite_private_key_count: usize,
+}
+
+/// Exact, operator-attested repair boundary for a Runtime whose verified
+/// retirement receipt is already stored but whose offboarding transaction
+/// never ran (the Runtime link is still active with no surviving compute).
+/// This path never creates, modifies, or deletes a retirement snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminOffboardRetiredRuntimeInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub expected_owner_email: String,
+    pub operator_observed_compute_absent: bool,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetiredRuntimeOffboardReceipt {
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub retirement_request_id: String,
+    pub retirement_locator: String,
+    pub offboarded_at: String,
     pub revoked_finite_private_key_count: usize,
 }
 
@@ -8501,6 +8536,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offboard_retired_runtime_is_exact_fail_closed_and_keeps_the_receipt() {
+        with_isolated_postgres(|db| async move {
+            let (project_id, runtime_id, destroy_id) = stage_retired_offboard_anomaly(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner_offboard",
+                "offboard-submit",
+                "retired-agent-001",
+            )
+            .await;
+            let input = |compute_absent: bool| AdminOffboardRetiredRuntimeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_offboard".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "retired-agent-001".to_string(),
+                expected_owner_email: "owner@finite.vip".to_string(),
+                operator_observed_compute_absent: compute_absent,
+                now: Some("2026-07-21T20:10:00Z".to_string()),
+            };
+
+            // Compute must be observed absent.
+            assert!(matches!(
+                db.admin_offboard_retired_runtime(input(false)).await,
+                Err(CoreError::RetiredRuntimeOffboardAcknowledgementRequired)
+            ));
+            assert!(db.active_runtime_for_project(&project_id).await.is_some());
+
+            // The binding must match exactly.
+            let mut wrong_binding_input = input(true);
+            wrong_binding_input.expected_source_machine_id = "replacement-agent".to_string();
+            assert!(matches!(
+                db.admin_offboard_retired_runtime(wrong_binding_input).await,
+                Err(CoreError::RuntimeSpecMismatch)
+            ));
+
+            // The owner must match exactly.
+            let mut wrong_owner_input = input(true);
+            wrong_owner_input.expected_owner_email = "other@finite.vip".to_string();
+            assert!(matches!(
+                db.admin_offboard_retired_runtime(wrong_owner_input).await,
+                Err(CoreError::RetiredRuntimeOffboardOwnerMismatch)
+            ));
+
+            let receipt_row_before = db
+                .row("runtime_retirement_snapshots", &destroy_id)
+                .await
+                .expect("staged receipt must read back");
+            let receipt = db
+                .admin_offboard_retired_runtime(input(true))
+                .await
+                .unwrap();
+            assert_eq!(receipt.project_id, project_id);
+            assert_eq!(receipt.agent_runtime_id, runtime_id);
+            assert_eq!(receipt.retirement_request_id, destroy_id);
+            assert_eq!(
+                receipt.retirement_locator,
+                runtime_retirement_archive_locator(&destroy_id)
+            );
+
+            // Offboarding completed: the link is inactive and the membership
+            // archived, while Project, Runtime, and receipt rows survive.
+            assert!(db.active_runtime_for_project(&project_id).await.is_none());
+            assert!(db.project(&project_id).await.is_some());
+            assert!(db.agent_runtime(&runtime_id).await.is_some());
+            assert!(
+                db.all("project_room_memberships")
+                    .await
+                    .iter()
+                    .any(|membership| {
+                        membership["project_id"] == project_id.as_str()
+                            && !membership["archived_at"].is_null()
+                    })
+            );
+            assert_eq!(
+                db.row("runtime_retirement_snapshots", &destroy_id)
+                    .await
+                    .unwrap(),
+                receipt_row_before,
+                "the repair must not touch the stored receipt"
+            );
+            let events = db.finite_private_admin_audit_events().await.unwrap();
+            assert!(events.iter().any(|event| {
+                event.action == "runtime.admin_offboard_retired"
+                    && event.target_id == runtime_id
+                    && event.actor == "admin@finite.vip"
+            }));
+
+            // The departure is recorded as a retirement exactly once; a rerun
+            // fails closed on the inactive link and appends nothing.
+            let facts = db.brain_agent_departure_facts(0, 100).await.unwrap();
+            assert_eq!(facts.facts.len(), 1);
+            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
+            assert!(matches!(
+                db.admin_offboard_retired_runtime(input(true)).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+            assert_eq!(
+                db.brain_agent_departure_facts(0, 100)
+                    .await
+                    .unwrap()
+                    .facts
+                    .len(),
+                1
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn offboard_retired_runtime_does_not_duplicate_an_existing_departure_fact() {
+        with_isolated_postgres(|db| async move {
+            let (project_id, runtime_id, destroy_id) = stage_retired_offboard_anomaly(
+                &db,
+                "owner@finite.vip",
+                "user_workos_owner_offboard_dup",
+                "offboard-dup-submit",
+                "retired-agent-002",
+            )
+            .await;
+            // A partially applied older offboarding already recorded the
+            // retirement fact; the repair must not append a second one.
+            let agent_email = db.row("projects", &project_id).await.unwrap()["agent_email"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            db.exec(&format!(
+                "INSERT INTO brain_agent_departure_facts (
+                   account_id, principal_kind, principal_ref, departed_at, reason
+                 ) VALUES (
+                   'user_workos_owner_offboard_dup', 'agent', '{agent_email}',
+                   '2026-07-21T20:04:00Z', 'retired'
+                 )"
+            ))
+            .await;
+            let receipt = db
+                .admin_offboard_retired_runtime(AdminOffboardRetiredRuntimeInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "user_workos_admin_offboard".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: "oslo-host-1".to_string(),
+                    expected_source_machine_id: "retired-agent-002".to_string(),
+                    expected_owner_email: "owner@finite.vip".to_string(),
+                    operator_observed_compute_absent: true,
+                    now: Some("2026-07-21T20:10:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt.retirement_request_id, destroy_id);
+            assert!(db.active_runtime_for_project(&project_id).await.is_none());
+            let facts = db.brain_agent_departure_facts(0, 100).await.unwrap();
+            assert_eq!(facts.facts.len(), 1);
+            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn admin_friend_key_issue_mirrors_cli_and_records_admin_audit() {
         with_isolated_postgres(|db| async move {
             let raw_key = "fpk_live_test_friend_key_material_0001";
@@ -9323,5 +9518,110 @@ mod tests {
             stop: true,
             runtime_retirement: false,
         })
+    }
+
+    /// Stage the production anomaly the retired-offboard repair exists for: a
+    /// destroy control that stored its verified retirement receipt while the
+    /// offboarding transaction never ran, leaving the runtime link active with
+    /// no compute behind it. Returns (project_id, agent_runtime_id, destroy
+    /// request_id).
+    async fn stage_retired_offboard_anomaly(
+        db: &TestDb,
+        email: &str,
+        workos_user_id: &str,
+        idempotency_key: &str,
+        source_machine_id: &str,
+    ) -> (String, String, String) {
+        promote_runtime_artifact(db).await;
+        let runtime_id = complete_self_serve_agent(
+            db,
+            email,
+            workos_user_id,
+            idempotency_key,
+            source_machine_id,
+            "artifact-v1",
+            "2026-07-21T20:00:00Z",
+        )
+        .await;
+        let project_id = db
+            .agent_runtime(&runtime_id)
+            .await
+            .unwrap()
+            .project_id
+            .clone();
+        let retirement_capable =
+            serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                runtime_retirement: true,
+                ..*kata_runtime_capabilities().v1()
+            }))
+            .unwrap();
+        db.exec(&format!(
+            "UPDATE agent_runtimes SET runtime_capabilities = '{retirement_capable}'::jsonb \
+             WHERE id = '{runtime_id}'"
+        ))
+        .await;
+        let destroy = db
+            .request_runtime_destroy(RequestRuntimeDestroyInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-07-21T20:01:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+        let lease = db
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: format!("destroy-lease-{source_machine_id}"),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            runtime_retirement: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-07-21T20:01:30Z".to_string()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let spec = runtime_spec_v1(lease.runtime_spec.as_ref().unwrap());
+        db.exec(&format!(
+            "UPDATE runtime_control_requests \
+             SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                 completed_at = CURRENT_TIMESTAMP \
+             WHERE id = '{}'",
+            destroy.id
+        ))
+        .await;
+        db.exec(&format!(
+            "INSERT INTO runtime_retirement_snapshots (
+               request_id, project_id, agent_runtime_id, durable_state_id,
+               runtime_artifact_id, schema_version, backend, locator,
+               zip_bytes, zip_sha256, manifest_sha256, created_at,
+               verified_at, recovery_authority_id, retention_policy, stored_at
+             ) VALUES (
+               '{}', '{}', '{}', '{}',
+               '{}', 'runtime_retirement_snapshot.v1', 'borg', '{}',
+               8192, '{}', '{}', '2026-07-21T20:02:00Z',
+               '2026-07-21T20:03:00Z', 'finite-assisted-test',
+               'indefinite_until_purge', CURRENT_TIMESTAMP
+             )",
+            destroy.id,
+            project_id,
+            runtime_id,
+            spec.durable_state_id,
+            spec.runtime_artifact_id,
+            runtime_retirement_archive_locator(&destroy.id),
+            "a".repeat(64),
+            "b".repeat(64),
+        ))
+        .await;
+        (project_id, runtime_id, destroy.id)
     }
 }

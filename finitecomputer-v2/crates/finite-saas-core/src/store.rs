@@ -6,33 +6,34 @@ use crate::launch_codes::{
 use crate::{
     AdminArchiveUnrecoverableRuntimeInput, AdminAssignFinitePrivateLimitProfileInput,
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
-    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
-    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
-    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
-    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
-    ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
-    BrainAccountAgentRoster, BrainAccountAgentRosterEntry, BrainAccountRosterLookup,
-    BrainAgentAccount, BrainAgentDepartureFact, BrainAgentDepartureFactsPage,
-    BrainDeparturePrincipalKind, BrainDepartureReason, CORE_SCHEMA_SQL,
-    CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAccount, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminProject, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
-    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
-    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    AdminOffboardRetiredRuntimeInput, AdminResetFinitePrivateUsageWindowInput,
+    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
+    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
+    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
+    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
+    BillingOverview, BillingSubscriptionStatus, BrainAccountAgentRoster,
+    BrainAccountAgentRosterEntry, BrainAccountRosterLookup, BrainAgentAccount,
+    BrainAgentDepartureFact, BrainAgentDepartureFactsPage, BrainDeparturePrincipalKind,
+    BrainDepartureReason, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
+    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
+    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectMembershipRole, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
     RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
@@ -784,6 +785,17 @@ impl CoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await?;
+        self.finish(tx).await?;
+        Ok(receipt)
+    }
+
+    pub async fn admin_offboard_retired_runtime(
+        &self,
+        input: AdminOffboardRetiredRuntimeInput,
+    ) -> CoreResult<RetiredRuntimeOffboardReceipt> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let receipt = postgres_admin_offboard_retired_runtime(&*tx, input).await?;
         self.finish(tx).await?;
         Ok(receipt)
     }
@@ -4894,6 +4906,179 @@ where
     })
 }
 
+/// Repair boundary for a Runtime whose destroy control stored a VERIFIED
+/// retirement receipt but whose offboarding transaction never ran (the
+/// `project_runtime_links.active` link, room membership, relay credential, and
+/// Finite Private keys survive with no compute behind them). This path never
+/// creates, modifies, or deletes the retirement snapshot, and never touches
+/// provider metadata columns.
+///
+/// The command is safe to run twice: a second run finds no active link and
+/// fails closed with `ProjectRuntimeNotFound`, leaving every committed effect
+/// of the first run untouched.
+async fn postgres_admin_offboard_retired_runtime<C>(
+    client: &C,
+    input: AdminOffboardRetiredRuntimeInput,
+) -> CoreResult<RetiredRuntimeOffboardReceipt>
+where
+    C: GenericClient + Sync,
+{
+    if !input.operator_observed_compute_absent {
+        return Err(CoreError::RetiredRuntimeOffboardAcknowledgementRequired);
+    }
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+    if admin_workos_user_id.is_empty() {
+        return Err(CoreError::MissingWorkosUserId);
+    }
+    let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let row = client
+        .query_opt(
+            "SELECT runtime.id AS agent_runtime_id, runtime.source_host_id,
+                    runtime.source_machine_id, owner.normalized_email AS owner_email
+             FROM projects AS project
+             JOIN users AS owner ON owner.id = project.owner_user_id
+             JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.active = TRUE
+             JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
+             WHERE project.id = $1
+             FOR UPDATE OF project, link, runtime",
+            &[&input.project_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    let agent_runtime_id: String = row.get("agent_runtime_id");
+    let source_host_id: String = row.get("source_host_id");
+    let source_machine_id: String = row.get("source_machine_id");
+    let owner_email: String = row.get("owner_email");
+    if owner_email != expected_owner_email {
+        return Err(CoreError::RetiredRuntimeOffboardOwnerMismatch);
+    }
+    if agent_runtime_id != input.expected_agent_runtime_id
+        || source_host_id != input.expected_source_host_id
+        || source_machine_id != input.expected_source_machine_id
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_control_requests
+             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    let snapshot_row = client
+        .query_opt(
+            "SELECT request_id
+             FROM runtime_retirement_snapshots
+             WHERE agent_runtime_id = $1 AND verified_at IS NOT NULL
+             LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::RetiredRuntimeOffboardReceiptMissing)?;
+    let retirement_request_id: String = snapshot_row.get("request_id");
+    let snapshot = postgres_runtime_retirement_snapshot(client, &retirement_request_id)
+        .await?
+        .ok_or(CoreError::RetiredRuntimeOffboardReceiptMissing)?;
+    let request = locked_runtime_control_request(client, &retirement_request_id).await?;
+    let runtime = select_agent_runtime(client, &agent_runtime_id)
+        .await?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    let spec_row = client
+        .query_opt(
+            "SELECT runtime_spec
+             FROM agent_creation_requests
+             WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+    let value: Value = spec_row.get("runtime_spec");
+    let runtime_spec: RuntimeSpecEnvelope = serde_json::from_value(value).map_err(json_error)?;
+    // The stored receipt must re-verify against its own destroy request,
+    // Runtime binding, and RuntimeSpec exactly as at destroy completion.
+    validate_runtime_retirement_snapshot_receipt(
+        &snapshot.receipt,
+        &request,
+        &runtime,
+        &runtime_spec,
+        &now,
+    )?;
+
+    ensure_grandfathered_linked_user(client, &admin_email, &admin_workos_user_id, &now).await?;
+    let revoked_api_key_ids = postgres_offboard_runtime(
+        client,
+        &input.project_id,
+        &agent_runtime_id,
+        &now,
+        "finite_private.runtime.offboard_retired_revoke_keys",
+        Some(&admin_email),
+    )
+    .await?;
+    // The retirement receipt proves this is a retirement, not a deletion. The
+    // facts log is append-only with no uniqueness constraint, so a partially
+    // applied older offboarding must not gain a second fact for the same
+    // departure.
+    if !postgres_agent_departure_fact_exists(client, &input.project_id).await? {
+        postgres_record_agent_departure(
+            client,
+            &input.project_id,
+            &now,
+            BrainDepartureReason::Retired,
+        )
+        .await?;
+    }
+    let revoked_finite_private_key_count = revoked_api_key_ids.len();
+    let retirement_locator = snapshot.receipt.locator.clone();
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "runtime.admin_offboard_retired",
+            target_type: "agent_runtime",
+            target_id: &agent_runtime_id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": input.project_id,
+                "ownerEmail": owner_email,
+                "sourceHostId": source_host_id,
+                "sourceMachineId": source_machine_id,
+                "operatorObservedComputeAbsent": true,
+                "retirementRequestId": retirement_request_id,
+                "retirementLocator": retirement_locator,
+                "revokedApiKeyIds": revoked_api_key_ids,
+            }),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(RetiredRuntimeOffboardReceipt {
+        project_id: input.project_id,
+        agent_runtime_id,
+        retirement_request_id,
+        retirement_locator,
+        offboarded_at: now,
+        revoked_finite_private_key_count,
+    })
+}
+
 async fn postgres_admin_request_runtime_control_bound<C>(
     client: &C,
     input: AdminRuntimeControlInput,
@@ -6240,6 +6425,33 @@ where
         .await
         .map_err(store_error)?;
     postgres_bump_account_roster_revision(client, &account_id, now).await
+}
+
+/// True when a Permanent Departure Fact already exists for the project's
+/// agent. `brain_agent_departure_facts` is append-only with no uniqueness
+/// constraint, so repair paths that complete a partially applied offboarding
+/// must check before appending a second fact for the same departure.
+async fn postgres_agent_departure_fact_exists<C>(client: &C, project_id: &str) -> CoreResult<bool>
+where
+    C: GenericClient + Sync,
+{
+    let exists = client
+        .query_opt(
+            "SELECT 1
+             FROM projects p
+             JOIN users u ON u.id = p.owner_user_id
+             JOIN brain_agent_departure_facts AS fact
+               ON fact.account_id = u.workos_user_id
+              AND fact.principal_kind = 'agent'
+              AND fact.principal_ref = p.agent_email
+             WHERE p.id = $1
+             LIMIT 1",
+            &[&project_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some();
+    Ok(exists)
 }
 
 /// The authoritative account agent roster (ADR-0046): account-owned,
@@ -11296,6 +11508,331 @@ mod tests {
                             && event.target_id == runtime_id
                     })
             );
+        })
+        .await;
+    }
+
+    /// Fail-closed repair for a Runtime whose destroy stored a verified
+    /// retirement receipt but whose offboarding never ran: the compute-absent
+    /// attestation, exact binding, and owner must match, an in-flight control
+    /// blocks the repair, a missing receipt refuses, and success completes the
+    /// normal offboarding boundary (link, membership, relay credential, keys,
+    /// departure fact, audit) without touching the receipt row.
+    #[tokio::test]
+    async fn postgres_admin_offboard_retired_runtime_completes_verified_retirement() {
+        with_isolated_postgres(|store| async move {
+            let run = "offboard-retired";
+            let owner_email = format!("{run}-owner@finite.vip");
+            let admin_email = format!("{run}-admin@finite.vip");
+            let machine_id = format!("{run}-agent-001");
+            let host = "offboard-retired-host";
+            let launch_code = issue_test_launch_code(&store, "2026-07-21T12:00:00Z").await;
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-offboard-retired-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:offboard-retired-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "offboard-retired-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: owner_email.clone(),
+                    workos_user_id: format!("workos_{run}_owner"),
+                    display_name: "Offboard Retired Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: format!("{run}-submit"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    source_host_id: None,
+                    lease_token: format!("lease-{run}"),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("offboard-retired request should lease");
+            assert_eq!(lease.request.id, created.request.id);
+            let provisioned = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("lease-{run}"),
+                    source_host_id: Some(host.to_string()),
+                    source_machine_id: Some(machine_id.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("lease-{run}"),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine_id.clone(),
+                    runtime_artifact_id: Some("artifact-offboard-retired-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41002/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Offboard Retired Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: vec!["http://127.0.0.1:41002/contact".to_string()],
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            let project_id = completed.project.id.clone();
+
+            // Stage the anomaly: a destroy whose verified receipt is stored but
+            // whose offboarding never ran (link still active, endpoint set).
+            let retirement_capable =
+                serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                    runtime_retirement: true,
+                    ..*kata_runtime_capabilities().v1()
+                }))
+                .unwrap();
+            store
+                .exec(&format!(
+                    "UPDATE agent_runtimes SET runtime_capabilities = '{retirement_capable}'::jsonb \
+                     WHERE id = '{runtime_id}'"
+                ))
+                .await;
+            let destroy = store
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: admin_email.clone(),
+                    admin_workos_user_id: format!("workos_{run}_admin"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine_id.clone(),
+                    now: Some("2026-07-21T12:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let destroy_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("ctl-destroy-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                            RuntimeCapabilitiesV1 {
+                                runtime_retirement: true,
+                                ..*kata_runtime_capabilities().v1()
+                            },
+                        )),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-07-21T12:01:30Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("retirement should lease to a capable Kata runner");
+            assert_eq!(destroy_lease.request.id, destroy.id);
+            let destroy_spec = runtime_spec_v1(destroy_lease.runtime_spec.as_ref().unwrap());
+
+            let input = |compute_absent: bool| AdminOffboardRetiredRuntimeInput {
+                admin_verified_email: admin_email.clone(),
+                admin_workos_user_id: format!("workos_{run}_admin"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine_id.clone(),
+                expected_owner_email: owner_email.clone(),
+                operator_observed_compute_absent: compute_absent,
+                now: Some("2026-07-21T12:05:00Z".to_string()),
+            };
+
+            // The compute-absent attestation is required.
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(input(false))
+                    .await
+                    .unwrap_err(),
+                CoreError::RetiredRuntimeOffboardAcknowledgementRequired
+            ));
+            assert!(store.active_runtime_for_project(&project_id).await.is_some());
+
+            // An in-flight control operation blocks the repair.
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(input(true))
+                    .await
+                    .unwrap_err(),
+                CoreError::RuntimeControlOperationConflict
+            ));
+            // The older Core completed the destroy without offboarding.
+            store
+                .exec(&format!(
+                    "UPDATE runtime_control_requests \
+                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                         completed_at = CURRENT_TIMESTAMP \
+                     WHERE id = '{}'",
+                    destroy.id
+                ))
+                .await;
+
+            // Without a stored receipt the repair refuses.
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(input(true))
+                    .await
+                    .unwrap_err(),
+                CoreError::RetiredRuntimeOffboardReceiptMissing
+            ));
+
+            // The verified receipt the destroy stored before its offboarding
+            // was lost.
+            store
+                .exec(&format!(
+                    "INSERT INTO runtime_retirement_snapshots (
+                       request_id, project_id, agent_runtime_id, durable_state_id,
+                       runtime_artifact_id, schema_version, backend, locator,
+                       zip_bytes, zip_sha256, manifest_sha256, created_at,
+                       verified_at, recovery_authority_id, retention_policy, stored_at
+                     ) VALUES (
+                       '{}', '{}', '{}', '{}',
+                       '{}', 'runtime_retirement_snapshot.v1', 'borg', '{}',
+                       8192, '{}', '{}', '2026-07-21T12:02:00Z',
+                       '2026-07-21T12:03:00Z', 'finite-assisted-test',
+                       'indefinite_until_purge', CURRENT_TIMESTAMP
+                     )",
+                    destroy.id,
+                    project_id,
+                    runtime_id,
+                    destroy_spec.durable_state_id,
+                    destroy_spec.runtime_artifact_id,
+                    crate::runtime_retirement_archive_locator(&destroy.id),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                ))
+                .await;
+            let receipt_row_before = store
+                .row("runtime_retirement_snapshots", &destroy.id)
+                .await
+                .expect("staged receipt must read back");
+
+            // The owner and the exact binding must match.
+            let mut wrong_owner = input(true);
+            wrong_owner.expected_owner_email = "someone-else@finite.vip".to_string();
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(wrong_owner)
+                    .await
+                    .unwrap_err(),
+                CoreError::RetiredRuntimeOffboardOwnerMismatch
+            ));
+            let mut wrong_binding = input(true);
+            wrong_binding.expected_source_machine_id = "replacement-agent".to_string();
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(wrong_binding)
+                    .await
+                    .unwrap_err(),
+                CoreError::RuntimeSpecMismatch
+            ));
+
+            let receipt = store
+                .admin_offboard_retired_runtime(input(true))
+                .await
+                .unwrap();
+            assert_eq!(receipt.project_id, project_id);
+            assert_eq!(receipt.agent_runtime_id, runtime_id);
+            assert_eq!(receipt.retirement_request_id, destroy.id);
+            assert_eq!(
+                receipt.retirement_locator,
+                crate::runtime_retirement_archive_locator(&destroy.id)
+            );
+            assert_eq!(receipt.revoked_finite_private_key_count, 1);
+
+            // Offboarding completed: the link is inactive, the membership is
+            // archived, and the runtime-scoped key is revoked.
+            assert!(store.active_runtime_for_project(&project_id).await.is_none());
+            assert!(store.project(&project_id).await.is_some());
+            assert!(store.agent_runtime(&runtime_id).await.is_some());
+            assert!(
+                store
+                    .all("project_room_memberships")
+                    .await
+                    .iter()
+                    .any(|membership| {
+                        membership["project_id"] == project_id.as_str()
+                            && !membership["archived_at"].is_null()
+                    })
+            );
+            let key_after = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .api_keys
+                .into_iter()
+                .find(|key| key.id == provisioned.api_key.id)
+                .unwrap();
+            assert_eq!(key_after.status, FinitePrivateApiKeyStatus::Revoked);
+
+            // The receipt row is untouched.
+            let receipt_row_after = store
+                .row("runtime_retirement_snapshots", &destroy.id)
+                .await
+                .unwrap();
+            assert_eq!(receipt_row_after, receipt_row_before);
+
+            // The repair and the key revocation are audited.
+            let events = store.finite_private_admin_audit_events().await.unwrap();
+            assert!(events.iter().any(|event| {
+                event.action == "runtime.admin_offboard_retired"
+                    && event.actor == admin_email
+                    && event.target_id == runtime_id
+            }));
+            assert!(events.iter().any(|event| {
+                event.action == "finite_private.runtime.offboard_retired_revoke_keys"
+                    && event.target_id == runtime_id
+            }));
+
+            // The departure is recorded as a retirement exactly once, and a
+            // second run fails closed on the inactive link without adding a
+            // second fact.
+            let facts = store.brain_agent_departure_facts(0, 100).await.unwrap();
+            assert_eq!(facts.facts.len(), 1);
+            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
+            assert_eq!(facts.facts[0].account_id, format!("workos_{run}_owner"));
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(input(true))
+                    .await
+                    .unwrap_err(),
+                CoreError::ProjectRuntimeNotFound
+            ));
+            let facts_after_rerun = store.brain_agent_departure_facts(0, 100).await.unwrap();
+            assert_eq!(facts_after_rerun.facts.len(), 1);
         })
         .await;
     }
