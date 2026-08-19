@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CANONICAL_FINITE_PRIVATE_MODEL="deepseek-v4-flash-0731"
+readonly LEGACY_FINITE_PRIVATE_MODEL="glm-5-2"
+readonly FINITE_PRIVATE_PRODUCT_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+
 agent_home="${FINITECHAT_HOME:-/data/agent}"
 hermes_home="${HERMES_HOME:-${agent_home}/hermes-home}"
 server_url="${FINITE_SERVER_URL:-${FINITECHAT_SERVER_URL:-}}"
@@ -10,9 +14,14 @@ plugin_name="${FINITECHAT_HERMES_PLUGIN_NAME:-finitechat}"
 agent_name="${FINITECHAT_HERMES_AGENT_NAME:-${FINITE_AGENT_NAME:-${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}}}"
 agent_picture_url="${FINITECHAT_HERMES_AGENT_PICTURE_URL:-https://avatars.githubusercontent.com/u/274919006?v=4}"
 if [[ "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" ]]; then
-    model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-deepseek-v4-flash-0731}}"
+    model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-${CANONICAL_FINITE_PRIVATE_MODEL}}}"
     provider="${FINITECHAT_HERMES_PROVIDER:-custom}"
-    base_url="${FINITECHAT_HERMES_BASE_URL:-${FINITE_PRIVATE_BASE_URL:-https://kimi-k2-6.finite.containers.tinfoil.dev/v1}}"
+    base_url="${FINITECHAT_HERMES_BASE_URL:-${FINITE_PRIVATE_BASE_URL:-${FINITE_PRIVATE_PRODUCT_BASE_URL}}}"
+    if [[ "$model" == "$LEGACY_FINITE_PRIVATE_MODEL" \
+        && "$provider" == "custom" \
+        && "$base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
+        model="$CANONICAL_FINITE_PRIVATE_MODEL"
+    fi
     context_length="${FINITECHAT_HERMES_CONTEXT_LENGTH:-${FINITE_PRIVATE_CONTEXT_LENGTH:-393216}}"
 else
     model="${FINITECHAT_HERMES_MODEL:-anthropic/claude-sonnet-4.6}"
