@@ -376,11 +376,21 @@ while (($#)); do
   machine="$2"
   project_id="$3"
   shift 3
-  printf 'CANONICAL\t%s\t%s\t%s\t' "$runtime_id" "$machine" "$project_id"
-  nerdctl --namespace finite inspect --format '{{.State.Status}}{{"\t"}}{{.Config.Image}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime_artifact_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.state_schema_version"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_host_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_machine_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.project_id"}}{{"\t"}}{{json .Mounts}}{{"\t"}}{{json .NetworkSettings.Ports}}' "$machine" || {
-    echo "runtime rollout provider preflight failed: canonical container $machine is absent" >&2
-    exit 1
-  }
+  if inspect_out="$(nerdctl --namespace finite inspect --format '{{.State.Status}}{{"\t"}}{{.Config.Image}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime_artifact_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.state_schema_version"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_host_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_machine_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.project_id"}}{{"\t"}}{{json .Mounts}}{{"\t"}}{{json .NetworkSettings.Ports}}' "$machine")"; then
+    printf 'CANONICAL\t%s\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id" "$inspect_out"
+    continue
+  fi
+  # A failed inspect becomes an ABSENT row only when absence is definitive:
+  # the full namespace listing must succeed and must not contain the
+  # container. Every other failure (daemon, timeout, listing error, or a
+  # container that exists but cannot be inspected) is ambiguous and fatal.
+  if all_names="$(nerdctl --namespace finite ps --all --format '{{.Names}}')" \
+    && ! grep -Fxq -- "$machine" <<<"$all_names"; then
+    printf 'ABSENT\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id"
+    continue
+  fi
+  echo "runtime rollout provider preflight failed: could not inspect canonical container $machine" >&2
+  exit 1
 done
 while IFS= read -r name; do
   [[ -n $name ]] || continue
@@ -410,11 +420,15 @@ REMOTE
         runtime_label: .[8], source_host_label: .[9], source_machine_label: .[10],
         project_label: .[11], mounts: (.[12] | fromjson), ports: (.[13] | fromjson)
       }] | sort_by(.project_id, .agent_runtime_id, .source_machine_id) as $canonical
+    | [$rows[] | select(.[0] == "ABSENT") | {
+        agent_runtime_id: .[1], source_machine_id: .[2], project_id: .[3], state: "absent"
+      }] as $absent
     | if ($systems | length) != 1 or ($systems[0] | length) != 2
         or ($systems[0][1] | test("^/nix/store/[A-Za-z0-9+._?=-]+$") | not)
       then error("invalid remote system closure") else . end
-    | if ($canonical | length) != ($expected | length)
-        or ($canonical | map({project_id, agent_runtime_id, source_machine_id})) != $expected
+    | if (($canonical + $absent) | length) != ($expected | length)
+        or (($canonical + $absent) | sort_by(.project_id, .agent_runtime_id, .source_machine_id)
+          | map({project_id, agent_runtime_id, source_machine_id})) != $expected
       then error("provider fact identity mismatch") else . end
     | [$canonical[]
       | . as $entry
@@ -442,7 +456,7 @@ REMOTE
           source_machine_owner_count: $source_owners,
           durable_root_owner_count: $durable_owners,
           host_port: (if .state == "running" then $ports[0] else null end)
-        } end]
+        } end] + $absent
       | {remote_system_closure:$systems[0][1], provider_facts:.}
   ' <<<"$snapshot")" || {
     echo "runtime rollout provider facts failed local validation" >&2
@@ -583,7 +597,8 @@ build_reviewed_plan() {
           | $facts[] as $fact
           | select($fact.project_id == $entry.project_id and $fact.agent_runtime_id == $entry.agent_runtime_id and $fact.source_machine_id == $entry.source_machine_id)
           | select($fact.state != "running")
-          | ($entry | del(.project_display_name)) + {reason:"provider_not_running", provider_facts:$fact}
+          | ($entry | del(.project_display_name))
+            + {reason:(if $fact.state == "absent" then "provider_compute_absent" else "provider_not_running" end), provider_facts:$fact}
         ] | sort_by(.project_id, .agent_runtime_id, .source_machine_id),
         skipped: ($core.skipped | map(del(.project_display_name)) | sort_by(.project_id, .agent_runtime_id, .reason)),
         canary: (if $scope.kind == "all" then
