@@ -161,7 +161,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -1416,9 +1416,18 @@ fn persist_brain_worker_outcome(
     transport_epoch: &AtomicU64,
     result: &Result<(), String>,
 ) {
+    // Every successful notification sync is a supervisor tick: without this
+    // bookkeeping a healthy `daemon supervise` reports `tickCount: 0` and
+    // `lastTickAt: null` forever, which is indistinguishable from a wedged
+    // daemon until `failureCount` starts climbing.
+    let record_tick = |state: &mut AgentState, now: String| {
+        state.daemon.tick_count = state.daemon.tick_count.saturating_add(1);
+        state.daemon.last_tick_at = Some(now);
+    };
     match result {
         Ok(()) if notification.reason == "notifications_unsupported" => {
-            let _ = mutate_agent_state(tree_env, |state, _| {
+            let _ = mutate_agent_state(tree_env, |state, now| {
+                record_tick(state, now);
                 state.daemon.notification_status = Some("unsupported".to_owned());
                 state.daemon.last_error = None;
                 Ok(())
@@ -1428,7 +1437,8 @@ fn persist_brain_worker_outcome(
             if notification.reason == "stream_catch_up"
                 && transport_epoch.load(Ordering::SeqCst) == notification.transport_epoch =>
         {
-            let _ = mutate_agent_state(tree_env, |state, _| {
+            let _ = mutate_agent_state(tree_env, |state, now| {
+                record_tick(state, now);
                 state.daemon.notification_status = None;
                 state.daemon.last_error = None;
                 Ok(())
@@ -1450,7 +1460,8 @@ fn persist_brain_worker_outcome(
             });
         }
         Ok(()) => {
-            let _ = mutate_agent_state(tree_env, |state, _| {
+            let _ = mutate_agent_state(tree_env, |state, now| {
+                record_tick(state, now);
                 if state.daemon.notification_status.is_none() {
                     state.daemon.last_error = None;
                 }
@@ -14099,6 +14110,52 @@ mod tests {
 
         assert!(transient_working_tree_gap(&error));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn supervisor_worker_outcomes_record_ticks_and_failures() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        let transport_epoch = AtomicU64::new(7);
+        let notification = BrainUpdateNotification {
+            brain_id: "brain".to_owned(),
+            latest_sequence: 1,
+            reason: "stream_catch_up".to_owned(),
+            transport_epoch: 7,
+        };
+
+        persist_brain_worker_outcome(&env, &notification, &transport_epoch, &Ok(()));
+        let state = read_agent_state(&tree).unwrap();
+        assert_eq!(state.daemon.tick_count, 1);
+        assert_eq!(
+            state.daemon.last_tick_at.as_deref(),
+            Some("2026-06-24T20:46:36Z")
+        );
+        assert_eq!(state.daemon.failure_count, 0);
+        assert!(state.daemon.last_error.is_none());
+
+        persist_brain_worker_outcome(
+            &env,
+            &notification,
+            &transport_epoch,
+            &Err("server URL is required".to_owned()),
+        );
+        let state = read_agent_state(&tree).unwrap();
+        assert_eq!(state.daemon.tick_count, 1);
+        assert_eq!(state.daemon.failure_count, 1);
+        assert_eq!(
+            state.daemon.last_error.as_deref(),
+            Some("server URL is required")
+        );
+        assert_eq!(state.sync.status, "blocked: server URL is required");
     }
 
     #[test]

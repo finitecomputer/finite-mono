@@ -336,6 +336,11 @@ impl BrainStore {
         user_id: &UserId,
         control_records: &[SyncRecordInput],
     ) -> Result<(), StoreError> {
+        if self.member_exists(brain_id, user_id)? {
+            return Err(StoreError::BrokenInvariant {
+                reason: "target is already a brain member".to_owned(),
+            });
+        }
         let brain = self.load_core_brain(brain_id)?;
         let all_members_folders = brain
             .folders

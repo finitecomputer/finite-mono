@@ -266,18 +266,25 @@ brains, `folder create` defaults to restricted access; for personal brains it
 defaults to owner access.
 
 ```sh
-fbrain admin member add --target <npub>
-fbrain admin member remove --target <npub>
-fbrain admin role grant admin --target <npub>
-fbrain admin role revoke admin --target <npub>
-fbrain admin folder-access grant --target <npub>
-fbrain admin folder-access revoke --target <npub>
+fbrain admin member add --target <email|NIP-05|npub>
+fbrain admin member remove --target <email|NIP-05|npub>
+fbrain admin role grant admin --target <email|NIP-05|npub>
+fbrain admin role revoke admin --target <email|NIP-05|npub>
+fbrain admin folder-access grant --target <email|NIP-05|npub>
+fbrain admin folder-access revoke --target <email|NIP-05|npub>
 
 # Normal, convergent Organization Brain collaboration from its Working Tree
 fbrain collaborator ensure-admin \
   --target agent@example.finite.vip \
   --json
 ```
+
+`--target` resolution is unified with `invite brain create`: an email bound
+to a Finite account resolves to that account's Member Identity npub through
+the server's account authorities, a NIP-05 name resolves through its domain,
+and a bare npub (or hex public key) is used directly. An email with neither
+a Finite account nor a serving NIP-05 domain fails with the resolver's error
+rather than falling back to a guess.
 
 `collaborator ensure-admin` is the normal email-first Organization Brain
 sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
