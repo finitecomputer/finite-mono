@@ -66,7 +66,7 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use thiserror::Error;
 
 pub mod rejected_entry_diagnostic;
@@ -3363,10 +3363,59 @@ pub struct SqliteClientStore {
 /// path would let a fresh inode split the lock domain.
 #[derive(Debug)]
 struct WriterLease {
-    _file: fs::File,
+    file: Option<fs::File>,
+    key: PathBuf,
+    #[cfg(test)]
+    drop_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
-static WRITER_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<WriterLease>>>> = OnceLock::new();
+#[derive(Debug)]
+struct WriterLeaseRegistry {
+    leases: Mutex<BTreeMap<PathBuf, Weak<WriterLease>>>,
+    released: Condvar,
+}
+
+static WRITER_LEASES: OnceLock<WriterLeaseRegistry> = OnceLock::new();
+
+fn writer_lease_registry() -> &'static WriterLeaseRegistry {
+    WRITER_LEASES.get_or_init(|| WriterLeaseRegistry {
+        leases: Mutex::new(BTreeMap::new()),
+        released: Condvar::new(),
+    })
+}
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .drop_barrier
+            .lock()
+            .unwrap_or_else(|entry| entry.into_inner())
+            .take()
+        {
+            barrier.wait();
+            barrier.wait();
+        }
+
+        // Release the OS lock before waking an in-process successor. The
+        // registry entry deliberately remains present until then so a failed
+        // Weak upgrade means "local teardown in progress", not "another
+        // process owns the store".
+        drop(self.file.take());
+        let registry = writer_lease_registry();
+        let mut leases = registry
+            .leases
+            .lock()
+            .unwrap_or_else(|entry| entry.into_inner());
+        if leases
+            .get(&self.key)
+            .is_some_and(|lease| std::ptr::eq(lease.as_ptr(), self))
+        {
+            leases.remove(&self.key);
+        }
+        registry.released.notify_all();
+    }
+}
 
 fn writer_lease_path(db_path: &Path) -> PathBuf {
     let mut path = db_path.as_os_str().to_owned();
@@ -3386,11 +3435,24 @@ fn acquire_writer_lease(db_path: &Path) -> Result<Arc<WriterLease>, ClientStoreE
             path: lease_path.clone(),
             source,
         })?;
-    let registry = WRITER_LEASES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut leases = registry.lock().unwrap_or_else(|entry| entry.into_inner());
+    let registry = writer_lease_registry();
+    let mut leases = registry
+        .leases
+        .lock()
+        .unwrap_or_else(|entry| entry.into_inner());
     let key = fs::canonicalize(&lease_path).unwrap_or_else(|_| lease_path.clone());
-    if let Some(existing) = leases.get(&key).and_then(Weak::upgrade) {
-        return Ok(existing);
+    loop {
+        if let Some(existing) = leases.get(&key).and_then(Weak::upgrade) {
+            return Ok(existing);
+        }
+        if leases.contains_key(&key) {
+            leases = registry
+                .released
+                .wait(leases)
+                .unwrap_or_else(|entry| entry.into_inner());
+            continue;
+        }
+        break;
     }
     let acquired = fs4::fs_std::FileExt::try_lock_exclusive(&file).map_err(|source| {
         ClientStoreError::WriterLeaseIo {
@@ -3404,7 +3466,12 @@ fn acquire_writer_lease(db_path: &Path) -> Result<Arc<WriterLease>, ClientStoreE
             lease_path,
         });
     }
-    let lease = Arc::new(WriterLease { _file: file });
+    let lease = Arc::new(WriterLease {
+        file: Some(file),
+        key: key.clone(),
+        #[cfg(test)]
+        drop_barrier: Mutex::new(None),
+    });
     leases.insert(key, Arc::downgrade(&lease));
     Ok(lease)
 }
@@ -13546,6 +13613,46 @@ mod tests {
             credential_not_before_unix_seconds: NOW.saturating_sub(60),
             credential_not_after_unix_seconds: NOW.saturating_add(600),
         }
+    }
+
+    #[test]
+    fn writer_lease_reopen_waits_for_in_process_teardown() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let lease = acquire_writer_lease(&db_path).unwrap();
+        let drop_barrier = Arc::new(std::sync::Barrier::new(2));
+        *lease
+            .drop_barrier
+            .lock()
+            .unwrap_or_else(|entry| entry.into_inner()) = Some(Arc::clone(&drop_barrier));
+
+        let dropper = std::thread::spawn(move || drop(lease));
+        // The last strong reference is now gone, so Weak::upgrade fails, but
+        // the test hook keeps the old file descriptor and OS lock alive.
+        drop_barrier.wait();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reopener = std::thread::spawn(move || {
+            result_tx.send(acquire_writer_lease(&db_path)).unwrap();
+        });
+        let premature = result_rx.recv_timeout(std::time::Duration::from_millis(100));
+
+        drop_barrier.wait();
+        dropper.join().unwrap();
+        let reopened = match premature {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => result_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("reopen must continue after local lease teardown"),
+            Ok(result) => {
+                panic!("reopen completed before the local OS lock was released: {result:?}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("reopen worker disconnected")
+            }
+        };
+        let reopened = reopened.expect("local lease handoff must not look cross-process");
+        reopener.join().unwrap();
+        drop(reopened);
     }
 
     #[test]
