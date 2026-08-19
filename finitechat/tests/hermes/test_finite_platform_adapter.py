@@ -56,6 +56,12 @@ class MessageType(Enum):
     COMMAND = "command"
 
 
+class ProcessingOutcome(Enum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class MessageEvent:
     text: str
@@ -110,6 +116,13 @@ class BasePlatformAdapter:
 
     async def handle_message(self, event: MessageEvent) -> None:
         self.handled_messages.append(event)
+        # The real base class returns at dispatch and reports completion from
+        # the background turn through this hook. Firing it inline keeps the
+        # ack-after-completion ordering visible to call-sequence assertions.
+        await self.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
+        return None
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         self.handled_messages.append(event)
@@ -590,7 +603,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter.handle_message = handle_message
         event = MessageEvent(
             text="hello",
-            source=types.SimpleNamespace(chat_id="room-canonical"),
+            source=types.SimpleNamespace(
+                platform=Platform.FINITECHAT,
+                chat_id="room-canonical",
+                chat_type="dm",
+                thread_id=None,
+            ),
             raw_message={"conversation_id": "home", "segment_id": "chat-1"},
         )
         with (
@@ -1433,6 +1451,160 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(adapter.handled_messages), 1)
         self.assertEqual([call[0] for call in calls], ["activity", "ack", "ack"])
 
+    def test_turn_completion_hook_owns_the_ack(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        handled = self._running_turn(adapter)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "conversation_id": "topic-build",
+            "segment_id": "chat-build-1",
+            "text": "please build",
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        # Dispatch alone must not ack: the turn is still running.
+        self.assertEqual(len(handled), 1)
+        self.assertEqual([call[0] for call in calls], ["activity"])
+
+        # A redelivery while the turn runs is ignored — no second dispatch,
+        # no ack; the inbox entry stays owned by the running turn.
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+        self.assertEqual(len(handled), 1)
+        self.assertEqual([call[0] for call in calls], ["activity"])
+
+        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
+
+        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
+        self.assertEqual(calls[-1][1]["message_id"], "msg-12")
+        event_key = self.module._adapter_event_key("room-agent-1", 12, "msg-12")
+        self.assertIn(event_key, adapter._delivered_event_keys)
+        self.assertTrue(cast(Any, adapter._state_store).is_delivered(event_key))
+        self.assertEqual(adapter._pending_event_acks, {})
+
+    def test_processing_failure_before_completion_leaves_event_unacked(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        async def failing_handle(event):
+            raise RuntimeError("turn crashed")
+
+        adapter.handle_message = failing_handle
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "text": "please build",
+        }
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        self.assertEqual([call[0] for call in calls], ["activity", "activity"])
+        self.assertEqual(calls[0][1]["action"], "set")
+        self.assertEqual(calls[1][1]["action"], "clear")
+        event_key = self.module._adapter_event_key("room-agent-1", 12, "msg-12")
+        self.assertNotIn(event_key, adapter._delivered_event_keys)
+        self.assertFalse(cast(Any, adapter._state_store).is_delivered(event_key))
+        self.assertEqual(adapter._pending_event_acks, {})
+
+        # The unacked entry's redelivery is processed whole, then acked.
+        handled = self._running_turn(adapter)
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
+        self.assertEqual(len(handled), 1)
+        ack_calls = [call for call in calls if call[0] == "ack"]
+        self.assertEqual(len(ack_calls), 1)
+
+    def test_failed_turn_is_acked_after_the_turn_ran(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        handled = self._running_turn(adapter)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "text": "please build",
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+        self.assertEqual([call[0] for call in calls], ["activity"])
+
+        # The turn ran to completion and delivered an error notice, so the
+        # event was processed. Leaving it unacked would re-run the completed
+        # turn on every inbox redelivery.
+        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.FAILURE))
+
+        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
+        self.assertEqual(calls[-1][1]["message_id"], "msg-12")
+
+    def test_cancelled_turn_stays_unacked_and_redelivery_reprocesses(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        handled = self._running_turn(adapter)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "text": "please build",
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.CANCELLED))
+
+        self.assertEqual([call[0] for call in calls], ["activity"])
+        self.assertEqual(adapter._pending_event_acks, {})
+        self.assertEqual(adapter._delivered_event_keys, set())
+
+        # A shutdown-cancelled turn is redelivered by the inbox and processed
+        # whole on the next run.
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+        self.assertEqual(len(handled), 2)
+
+    def test_persisted_dedup_acks_redelivery_without_reprocessing_after_restart(self):
+        first = self.adapter()
+        first_calls = []
+
+        async def fake_first_json(action, payload, *, timeout):
+            first_calls.append((action, payload, timeout))
+            if action == "ack":
+                # The process dies (or the transport fails) between processing
+                # and the ack landing.
+                return self.module._FiniteChatResult(False, {}, "ack transport busy", True)
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        first._finitechat_json = fake_first_json
+        handled = self._running_turn(first)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "text": "please build",
+        }
+
+        asyncio.run(first._handle_finitechat_event(raw_event))
+        asyncio.run(first.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
+
+        # Processed and dedup-persisted, but the ack never landed.
+        self.assertEqual([call[0] for call in first_calls], ["activity", "ack"])
+        cast(Any, first._state_store).close()
+
+        restarted = self.adapter()
+        restarted_calls = []
+        restarted._finitechat_json = self._record_json(restarted_calls)
+        asyncio.run(restarted._handle_finitechat_event(raw_event))
+
+        self.assertEqual(restarted.handled_messages, [])
+        self.assertEqual([call[0] for call in restarted_calls], ["ack"])
+        self.assertEqual(restarted_calls[0][1]["message_id"], "msg-12")
+
     def test_busy_text_waits_unacked_then_admits_in_inbox_order(self):
         adapter = self.adapter()
         calls = []
@@ -1753,6 +1925,17 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             return self.module._FiniteChatResult(True, {}, None, False)
 
         return fake_json
+
+    def _running_turn(self, adapter):
+        """Stub handle_message with a turn that never reports completion."""
+
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+        return handled
 
     @staticmethod
     def _text_event(
