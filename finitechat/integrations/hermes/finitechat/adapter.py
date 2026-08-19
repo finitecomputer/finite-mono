@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -45,8 +46,10 @@ ACTIVE_TURN_POLL_TIMEOUT_MILLIS = 100
 DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
 BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
+ADAPTER_STATE_DB_FILE = "hermes-adapter-state.db"
 SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
+MAX_PERSISTED_DELIVERED_EVENT_KEYS = 4096
 MAX_OUTBOUND_MESSAGE_ROUTES = 256
 STREAM_RECONNECT_BACKOFF_SECS = 2.0
 STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
@@ -461,6 +464,151 @@ def check_requirements() -> bool:
     return bool(_resolve_finitechat_command(""))
 
 
+class _AdapterStateStore:
+    """Adapter-owned durable state, held in one small SQLite file.
+
+    The route table decides where replies land, so it must survive the
+    gateway restarts that wipe process memory. The file lives in the agent
+    home next to the bridge status file and is owned solely by this
+    adapter — the Rust sidecar's own state files are never touched.
+
+    Every operation degrades to a no-op on error: durable state must never
+    break message flow. Ids only — no message content is ever stored.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._conn: sqlite3.Connection | None = None
+        self._connect_failed = False
+
+    def _connect(self) -> sqlite3.Connection | None:
+        if self._conn is not None:
+            return self._conn
+        if self._connect_failed:
+            return None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self._path, timeout=5)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS inbound_chat_routes ("
+                "room_id TEXT NOT NULL, "
+                "thread_id TEXT NOT NULL, "
+                "conversation_id TEXT, "
+                "segment_id TEXT, "
+                "updated_at REAL NOT NULL, "
+                "PRIMARY KEY (room_id, thread_id))"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS delivered_events ("
+                "event_key TEXT PRIMARY KEY, "
+                "created_at REAL NOT NULL)"
+            )
+        except (OSError, sqlite3.Error) as exc:
+            self._connect_failed = True
+            logger.warning(
+                "[finitechat] adapter state store unavailable at %s: %s", self._path, exc
+            )
+            return None
+        self._conn = conn
+        return conn
+
+    def remember_route(
+        self,
+        room_id: str,
+        thread_id: str,
+        conversation_id: str | None,
+        segment_id: str | None,
+    ) -> None:
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(
+                "INSERT INTO inbound_chat_routes ("
+                "room_id, thread_id, conversation_id, segment_id, updated_at"
+                ") VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(room_id, thread_id) DO UPDATE SET "
+                "conversation_id = excluded.conversation_id, "
+                "segment_id = excluded.segment_id, "
+                "updated_at = excluded.updated_at",
+                (room_id, thread_id, conversation_id, segment_id, time.time()),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not persist chat route: %s", exc)
+
+    def lookup_route(self, room_id: str, thread_id: str) -> tuple[str | None, str | None] | None:
+        conn = self._connect()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT conversation_id, segment_id FROM inbound_chat_routes "
+                "WHERE room_id = ? AND thread_id = ?",
+                (room_id, thread_id),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not read persisted chat route: %s", exc)
+            return None
+        if row is None:
+            return None
+        return str(row[0]) if row[0] else None, str(row[1]) if row[1] else None
+
+    def remember_delivered(self, event_key: str) -> None:
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO delivered_events (event_key, created_at) VALUES (?, ?)",
+                (event_key, time.time()),
+            )
+            conn.execute(
+                "DELETE FROM delivered_events WHERE event_key NOT IN ("
+                "SELECT event_key FROM delivered_events "
+                "ORDER BY created_at DESC LIMIT ?)",
+                (MAX_PERSISTED_DELIVERED_EVENT_KEYS,),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not persist delivered event key: %s", exc)
+
+    def is_delivered(self, event_key: str) -> bool:
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM delivered_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not read delivered event key: %s", exc)
+            return False
+        return row is not None
+
+    def load_delivered_keys(self, limit: int) -> list[str]:
+        """Most-recent persisted delivered keys, oldest first."""
+        conn = self._connect()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT event_key FROM delivered_events ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not load delivered event keys: %s", exc)
+            return []
+        return [str(row[0]) for row in reversed(rows)]
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+
+
 def validate_config(config: PlatformConfig) -> bool:
     extra = getattr(config, "extra", {}) or {}
     return bool(extra.get("home") or os.getenv("FINITECHAT_HOME"))
@@ -538,6 +686,22 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+        # Adapter-owned durable copy of the reply-route table and the
+        # delivered-event dedup set. The in-memory structures above stay the
+        # read caches; this store is the restart-surviving source of truth
+        # they read through to on a miss.
+        self._state_store = (
+            _AdapterStateStore(Path(self.home) / ADAPTER_STATE_DB_FILE) if self.home else None
+        )
+        # Inbox entries dispatched to a Hermes turn but not yet acked. The
+        # ack lands only when the turn's completion hook reports the event
+        # processed; until then a redelivery is ignored without a second
+        # dispatch and without an ack.
+        self._pending_event_acks: dict[str, tuple[str, Any, str]] = {}
+        if self._state_store is not None:
+            for persisted_key in self._state_store.load_delivered_keys(MAX_DELIVERED_EVENT_KEYS):
+                self._delivered_event_keys.add(persisted_key)
+                self._delivered_event_order.append(persisted_key)
         # The Rust inbox is the durable queue. Keep at most its first blocked
         # ordinary text event per Hermes session in memory while the current
         # owner task finishes. Later events remain only in the inbox and are
@@ -610,12 +774,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         await self._cancel_admission_tasks()
         await self._stop_service()
         await self.cancel_background_tasks()
+        if self._state_store is not None:
+            self._state_store.close()
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
-        """Surface a claimed quota notice after Hermes' final response delivery.
+        """Settle the event's inbox ack, then surface any claimed quota notice.
 
         Pinned Hermes invokes this hook once after the final response (including
         streamed delivery), and not after each model/tool subcall. Core claims a
@@ -624,6 +790,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         transient notice, while the dashboard continues to show authoritative state.
         """
         outcome_name = str(getattr(outcome, "value", getattr(outcome, "name", outcome))).lower()
+        await self._settle_event_ack(event, outcome_name)
         if outcome_name != "success":
             return
         status = await asyncio.to_thread(_finite_private_control_request, "usage", "GET")
@@ -1042,8 +1209,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.warning("[finitechat] ignored event without message_id")
             return
         event_key = _adapter_event_key(room_id, seq, message_id)
-        if event_key and event_key in self._delivered_event_keys:
+        if event_key and self._is_delivered_event(event_key):
             await self._ack_finitechat_event(room_id, seq, message_id)
+            return
+        if event_key and event_key in self._pending_event_acks:
+            # The turn for this event is still running. Ignore the redelivery
+            # without a second dispatch and without acking — the inbox entry
+            # is only acked once the turn reports the event processed.
             return
 
         raw_source = raw_event.get("source")
@@ -1128,18 +1300,44 @@ class FiniteChatAdapter(BasePlatformAdapter):
         raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
         await self._hydrate_hermes_home_channel_if_needed()
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
+        # The durable inbox entry is acked only after the event's turn has run
+        # to completion — never at dispatch. Register the pending ack before
+        # handle_message so the completion hook (which fires from the
+        # background turn, or synchronously from a stubbed handler) always
+        # finds it.
+        session_active = self._session_is_active(session_key)
+        if event_key:
+            self._pending_event_acks[event_key] = (room_id, seq, message_id)
         try:
             await self.handle_message(event)
-            if event_key:
-                self._remember_delivered_event(event_key)
-            await self._ack_finitechat_event(room_id, seq, message_id)
         except Exception:
+            if event_key:
+                self._pending_event_acks.pop(event_key, None)
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+        if not event_key or event_key not in self._pending_event_acks:
+            # Nothing to track, or the completion hook already settled the ack
+            # while handle_message was running.
+            return
+        queued_for_later = getattr(self, "_pending_messages", {}).get(session_key) is event
+        if session_active and not queued_for_later:
+            # Events consumed inline by a busy session (slash-command bypass,
+            # busy-session handlers) never pass through the background turn
+            # that fires the completion hook. Keep the dispatch-time ack for
+            # exactly those; every other event is acked by the hook once its
+            # turn completes.
+            self._pending_event_acks.pop(event_key, None)
+            self._remember_delivered_event(event_key)
+            await self._ack_finitechat_event(room_id, seq, message_id)
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -1326,6 +1524,49 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not ack.ok:
             logger.warning("[finitechat] failed to ack %s/%s: %s", room_id, seq, ack.error)
 
+    async def _settle_event_ack(self, event: MessageEvent, outcome_name: str) -> None:
+        """Ack the durable inbox entry once the event's turn has run.
+
+        The completion hook fires exactly once per background turn, so this is
+        the one place a processed event is acked. A cancelled turn (shutdown,
+        interrupt) leaves the entry unacked so the inbox redelivers it whole;
+        a crash between processing and ack is covered by the persisted dedup
+        key, which the redelivery path acks without re-running the turn.
+        """
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        room_id = str(raw_message.get("room_id") or self.room_id)
+        seq = raw_message.get("seq")
+        message_id = str(raw_message.get("message_id") or "")
+        event_key = _adapter_event_key(room_id, seq, message_id) or ""
+        pending = self._pending_event_acks.pop(event_key, None) if event_key else None
+        if pending is None:
+            return
+        pending_room_id, pending_seq, pending_message_id = pending
+        if outcome_name == "cancelled":
+            logger.info(
+                "[finitechat] turn for %s/%s cancelled before completion; "
+                "leaving the inbox entry unacked for redelivery",
+                pending_room_id,
+                pending_seq,
+            )
+            return
+        # Success or failure alike: the turn ran to completion and the user
+        # was answered (reply or error notice), so the event was processed.
+        # Persist the dedup key before acking — a crash between the two
+        # redelivers, and the persisted key dedups that retry.
+        self._remember_delivered_event(event_key)
+        await self._ack_finitechat_event(pending_room_id, pending_seq, pending_message_id)
+
+    def _is_delivered_event(self, event_key: str) -> bool:
+        if event_key in self._delivered_event_keys:
+            return True
+        if self._state_store is not None and self._state_store.is_delivered(event_key):
+            # Evicted from the bounded in-memory window but still persisted;
+            # re-cache so the next redelivery stays memory-fast.
+            self._remember_delivered_event(event_key)
+            return True
+        return False
+
     def _remember_delivered_event(self, event_key: str) -> None:
         if event_key in self._delivered_event_keys:
             return
@@ -1334,6 +1575,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         while len(self._delivered_event_order) > MAX_DELIVERED_EVENT_KEYS:
             evicted = self._delivered_event_order.pop(0)
             self._delivered_event_keys.discard(evicted)
+        if self._state_store is not None:
+            self._state_store.remember_delivered(event_key)
 
     def _remember_inbound_chat_route(
         self,
@@ -1345,6 +1588,24 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not thread_id or (conversation_id is None and segment_id is None):
             return
         self._inbound_chat_routes[(room_id, thread_id)] = (conversation_id, segment_id)
+        if self._state_store is not None:
+            self._state_store.remember_route(room_id, thread_id, conversation_id, segment_id)
+
+    def _lookup_inbound_chat_route(
+        self,
+        room_id: str,
+        route_key: str,
+    ) -> tuple[str | None, str | None] | None:
+        key = (room_id, route_key)
+        remembered = self._inbound_chat_routes.get(key)
+        if remembered is not None:
+            return remembered
+        if self._state_store is None:
+            return None
+        persisted = self._state_store.lookup_route(room_id, route_key)
+        if persisted is not None:
+            self._inbound_chat_routes[key] = persisted
+        return persisted
 
     @staticmethod
     def _route_metadata(
@@ -1505,7 +1766,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         route_key = segment_id or thread_id
         remembered_route = (
-            self._inbound_chat_routes.get((room_id, route_key)) if route_key else None
+            self._lookup_inbound_chat_route(room_id, route_key) if route_key else None
         )
         if remembered_route is not None:
             remembered_conversation_id, remembered_segment_id = remembered_route
@@ -1522,6 +1783,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # Unknown Hermes thread/chat identifiers stay unscoped so Core can
             # apply the canonical Home/Home-chat fallback. Promoting them into
             # conversation ids manufactures phantom top-level topics.
+            if route_key is not None:
+                logger.warning(
+                    "[finitechat] no remembered route for room %s route key %s; "
+                    "sending unscoped (Core Home fallback)",
+                    room_id,
+                    route_key,
+                )
             segment_id = None
         return conversation_id, segment_id
 

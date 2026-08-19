@@ -276,7 +276,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
 
-      - name: Hermes sidecar smoke
+      - name: Hermes CLI round-trip smoke
         run: scripts/hermes-sidecar-smoke.sh
 
       - name: Build Hermes Agent runtime
@@ -354,13 +354,21 @@ jobs:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
 
-      - name: Hermes adapter regression report
+      - name: Chat reliability fast gate (Hermes adapter)
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
             --python "$HERMES_AGENT_PYTHON" \
             --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
+
+      - name: Upload Hermes adapter regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-adapter-regressions-${{ github.run_attempt }}
+          path: ${{ env.CARGO_TARGET_DIR }}/hermes-adapter-regressions/report.json
+          if-no-files-found: error
 
       - name: Hermes platform adapter tests
         env:

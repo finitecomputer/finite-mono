@@ -153,8 +153,10 @@ class PinnedHermesSenderContextTests(unittest.TestCase):
 
 
 class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_018_owner_task_blocks_ack_until_followup_turn_begins(self):
+    async def test_real_018_owner_task_blocks_ack_until_followup_turn_completes(self):
         module = PINNED_ADAPTER_MODULE
+        agent_home = tempfile.TemporaryDirectory()
+        self.addCleanup(agent_home.cleanup)
         adapter = module.FiniteChatAdapter(
             PlatformConfig(
                 enabled=True,
@@ -165,7 +167,7 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
                     name="Finite Chat",
                 ),
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": agent_home.name,
                     "finitechat_bin": "/bin/echo",
                 },
             )
@@ -225,16 +227,30 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(admission, timeout=1)
 
         self.assertEqual([event.text for event in handler_events], ["queued on real Hermes"])
-        self.assertEqual([call[0] for call in bridge_calls], ["activity", "ack"])
-        self.assertEqual(bridge_calls[-1][1]["message_id"], "msg-61")
+        # The turn owns the ack: dispatch alone must not ack the durable
+        # inbox entry while the turn is still running.
+        self.assertEqual([call[0] for call in bridge_calls], ["activity"])
 
+        turn_task = adapter._session_tasks[session_key]
         finish_handler.set()
+        await asyncio.wait_for(turn_task, timeout=5)
+
+        # The processing activity is set first; the ack follows once the turn
+        # completes. Later activity calls are the runtime's typing cleanup.
+        self.assertEqual(bridge_calls[0][0], "activity")
+        self.assertEqual(bridge_calls[0][1]["action"], "set")
+        ack_calls = [call for call in bridge_calls if call[0] == "ack"]
+        self.assertEqual(len(ack_calls), 1)
+        self.assertEqual(ack_calls[0][1]["message_id"], "msg-61")
+        event_key = module._adapter_event_key("room-agent-1", 61, "msg-61")
+        self.assertIn(event_key, adapter._delivered_event_keys)
+
         await adapter.cancel_background_tasks()
 
 
 class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def _adapter():
+    def _adapter(home: str):
         module = PINNED_ADAPTER_MODULE
         return module.FiniteChatAdapter(
             PlatformConfig(
@@ -246,11 +262,16 @@ class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
                     name="Finite Chat",
                 ),
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": home,
                     "finitechat_bin": "/bin/echo",
                 },
             )
         )
+
+    def _agent_home(self) -> str:
+        agent_home = tempfile.TemporaryDirectory()
+        self.addCleanup(agent_home.cleanup)
+        return agent_home.name
 
     @staticmethod
     def _text_event(
@@ -280,7 +301,7 @@ class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
         from tools import clarify_gateway
 
         module = PINNED_ADAPTER_MODULE
-        adapter = self._adapter()
+        adapter = self._adapter(self._agent_home())
         bridge_calls = []
 
         async def fake_json(action, payload, *, timeout):
@@ -401,7 +422,8 @@ class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
         from tools import clarify_gateway
 
         module = PINNED_ADAPTER_MODULE
-        first = self._adapter()
+        agent_home = self._agent_home()
+        first = self._adapter(agent_home)
         first_calls = []
 
         async def first_json(action, payload, *, timeout):
@@ -443,7 +465,7 @@ class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first_calls[0][1]["text"], "❓ What should change?")
             self.assertEqual(first_calls[0][1]["kind"], "message")
 
-            restarted = self._adapter()
+            restarted = self._adapter(agent_home)
             restarted_calls = []
 
             async def restarted_json(action, payload, *, timeout):

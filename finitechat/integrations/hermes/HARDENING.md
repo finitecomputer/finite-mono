@@ -392,7 +392,7 @@ Current local smoke:
 
 ```bash
 cargo run -q -p finitechat-rmp -- test ios-simulator --json
-scripts/hermes-adapter-regression-report.py
+just chat-reliability-fast
 scripts/hermes-sidecar-smoke.sh
 scripts/hermes-agent-media-e2e.sh
 scripts/hermes-real-gateway-admission-smoke.py
@@ -415,11 +415,15 @@ handler.
 The iOS Simulator script writes
 `target/ios-hermes-agent-media-e2e/report.json`; it requires a booted
 simulator or `IOS_SIMULATOR_UDID`.
-Together they prove finitechat-server, `finitechat hermes` CLI, encrypted
-client stores, `finitechat hermes serve`, `/v1/hermes/inbound` NDJSON,
-ack/drain, adapter redelivery/ack/fallback/filter/group/receipt regressions,
-and native iOS app runtime plumbing. They do not, by themselves, prove the
-production `hermes gateway run` path: the Hermes media smoke imports the
+Together they prove finitechat-server, the direct `finitechat hermes` CLI,
+encrypted client stores, resident `finitechat hermes serve` and
+`/v1/hermes/inbound` NDJSON through the media E2E, adapter
+redelivery/ack/fallback/filter/group/receipt regressions, and native iOS app
+runtime plumbing. The historically named `hermes-sidecar-smoke.sh` proves only
+the direct CLI round trip and explicitly records that it does not cover the
+resident service, NDJSON stream, or ack/drain. These checks do not, by
+themselves, prove the production `hermes gateway run` path: the Hermes media
+smoke imports the
 adapter directly and installs a test handler. The required additional local
 gate is a real Hermes 0.17 gateway admission smoke where a user joins through
 the invite/PIN flow and the agent's platform adapter admits the join without a
@@ -516,9 +520,11 @@ Current CI shape:
 - `.github/workflows/ci.yml` pins the adapter test environment to the root
   flake's Nix Hermes runtime.
 - Every PR and `main`/`codex/**` push runs Rust fmt, clippy, workspace tests,
-  the local Hermes sidecar smoke, Ruff, BasedPyright, and Python adapter tests.
-- The local smoke uploads `target/hermes-sidecar-smoke/report.json` as a CI
-  artifact so humans can inspect the exact invite/join/readiness/reply timings.
+  the local Hermes CLI round-trip smoke, Ruff, BasedPyright, and Python adapter
+  tests.
+- CI uploads `target/hermes-adapter-regressions/report.json` even when the
+  focused reliability gate fails, so the missing, skipped, or failed boundary
+  and its asserted dispatch/ack/completion/restart contract remain inspectable.
 - The Docker runtime smoke runs on `main`, tags, or manual dispatch with
   `docker_smoke=true`; it uploads `target/hermes-docker-smoke/report.json` and
   `target/hermes-docker-smoke/restic-preflight.json`, plus the local encrypted
