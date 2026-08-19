@@ -12,6 +12,7 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    crane.url = "github:ipetkov/crane/v0.23.4";
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
@@ -51,6 +52,7 @@
     {
       self,
       nixpkgs,
+      crane,
       hermes-nixpkgs,
       hermes-agent,
       nixpkgs-lat3,
@@ -64,8 +66,10 @@
       ...
     }:
     let
+      finitePackagePkgsLinux = import nixpkgs { system = "x86_64-linux"; };
       finitePackagesLinux = import ./infra/nixos/packages.nix {
-        pkgs = import nixpkgs { system = "x86_64-linux"; };
+        pkgs = finitePackagePkgsLinux;
+        craneLib = crane.mkLib finitePackagePkgsLinux;
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
@@ -158,8 +162,10 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
+          finitePackagePkgs = import nixpkgs { inherit system; };
           finitePackages = import ./infra/nixos/packages.nix {
-            pkgs = import nixpkgs { inherit system; };
+            pkgs = finitePackagePkgs;
+            craneLib = crane.mkLib finitePackagePkgs;
             sourceRoot = ./.;
           };
           gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
