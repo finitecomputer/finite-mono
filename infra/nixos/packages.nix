@@ -192,6 +192,7 @@ rec {
       meta.mainProgram = "devfinity";
       passthru = {
         inherit runtimeInputs;
+        cargoArtifacts = devfinity-unwrapped.cargoArtifacts;
         unwrapped = devfinity-unwrapped;
       };
     };

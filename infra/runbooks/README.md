@@ -126,7 +126,10 @@ Two rules apply to **every** release and promotion, no exceptions:
   `include_str!`/`include_bytes!` input outside those crate directories, add
   that path to its `sourcePaths` in the same change. Do not add unrelated
   workspace members or fall back to the full flake source. The `Nix service
-  packages` CI lane builds every scoped package and must pass before rollout.
+  packages` CI lane builds every dependency artifact before its scoped package
+  and explicitly includes both closures in trusted Cachix pushes; its job
+  summary reports whether each phase required a build and how long it took.
+  The lane must pass before rollout.
   For a supposedly component-only change, compare the clean base and candidate
   outputs with `nix path-info .#packages.x86_64-linux.<package>`; an unrelated
   package path change is a stop condition and a source-scoping bug.
