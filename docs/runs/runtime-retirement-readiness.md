@@ -305,6 +305,39 @@ membership, deactivate the Runtime link, remove relay credentials, revoke
 scoped Finite Private keys, and retain all Project, Runtime, link, and audit
 history. This releases inventory; it does not claim or create a backup.
 
+### Retired Runtime with incomplete offboarding
+
+A destroy control can complete under an older Core in a state where its
+verified retirement receipt is stored and compute is removed, but the
+offboarding transaction never ran: the Runtime link is still active, the Agent
+is still visible, and its credentials are still live. Neither
+`runtime-archive-unrecoverable` (which fails closed when a retirement snapshot
+exists) nor a fresh `runtime-retire-exact` (whose destroy retries wedge on the
+absent container) can complete that boundary.
+
+Once the operator has independently confirmed that canonical compute for the
+exact Runtime is absent, `finite-saas-core runtime-offboard-retired-exact`
+completes the offboarding. The Core transaction fails closed unless the exact
+Project, Runtime, source host, source machine, and owner email match the
+active link, no lifecycle control is active, and a stored retirement receipt
+re-verifies against its own destroy request and RuntimeSpec. On success it
+reuses the normal offboarding boundary and records the departure as a
+retirement; it never creates, modifies, or deletes the retirement snapshot,
+and it does not claim or create a backup. A second run fails closed because
+the link is already inactive.
+
+```console
+finite-saas-core runtime-offboard-retired-exact \
+  --project-id <project> \
+  --expected-agent-runtime-id <runtime> \
+  --expected-source-host-id <host> \
+  --expected-source-machine-id <machine> \
+  --expected-owner-email <owner-email> \
+  --admin-email <operator-email> \
+  --admin-workos-user-id <operator-workos-user-id> \
+  --confirm-compute-absent
+```
+
 ### Operator retirement for managed test deploys
 
 An operator may retire a clearly identified Finite-managed test deployment with

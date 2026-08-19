@@ -4,13 +4,14 @@ use finite_saas_core::api::router_with_agent_creation_placement;
 use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
-    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
-    CoreResult, FinitePrivateApiKey, FinitePrivateGrant, IssueFinitePrivateApiKeyInput,
-    IssueFinitePrivateFriendKeyInput, ResetFinitePrivateUsageWindowInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
+    AdminArchiveUnrecoverableRuntimeInput, AdminOffboardRetiredRuntimeInput, AdminRuntimeOverview,
+    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
+    ApproveFinitePrivateGrantInput, CoreResult, FinitePrivateApiKey, FinitePrivateGrant,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput,
+    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
+    RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,6 +91,9 @@ enum Command {
     /// Archive a legacy Runtime only after exact binding and absence attestations.
     #[command(name = "runtime-archive-unrecoverable")]
     RuntimeArchiveUnrecoverable(RuntimeArchiveUnrecoverableCliArgs),
+    /// Complete offboarding for a Runtime whose verified retirement receipt is stored.
+    #[command(name = "runtime-offboard-retired-exact")]
+    RuntimeOffboardRetiredExact(RuntimeOffboardRetiredExactCliArgs),
     /// Approve a verified email for Finite Private without issuing a key.
     ///
     /// Break-glass path: prefer the dashboard admin page at /dashboard/admin, which calls the Core admin API.
@@ -304,6 +308,30 @@ struct RuntimeArchiveUnrecoverableCliArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct RuntimeOffboardRetiredExactCliArgs {
+    #[arg(long)]
+    project_id: String,
+    #[arg(long)]
+    expected_agent_runtime_id: String,
+    #[arg(long)]
+    expected_source_host_id: String,
+    #[arg(long)]
+    expected_source_machine_id: String,
+    #[arg(long)]
+    expected_owner_email: String,
+    #[arg(long)]
+    admin_email: String,
+    #[arg(long)]
+    admin_workos_user_id: String,
+    /// Operator attestation that canonical compute for this exact Runtime was
+    /// independently confirmed absent before offboarding completes.
+    #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+    confirm_compute_absent: bool,
+    #[arg(long)]
+    now: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
 struct RuntimeRetireExactCliArgs {
     #[arg(long)]
     project_id: String,
@@ -422,6 +450,10 @@ async fn main() -> Result<()> {
         }
         Command::RuntimeArchiveUnrecoverable(args) => {
             let receipt = runtime_archive_unrecoverable_command(args).await?;
+            print_json(&receipt)
+        }
+        Command::RuntimeOffboardRetiredExact(args) => {
+            let receipt = runtime_offboard_retired_exact_command(args).await?;
             print_json(&receipt)
         }
         Command::FinitePrivateGrantApprove {
@@ -1173,6 +1205,26 @@ async fn runtime_archive_unrecoverable_command(
             operator_observed_compute_absent: args.confirm_compute_absent,
             operator_observed_durable_state_absent: args.confirm_durable_state_absent,
             owner_acknowledged_unrecoverable: args.confirm_owner_acknowledged_unrecoverable,
+            now: args.now,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+async fn runtime_offboard_retired_exact_command(
+    args: RuntimeOffboardRetiredExactCliArgs,
+) -> Result<finite_saas_core::RetiredRuntimeOffboardReceipt> {
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
+    store
+        .admin_offboard_retired_runtime(AdminOffboardRetiredRuntimeInput {
+            admin_verified_email: args.admin_email,
+            admin_workos_user_id: args.admin_workos_user_id,
+            project_id: args.project_id,
+            expected_agent_runtime_id: args.expected_agent_runtime_id,
+            expected_source_host_id: args.expected_source_host_id,
+            expected_source_machine_id: args.expected_source_machine_id,
+            expected_owner_email: args.expected_owner_email,
+            operator_observed_compute_absent: args.confirm_compute_absent,
             now: args.now,
         })
         .await
@@ -1968,6 +2020,32 @@ mod tests {
                 "--confirm-owner-acknowledged-unrecoverable",
             ]))
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn offboard_retired_cli_requires_confirm_compute_absent() {
+        let common = [
+            "finite-saas-core",
+            "runtime-offboard-retired-exact",
+            "--project-id",
+            "project-a",
+            "--expected-agent-runtime-id",
+            "runtime-a",
+            "--expected-source-host-id",
+            "lat1",
+            "--expected-source-machine-id",
+            "finite-kata-a",
+            "--expected-owner-email",
+            "owner@finite.vip",
+            "--admin-email",
+            "admin@finite.vip",
+            "--admin-workos-user-id",
+            "workos-admin",
+        ];
+        assert!(Args::try_parse_from(common).is_err());
+        assert!(
+            Args::try_parse_from(common.into_iter().chain(["--confirm-compute-absent"])).is_ok()
         );
     }
 
