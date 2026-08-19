@@ -27,6 +27,9 @@ in
       FINITE_BRAIN_DB = "/var/lib/finitebrain/finite-brain.sqlite3";
       FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
+      # The brain:// live viewer (chat preview pane) calls the public router
+      # directly from the browser; admit the dashboard origin cross-origin.
+      FINITE_BRAIN_CORS_ALLOWED_ORIGINS = "https://finite.computer";
       FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
       FC_CORE_API_BASE_URL = "http://127.0.0.1:4200";
       FINITE_BRAIN_INVITE_MAILER = "resend";

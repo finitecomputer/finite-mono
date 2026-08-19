@@ -1543,7 +1543,7 @@ wait "$postgres_pid"
                 serde_json::json!({
                     "FINITE_SITES_API": self.finitesites_api_url(),
                     "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                    "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+                    "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
                     "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
                 })
                 .to_string(),
@@ -1763,7 +1763,12 @@ wait "$postgres_pid"
                     "FINITE_BRAIN_ADDR",
                     format!("{}:{}", self.service_bind_host(), self.ports.finite_brain),
                 ),
-                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.dashboard_origin()),
+                // The brain:// live viewer signs AND fetches against this
+                // origin directly from the browser, so the public base must
+                // be a URL the host browser can reach — the service's own
+                // probe origin, with the dashboard admitted via CORS.
+                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.finite_brain_url()),
+                ("FINITE_BRAIN_CORS_ALLOWED_ORIGINS", self.dashboard_origin()),
                 (
                     "FINITE_BRAIN_DB",
                     self.finite_brain_dir()
@@ -2134,7 +2139,7 @@ wait "$postgres_pid"
                     serde_json::json!({
                         "FINITE_SITES_API": self.finitesites_api_url(),
                         "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
                         "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
                     })
                     .to_string(),
@@ -2225,7 +2230,7 @@ wait "$postgres_pid"
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
-            ("FC_BRAIN_PUBLIC_ORIGIN", self.dashboard_origin()),
+            ("FC_BRAIN_PUBLIC_ORIGIN", self.finite_brain_url()),
             (
                 "FC_SITES_UPSTREAM_URL",
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
@@ -5237,18 +5242,19 @@ printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
         assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
         assert!(!yaml.contains("--operator-token"));
         assert!(yaml.contains("exec finite-brain"));
-        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FINITE_BRAIN_CORS_ALLOWED_ORIGINS=http://127.0.0.1:13002"));
         assert!(yaml.contains("FINITE_BRAIN_INVITE_MAILER=dev"));
         assert!(yaml.contains("FINITE_BRAIN_PROTECTED_RATE_LIMIT=10000:60"));
         assert!(
             yaml.contains("FINITE_BRAIN_SERVER_URL\\\":\\\"http://host.container.internal:18790")
         );
-        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL\\\":\\\"http://127.0.0.1:13002"));
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL\\\":\\\"http://127.0.0.1:18790"));
         assert!(
             yaml.contains("FINITE_BRAIN_DEVELOPMENT_HTTP_HOST\\\":\\\"host.container.internal")
         );
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
-        assert!(yaml.contains("FC_BRAIN_PUBLIC_ORIGIN=http://127.0.0.1:13002"));
+        assert!(yaml.contains("FC_BRAIN_PUBLIC_ORIGIN=http://127.0.0.1:18790"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
         assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
         assert!(
