@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -45,6 +46,7 @@ ACTIVE_TURN_POLL_TIMEOUT_MILLIS = 100
 DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
 BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
+ADAPTER_STATE_DB_FILE = "hermes-adapter-state.db"
 SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
 MAX_OUTBOUND_MESSAGE_ROUTES = 256
@@ -461,6 +463,98 @@ def check_requirements() -> bool:
     return bool(_resolve_finitechat_command(""))
 
 
+class _AdapterStateStore:
+    """Adapter-owned durable state, held in one small SQLite file.
+
+    The route table decides where replies land, so it must survive the
+    gateway restarts that wipe process memory. The file lives in the agent
+    home next to the bridge status file and is owned solely by this
+    adapter — the Rust sidecar's own state files are never touched.
+
+    Every operation degrades to a no-op on error: durable state must never
+    break message flow. Ids only — no message content is ever stored.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._conn: sqlite3.Connection | None = None
+        self._connect_failed = False
+
+    def _connect(self) -> sqlite3.Connection | None:
+        if self._conn is not None:
+            return self._conn
+        if self._connect_failed:
+            return None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self._path, timeout=5)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS inbound_chat_routes ("
+                "room_id TEXT NOT NULL, "
+                "thread_id TEXT NOT NULL, "
+                "conversation_id TEXT, "
+                "segment_id TEXT, "
+                "updated_at REAL NOT NULL, "
+                "PRIMARY KEY (room_id, thread_id))"
+            )
+        except (OSError, sqlite3.Error) as exc:
+            self._connect_failed = True
+            logger.warning(
+                "[finitechat] adapter state store unavailable at %s: %s", self._path, exc
+            )
+            return None
+        self._conn = conn
+        return conn
+
+    def remember_route(
+        self,
+        room_id: str,
+        thread_id: str,
+        conversation_id: str | None,
+        segment_id: str | None,
+    ) -> None:
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(
+                "INSERT INTO inbound_chat_routes ("
+                "room_id, thread_id, conversation_id, segment_id, updated_at"
+                ") VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(room_id, thread_id) DO UPDATE SET "
+                "conversation_id = excluded.conversation_id, "
+                "segment_id = excluded.segment_id, "
+                "updated_at = excluded.updated_at",
+                (room_id, thread_id, conversation_id, segment_id, time.time()),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not persist chat route: %s", exc)
+
+    def lookup_route(self, room_id: str, thread_id: str) -> tuple[str | None, str | None] | None:
+        conn = self._connect()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT conversation_id, segment_id FROM inbound_chat_routes "
+                "WHERE room_id = ? AND thread_id = ?",
+                (room_id, thread_id),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("[finitechat] could not read persisted chat route: %s", exc)
+            return None
+        if row is None:
+            return None
+        return str(row[0]) if row[0] else None, str(row[1]) if row[1] else None
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+
+
 def validate_config(config: PlatformConfig) -> bool:
     extra = getattr(config, "extra", {}) or {}
     return bool(extra.get("home") or os.getenv("FINITECHAT_HOME"))
@@ -538,6 +632,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+        # Adapter-owned durable copy of the reply-route table. The in-memory
+        # dict above stays the read cache; this store is the restart-surviving
+        # source of truth it reads through to on a miss.
+        self._state_store = (
+            _AdapterStateStore(Path(self.home) / ADAPTER_STATE_DB_FILE) if self.home else None
+        )
         # The Rust inbox is the durable queue. Keep at most its first blocked
         # ordinary text event per Hermes session in memory while the current
         # owner task finishes. Later events remain only in the inbox and are
@@ -610,6 +710,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         await self._cancel_admission_tasks()
         await self._stop_service()
         await self.cancel_background_tasks()
+        if self._state_store is not None:
+            self._state_store.close()
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
@@ -1345,6 +1447,24 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not thread_id or (conversation_id is None and segment_id is None):
             return
         self._inbound_chat_routes[(room_id, thread_id)] = (conversation_id, segment_id)
+        if self._state_store is not None:
+            self._state_store.remember_route(room_id, thread_id, conversation_id, segment_id)
+
+    def _lookup_inbound_chat_route(
+        self,
+        room_id: str,
+        route_key: str,
+    ) -> tuple[str | None, str | None] | None:
+        key = (room_id, route_key)
+        remembered = self._inbound_chat_routes.get(key)
+        if remembered is not None:
+            return remembered
+        if self._state_store is None:
+            return None
+        persisted = self._state_store.lookup_route(room_id, route_key)
+        if persisted is not None:
+            self._inbound_chat_routes[key] = persisted
+        return persisted
 
     @staticmethod
     def _route_metadata(
@@ -1505,7 +1625,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         route_key = segment_id or thread_id
         remembered_route = (
-            self._inbound_chat_routes.get((room_id, route_key)) if route_key else None
+            self._lookup_inbound_chat_route(room_id, route_key) if route_key else None
         )
         if remembered_route is not None:
             remembered_conversation_id, remembered_segment_id = remembered_route
@@ -1522,6 +1642,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # Unknown Hermes thread/chat identifiers stay unscoped so Core can
             # apply the canonical Home/Home-chat fallback. Promoting them into
             # conversation ids manufactures phantom top-level topics.
+            if route_key is not None:
+                logger.warning(
+                    "[finitechat] no remembered route for room %s route key %s; "
+                    "sending unscoped (Core Home fallback)",
+                    room_id,
+                    route_key,
+                )
             segment_id = None
         return conversation_id, segment_id
 

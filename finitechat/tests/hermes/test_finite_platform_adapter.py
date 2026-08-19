@@ -224,6 +224,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             name: sys.modules.get(name) for name in GATEWAY_MODULE_NAMES
         }
         self.module = load_adapter_module()
+        # Per-test isolated agent home: the adapter persists reply routes and
+        # delivered-event dedup under it, so tests must not share state.
+        state_home = tempfile.TemporaryDirectory()
+        self.addCleanup(state_home.cleanup)
+        self.state_home = state_home.name
 
     def tearDown(self):
         for name, module in self.original_gateway_modules.items():
@@ -238,7 +243,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         *,
         configured_home: bool = True,
     ):
-        extra = {"home": "/tmp/finite-agent-home", "finitechat_bin": "/bin/echo"}
+        extra = {"home": self.state_home, "finitechat_bin": "/bin/echo"}
         if room_id:
             extra["room_id"] = room_id
         home_channel = (
@@ -615,7 +620,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         )
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
-                extra={"home": "/tmp/finite-agent-home", "finitechat_bin": "/bin/echo"},
+                extra={"home": self.state_home, "finitechat_bin": "/bin/echo"},
                 home_channel=explicit,
             )
         )
@@ -749,7 +754,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             adapter = self.module.FiniteChatAdapter(
                 PlatformConfig(
                     extra={
-                        "home": "/tmp/finite-agent-home",
+                        "home": self.state_home,
                         "finitechat_bin": "/bin/false",
                     }
                 )
@@ -1280,6 +1285,104 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([payload["conversation_id"] for payload in payloads], [None, None, None])
         self.assertEqual([payload["segment_id"] for payload in payloads], [None, None, None])
 
+    def test_reply_route_survives_adapter_restart(self):
+        first = self.adapter()
+        first_calls = []
+
+        async def fake_first_json(action, payload, *, timeout):
+            first_calls.append((action, payload, timeout))
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        first._finitechat_json = fake_first_json
+        asyncio.run(
+            first._handle_finitechat_event(
+                {
+                    "room_id": "room-agent-1",
+                    "seq": 7,
+                    "message_id": "msg-7",
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-build-1",
+                    "text": "please build",
+                }
+            )
+        )
+        self.assertIsNotNone(first._state_store)
+        cast(Any, first._state_store).close()
+
+        restarted = self.adapter()
+        self.assertEqual(restarted._inbound_chat_routes, {})
+        restarted_calls = []
+
+        async def fake_restarted_json(action, payload, *, timeout):
+            restarted_calls.append((action, payload, timeout))
+            if action == "send":
+                return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        restarted._finitechat_json = fake_restarted_json
+        result = asyncio.run(
+            restarted.send(
+                "room-agent-1",
+                "done",
+                metadata={"thread_id": "chat-build-1"},
+            )
+        )
+
+        self.assertTrue(result.success)
+        send_payload = next(call[1] for call in restarted_calls if call[0] == "send")
+        self.assertEqual(send_payload["conversation_id"], "topic-build")
+        self.assertEqual(send_payload["segment_id"], "chat-build-1")
+        # The read-through backfills the in-memory cache for the next lookup.
+        self.assertEqual(
+            restarted._inbound_chat_routes[("room-agent-1", "chat-build-1")],
+            ("topic-build", "chat-build-1"),
+        )
+
+    def test_unscoped_fallback_logs_warning_with_route_key(self):
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
+
+        adapter._finitechat_json = fake_json
+        with self.assertLogs(level="WARNING") as captured:
+            asyncio.run(
+                adapter.send(
+                    "room-agent-1",
+                    "reply",
+                    metadata={"thread_id": "unknown-thread"},
+                )
+            )
+
+        send_payload = next(call[1] for call in calls if call[0] == "send")
+        self.assertIsNone(send_payload["conversation_id"])
+        self.assertIsNone(send_payload["segment_id"])
+        self.assertTrue(
+            any(
+                "room-agent-1" in message and "unknown-thread" in message
+                for message in captured.output
+            ),
+            captured.output,
+        )
+
+    def test_unscoped_home_send_without_route_key_stays_silent(self):
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
+
+        adapter._finitechat_json = fake_json
+        with self.assertNoLogs(level="WARNING"):
+            asyncio.run(adapter.send("room-agent-1", "home update"))
+
+        send_payload = next(call[1] for call in calls if call[0] == "send")
+        self.assertIsNone(send_payload["conversation_id"])
+        self.assertIsNone(send_payload["segment_id"])
+
     def test_duplicate_redelivery_is_acked_without_second_dispatch(self):
         adapter = self.adapter()
         calls = []
@@ -1632,7 +1735,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_home_is_required_and_room_is_optional(self):
         self.assertTrue(
-            self.module.validate_config(PlatformConfig(extra={"home": "/tmp/finite-agent-home"}))
+            self.module.validate_config(PlatformConfig(extra={"home": self.state_home}))
         )
         old_home = os.environ.pop("FINITECHAT_HOME", None)
         try:
@@ -2048,7 +2151,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
                 }
@@ -2089,7 +2192,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
                 }
@@ -2148,7 +2251,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/finitechat",
                 }
@@ -2188,7 +2291,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/finitechat",
                     "inbound_stream": True,
@@ -2346,7 +2449,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "room_id": "room-agent-1",
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
@@ -2414,7 +2517,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "room_id": "room-agent-1",
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
@@ -2481,7 +2584,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
-                    "home": "/tmp/finite-agent-home",
+                    "home": self.state_home,
                     "room_id": "room-agent-1",
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
