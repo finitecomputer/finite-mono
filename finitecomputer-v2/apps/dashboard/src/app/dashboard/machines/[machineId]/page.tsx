@@ -165,10 +165,14 @@ async function ImportedMachineOverview({
                 <form action={stopCoreRuntimeAction}>
                   <input type="hidden" name="machineId" value={access.machineId} />
                   <input type="hidden" name="redirectPath" value={`/dashboard/machines/${access.machineId}`} />
-                  <FormActionButton variant="outline" pendingLabel="Stopping...">
+                  <ConfirmSubmitButton
+                    variant="outline"
+                    pendingLabel="Stopping..."
+                    confirmMessage="Stop this agent? It will go offline and stay stopped until you restart it from this page."
+                  >
                     <StopCircleIcon />
                     Stop
-                  </FormActionButton>
+                  </ConfirmSubmitButton>
                 </form>
               ) : null}
               <Button asChild variant="secondary">
