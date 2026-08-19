@@ -29,6 +29,40 @@ test:
 chat-history-stress:
     cargo test --locked -p finitechat-core --lib tests::late_same_account_device_converges_topics_named_chats_and_archives_after_restart -- --ignored --exact --nocapture
 
+# Fast, credential-free Hermes adapter durability gate. Uses the pinned Hermes
+# Python runtime and writes machine-checkable evidence for CI and local review.
+chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/report.json":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(pwd)"
+    report_arg={{ quote(report) }}
+    if [[ "$report_arg" = /* ]]; then
+        report_path="$report_arg"
+    else
+        report_path="$repo_root/$report_arg"
+    fi
+
+    if [[ -n "${HERMES_AGENT_PYTHON:-}" && -x "$HERMES_AGENT_PYTHON" ]]; then
+        cd "$repo_root/finitechat"
+        exec "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
+            --python "$HERMES_AGENT_PYTHON" \
+            --report "$report_path"
+    fi
+
+    hermes_python_store="$(
+        nix build --no-link --print-out-paths \
+            "$repo_root#hermes-agent-python" | tail -n 1
+    )"
+    hermes_python="$hermes_python_store/bin/python3"
+    if [[ ! -x "$hermes_python" ]]; then
+        echo "Pinned Hermes Python did not produce an executable: $hermes_python" >&2
+        exit 1
+    fi
+    cd "$repo_root/finitechat"
+    exec "$hermes_python" scripts/hermes-adapter-regression-report.py \
+        --python "$hermes_python" \
+        --report "$report_path"
+
 # Web-only contributor gate: dashboard unit tests, lint, project-wide typecheck,
 # and production build.
 web-check:

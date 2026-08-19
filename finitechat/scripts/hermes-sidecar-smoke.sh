@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Human-facing Hermes sidecar smoke.
+# Human-facing Hermes CLI round-trip smoke.
 #
 # Exercises the strongest local encrypted flow:
-#   live finitechat server -> agent home -> invite URL -> user join
-#   -> finitechat hermes serve -> /v1/hermes/inbound NDJSON
-#   -> ack/drain -> agent reply -> user decrypts.
+#   live finitechat server -> agent home -> MLS add/Welcome -> user join
+#   -> direct finitechat hermes poll -> agent text/media reply -> user decrypts.
+# It does not start the resident `finitechat hermes serve` transport, consume
+# `/v1/hermes/inbound` NDJSON, or exercise inbox ack/drain semantics.
 #
 # Writes a JSON evidence report for runbooks, CI artifacts, and Docker/Tinfoil
 # baseline comparisons.
@@ -48,7 +49,7 @@ path.write_text(json.dumps({
     "command": "scripts/hermes-sidecar-smoke.sh",
 }, indent=2) + "\n")
 PY
-    echo "Hermes sidecar smoke failed; report: $REPORT" >&2
+    echo "Hermes CLI round-trip smoke failed; report: $REPORT" >&2
     exit "$status"
 fi
 
@@ -83,18 +84,25 @@ path = pathlib.Path(sys.argv[1])
 data = json.loads(path.read_text())
 data["generated_at_unix"] = int(time.time())
 data["command"] = "scripts/hermes-sidecar-smoke.sh"
+data["evidence_scope"] = "direct Hermes CLI round trip; resident sidecar transport not exercised"
+data["not_proved"] = [
+    "finitechat hermes serve",
+    "sidecar /v1/hermes/inbound NDJSON",
+    "ack/drain",
+]
 data["proof_layers"] = [
     "finitechat-server",
     "finitechat hermes CLI",
     "encrypted client stores",
-    "finitechat hermes serve",
-    "sidecar /v1/hermes/inbound NDJSON",
-    "ack/drain",
-    "agent reply",
+    "MLS add/Welcome",
+    "direct Hermes poll",
+    "agent text reply",
+    "agent media reply",
     "user decrypt",
+    "invalid media rejected before append",
 ]
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 
-echo "Hermes sidecar smoke passed; report: $REPORT"
+echo "Hermes CLI round-trip smoke passed; report: $REPORT"
 cat "$REPORT"

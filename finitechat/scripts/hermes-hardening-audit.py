@@ -31,16 +31,24 @@ REQUIRED_SIDECAR_PROOF_LAYERS = {
     "finitechat-server",
     "finitechat hermes CLI",
     "encrypted client stores",
+    "MLS add/Welcome",
+    "direct Hermes poll",
+    "agent text reply",
+    "agent media reply",
+    "user decrypt",
+    "invalid media rejected before append",
+}
+REQUIRED_SIDECAR_NOT_PROVED = {
     "finitechat hermes serve",
     "sidecar /v1/hermes/inbound NDJSON",
     "ack/drain",
-    "agent reply",
-    "user decrypt",
 }
 REQUIRED_ADAPTER_REGRESSION_LAYERS = {
     "plain message mapping",
     "redelivery dedupe",
     "ack retry without duplicate dispatch",
+    "durable busy-text admission",
+    "Hermes clarification routing",
     "transient poll recovery",
     "sidecar startup",
     "service fallback",
@@ -51,7 +59,16 @@ REQUIRED_ADAPTER_REGRESSION_LAYERS = {
     "room filtering",
     "group sender identity",
     "receipt/control stream filtering",
-    "inbound stream fallback",
+    "strict inbound stream recovery",
+    "restart after route learning preserves reply scope",
+    "unknown reply route warns before Home fallback",
+    "intentional unscoped Home send stays quiet",
+    "in-flight turn retains inbox ownership until completion",
+    "pre-completion handler failure leaves event for redelivery",
+    "terminal failure acks completed turn",
+    "cancelled turn leaves event for redelivery",
+    "restart after processing before ack suppresses duplicate turn",
+    "pinned Hermes owner task retains ack until completion",
 }
 REQUIRED_MEDIA_E2E_STEPS = {
     "server_ready",
@@ -758,18 +775,30 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         else f"missing regression layers: {', '.join(adapter_missing)}",
     )
 
+    sidecar_missing = missing_layers(sidecar or {}, REQUIRED_SIDECAR_PROOF_LAYERS)
+    sidecar_not_proved = set((sidecar or {}).get("not_proved") or [])
+    sidecar_scope_is_honest = (
+        (sidecar or {}).get("evidence_scope")
+        == "direct Hermes CLI round trip; resident sidecar transport not exercised"
+        and sidecar_not_proved >= REQUIRED_SIDECAR_NOT_PROVED
+    )
+    sidecar_passed = (
+        bool(sidecar)
+        and sidecar.get("status") == "passed"
+        and not sidecar_missing
+        and sidecar_scope_is_honest
+    )
+    sidecar_detail_parts = []
+    if sidecar_missing:
+        sidecar_detail_parts.append(f"missing layers: {', '.join(sidecar_missing)}")
+    if not sidecar_scope_is_honest:
+        sidecar_detail_parts.append("direct CLI scope or explicit sidecar exclusions missing")
     add_check(
         checks,
-        name="local_sidecar_smoke",
-        status="passed"
-        if sidecar
-        and sidecar.get("status") == "passed"
-        and not missing_layers(sidecar, REQUIRED_SIDECAR_PROOF_LAYERS)
-        else "missing",
+        name="local_hermes_cli_round_trip",
+        status="passed" if sidecar_passed else "missing",
         evidence=str(sidecar_path) if sidecar else None,
-        detail=None
-        if sidecar and not missing_layers(sidecar, REQUIRED_SIDECAR_PROOF_LAYERS)
-        else f"missing layers: {', '.join(missing_layers(sidecar or {}, REQUIRED_SIDECAR_PROOF_LAYERS))}",
+        detail=None if sidecar_passed else "; ".join(sidecar_detail_parts),
     )
 
     media_facts = media_e2e.get("facts", {}) if isinstance(media_e2e, dict) else {}

@@ -44,11 +44,12 @@ SIDECAR_LAYERS = [
     "finitechat-server",
     "finitechat hermes CLI",
     "encrypted client stores",
-    "finitechat hermes serve",
-    "sidecar /v1/hermes/inbound NDJSON",
-    "ack/drain",
-    "agent reply",
+    "MLS add/Welcome",
+    "direct Hermes poll",
+    "agent text reply",
+    "agent media reply",
     "user decrypt",
+    "invalid media rejected before append",
 ]
 DOCKER_LAYERS = [
     "docker image build",
@@ -100,6 +101,8 @@ ADAPTER_REGRESSION_LAYERS = [
     "plain message mapping",
     "redelivery dedupe",
     "ack retry without duplicate dispatch",
+    "durable busy-text admission",
+    "Hermes clarification routing",
     "transient poll recovery",
     "sidecar startup",
     "service fallback",
@@ -110,7 +113,16 @@ ADAPTER_REGRESSION_LAYERS = [
     "room filtering",
     "group sender identity",
     "receipt/control stream filtering",
-    "inbound stream fallback",
+    "strict inbound stream recovery",
+    "restart after route learning preserves reply scope",
+    "unknown reply route warns before Home fallback",
+    "intentional unscoped Home send stays quiet",
+    "in-flight turn retains inbox ownership until completion",
+    "pre-completion handler failure leaves event for redelivery",
+    "terminal failure acks completed turn",
+    "cancelled turn leaves event for redelivery",
+    "restart after processing before ack suppresses duplicate turn",
+    "pinned Hermes owner task retains ack until completion",
 ]
 
 
@@ -120,7 +132,16 @@ def write_json(path: Path, value: dict) -> None:
 
 
 def sidecar_report() -> dict:
-    return {"status": "passed", "proof_layers": SIDECAR_LAYERS}
+    return {
+        "status": "passed",
+        "evidence_scope": "direct Hermes CLI round trip; resident sidecar transport not exercised",
+        "not_proved": [
+            "finitechat hermes serve",
+            "sidecar /v1/hermes/inbound NDJSON",
+            "ack/drain",
+        ],
+        "proof_layers": SIDECAR_LAYERS,
+    }
 
 
 def adapter_regression_report() -> dict:
@@ -587,6 +608,19 @@ class HardeningAuditTest(unittest.TestCase):
         self.assertEqual(audit["missing"], [])
         self.assertEqual(audit["recovery_scope"], RECOVERY_SCOPE)
         self.assertIn("not Agent Runtime Recovery Readiness", audit["completion_scope"])
+
+    def test_audit_rejects_cli_smoke_that_overclaims_resident_sidecar_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_value:
+            tmp = Path(tmp_value)
+            write_complete_audit_inputs(tmp)
+            report = sidecar_report()
+            report["evidence_scope"] = "resident sidecar"
+            report["not_proved"] = []
+            write_json(tmp / "sidecar.json", report)
+            status, audit = run_audit(tmp, require_complete=True)
+
+        self.assertEqual(status, 2)
+        self.assertIn("local_hermes_cli_round_trip", audit["missing"])
 
     def test_audit_rejects_legacy_agent_only_snapshot_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:

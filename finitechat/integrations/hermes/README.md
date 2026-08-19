@@ -193,7 +193,7 @@ and agent-local filesystem paths never enter the encrypted room log.
 For a local human smoke with JSON evidence:
 
 ```bash
-scripts/hermes-adapter-regression-report.py
+just chat-reliability-fast
 scripts/hermes-sidecar-smoke.sh
 scripts/hermes-agent-media-e2e.sh
 scripts/ios-hermes-agent-media-e2e.sh
@@ -203,11 +203,15 @@ The adapter regression command writes
 `target/hermes-adapter-regressions/report.json` and proves focused Python
 adapter behavior for plain messages, redelivery, ack retry, poll recovery,
 sidecar startup/fallback/serialization, media, edits, typing activity, room
-filters, group sender identity, receipt/control stream filtering, and stream
-fallback.
-The script writes `target/hermes-sidecar-smoke/report.json` with timings for
-server startup, Welcome-first room admission, sidecar readiness, inbound
-delivery, ack/drain, agent reply, and user decrypt.
+filters, group sender identity, receipt/control stream filtering, strict stream
+recovery, durable reply routes, and ack ownership across failure/restart
+boundaries. It fails if a required test is missing or skipped.
+The CLI round-trip script writes `target/hermes-sidecar-smoke/report.json` for
+server startup, Welcome-first room admission, direct `finitechat hermes poll`,
+text/media replies, user decrypt, and invalid-media rejection. Despite its
+historical filename, it does not start `finitechat hermes serve`, consume the
+NDJSON inbound stream, or prove ack/drain behavior; those exclusions are
+recorded in the report.
 The media E2E writes `target/hermes-agent-media-e2e/report.json` and runs the
 real `hermes-agent` package against the Finite plugin with the sidecar inbound
 stream enabled. It proves an image sent by a Finite Chat user reaches Hermes as
