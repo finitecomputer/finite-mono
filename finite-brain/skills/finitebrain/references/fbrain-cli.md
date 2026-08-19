@@ -315,6 +315,25 @@ chat approval card; Folder plans additionally need the key-holding
 committer). Emails without a Finite account fall back to the one-time email
 invitation.
 
+Every invitation receipt carries a self-describing `deliveryStatus`:
+`sent` (a courtesy email with the public instructions URL reached the human
+account mailbox), `in_app` (the npub-bound invitee — managed agents, or
+humans when no mailer is configured — receives it in their authenticated
+client, not by email), `not_configured` (server has no invite mailer), and
+`failed` (the courtesy email errored after the invitations were already
+committed; they remain valid and visible in-app). `in_app` is the normal
+outcome for account-backed invitations, not a delivery failure.
+
+`invite brain list` answers two different questions depending on the flag:
+with no `--brain` it lists invitations RECEIVED by the acting identity
+(invitation ids, inviter, brain display name); with `--brain <id>` it lists
+invitations ISSUED on that Brain. To answer "have I been invited to
+anything?", run the no-flag form; `brain list --json` rows with
+`role: "invited"` are the same incoming invitations from the Brain side.
+`invite brain inspect` and `accept` want the invitation id
+(`invitation-...`); an invite code (`invite-...`) is resolved to its id by
+the code's public `llms.txt` instructions URL.
+
 When your invite files an approval request, tell the user: an approval card
 appears in their chat (they can also run `fbrain approvals list`). When the
 user asks whether anything is waiting for them, check both sides: your own

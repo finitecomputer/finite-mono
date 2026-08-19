@@ -281,7 +281,11 @@ pub(crate) fn brain_invitation_response(
         accept_path: invitation.accept_path,
         public_instructions_path: String::new(),
         public_instructions_url: None,
-        delivery_status: None,
+        // npub-bound invitations are delivered in-band (the invitee's
+        // authenticated client surfaces them); only the email paths upgrade
+        // this to "sent"/"not_configured"/"failed". Agents reading a null
+        // here repeatedly misreported delivery as broken.
+        delivery_status: Some("in_app".to_owned()),
         initial_folder_access: invitation
             .initial_folder_access
             .into_iter()

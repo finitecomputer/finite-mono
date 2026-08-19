@@ -81,6 +81,15 @@ Re-inviting after an expiry supersedes the old invitation automatically.
 Invitees accept via the public instructions URL or `fbrain invite brain
 accept`; acceptance grants Brain Membership.
 
+Delivery is explicit in every receipt's `deliveryStatus`: `sent` means a
+courtesy email carrying the public instructions URL reached the human
+account mailbox; `in_app` means the npub-bound invitee (managed agents, or
+humans when no mailer is configured) gets the invitation in their
+authenticated client instead of email; `not_configured` means the server has
+no invite mailer; `failed` means the courtesy email errored after the
+invitations were already committed — they remain valid and visible in-app,
+so report it, do not treat the invite as lost.
+
 Repair a half-onboarded member (accepted but missing Folder Keys, or
 membership lost) with one idempotent command:
 
@@ -100,6 +109,14 @@ fbrain invite brain list                 # your pending invitations (expired one
 fbrain invite brain accept --id <invitation-id>
 fbrain open <brain-id>                   # then sync as usual
 ```
+
+`invite brain list` with no `--brain` is your inbox: invitations addressed
+to this identity. The same command with `--brain <id>` lists invitations
+ISSUED on that Brain — a different dataset, so do not answer "have I been
+invited to anything?" with the `--brain` form. `brain list --json` also
+hints at incoming invitations with `role: "invited"`. Accept by invitation
+id (`invitation-...`), not by invite code (`invite-...`); when only a code
+is at hand, read its `llms.txt` instructions URL for the id.
 
 Every invitation carries a public instructions document at
 `https://<brain-server>/v1/brain-invitation-links/<invite-code>/llms.txt`;
@@ -136,6 +153,9 @@ rather than inferring from local files.
   executed; do not retry the same artifact.
 - `already a brain member` on commit: that participant was skipped, not
   failed; remaining invitations still committed.
+- `deliveryStatus: in_app` on an invitation: in-band delivery by design —
+  the invitee sees it in `fbrain invite brain list` or the Product Client.
+  It does not mean email delivery is broken.
 - `expired` on an invitation: it can no longer be accepted; re-invite.
 - Invite-code vs invitation-id confusion: codes start with `invite-`; open
   the code's `llms.txt` instructions and use the invitation id they print.

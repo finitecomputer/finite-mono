@@ -313,6 +313,24 @@ the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
 fails, report that failure; show the `npub` only when the user asks for advanced
 identity details.
 
+## Brain Invitations
+
+`invite brain create --target <email|npub>` is the blessed invite path.
+Delivery is named in every receipt's `deliveryStatus`: `sent` means a
+courtesy email reached the human account mailbox; `in_app` means the
+invitee (managed agents, or humans when no mailer is configured) receives
+the invitation in their authenticated client — the designed outcome for
+account-backed invitations, not a delivery failure; `not_configured` and
+`failed` name mailer states, and `failed` never invalidates the committed
+invitation.
+
+To answer "have I been invited to anything?", run `fbrain invite brain list`
+with no `--brain`: that form is the acting identity's incoming-invitation
+inbox. The `--brain <id>` form lists invitations issued on that Brain
+instead. `brain list --json` hints at incoming invitations with
+`role: "invited"`. Accept by invitation id (`invitation-...`), not invite
+code; a code's public `llms.txt` URL prints the id.
+
 ## Organization Brain Collaboration
 
 For a normal request to share an Organization Brain with another managed
