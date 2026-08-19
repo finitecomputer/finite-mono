@@ -4911,6 +4911,39 @@ fn commit_invitation_plan<W: Write>(
             output,
             "invited {invited} principal(s); they accept with `fbrain invite brain accept`"
         )?;
+        let deliveries: Vec<(String, String)> = response
+            .get("invitations")
+            .and_then(|invitations| invitations.as_array())
+            .map(|invitations| {
+                invitations
+                    .iter()
+                    .filter_map(|entry| {
+                        Some((
+                            entry.get("ref")?.as_str()?.to_owned(),
+                            entry
+                                .get("invitation")?
+                                .get("deliveryStatus")?
+                                .as_str()?
+                                .to_owned(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !deliveries.is_empty() {
+            let rendered = deliveries
+                .iter()
+                .map(|(ref_, status)| format!("{ref_}={status}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(output, "delivery: {rendered}")?;
+            if deliveries.iter().any(|(_, status)| status == "failed") {
+                writeln!(
+                    output,
+                    "a courtesy email failed; the invitation is still committed and visible to the invitee in-app"
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -9212,6 +9245,88 @@ mod tests {
         assert_eq!(body["grants"][0]["recipientNpub"], admin_npub);
         assert!(body.get("folderKey").is_none());
         assert!(body.get("rotationBody").is_none());
+    }
+
+    #[test]
+    fn invites_create_plan_commit_receipt_names_delivery() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let target_npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000002");
+        // Preflight resolves an account-backed email, then the commit returns
+        // one human invitation that was emailed.
+        let (server_url, server) = start_scripted_capture_server(vec![
+            (
+                200,
+                serde_json::json!({
+                    "planId": "plan-1",
+                    "planHash": "hash-1",
+                    "human": { "email": "bob@example.com", "npub": target_npub },
+                    "agents": [],
+                    "exclusions": [],
+                })
+                .to_string(),
+            ),
+            (
+                200,
+                serde_json::json!({
+                    "status": "committed",
+                    "planId": "plan-1",
+                    "rosterRevision": 1,
+                    "invitations": [{
+                        "ref": "bob@example.com",
+                        "npub": target_npub,
+                        "invitation": {
+                            "id": "invitation-1",
+                            "status": "pending",
+                            "inviteCode": "invite-1",
+                            "deliveryStatus": "sent",
+                        },
+                    }],
+                    "skipped": [],
+                })
+                .to_string(),
+            ),
+        ]);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "acme",
+                "--target",
+                "bob@example.com",
+                "--server",
+                &server_url,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("invited 1 principal(s)"), "{text}");
+        assert!(
+            text.contains("delivery: bob@example.com=sent"),
+            "receipt must name per-principal delivery: {text}"
+        );
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/preflight")
+        );
+        assert!(
+            requests[1]
+                .0
+                .starts_with("POST /v1/brains/acme/invitations/commit")
+        );
     }
 
     #[test]

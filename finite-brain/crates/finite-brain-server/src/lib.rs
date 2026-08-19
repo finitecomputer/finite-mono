@@ -1561,7 +1561,7 @@ fn deliver_email_invitation(
     invitation: &StoredBrainInvitation,
 ) -> Result<Option<String>, ApiError> {
     let Some(invited_email) = invitation.invited_email.as_deref() else {
-        return Ok(None);
+        return Ok(Some("in_app".to_owned()));
     };
     let Some(mailer) = state.invite_mailer.as_ref() else {
         return Ok(Some("not_configured".to_owned()));
@@ -1579,6 +1579,27 @@ fn deliver_email_invitation(
         )
     })?;
     Ok(Some("sent".to_owned()))
+}
+
+/// Send the account-holder courtesy email for a plan-committed invitation
+/// and classify the outcome. Managed agent mailboxes are not human-readable,
+/// so only the human Principal's invitation is emailed; every plan
+/// invitation is additionally delivered in-band. A mailer error happens
+/// after the invitations are already durable, so it is reported as
+/// "failed" instead of failing the commit.
+fn deliver_plan_courtesy_email(
+    state: &ServerState,
+    human_email: &str,
+    invite_code: &str,
+) -> String {
+    let Some(mailer) = state.invite_mailer.as_ref() else {
+        return "not_configured".to_owned();
+    };
+    let email = invite_email_payload(state, human_email, invite_code, false);
+    match mailer(&email) {
+        Ok(()) => "sent".to_owned(),
+        Err(_) => "failed".to_owned(),
+    }
 }
 
 fn resend_invite_mailer(api_key: String, from: String) -> BrainInviteMailer {
@@ -8741,6 +8762,8 @@ mod tests {
             invitation.initial_folder_access,
             vec!["getting-started".to_owned()]
         );
+        // npub-bound invitations are delivered in-band, never emailed.
+        assert_eq!(invitation.delivery_status.as_deref(), Some("in_app"));
 
         let list = authed_request(
             router.clone(),
@@ -11758,6 +11781,155 @@ mod tests {
         }
     }
 
+    /// Preflight and commit the full friend@example.com plan (human plus two
+    /// agents) under the given mailer wiring, returning the commit receipt
+    /// and every email the mailer saw.
+    async fn commit_full_plan_with_mailer(
+        mailer: Option<std::result::Result<(), String>>,
+    ) -> (InvitationCommitResponse, Vec<BrainInviteEmail>) {
+        let mut fixture = PlanFixture::new();
+        let delivered: Arc<Mutex<Vec<BrainInviteEmail>>> = Arc::new(Mutex::new(Vec::new()));
+        if let Some(outcome) = mailer {
+            let delivered_for_mailer = delivered.clone();
+            fixture.state = fixture.state.clone().with_invite_mailer(move |email| {
+                delivered_for_mailer.lock().unwrap().push(email.clone());
+                outcome.clone()
+            });
+        }
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, fixture.full_roster_agents()),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_one_npub(),
+                    "managedAgentEmail": "agent-one@finite.vip",
+                }),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": fixture.agent_two_npub(),
+                    "managedAgentEmail": "agent-two@finite.vip",
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+        let plan = run_preflight(&router, &fixture).await;
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.invitations.len(), 3);
+        let delivered = delivered.lock().expect("delivery capture mutex").clone();
+        (committed, delivered)
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_courtesy_emails_only_the_human_principal() {
+        let (committed, delivered) = commit_full_plan_with_mailer(Some(Ok(()))).await;
+        let human = committed
+            .invitations
+            .iter()
+            .find(|entry| entry.ref_ == "friend@example.com")
+            .expect("human principal invitation");
+        assert_eq!(human.invitation.delivery_status.as_deref(), Some("sent"));
+        for entry in committed
+            .invitations
+            .iter()
+            .filter(|entry| entry.ref_ != "friend@example.com")
+        {
+            assert_eq!(entry.invitation.delivery_status.as_deref(), Some("in_app"));
+        }
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].to, "friend@example.com");
+        assert_eq!(delivered[0].subject, "Brain invitation");
+        assert!(delivered[0].text.contains(&human.invitation.invite_code));
+        assert!(
+            delivered[0].text.contains(
+                &human
+                    .invitation
+                    .public_instructions_url
+                    .clone()
+                    .unwrap_or_default()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_without_a_mailer_reports_not_configured() {
+        let (committed, delivered) = commit_full_plan_with_mailer(None).await;
+        assert!(delivered.is_empty());
+        for entry in &committed.invitations {
+            let expected = if entry.ref_ == "friend@example.com" {
+                "not_configured"
+            } else {
+                "in_app"
+            };
+            assert_eq!(entry.invitation.delivery_status.as_deref(), Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_courtesy_email_failure_does_not_fail_the_commit() {
+        let (committed, delivered) =
+            commit_full_plan_with_mailer(Some(Err("mailer down".to_owned()))).await;
+        assert_eq!(delivered.len(), 1);
+        let human = committed
+            .invitations
+            .iter()
+            .find(|entry| entry.ref_ == "friend@example.com")
+            .expect("human principal invitation");
+        assert_eq!(human.invitation.delivery_status.as_deref(), Some("failed"));
+        assert_eq!(human.invitation.status, "pending");
+    }
+
     #[tokio::test]
     async fn invitation_commit_rejects_plan_hash_mismatch() {
         let fixture = PlanFixture::new();
@@ -11909,6 +12081,107 @@ mod tests {
                 .unwrap();
             assert_eq!(new.status, LinkStatus::Pending);
         }
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_reusing_a_pending_invitation_does_not_re_email() {
+        let mut fixture = PlanFixture::new();
+        let delivered: Arc<Mutex<Vec<BrainInviteEmail>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_for_mailer = delivered.clone();
+        fixture.state = fixture.state.clone().with_invite_mailer(move |email| {
+            delivered_for_mailer.lock().unwrap().push(email.clone());
+            Ok(())
+        });
+        let core_responses = vec![
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+            (
+                200,
+                "/api/core/v1/brain/account-agent-roster",
+                fixture.roster(3, serde_json::json!([])),
+            ),
+        ];
+        let identity_responses = vec![
+            // Brain creation probes whether the creator is a Managed Agent.
+            (
+                404,
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({}),
+            ),
+            (
+                200,
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_friend",
+                    "userNpub": fixture.human_npub(),
+                }),
+            ),
+        ];
+        let (fixture, router) =
+            plan_fixture_router(fixture, core_responses, identity_responses).await;
+
+        // A still-live pending invitation for the human already occupies the
+        // (Brain, target) singleton: the commit must reuse it without
+        // minting a second delivery handle or a second courtesy email.
+        {
+            let mut store = fixture.state.store.lock().unwrap();
+            store
+                .create_brain_invitation(
+                    &BrainId::new("acme").unwrap(),
+                    "invitation-live",
+                    &UserId::new(fixture.human_npub()).unwrap(),
+                    "invite-live",
+                    "/v1/brain-invitation-links/invite-live/accept",
+                    &[],
+                    &UserId::new(npub(&fixture.admin_keys)).unwrap(),
+                    "2026-07-01T00:00:00Z",
+                    "2026-06-23T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let plan = run_preflight(&router, &fixture).await;
+        let commit = authed_request(
+            router,
+            &fixture.admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations/commit",
+            Some(
+                serde_json::json!({
+                    "planId": plan.plan_id,
+                    "planHash": plan.plan_hash,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let committed: InvitationCommitResponse = read_json(commit).await;
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.invitations.len(), 1);
+        assert_eq!(committed.invitations[0].invitation.id, "invitation-live");
+        assert_eq!(
+            committed.invitations[0]
+                .invitation
+                .delivery_status
+                .as_deref(),
+            Some("in_app")
+        );
+        assert!(
+            committed
+                .skipped
+                .iter()
+                .any(|skip| skip.reason.contains("pending invitation reused"))
+        );
+        let delivered = delivered.lock().expect("delivery capture mutex");
+        assert!(
+            delivered.is_empty(),
+            "reused pending invitation must not trigger a second courtesy email"
+        );
     }
 
     #[tokio::test]

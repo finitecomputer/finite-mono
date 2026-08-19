@@ -635,6 +635,10 @@ pub(crate) async fn execute_invitation_plan_commit(
     let mut invitations = Vec::new();
     let mut skipped = Vec::new();
     let mut superseded_invitation_ids = Vec::new();
+    // The human Principal's freshly minted invite code, when this commit
+    // created one: the reuse and skip paths keep the already-delivered
+    // invitation and must not trigger a second courtesy email.
+    let mut fresh_human_invite_code: Option<String> = None;
     {
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(brain_id)?;
@@ -713,6 +717,13 @@ pub(crate) async fn execute_invitation_plan_commit(
                 16,
             );
             let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
+            if plan
+                .human_npub
+                .as_ref()
+                .is_some_and(|human| human.as_str() == npub)
+            {
+                fresh_human_invite_code = Some(invite_code.clone());
+            }
             let invitation = store.create_brain_invitation_with_provenance(
                 brain_id,
                 &id,
@@ -755,6 +766,25 @@ pub(crate) async fn execute_invitation_plan_commit(
                 )?;
             }
         }
+    }
+
+    // Courtesy delivery: the human Principal's account mailbox gets the same
+    // public-instructions email the no-account bootstrap path sends, because
+    // account-backed invitations are otherwise delivered only in-band and
+    // invitees did not notice them. Agent invitations stay in-band, and a
+    // reused pending invitation is not re-emailed. The invitations are
+    // already durable here, so a mailer failure is reported through
+    // deliveryStatus, never raised.
+    if let Some(invite_code) = fresh_human_invite_code.as_deref()
+        && let Some(entry) = invitations
+            .iter_mut()
+            .find(|entry| entry.invitation.invite_code == invite_code)
+    {
+        entry.invitation.delivery_status = Some(deliver_plan_courtesy_email(
+            state,
+            &plan.human_email,
+            invite_code,
+        ));
     }
 
     Ok(PlanCommitResult::Committed(InvitationCommitResponse {
