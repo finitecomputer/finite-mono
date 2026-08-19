@@ -1,12 +1,14 @@
 # Nix builds of the workspace server binaries + CLIs, shared by flake.nix.
 # Each package receives a generated workspace manifest plus only its transitive
-# local crate closure. Keep these path lists aligned with Cargo path dependencies;
-# the Nix package-build CI lane catches omissions. The root Cargo.lock has git deps
-# (hypernote-mdx, pinned finitechat crates), hence allowBuiltinFetchGit.
+# local crate closure. Crane first compiles that scoped package's dependencies
+# from dummy sources, then reuses those artifacts for the real application build.
+# Keep these path lists aligned with Cargo path dependencies; the Nix package-build
+# CI lane catches omissions.
 # A missing path dependency usually surfaces there as Cargo's "failed to load
 # manifest" or "no targets specified" error; update that package's sourcePaths.
 # doCheck = false: tests run in CI via cargo; nix builds stay fast/reliable.
 {
+  craneLib,
   pkgs,
   sourceRoot,
 }:
@@ -16,8 +18,8 @@ let
   workspaceManifest = builtins.fromTOML (builtins.readFile (sourceRoot + "/Cargo.toml"));
   workspaceMembers = workspaceManifest.workspace.members;
 
-  scopedSource =
-    name: paths:
+  scopedSources =
+    paths:
     let
       members = builtins.filter (member: builtins.elem member paths) workspaceMembers;
       manifest = (pkgs.formats.toml { }).generate "Cargo.toml" (
@@ -31,15 +33,22 @@ let
       files = lib.fileset.toSource {
         root = sourceRoot;
         fileset = lib.fileset.unions (
-          [ (sourceRoot + "/Cargo.lock") ] ++ map (path: sourceRoot + "/${path}") paths
+          [
+            (sourceRoot + "/Cargo.lock")
+            (sourceRoot + "/Cargo.toml")
+          ]
+          ++ map (path: sourceRoot + "/${path}") paths
         );
       };
+      app = pkgs.runCommand "source" { } ''
+        cp -R ${files} "$out"
+        chmod u+w "$out" "$out/Cargo.toml"
+        cp ${manifest} "$out/Cargo.toml"
+      '';
     in
-    pkgs.runCommand "${name}-source" { } ''
-      cp -R ${files} "$out"
-      chmod u+w "$out"
-      cp ${manifest} "$out/Cargo.toml"
-    '';
+    {
+      inherit app files manifest;
+    };
 
   crateVersion =
     dir: (builtins.fromTOML (builtins.readFile (sourceRoot + "/${dir}/Cargo.toml"))).package.version;
@@ -50,40 +59,81 @@ let
       crate ? pname,
       dir,
       sourcePaths,
+      cargoExtraArgs ? "--offline -p ${crate}",
       exposeSourceFingerprint ? false,
       mainProgram ? pname,
+      dummySourceAttrs ? { },
       extraAttrs ? { },
     }:
     let
-      src = scopedSource pname sourcePaths;
+      sources = scopedSources sourcePaths;
+      src = sources.app;
+      version = crateVersion dir;
+      cargoVendorDir = craneLib.vendorCargoDeps {
+        cargoLock = sourceRoot + "/Cargo.lock";
+      };
+      commonArgs = {
+        inherit
+          cargoVendorDir
+          pname
+          src
+          version
+          ;
+        # The scoped workspace has fewer members than the root lock records,
+        # so Cargo must be allowed to normalize its build-directory copy. The
+        # vendored root lock remains the only available dependency universe.
+        inherit cargoExtraArgs;
+        strictDeps = true;
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl ];
+      };
+      dummySrc = craneLib.mkDummySrc (
+        {
+          src = sources.files;
+          cargoLock = sourceRoot + "/Cargo.lock";
+          # mkDummySrc reads the real root manifest to discover Cargo targets,
+          # then this restores the same scoped workspace used by the app build.
+          extraDummyScript = ''
+            chmod u+w "$out/Cargo.toml"
+            cp ${sources.manifest} "$out/Cargo.toml"
+          '';
+        }
+        // dummySourceAttrs
+      );
+      cargoArtifacts = craneLib.buildDepsOnly (
+        (builtins.removeAttrs commonArgs [ "src" ])
+        // {
+          inherit dummySrc;
+          # CI consumes release build artifacts; workspace checks/tests run in
+          # their own lanes, so skip buildDepsOnly's additional cargo check.
+          cargoCheckCommand = ":";
+          doCheck = false;
+        }
+      );
       sourceFingerprint = "nix-${builtins.substring 0 32 (builtins.baseNameOf (toString src))}";
-      fingerprintAttrs = lib.optionalAttrs exposeSourceFingerprint {
+      fingerprintBuildAttrs = lib.optionalAttrs exposeSourceFingerprint {
         FINITECHAT_BUILD_FINGERPRINT = sourceFingerprint;
         # Nix builds an immutable scoped snapshot. This describes that build
         # input; it does not inspect the caller's Git working-tree status.
         FINITECHAT_BUILD_DIRTY = "false";
-        passthru.sourceFingerprint = sourceFingerprint;
       };
+      fingerprintPassthru = lib.optionalAttrs exposeSourceFingerprint {
+        inherit sourceFingerprint;
+      };
+      appAttrs = builtins.removeAttrs extraAttrs [ "passthru" ];
     in
-    pkgs.rustPlatform.buildRustPackage (
-      {
-        inherit pname src;
-        version = crateVersion dir;
-        cargoLock = {
-          lockFile = sourceRoot + "/Cargo.lock";
-          allowBuiltinFetchGit = true;
-        };
-        cargoBuildFlags = [
-          "-p"
-          crate
-        ];
+    craneLib.buildPackage (
+      commonArgs
+      // {
+        inherit cargoArtifacts;
         doCheck = false;
-        nativeBuildInputs = [ pkgs.pkg-config ];
-        buildInputs = [ pkgs.openssl ];
         meta.mainProgram = mainProgram;
       }
-      // fingerprintAttrs
-      // extraAttrs
+      // fingerprintBuildAttrs
+      // appAttrs
+      // {
+        passthru = (extraAttrs.passthru or { }) // fingerprintPassthru // { inherit cargoArtifacts; };
+      }
     );
 in
 rec {
@@ -92,6 +142,14 @@ rec {
     pname = "devfinity";
     dir = "devfinity";
     sourcePaths = [ "devfinity" ];
+    dummySourceAttrs.cleanCargoTomlFilter =
+      path:
+      craneLib.filters.cargoTomlDefault path
+      &&
+        path != [
+          "dev-dependencies"
+          "finitechat-core"
+        ];
     extraAttrs.postPatch = ''
       # The binary package does not run devfinity tests; avoid pulling the
       # test-only finitechat-core path dependency into this Nix source closure.

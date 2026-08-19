@@ -117,6 +117,11 @@ Two rules apply to **every** release and promotion, no exceptions:
   `infra/nixos/packages.nix`: the root `Cargo.lock`, a generated root workspace
   manifest listing only the package's selected workspace members, and only the
   binary's transitive local crate directories plus explicitly embedded assets.
+  Crane builds a separate dummy-source dependency artifact for each scoped
+  package and feeds it into the real-source application build. An ordinary Rust
+  source edit must therefore leave
+  `.#packages.x86_64-linux.<package>.cargoArtifacts.drvPath` unchanged; manifest,
+  lockfile, build-input, or package-selection changes intentionally invalidate it.
   When a package gains a path dependency or an
   `include_str!`/`include_bytes!` input outside those crate directories, add
   that path to its `sourcePaths` in the same change. Do not add unrelated
