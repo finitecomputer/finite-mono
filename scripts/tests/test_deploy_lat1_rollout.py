@@ -205,7 +205,14 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     runtime="${values[index]}"
                     machine="${values[index+1]}"
                     project="${values[index+2]}"
-                    fact="$(jq -ce --arg runtime "$runtime" --arg machine "$machine" --arg project "$project" '.[] | select(.agent_runtime_id == $runtime and .source_machine_id == $machine and .project_id == $project)' <<<"$FAKE_PROVIDER_FACTS")"
+                    if [[ ${FAKE_PROVIDER_FAILURE:-} == "canonical inspect error" ]]; then
+                      echo "runtime rollout provider preflight failed: could not inspect canonical container $machine" >&2
+                      exit 1
+                    fi
+                    if ! fact="$(jq -ce --arg runtime "$runtime" --arg machine "$machine" --arg project "$project" '.[] | select(.agent_runtime_id == $runtime and .source_machine_id == $machine and .project_id == $project)' <<<"$FAKE_PROVIDER_FACTS")"; then
+                      printf 'ABSENT\t%s\t%s\t%s\n' "$runtime" "$machine" "$project"
+                      continue
+                    fi
                     if [[ -f "$FAKE_STATE_DIR/upgraded-$machine" ]]; then
                       fact="$(jq -c --arg artifact artifact-v2 --arg image "$FAKE_TARGET_IMAGE" '.current_artifact_id = $artifact | .image = $image' <<<"$fact")"
                     fi
@@ -576,6 +583,129 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(len(exact), 1)
             self.assertIn("runtime-running", exact[0])
             self.assertNotIn("runtime-offline", exact[0])
+
+    def test_all_excludes_absent_canonical_compute_without_aborting(self) -> None:
+        # A ghost fleet record: Core plans the runtime, but its canonical
+        # container is definitively absent on the host. The entry becomes a
+        # loud provider_compute_absent exclusion, never a plan-wide abort.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            ghost = plan_entry("project-ghost", "runtime-ghost", "kata-ghost")
+            running = plan_entry("project-running", "runtime-running", "kata-running")
+            canary_skip = skipped_entry(
+                "project-canary",
+                "runtime-canary",
+                "kata-canary",
+                "already_on_target_artifact",
+            )
+            facts = [
+                provider_fact("project-running", "runtime-running", "kata-running"),
+                provider_fact(
+                    "project-canary",
+                    "runtime-canary",
+                    "kata-canary",
+                    artifact="artifact-v2",
+                    image=TARGET_IMAGE,
+                ),
+            ]
+            env, log, state_root = self.fake_ssh_environment(
+                temp,
+                rollout_report([ghost, running], skipped=[canary_skip]),
+                facts,
+            )
+            scope = (
+                "--roll-all",
+                "--roll-canary-project-id",
+                "project-canary",
+            )
+            prepared, plan_hash = self.prepare(env, *scope)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            self.assertIn("provider_compute_absent=1", prepared.stdout)
+            saved = json.loads(
+                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [entry["agent_runtime_id"] for entry in saved["planned"]],
+                ["runtime-running"],
+            )
+            self.assertEqual(len(saved["excluded"]), 1)
+            self.assertEqual(saved["excluded"][0]["agent_runtime_id"], "runtime-ghost")
+            self.assertEqual(saved["excluded"][0]["reason"], "provider_compute_absent")
+            self.assertEqual(saved["excluded"][0]["provider_facts"]["state"], "absent")
+            self.assertIsNone(
+                saved["excluded"][0]["provider_facts"]["agent_principal_sha256"]
+            )
+
+            log.write_text("", encoding="utf-8")
+            executed = self.run_rollout(
+                "--execute-plan-hash",
+                plan_hash,
+                *self.actor_args(),
+                *scope,
+                env=env,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            exact = [
+                call
+                for call in log.read_text(encoding="utf-8").splitlines()
+                if "--expected-agent-runtime-id" in call and "--plan-only" not in call
+            ]
+            self.assertEqual(len(exact), 1)
+            self.assertIn("runtime-running", exact[0])
+            self.assertNotIn("runtime-ghost", exact[0])
+
+    def test_absent_canonical_compute_explicit_scope_refuses(self) -> None:
+        # An explicitly requested runtime whose compute is gone is a loud
+        # refusal, same as any other provider exclusion in explicit scope.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            plan = rollout_report(
+                [plan_entry("project-ghost", "runtime-ghost", "kata-ghost")]
+            )
+            env, _, _ = self.fake_ssh_environment(temp, plan, [])
+            result, _ = self.prepare(env, "--roll-project-id", "project-ghost")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("excluded by provider preflight", result.stderr)
+
+    def test_ambiguous_canonical_inspect_failure_stays_fatal(self) -> None:
+        # Only a definitive container-not-found becomes a skip. Any other
+        # inspect failure (daemon, timeout, unreachable host) aborts the
+        # whole plan, exactly as before.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            running = plan_entry("project-running", "runtime-running", "kata-running")
+            canary_skip = skipped_entry(
+                "project-canary",
+                "runtime-canary",
+                "kata-canary",
+                "already_on_target_artifact",
+            )
+            facts = [
+                provider_fact("project-running", "runtime-running", "kata-running"),
+                provider_fact(
+                    "project-canary",
+                    "runtime-canary",
+                    "kata-canary",
+                    artifact="artifact-v2",
+                    image=TARGET_IMAGE,
+                ),
+            ]
+            env, _, state_root = self.fake_ssh_environment(
+                temp,
+                rollout_report([running], skipped=[canary_skip]),
+                facts,
+                provider_failure="canonical inspect error",
+            )
+            result, plan_hash = self.prepare(
+                env,
+                "--roll-all",
+                "--roll-canary-project-id",
+                "project-canary",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(plan_hash, "")
+            self.assertIn("could not inspect canonical container", result.stderr)
+            self.assertFalse(state_root.exists())
 
     def test_execute_recomputes_hash_then_rechecks_each_entry_and_postflight(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
