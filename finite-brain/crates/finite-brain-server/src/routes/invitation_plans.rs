@@ -6,25 +6,6 @@ use finite_brain_store::{
 const PLAN_COMMIT_WINDOW_SECONDS: u64 = 15 * 60;
 const COMMIT_INVITATION_EXPIRY_SECONDS: u64 = 14 * 24 * 60 * 60;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CoreAccountAgentRosterResponse {
-    workos_user_id: String,
-    human_mailbox: String,
-    roster_revision: i64,
-    #[serde(default)]
-    agents: Vec<CoreRosterAgentEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CoreRosterAgentEntry {
-    managed_agent_email: String,
-    #[serde(default)]
-    agent_npub: Option<String>,
-    status: String,
-}
-
 /// Fully resolved invite set for one invited email: human Principal, grant-ready
 /// agent Principals, and explicit exclusions for everything not grant-ready.
 #[derive(Clone)]

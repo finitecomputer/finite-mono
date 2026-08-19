@@ -190,6 +190,25 @@ struct IdentityUserResolutionResponse {
     user_npub: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreAccountAgentRosterResponse {
+    workos_user_id: String,
+    human_mailbox: String,
+    roster_revision: i64,
+    #[serde(default)]
+    agents: Vec<CoreRosterAgentEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreRosterAgentEntry {
+    managed_agent_email: String,
+    #[serde(default)]
+    agent_npub: Option<String>,
+    status: String,
+}
+
 /// Server-visible Brain invitation email payload.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BrainInviteEmail {
@@ -858,6 +877,19 @@ async fn resolve_identity_input(
         return resolved_identity(public_key, None, Vec::new());
     }
 
+    // An email-shaped target may bind to a Finite account whose npub only
+    // the account authorities know; resolve it exactly like the invitation
+    // plan flow before falling back to public NIP-05, which cannot answer
+    // for mailboxes on domains that serve no nostr.json document. finite.vip
+    // identifiers stay on the NIP-05 path: it is already routed to the
+    // identity authority and answers for managed agent mailboxes.
+    if email_like(input) && !finite_vip_email(input) {
+        let email = canonical_email(input)?;
+        if let Some(resolved) = resolve_account_email_identity(state, &email).await? {
+            return Ok(resolved);
+        }
+    }
+
     let identifier = Nip05Identifier::parse(input).map_err(nostr_identity_error)?;
     let request = identifier.well_known_request();
     let fetcher = state.nip05_fetcher.clone();
@@ -883,6 +915,66 @@ async fn resolve_identity_input(
         Some(verified.identifier().as_str().to_owned()),
         verified.relays().to_vec(),
     )
+}
+
+/// Resolve a Finite account email to its human Member Identity through the
+/// same Core account-agent roster and Finite Identity authorities the
+/// invitation plan flow uses. `Ok(None)` means the email does not bind to a
+/// Finite account (or the authorities are unconfigured) and the caller
+/// should fall back to NIP-05 resolution; authority transport failures are
+/// surfaced as gateway errors like every other authority call.
+async fn resolve_account_email_identity(
+    state: &ServerState,
+    email: &str,
+) -> Result<Option<ResolvedIdentity>, ApiError> {
+    let Some(authorities) = state.agent_bootstrap_authorities.as_ref() else {
+        return Ok(None);
+    };
+    let roster: Option<CoreAccountAgentRosterResponse> = post_authority_json_optional(
+        &format!(
+            "{}/api/core/v1/brain/account-agent-roster",
+            authorities.core_base_url
+        ),
+        "Authorization",
+        &format!("Bearer {}", authorities.core_token),
+        &serde_json::json!({ "email": email }),
+        "Finite Core account agent roster",
+    )
+    .await?;
+    let Some(roster) = roster else {
+        return Ok(None);
+    };
+    if canonical_email(&roster.human_mailbox)? != email {
+        // The roster answered for a different mailbox (for example a
+        // managed agent address resolving to its owning account), so this
+        // input is not itself an account email.
+        return Ok(None);
+    }
+    if roster.workos_user_id.trim().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "Finite Core returned an empty account id",
+        ));
+    }
+    let owner: IdentityUserResolutionResponse = post_authority_json(
+        &format!(
+            "{}/api/v1/operator/brain/user-resolution",
+            authorities.identity_base_url
+        ),
+        "X-Finite-Operator-Token",
+        &authorities.identity_token,
+        &serde_json::json!({ "workosUserId": roster.workos_user_id }),
+        "Finite Identity User Nostr Identity resolution",
+    )
+    .await?;
+    if owner.workos_user_id != roster.workos_user_id {
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "Finite Identity returned a mismatched WorkOS account",
+        ));
+    }
+    let public_key = NostrPublicKey::parse(&owner.user_npub).map_err(nostr_identity_error)?;
+    resolved_identity(public_key, None, Vec::new()).map(Some)
 }
 
 async fn resolve_and_record_identity(
@@ -5638,6 +5730,229 @@ mod tests {
                 && identity.hex == target_hex
                 && identity.display == "alice@example.com"
         }));
+    }
+
+    #[tokio::test]
+    async fn identity_resolution_keeps_finite_vip_on_the_nip05_path() {
+        let actor_keys = Keys::generate();
+        let target_key = NostrPublicKey::from_protocol(Keys::generate().public_key());
+        let target_hex = target_key.to_hex();
+        let identifier = Nip05Identifier::parse("cheater@finite.vip").unwrap();
+        let document = format!(r#"{{"names": {{"cheater": "{target_hex}"}}}}"#);
+        // A core roster call would fail fast against the discard port and
+        // surface a 502; resolving through the fixture proves finite.vip
+        // identifiers never consult the account roster.
+        let router = router_with_state(
+            test_state()
+                .with_nip05_fixture(identifier.well_known_request().url, document)
+                .with_agent_bootstrap_authorities(
+                    "http://127.0.0.1:9",
+                    "core-token",
+                    "http://127.0.0.1:9",
+                    "identity-token",
+                ),
+        );
+        let resolved = authed_request(
+            router,
+            &actor_keys,
+            "POST",
+            "/v1/identities/resolve",
+            Some(serde_json::json!({ "input": "cheater@finite.vip" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved: IdentityResponse = read_json(resolved).await;
+        assert_eq!(resolved.npub, target_key.to_npub().unwrap());
+    }
+
+    #[tokio::test]
+    async fn admin_member_add_rejects_duplicate_member_with_client_error() {
+        let admin_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let router = router_with_state(test_state());
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let add_body = |change_id: &str| {
+            serde_json::json!({
+                "targetNpub": target_npub,
+                "accessChangeEvent": admin_event(
+                    &admin_keys,
+                    "acme",
+                    change_id,
+                    AdminAccessAction::AddMember,
+                    None,
+                    Some(target_npub.as_str()),
+                    None,
+                ),
+            })
+            .to_string()
+        };
+        let add = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{target_npub}"),
+            Some(add_body("change_add_member_first")),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(add.status(), StatusCode::OK);
+
+        let duplicate = authed_request(
+            router,
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{target_npub}"),
+            Some(add_body("change_add_member_again")),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            duplicate,
+            StatusCode::BAD_REQUEST,
+            "broken invariant: target is already a brain member",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn identity_resolution_prefers_account_roster_for_email_targets() {
+        let actor_keys = Keys::generate();
+        let human_npub = npub(&Keys::generate());
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_rosalynn",
+            "humanMailbox": "rosalynn.emberton@gmail.com",
+            "rosterRevision": 1,
+            "agents": [],
+        });
+        let (core_url, _core_server) =
+            spawn_json_authority(vec![("/api/core/v1/brain/account-agent-roster", roster)]);
+        let (identity_url, _identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/user-resolution",
+            serde_json::json!({
+                "workosUserId": "user_workos_rosalynn",
+                "userNpub": human_npub,
+            }),
+        )]);
+        // The NIP-05 fetcher is wired to fail: gmail serves no nostr.json, so a
+        // resolution here proves the account roster answered instead.
+        let router = router_with_state(
+            test_state()
+                .with_nip05_failure("no nip05 document in tests")
+                .with_agent_bootstrap_authorities(
+                    core_url,
+                    "core-token",
+                    identity_url,
+                    "identity-token",
+                ),
+        );
+        let resolved = authed_request(
+            router,
+            &actor_keys,
+            "POST",
+            "/v1/identities/resolve",
+            Some(serde_json::json!({ "input": "rosalynn.emberton@gmail.com" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved: IdentityResponse = read_json(resolved).await;
+        assert_eq!(resolved.npub, human_npub);
+    }
+
+    #[tokio::test]
+    async fn identity_resolution_falls_back_to_nip05_when_the_roster_does_not_bind() {
+        let actor_keys = Keys::generate();
+        let target_key = NostrPublicKey::from_protocol(Keys::generate().public_key());
+        let target_hex = target_key.to_hex();
+        let identifier = Nip05Identifier::parse("alice@example.com").unwrap();
+        let document = format!(
+            r#"{{
+                "names": {{"alice": "{target_hex}"}}
+            }}"#
+        );
+        let (core_url, _core_server) = spawn_json_authority_with_status(vec![(
+            404,
+            "/api/core/v1/brain/account-agent-roster",
+            serde_json::json!({}),
+        )]);
+        let router = router_with_state(
+            test_state()
+                .with_nip05_fixture(identifier.well_known_request().url, document)
+                .with_agent_bootstrap_authorities(
+                    core_url,
+                    "core-token",
+                    "http://127.0.0.1:9",
+                    "identity-token",
+                ),
+        );
+        let resolved = authed_request(
+            router,
+            &actor_keys,
+            "POST",
+            "/v1/identities/resolve",
+            Some(serde_json::json!({ "input": "alice@example.com" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved: IdentityResponse = read_json(resolved).await;
+        assert_eq!(resolved.npub, target_key.to_npub().unwrap());
+        assert_eq!(resolved.nip05.as_deref(), Some("alice@example.com"));
+    }
+
+    #[tokio::test]
+    async fn identity_resolution_falls_back_to_nip05_on_roster_mailbox_mismatch() {
+        let actor_keys = Keys::generate();
+        let agent_key = NostrPublicKey::from_protocol(Keys::generate().public_key());
+        let agent_hex = agent_key.to_hex();
+        let identifier = Nip05Identifier::parse("agent@teams.example.com").unwrap();
+        let document = format!(r#"{{"names": {{"agent": "{agent_hex}"}}}}"#);
+        // The roster resolves the input to its owning account's mailbox, which
+        // is not the input itself: the input is not an account email (this is
+        // the managed-agent shape), so resolution must fall back to NIP-05
+        // rather than return the owner npub.
+        let roster = serde_json::json!({
+            "workosUserId": "user_workos_owner",
+            "humanMailbox": "owner@teams.example.com",
+            "rosterRevision": 1,
+            "agents": [],
+        });
+        let (core_url, _core_server) =
+            spawn_json_authority(vec![("/api/core/v1/brain/account-agent-roster", roster)]);
+        let router = router_with_state(
+            test_state()
+                .with_nip05_fixture(identifier.well_known_request().url, document)
+                .with_agent_bootstrap_authorities(
+                    core_url,
+                    "core-token",
+                    "http://127.0.0.1:9",
+                    "identity-token",
+                ),
+        );
+        let resolved = authed_request(
+            router,
+            &actor_keys,
+            "POST",
+            "/v1/identities/resolve",
+            Some(serde_json::json!({ "input": "agent@teams.example.com" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved: IdentityResponse = read_json(resolved).await;
+        assert_eq!(resolved.npub, agent_key.to_npub().unwrap());
     }
 
     #[tokio::test]
