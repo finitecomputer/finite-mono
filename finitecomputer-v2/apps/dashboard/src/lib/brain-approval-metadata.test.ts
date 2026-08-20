@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   approveResponseMetadata,
+  decodeApproveEnvelope,
   parseApproveQuestion,
   parseApproveResponse,
 } from "@/lib/brain-approval-metadata";
@@ -97,4 +98,74 @@ test("parseApproveResponse fails closed on unknown choices", () => {
     }),
     null,
   );
+});
+
+test("decodeApproveEnvelope is identical to the accessor pair on every shape", () => {
+  const cases: { metadata_json?: string }[] = [
+    // absent / malformed / non-brain
+    {},
+    { metadata_json: "" },
+    { metadata_json: "   " },
+    { metadata_json: "not json" },
+    { metadata_json: "[1,2,3]" },
+    { metadata_json: JSON.stringify({ approve: null }) },
+    { metadata_json: JSON.stringify({ approve: "approve" }) },
+    { metadata_json: JSON.stringify({ unrelated: true }) },
+    {
+      metadata_json: JSON.stringify({ approve: { service: "sites", requests: [] } }),
+    },
+    // question-side rejections
+    {
+      metadata_json: JSON.stringify({
+        approve: { service: "brain", requests: [{ brainId: "brain-1" }] },
+      }),
+    },
+    {
+      metadata_json: JSON.stringify({ approve: { service: "brain", requests: [] } }),
+    },
+    {
+      metadata_json: JSON.stringify({
+        approve: {
+          service: "brain",
+          nonce: "evil-attempt",
+          requests: [{ brainId: "brain-1", requestId: "approval-1" }],
+        },
+      }),
+    },
+    // question
+    question,
+    // responses
+    response("approved"),
+    response("approved", "deadbeef"),
+    response("denied"),
+    // response-side rejections (unknown choice, empty requests, non-string choice)
+    {
+      metadata_json: JSON.stringify({
+        approve: {
+          service: "brain",
+          choice: "maybe",
+          requests: [{ brainId: "brain-1", requestId: "approval-1" }],
+        },
+      }),
+    },
+    {
+      metadata_json: JSON.stringify({
+        approve: { service: "brain", choice: "approved", requests: [] },
+      }),
+    },
+    {
+      metadata_json: JSON.stringify({
+        approve: {
+          service: "brain",
+          choice: 42,
+          requests: [{ brainId: "brain-1", requestId: "approval-1" }],
+        },
+      }),
+    },
+  ];
+  for (const message of cases) {
+    const envelope = decodeApproveEnvelope(message);
+    assert.deepEqual(envelope.question, parseApproveQuestion(message));
+    assert.deepEqual(envelope.response, parseApproveResponse(message));
+  }
 });

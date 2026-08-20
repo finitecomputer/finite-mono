@@ -63,6 +63,44 @@ function approveValue(message: { metadata_json?: string }): unknown {
   return typeof approve === "object" && approve !== null ? approve : null;
 }
 
+/// The envelope decoded once from `metadata_json`: both ends discriminated
+/// from a single parse. At most one side is non-null — the question never
+/// carries a string `choice`; the response always requires one.
+export type BrainApproveEnvelope = {
+  question: BrainApproveQuestion | null;
+  response: BrainApproveResponse | null;
+};
+
+/// One parse, both discriminations — for callers walking many messages (the
+/// chat surface decodes each message once per state version, then reads both
+/// sides off the map). Behaves exactly like the accessor pair below: both
+/// fail-closed branches are preserved (the question rejects a string
+/// `choice`; the response requires it, approved or denied).
+export function decodeApproveEnvelope(
+  message: { metadata_json?: string },
+): BrainApproveEnvelope {
+  const envelope: BrainApproveEnvelope = { question: null, response: null };
+  const approve = approveValue(message);
+  if (approve === null) return envelope;
+  const record = approve as Record<string, unknown>;
+  if (record.service !== "brain") return envelope;
+  const requests = referencesFromValue(record.requests);
+  if (requests.length === 0) return envelope;
+  if (typeof record.choice === "string") {
+    if (record.choice !== "approved" && record.choice !== "denied") return envelope;
+    const artifactId = record.artifactId;
+    envelope.response = {
+      service: "brain",
+      choice: record.choice,
+      requests,
+      artifactId: typeof artifactId === "string" && artifactId ? artifactId : undefined,
+    };
+  } else {
+    envelope.question = { service: "brain", requests };
+  }
+  return envelope;
+}
+
 /// The agent's question: which approval requests this delivery asks about.
 /// Returns null unless the envelope is well-formed and non-empty.
 export function parseApproveQuestion(
