@@ -9,6 +9,10 @@ from importlib.machinery import SourceFileLoader
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SELECT_HARNESSES = ROOT / "scripts" / "ci" / "select-harnesses"
 
+# select-harnesses imports its sibling changed_paths module; running the
+# script directly puts scripts/ci on sys.path, so do the same here.
+sys.path.insert(0, str(SELECT_HARNESSES.parent))
+
 loader = SourceFileLoader("select_harnesses", str(SELECT_HARNESSES))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 select_harnesses = importlib.util.module_from_spec(spec)
@@ -215,6 +219,28 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(value, "false")
             else:
                 self.assertEqual(value, "true", key)
+
+    def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
+        args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
+        selection, _reason, paths = select_harnesses.select_harnesses(args)
+        values = selection.values()
+
+        self.assertEqual(paths, [".github/workflows/README.md"])
+        for key, value in values.items():
+            if key == "run_electron_alpha":
+                self.assertEqual(value, "false")
+            else:
+                self.assertEqual(value, "true", key)
+
+    def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
+        prefixed = argparse.Namespace(changed_files=["./justfile"])
+        bare = argparse.Namespace(changed_files=["justfile"])
+
+        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(prefixed)
+        bare_selection, _reason, bare_paths = select_harnesses.select_harnesses(bare)
+
+        self.assertEqual(prefixed_paths, bare_paths)
+        self.assertEqual(prefixed_selection.values(), bare_selection.values())
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import subprocess
 import sys
 from dataclasses import dataclass, fields
 
+import changed_paths
+
 
 OUTPUT_NAMES = (
     "run_rust",
@@ -149,12 +151,7 @@ def main() -> int:
     parser.add_argument("--push-head", default=os.environ.get("PUSH_HEAD_SHA") or os.environ.get("GITHUB_SHA"))
     parser.add_argument("--github-output")
     parser.add_argument("--summary")
-    parser.add_argument(
-        "--changed-file",
-        action="append",
-        dest="changed_files",
-        help="Override git diff input; useful for tests and local dry-runs.",
-    )
+    changed_paths.add_changed_file_argument(parser)
     args = parser.parse_args()
 
     selection, reason, paths = select_harnesses(args)
@@ -170,7 +167,7 @@ def main() -> int:
 
 def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, list[str]]:
     if args.changed_files is not None:
-        paths = normalized_paths(args.changed_files)
+        paths = changed_paths.normalized_paths(args.changed_files)
         selection = select_for_paths(paths)
         return selection, "changed-file override", paths
 
@@ -203,13 +200,7 @@ def changed_files_for_event(args: argparse.Namespace) -> list[str]:
     else:
         raise subprocess.CalledProcessError(2, ["git", "diff"], f"unsupported event: {args.event}")
 
-    completed = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", diff_range, "--"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-    return normalized_paths(completed.stdout.splitlines())
+    return changed_paths.normalized_paths(changed_paths.git_diff_changed_files(diff_range))
 
 
 def select_for_paths(paths: list[str]) -> HarnessSelection:
@@ -339,22 +330,6 @@ def is_dashboard_browser_path(path: str) -> bool:
             "src/styles/",
         )
     ) or relative == "src/proxy.ts"
-
-
-def normalized_paths(paths: list[str]) -> list[str]:
-    normalized = [normalize_path(path) for path in paths]
-    return [path for path in normalized if path]
-
-
-def normalize_path(path: str) -> str:
-    if not path:
-        return ""
-    if os.path.isabs(path):
-        try:
-            path = os.path.relpath(path, os.getcwd())
-        except ValueError:
-            return path
-    return path.replace(os.sep, "/").lstrip("./")
 
 
 def write_outputs(path: str | None, selection: HarnessSelection) -> None:
