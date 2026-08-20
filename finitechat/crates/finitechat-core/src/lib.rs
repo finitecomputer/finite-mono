@@ -10474,6 +10474,10 @@ impl ChatProjectionState {
             let _ = self.conversations.apply_event(context, &app_event);
         }
         let archive_changed = match decoded {
+            // A duplicate (same room, message id, and seq) was already
+            // projected from its stored message row with identical inputs;
+            // re-running the projection would only repeat its parse work.
+            DecodedAppEvent::ChatMessage { .. } if duplicate_projected_message => false,
             DecodedAppEvent::ChatMessage { .. } => {
                 if let Some(message) = project_chat_message(
                     event.room_id,
