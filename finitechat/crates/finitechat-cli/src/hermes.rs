@@ -43,9 +43,10 @@ use finitechat_core::{
     FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
-    HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
-    HermesMessageStatusV1, HermesMessageTypeV1, HermesPollEventV1, HermesSendRequestV1,
-    MAX_HERMES_METADATA_BYTES, MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
+    HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
+    HermesEditRequestV1, HermesMessagePayloadV1, HermesMessageStatusV1, HermesMessageTypeV1,
+    HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_METADATA_BYTES,
+    MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
 };
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
@@ -2196,9 +2197,24 @@ fn hermes_poll_event_from_chat_payload(
     payload: &[u8],
     typed_chat_message: bool,
 ) -> Result<Option<HermesPollEventV1>, CliError> {
-    if let Some(payload) = HermesMessagePayloadV1::decode(payload)
-        .map_err(|error| CliError::Hermes(error.to_string()))?
-    {
+    // Single JSON pass over the payload: parse once, dispatch on the "type"
+    // tag, and convert only the hermes form. Twin of the chat projection's
+    // resolve_chat_message_payload; the payload previously got one full Value
+    // parse per probe (the hermes decode, then the typed-JSON sniff).
+    let value = serde_json::from_slice::<Value>(payload).ok();
+    let payload_type = value
+        .as_ref()
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let decoded = match value {
+        Some(value) if payload_type.as_deref() == Some(HERMES_MESSAGE_PAYLOAD_TYPE_V1) => {
+            HermesMessagePayloadV1::decode_value(value)
+                .map_err(|error| CliError::Hermes(error.to_string()))?
+        }
+        _ => None,
+    };
+    if let Some(payload) = decoded {
         let mut event = payload.into_poll_event(
             context.room_id.to_owned(),
             context.seq,
@@ -2220,7 +2236,7 @@ fn hermes_poll_event_from_chat_payload(
         return Ok(Some(event));
     }
 
-    if typed_chat_message && payload_is_typed_json(payload) {
+    if typed_chat_message && payload_type.is_some() {
         return Ok(None);
     }
 
@@ -2522,13 +2538,6 @@ fn sanitized_attachment_filename(filename: &str) -> String {
     } else {
         sanitized
     }
-}
-
-fn payload_is_typed_json(payload: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(payload)
-        .ok()
-        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
-        .is_some()
 }
 
 fn encode_application_event(
@@ -3957,6 +3966,61 @@ mod tests {
         .expect("typed plain-text chat is still bridge-visible");
         assert_eq!(event.text, "plain hello");
         assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+    }
+
+    #[test]
+    fn poll_decoder_degrades_malformed_json_payload_to_lossy_text() {
+        let home = tempfile::tempdir().unwrap();
+        let malformed = br#"{"type":"finitechat.hermes.message.v1","#.to_vec();
+        let wrapped = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: None,
+            segment_id: None,
+            payload: malformed.clone(),
+        };
+        let plaintext = serde_json::to_vec(&wrapped).unwrap();
+        let event = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
+                room_id: "room-main",
+                seq: 1,
+                message_id: "message-malformed",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &plaintext,
+        )
+        .unwrap()
+        .expect("malformed JSON degrades to lossy text like any plain payload");
+        assert_eq!(event.text, String::from_utf8(malformed).unwrap());
+        assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+
+        let wrapped_binary = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: None,
+            segment_id: None,
+            payload: vec![0xff, 0xfe],
+        };
+        let plaintext = serde_json::to_vec(&wrapped_binary).unwrap();
+        let event = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
+                room_id: "room-main",
+                seq: 2,
+                message_id: "message-binary",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &plaintext,
+        )
+        .unwrap();
+        assert!(event.is_none(), "non-UTF-8 payloads stay undeliverable");
     }
 
     #[test]
