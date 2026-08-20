@@ -2206,7 +2206,7 @@ fn enrich_shared_folder_connection_identities(
 }
 
 fn event_from_value(value: serde_json::Value) -> Result<Event, ApiError> {
-    Event::from_json(value.to_string()).map_err(|_| {
+    serde_json::from_value(value).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             "signed Nostr event JSON did not parse",
@@ -2691,18 +2691,6 @@ fn object_ciphertext(payload_json: &str) -> String {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| payload_json.to_owned())
-}
-
-fn request_field(body: &[u8], field: &'static str) -> Result<String, ApiError> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, format!("{field} is required")))
 }
 
 fn lock_error<T>(_error: T) -> ApiError {
@@ -7064,6 +7052,60 @@ mod tests {
                 .payload_json
                 .contains("\"tombstoneEvent\"")
         );
+    }
+
+    #[tokio::test]
+    async fn sync_record_submit_rejects_malformed_bodies() {
+        let keys = Keys::generate();
+        let router = test_router();
+
+        let bodies = [
+            "not json".to_owned(),
+            serde_json::json!({ "folderId": "getting-started" }).to_string(),
+            serde_json::json!({ "recordType": "unknown_record" }).to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_revision",
+                "objectId": "obj_000000000001",
+                "baseRevision": null,
+                "keyVersion": 1,
+                "cipher": "AES-256-GCM",
+                "ciphertext": "{}",
+                "revisionEvent": {},
+            })
+            .to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_revision",
+                "folderId": "getting-started",
+                "objectId": "obj_000000000001",
+                "keyVersion": 1,
+                "cipher": "AES-256-GCM",
+            })
+            .to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_tombstone",
+                "folderId": "getting-started",
+                "baseRevision": 1,
+                "tombstoneEvent": {},
+            })
+            .to_string(),
+        ];
+        for body in bodies {
+            let response = authed_request(
+                router.clone(),
+                &keys,
+                "POST",
+                "/v1/brains/acme/sync/records",
+                Some(body),
+                TEST_NOW,
+            )
+            .await;
+            assert_error(
+                response,
+                StatusCode::BAD_REQUEST,
+                "invalid JSON request body",
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
