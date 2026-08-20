@@ -20794,6 +20794,7 @@ mod tests {
                         .dispatch_and_wait(AppAction::SendMessage {
                             room_id: room_id.clone(),
                             text: format!("room {index} history {message_index}"),
+                            metadata_json: None,
                         })
                         .unwrap();
                 }
