@@ -1,0 +1,19 @@
+set shell := ["../../../scripts/dev-shell", "-cu"]
+
+# Lists dashboard commands
+default:
+    just --list
+
+# Web-only contributor gate: dashboard unit tests, lint, project-wide typecheck,
+# and production build.
+web-check:
+    pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run typecheck && pnpm run build
+
+# Static production contract: Dashboard and Core must enforce the same Price.
+stripe-price-contract:
+    cd ../../.. && python3 finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py
+
+# Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
+# environment and the harness never prints their values.
+stripe-billing-clock:
+    pnpm install --frozen-lockfile && pnpm run test:stripe-billing-clock

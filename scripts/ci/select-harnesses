@@ -113,6 +113,16 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_runbook_facts_contract.py",
 }
 
+INFRA_JUSTFILE_PATH = "infra/justfile"
+FINITE_BRAIN_JUSTFILE_PATH = "finite-brain/justfile"
+FINITECHAT_JUSTFILE_PATH = "finitechat/justfile"
+FINITE_IDENTITY_JUSTFILE_PATH = "finite-identity/justfile"
+DASHBOARD_JUSTFILE_PATH = "finitecomputer-v2/apps/dashboard/justfile"
+NIX_CHECK_JUSTFILE_PATHS = {
+    "finitecomputer-v2/justfile",
+    "finitecomputer-v2/deploy/finite-computer/images/justfile",
+}
+
 
 @dataclass
 class HarnessSelection:
@@ -223,6 +233,34 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if is_global_path(path):
         selection.select_all()
+        return
+
+    if path == INFRA_JUSTFILE_PATH:
+        selection.run_finite_status_contract = True
+        selection.run_nix_checks = True
+        return
+
+    if path == FINITE_BRAIN_JUSTFILE_PATH:
+        selection.run_brain_product_matrix = True
+        selection.run_nix_checks = True
+        return
+
+    if path == FINITECHAT_JUSTFILE_PATH:
+        selection.run_hermes_bridge = True
+        selection.run_rust = True
+        return
+
+    if path == FINITE_IDENTITY_JUSTFILE_PATH:
+        selection.run_nix_checks = True
+        return
+
+    if path == DASHBOARD_JUSTFILE_PATH:
+        selection.run_dashboard = True
+        selection.run_nix_checks = True
+        return
+
+    if path in NIX_CHECK_JUSTFILE_PATHS:
+        selection.run_nix_checks = True
         return
 
     if is_monitoring_path(path) or path in MOVED_MONITORING_PATHS:
