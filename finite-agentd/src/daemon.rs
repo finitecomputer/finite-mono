@@ -32,7 +32,9 @@ use crate::connections::{
     TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger, hex_digest};
-use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
+use crate::supervisor::{
+    ProcessSpec, ProcessState, SupervisorHandle, SupervisorStatus, start_supervisor,
+};
 use crate::transport::BridgeClient;
 
 const STATUS_SCHEMA: &str = "finite.agent.status.v1";
@@ -498,9 +500,10 @@ fn spawn_startup_specialization_verifier(
 
 fn running_hermes_identity(status: &SupervisorStatus) -> Option<(u64, u32)> {
     let hermes = status.processes.get("hermes")?;
-    (hermes.state == "running")
-        .then(|| hermes.pid.map(|pid| (hermes.restart_count, pid)))
-        .flatten()
+    match hermes.state {
+        ProcessState::Running { pid } => Some((hermes.restart_count, pid)),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -1193,10 +1196,8 @@ mod tests {
         processes.processes.insert(
             "hermes".to_owned(),
             crate::supervisor::ProcessStatus {
-                state: "running".to_owned(),
-                pid: Some(42),
+                state: ProcessState::Running { pid: 42 },
                 restart_count: 7,
-                last_exit: None,
                 updated_at_ms: 0,
             },
         );

@@ -20,7 +20,7 @@ pub use daemon::{
     read_status, run_daemon,
 };
 pub use ledger::{CommandDecision, Ledger};
-pub use supervisor::{ProcessStatus, SupervisorStatus};
+pub use supervisor::{ProcessState, ProcessStatus, SupervisorStatus};
 
 #[derive(Debug, Error)]
 pub enum AgentdError {
