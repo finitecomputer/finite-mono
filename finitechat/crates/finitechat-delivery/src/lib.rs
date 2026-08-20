@@ -272,9 +272,9 @@ pub trait HttpDelivery {
 pub struct HttpDeliveryService {
     limits: HttpDeliveryLimits,
     #[serde(with = "map_as_pairs")]
-    groups: HashMap<GroupId, GroupQueue>,
+    groups: HashMap<GroupId, DeliveryQueue>,
     #[serde(with = "map_as_pairs")]
-    inboxes: HashMap<MemberId, InboxQueue>,
+    inboxes: HashMap<MemberId, DeliveryQueue>,
     #[serde(with = "map_as_pairs")]
     key_packages: HashMap<HttpKeyPackageId, KeyPackageRecord>,
 }
@@ -360,6 +360,7 @@ impl HttpDeliveryService {
                 validate_transport_group_id(transport_group_id)?;
                 match self.groups.get(group_id) {
                     Some(group) => group.check_append(
+                        HttpDeliveryPlane::Group,
                         &message.id,
                         message_digest,
                         *commit_admission,
@@ -382,8 +383,10 @@ impl HttpDeliveryService {
                 validate_member_id("recipient", recipient)?;
                 match self.inboxes.get(recipient) {
                     Some(inbox) => inbox.check_append(
+                        HttpDeliveryPlane::Inbox,
                         &message.id,
                         message_digest,
+                        None,
                         self.limits.max_queue_entries_per_route,
                     ),
                     None if self.inboxes.len() >= self.limits.max_recipient_inboxes => {
@@ -418,11 +421,27 @@ impl HttpDeliveryService {
             } => {
                 validate_group_id(&group_id)?;
                 validate_transport_group_id(&transport_group_id)?;
-                self.publish_group(group_id, commit_admission, message, message_digest)
+                publish_to_queue(
+                    &mut self.groups,
+                    self.limits,
+                    group_id,
+                    HttpDeliveryPlane::Group,
+                    commit_admission,
+                    message,
+                    message_digest,
+                )
             }
             HttpPublishTarget::Inbox { recipient } => {
                 validate_member_id("recipient", &recipient)?;
-                self.publish_inbox(recipient, message, message_digest)
+                publish_to_queue(
+                    &mut self.inboxes,
+                    self.limits,
+                    recipient,
+                    HttpDeliveryPlane::Inbox,
+                    None,
+                    message,
+                    message_digest,
+                )
             }
         }
     }
@@ -517,75 +536,85 @@ impl HttpDeliveryService {
             key_package: record.key_package.clone(),
         }))
     }
-
-    fn publish_group(
-        &mut self,
-        group_id: GroupId,
-        commit_admission: Option<HttpCommitAdmission>,
-        message: TransportMessage,
-        message_digest: [u8; 32],
-    ) -> Result<HttpPublishReceipt, HttpServerError> {
-        let max_entries = self.limits.max_queue_entries_per_route;
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            return group.append(message, message_digest, commit_admission, max_entries);
-        }
-        if self.groups.len() >= self.limits.max_groups {
-            return Err(HttpServerError::GroupLimitExceeded {
-                max: self.limits.max_groups,
-            });
-        }
-        let mut group = GroupQueue::default();
-        let receipt = group.append(message, message_digest, commit_admission, max_entries)?;
-        self.groups.insert(group_id, group);
-        Ok(receipt)
-    }
-
-    fn publish_inbox(
-        &mut self,
-        recipient: MemberId,
-        message: TransportMessage,
-        message_digest: [u8; 32],
-    ) -> Result<HttpPublishReceipt, HttpServerError> {
-        let max_entries = self.limits.max_queue_entries_per_route;
-        if let Some(inbox) = self.inboxes.get_mut(&recipient) {
-            return inbox.append(message, message_digest, max_entries);
-        }
-        if self.inboxes.len() >= self.limits.max_recipient_inboxes {
-            return Err(HttpServerError::InboxLimitExceeded {
-                max: self.limits.max_recipient_inboxes,
-            });
-        }
-        let mut inbox = InboxQueue::default();
-        let receipt = inbox.append(message, message_digest, max_entries)?;
-        self.inboxes.insert(recipient, inbox);
-        Ok(receipt)
-    }
 }
 
+/// Shared append path for group queues and recipient inboxes: create the
+/// queue unless the per-plane route cap is reached, then append into it.
+/// Inbox callers always pass `commit_admission: None`.
+fn publish_to_queue<K>(
+    queues: &mut HashMap<K, DeliveryQueue>,
+    limits: HttpDeliveryLimits,
+    key: K,
+    plane: HttpDeliveryPlane,
+    commit_admission: Option<HttpCommitAdmission>,
+    message: TransportMessage,
+    message_digest: [u8; 32],
+) -> Result<HttpPublishReceipt, HttpServerError>
+where
+    K: Eq + std::hash::Hash,
+{
+    let max_entries = limits.max_queue_entries_per_route;
+    if let Some(queue) = queues.get_mut(&key) {
+        return queue.append(
+            plane,
+            message,
+            message_digest,
+            commit_admission,
+            max_entries,
+        );
+    }
+    let max_routes = match plane {
+        HttpDeliveryPlane::Group => limits.max_groups,
+        HttpDeliveryPlane::Inbox => limits.max_recipient_inboxes,
+    };
+    if queues.len() >= max_routes {
+        return Err(match plane {
+            HttpDeliveryPlane::Group => HttpServerError::GroupLimitExceeded { max: max_routes },
+            HttpDeliveryPlane::Inbox => HttpServerError::InboxLimitExceeded { max: max_routes },
+        });
+    }
+    let mut queue = DeliveryQueue::default();
+    let receipt = queue.append(
+        plane,
+        message,
+        message_digest,
+        commit_admission,
+        max_entries,
+    )?;
+    queues.insert(key, queue);
+    Ok(receipt)
+}
+
+/// One sequencing queue: the append log, the digest index for duplicate
+/// replay, and the source epochs that already admitted a commit.
+///
+/// Group queues and recipient inboxes share this implementation; the caller
+/// passes its [`HttpDeliveryPlane`] for receipts and errors, and inboxes
+/// always pass `commit_admission: None`, so the stale-epoch branch cannot
+/// fire for them. `accepted_commit_epochs` predates the queue merge only for
+/// groups, so it defaults to empty when older snapshots (inboxes never
+/// serialized it) are loaded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct GroupQueue {
+struct DeliveryQueue {
     entries: Vec<HttpQueuedDelivery>,
     #[serde(with = "map_as_pairs")]
     messages: HashMap<MessageId, MessageIndex>,
+    #[serde(default)]
     accepted_commit_epochs: HashSet<EpochId>,
 }
 
-impl GroupQueue {
+impl DeliveryQueue {
     fn check_append(
         &self,
+        plane: HttpDeliveryPlane,
         message_id: &MessageId,
         message_digest: [u8; 32],
         commit_admission: Option<HttpCommitAdmission>,
         max_entries: usize,
     ) -> Result<HttpPublishCheck, HttpServerError> {
         if let Some(existing) = self.messages.get(message_id) {
-            return replay_or_reject_duplicate(
-                message_id,
-                message_digest,
-                existing,
-                HttpDeliveryPlane::Group,
-            )
-            .map(HttpPublishCheck::DuplicateReplay);
+            return replay_or_reject_duplicate(message_id, message_digest, existing, plane)
+                .map(HttpPublishCheck::DuplicateReplay);
         }
         if let Some(admission) = commit_admission
             && self
@@ -596,10 +625,10 @@ impl GroupQueue {
                 source_epoch: admission.source_epoch,
             });
         }
-        ensure_queue_has_space(HttpDeliveryPlane::Group, self.entries.len(), max_entries)?;
+        ensure_queue_has_space(plane, self.entries.len(), max_entries)?;
         Ok(HttpPublishCheck::Fresh(HttpPublishReceipt {
             message_id: message_id.clone(),
-            plane: HttpDeliveryPlane::Group,
+            plane,
             seq: (self.entries.len() as HttpSequence) + 1,
             duplicate: false,
         }))
@@ -607,12 +636,19 @@ impl GroupQueue {
 
     fn append(
         &mut self,
+        plane: HttpDeliveryPlane,
         message: TransportMessage,
         message_digest: [u8; 32],
         commit_admission: Option<HttpCommitAdmission>,
         max_entries: usize,
     ) -> Result<HttpPublishReceipt, HttpServerError> {
-        match self.check_append(&message.id, message_digest, commit_admission, max_entries)? {
+        match self.check_append(
+            plane,
+            &message.id,
+            message_digest,
+            commit_admission,
+            max_entries,
+        )? {
             HttpPublishCheck::DuplicateReplay(receipt) => return Ok(receipt),
             HttpPublishCheck::Fresh(_) => {}
         }
@@ -634,71 +670,7 @@ impl GroupQueue {
         debug_assert_eq!(self.entries.last().map(|entry| entry.seq), Some(seq));
         Ok(HttpPublishReceipt {
             message_id: message.id,
-            plane: HttpDeliveryPlane::Group,
-            seq,
-            duplicate: false,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct InboxQueue {
-    entries: Vec<HttpQueuedDelivery>,
-    #[serde(with = "map_as_pairs")]
-    messages: HashMap<MessageId, MessageIndex>,
-}
-
-impl InboxQueue {
-    fn check_append(
-        &self,
-        message_id: &MessageId,
-        message_digest: [u8; 32],
-        max_entries: usize,
-    ) -> Result<HttpPublishCheck, HttpServerError> {
-        if let Some(existing) = self.messages.get(message_id) {
-            return replay_or_reject_duplicate(
-                message_id,
-                message_digest,
-                existing,
-                HttpDeliveryPlane::Inbox,
-            )
-            .map(HttpPublishCheck::DuplicateReplay);
-        }
-        ensure_queue_has_space(HttpDeliveryPlane::Inbox, self.entries.len(), max_entries)?;
-        Ok(HttpPublishCheck::Fresh(HttpPublishReceipt {
-            message_id: message_id.clone(),
-            plane: HttpDeliveryPlane::Inbox,
-            seq: (self.entries.len() as HttpSequence) + 1,
-            duplicate: false,
-        }))
-    }
-
-    fn append(
-        &mut self,
-        message: TransportMessage,
-        message_digest: [u8; 32],
-        max_entries: usize,
-    ) -> Result<HttpPublishReceipt, HttpServerError> {
-        match self.check_append(&message.id, message_digest, max_entries)? {
-            HttpPublishCheck::DuplicateReplay(receipt) => return Ok(receipt),
-            HttpPublishCheck::Fresh(_) => {}
-        }
-        let seq = (self.entries.len() as HttpSequence) + 1;
-        self.messages.insert(
-            message.id.clone(),
-            MessageIndex {
-                seq,
-                digest: message_digest,
-            },
-        );
-        self.entries.push(HttpQueuedDelivery {
-            seq,
-            message: message.clone(),
-        });
-        debug_assert_eq!(self.entries.last().map(|entry| entry.seq), Some(seq));
-        Ok(HttpPublishReceipt {
-            message_id: message.id,
-            plane: HttpDeliveryPlane::Inbox,
+            plane,
             seq,
             duplicate: false,
         })
@@ -835,7 +807,11 @@ fn ensure_queue_has_space(
     }
 }
 
-fn validate_target_matches_message(
+/// Validate a publish target against the message envelope.
+///
+/// Shared with durable implementations (e.g. the normalized SQLite engine)
+/// so they reject exactly what the reference rejects.
+pub fn validate_target_matches_message(
     target: &HttpPublishTarget,
     message: &TransportMessage,
 ) -> Result<(), HttpServerError> {
@@ -858,7 +834,9 @@ fn validate_target_matches_message(
     }
 }
 
-fn validate_key_package_publication(
+/// Validate a KeyPackage publication. Shared with durable implementations so
+/// they reject exactly what the reference rejects.
+pub fn validate_key_package_publication(
     publication: &HttpKeyPackagePublication,
 ) -> Result<(), HttpServerError> {
     validate_key_package_id(&publication.key_package_id)?;
@@ -877,7 +855,9 @@ fn key_package_record_matches(
     record.owner == publication.owner && record.key_package == publication.key_package
 }
 
-fn validate_transport_message(message: &TransportMessage) -> Result<(), HttpServerError> {
+/// Validate a transport message before publish. Shared with durable
+/// implementations so they reject exactly what the reference rejects.
+pub fn validate_transport_message(message: &TransportMessage) -> Result<(), HttpServerError> {
     validate_message_id("message.id", &message.id)?;
     validate_non_empty_len(
         "message.payload",
@@ -903,11 +883,18 @@ fn validate_transport_message(message: &TransportMessage) -> Result<(), HttpServ
     }
 }
 
-fn validate_group_id(group_id: &GroupId) -> Result<(), HttpServerError> {
+/// Validate a group id. Shared with durable implementations so they reject
+/// exactly what the reference rejects.
+pub fn validate_group_id(group_id: &GroupId) -> Result<(), HttpServerError> {
     validate_bytes("group_id", group_id.as_slice(), MAX_HTTP_ID_BYTES)
 }
 
-fn validate_member_id(field: &'static str, member_id: &MemberId) -> Result<(), HttpServerError> {
+/// Validate a member id. Shared with durable implementations so they reject
+/// exactly what the reference rejects.
+pub fn validate_member_id(
+    field: &'static str,
+    member_id: &MemberId,
+) -> Result<(), HttpServerError> {
     validate_bytes(field, member_id.as_slice(), MAX_HTTP_ID_BYTES)
 }
 
@@ -923,7 +910,9 @@ fn validate_key_package_id(key_package_id: &HttpKeyPackageId) -> Result<(), Http
     )
 }
 
-fn validate_transport_group_id(transport_group_id: &[u8]) -> Result<(), HttpServerError> {
+/// Validate a transport group id. Shared with durable implementations so
+/// they reject exactly what the reference rejects.
+pub fn validate_transport_group_id(transport_group_id: &[u8]) -> Result<(), HttpServerError> {
     validate_bytes(
         "transport_group_id",
         transport_group_id,
@@ -969,7 +958,9 @@ fn validate_item_count(
     }
 }
 
-fn validate_page_limit(limit: usize) -> Result<(), HttpServerError> {
+/// Validate a sync page limit. Shared with durable implementations so they
+/// reject exactly what the reference rejects.
+pub fn validate_page_limit(limit: usize) -> Result<(), HttpServerError> {
     if (1..=MAX_HTTP_SYNC_PAGE_ENTRIES).contains(&limit) {
         Ok(())
     } else {
@@ -1595,5 +1586,189 @@ mod tests {
             service.publish(second_group, message("limit-4")),
             Err(HttpServerError::GroupLimitExceeded { max: 1 })
         );
+    }
+
+    #[test]
+    fn inbox_append_can_never_produce_stale_epoch() {
+        use finitechat_transport::transport::{Timestamp, TransportEnvelope, TransportSource};
+
+        // The stale-epoch branch is guarded by `commit_admission`, which the
+        // inbox publish path never carries (`HttpPublishTarget::Inbox` has no
+        // such field). Even a queue whose commit-epoch set is populated must
+        // accept admission-less appends.
+        let mut queue = DeliveryQueue::default();
+        queue.accepted_commit_epochs.insert(EpochId(1));
+        let message = |label: &str| TransportMessage {
+            id: MessageId::new(label.as_bytes().to_vec()),
+            payload: b"welcome-payload".to_vec(),
+            timestamp: Timestamp(1),
+            causal_deps: Vec::new(),
+            source: TransportSource(HTTP_SERVER_SOURCE.to_owned()),
+            envelope: TransportEnvelope::Welcome {
+                recipient: MemberId::new(b"inbox-recipient".to_vec()),
+            },
+        };
+
+        let first = message("inbox-first");
+        let receipt = queue
+            .append(
+                HttpDeliveryPlane::Inbox,
+                first.clone(),
+                digest_transport_message(&first),
+                None,
+                16,
+            )
+            .expect("admission-less append is accepted despite accepted commit epochs");
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(receipt.plane, HttpDeliveryPlane::Inbox);
+
+        // The guard itself still works: carrying an already-admitted epoch is
+        // what produces StaleEpoch, and inboxes can never carry one.
+        let second = message("inbox-second");
+        assert_eq!(
+            queue.check_append(
+                HttpDeliveryPlane::Inbox,
+                &second.id,
+                digest_transport_message(&second),
+                Some(HttpCommitAdmission {
+                    source_epoch: EpochId(1)
+                }),
+                16,
+            ),
+            Err(HttpServerError::StaleEpoch {
+                source_epoch: EpochId(1)
+            }),
+            "contrast: the same queue rejects a stale commit admission"
+        );
+
+        // Service level: repeated inbox publishes never produce StaleEpoch.
+        let mut service = HttpDeliveryService::default();
+        let recipient = MemberId::new(b"inbox-recipient".to_vec());
+        for (index, label) in ["welcome-a", "welcome-b"].iter().enumerate() {
+            let message = TransportMessage {
+                id: MessageId::new(label.as_bytes().to_vec()),
+                payload: b"welcome-payload".to_vec(),
+                timestamp: Timestamp(index as u64 + 1),
+                causal_deps: Vec::new(),
+                source: TransportSource(HTTP_SERVER_SOURCE.to_owned()),
+                envelope: TransportEnvelope::Welcome {
+                    recipient: recipient.clone(),
+                },
+            };
+            let receipt = service
+                .publish(
+                    HttpPublishTarget::Inbox {
+                        recipient: recipient.clone(),
+                    },
+                    message,
+                )
+                .expect("inbox publish is accepted");
+            assert_eq!(receipt.seq, index as u64 + 1);
+        }
+    }
+
+    /// Harness that restarts through a JSON snapshot round trip, standing in
+    /// for durable wrappers that boot from serialized service state.
+    struct SnapshotHarness {
+        service: HttpDeliveryService,
+    }
+
+    impl conformance::HttpDeliveryHarness for SnapshotHarness {
+        type Delivery = HttpDeliveryService;
+
+        fn delivery(&mut self) -> &mut Self::Delivery {
+            &mut self.service
+        }
+
+        fn restart(&mut self) -> bool {
+            let json = serde_json::to_string(&self.service).expect("snapshot serialize");
+            self.service = serde_json::from_str(&json).expect("snapshot reload");
+            true
+        }
+    }
+
+    #[test]
+    fn state_survives_restart_when_snapshot_predates_queue_merge() {
+        use finitechat_transport::transport::{Timestamp, TransportEnvelope, TransportSource};
+
+        // Seed state exercising every queue field: a group with an admitted
+        // commit and an inbox with a queued Welcome.
+        let mut service = HttpDeliveryService::default();
+        let group_id = GroupId::new(b"pre-merge-group".to_vec());
+        let commit = TransportMessage {
+            id: MessageId::new(b"pre-merge-commit".to_vec()),
+            payload: b"pre-merge-commit-payload".to_vec(),
+            timestamp: Timestamp(1),
+            causal_deps: Vec::new(),
+            source: TransportSource(HTTP_SERVER_SOURCE.to_owned()),
+            envelope: TransportEnvelope::GroupMessage {
+                transport_group_id: b"pre-merge-transport".to_vec(),
+            },
+        };
+        service
+            .publish(
+                HttpPublishTarget::Group {
+                    group_id: group_id.clone(),
+                    transport_group_id: b"pre-merge-transport".to_vec(),
+                    commit_admission: Some(HttpCommitAdmission {
+                        source_epoch: EpochId(3),
+                    }),
+                },
+                commit,
+            )
+            .expect("pre-merge commit publish");
+        let recipient = MemberId::new(b"pre-merge-recipient".to_vec());
+        let welcome = TransportMessage {
+            id: MessageId::new(b"pre-merge-welcome".to_vec()),
+            payload: b"pre-merge-welcome-payload".to_vec(),
+            timestamp: Timestamp(2),
+            causal_deps: Vec::new(),
+            source: TransportSource(HTTP_SERVER_SOURCE.to_owned()),
+            envelope: TransportEnvelope::Welcome {
+                recipient: recipient.clone(),
+            },
+        };
+        service
+            .publish(
+                HttpPublishTarget::Inbox {
+                    recipient: recipient.clone(),
+                },
+                welcome.clone(),
+            )
+            .expect("pre-merge welcome publish");
+
+        // Pre-merge snapshots have no `accepted_commit_epochs` on inbox
+        // queues (and pre-commit-admission snapshots lack it on group queues
+        // too); serde(default) must fill it on load.
+        let mut json = serde_json::to_value(&service).expect("serialize service");
+        for plane in ["groups", "inboxes"] {
+            for pair in json[plane]
+                .as_array_mut()
+                .expect("queues serialize as pairs")
+            {
+                pair[1]
+                    .as_object_mut()
+                    .expect("queue object")
+                    .remove("accepted_commit_epochs");
+            }
+        }
+        let mut service: HttpDeliveryService =
+            serde_json::from_value(json).expect("pre-merge snapshot still loads");
+
+        // The loaded state still sequences and replays duplicates.
+        let page = service
+            .sync_group(&group_id, 0, 10)
+            .expect("sync after pre-merge load");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].seq, 1);
+        let replay = service
+            .publish(HttpPublishTarget::Inbox { recipient }, welcome)
+            .expect("duplicate welcome replays after pre-merge load");
+        assert_eq!(replay.seq, 1);
+        assert!(replay.duplicate);
+
+        // And the full restart check passes on top of the pre-merge state,
+        // with restarts round-tripping through today's snapshot encoding.
+        conformance::check_state_survives_restart(&mut SnapshotHarness { service });
     }
 }
