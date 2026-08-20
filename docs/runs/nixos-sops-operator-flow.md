@@ -7,6 +7,9 @@ files and how new operators become SOPS recipients. It is values-free: do not
 paste plaintext secrets, derived hashes, fingerprints, or private keys into
 this document, commits, issues, chat, or logs.
 
+Concise command reference:
+[`infra/nixos/secrets/OPERATIONS.md`](../../infra/nixos/secrets/OPERATIONS.md).
+
 ## Model
 
 - Public `age1...` recipients are committed in

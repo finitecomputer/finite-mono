@@ -6,6 +6,7 @@ password-derived evidence here.
 
 The operator workflow is documented in
 [`docs/runs/nixos-sops-operator-flow.md`](../../../docs/runs/nixos-sops-operator-flow.md).
+For the concise command reference, see [`OPERATIONS.md`](OPERATIONS.md).
 
 The production host private age identities live only on the hosts:
 
