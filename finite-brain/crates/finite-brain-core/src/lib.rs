@@ -1818,6 +1818,117 @@ pub fn issue_admin_access_change_event(
         })
 }
 
+/// Decoded view of a sync record's `payload_json`.
+///
+/// `payload_json` is at once the persisted `brain_record_index` column, the
+/// sync wire field, and the CLI's record representation, so every consumer
+/// used to re-parse the same string per fact it needed. Decode once per record
+/// and thread this typed view instead. In-memory only: no persisted or wire
+/// byte changes. Read paths fail open — legacy and forward-compat payloads map
+/// to [`DecodedSyncPayload::Unknown`] or [`DecodedSyncPayload::Invalid`] and
+/// keep the legacy whole-string ciphertext fallback.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum DecodedSyncPayload {
+    /// Payload carrying a `ciphertext` string (Folder Object revision shape,
+    /// or a legacy envelope JSON document).
+    Revision {
+        /// `baseRevision` when present and an unsigned integer.
+        base_revision: Option<u64>,
+        /// `ciphertext` string.
+        ciphertext: String,
+    },
+    /// `folder_object_tombstone` payload.
+    Tombstone,
+    /// Folder Key Grant payload.
+    KeyGrant {
+        /// `recipientNpub` string.
+        recipient_npub: String,
+    },
+    /// `folder_subtree_tombstone` admin-change payload.
+    AdminChange {
+        /// Deleted `folderIds`; `None` when the field is missing, is not an
+        /// array, or holds a non-string entry.
+        subtree_tombstone_ids: Option<Vec<String>>,
+    },
+    /// Valid JSON with an unrecognized shape (legacy or forward-compat).
+    Unknown,
+    /// Not valid JSON at all (for example a legacy bare ciphertext string).
+    Invalid,
+}
+
+impl DecodedSyncPayload {
+    /// Ciphertext carried by the payload, or the raw payload string itself for
+    /// legacy and unrecognized shapes (the bare-ciphertext fallback).
+    pub fn ciphertext_or_raw(&self, payload_json: &str) -> String {
+        match self {
+            Self::Revision { ciphertext, .. } => ciphertext.clone(),
+            _ => payload_json.to_owned(),
+        }
+    }
+
+    /// Whether the payload's `baseRevision` is absent, null, or the payload is
+    /// not revision-shaped — the create/update report distinction.
+    pub fn base_revision_is_none(&self) -> bool {
+        !matches!(
+            self,
+            Self::Revision {
+                base_revision: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Whether the payload is a `folder_subtree_tombstone` admin change.
+    pub fn is_folder_subtree_tombstone(&self) -> bool {
+        matches!(self, Self::AdminChange { .. })
+    }
+}
+
+/// Decode a sync record `payload_json` once into its typed facts.
+pub fn decode_sync_payload(payload_json: &str) -> DecodedSyncPayload {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload_json) else {
+        return DecodedSyncPayload::Invalid;
+    };
+    if value.get("recordType").and_then(serde_json::Value::as_str)
+        == Some("folder_subtree_tombstone")
+    {
+        let subtree_tombstone_ids = value
+            .get("folderIds")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|folder_ids| {
+                folder_ids
+                    .iter()
+                    .map(|folder_id| folder_id.as_str().map(ToOwned::to_owned))
+                    .collect::<Option<Vec<String>>>()
+            });
+        return DecodedSyncPayload::AdminChange {
+            subtree_tombstone_ids,
+        };
+    }
+    if let Some(ciphertext) = value.get("ciphertext").and_then(serde_json::Value::as_str) {
+        return DecodedSyncPayload::Revision {
+            base_revision: value
+                .get("baseRevision")
+                .and_then(serde_json::Value::as_u64),
+            ciphertext: ciphertext.to_owned(),
+        };
+    }
+    if let Some(recipient_npub) = value
+        .get("recipientNpub")
+        .and_then(serde_json::Value::as_str)
+    {
+        return DecodedSyncPayload::KeyGrant {
+            recipient_npub: recipient_npub.to_owned(),
+        };
+    }
+    if value.get("recordType").and_then(serde_json::Value::as_str)
+        == Some("folder_object_tombstone")
+    {
+        return DecodedSyncPayload::Tombstone;
+    }
+    DecodedSyncPayload::Unknown
+}
+
 /// Validate an official Product Client request-signing intent before the user key signs it.
 pub fn validate_brain_http_authorization_intent(
     input: &BrainHttpAuthorizationIntent,
@@ -3953,5 +4064,133 @@ mod tests {
             .finalize(&human_keys)
             .unwrap();
         assert!(validate_brain_approval_event(&wrong_kind, &human_npub).is_err());
+    }
+
+    #[test]
+    fn decode_sync_payload_reads_revision_facts() {
+        let created = decode_sync_payload(
+            r#"{"recordType":"folder_object_revision","folderId":"general","objectId":"obj_1","baseRevision":null,"keyVersion":1,"cipher":"AES-256-GCM","ciphertext":"ct-create","revisionEvent":{}}"#,
+        );
+        assert_eq!(
+            created,
+            DecodedSyncPayload::Revision {
+                base_revision: None,
+                ciphertext: "ct-create".to_owned(),
+            }
+        );
+        assert!(created.base_revision_is_none());
+        assert!(!created.is_folder_subtree_tombstone());
+
+        let updated = decode_sync_payload(
+            r#"{"recordType":"folder_object_revision","baseRevision":3,"ciphertext":"ct-update"}"#,
+        );
+        assert_eq!(
+            updated,
+            DecodedSyncPayload::Revision {
+                base_revision: Some(3),
+                ciphertext: "ct-update".to_owned(),
+            }
+        );
+        assert!(!updated.base_revision_is_none());
+        assert_eq!(updated.ciphertext_or_raw("raw"), "ct-update");
+    }
+
+    #[test]
+    fn decode_sync_payload_reads_control_record_facts() {
+        let tombstone = decode_sync_payload(
+            r#"{"recordType":"folder_subtree_tombstone","folderId":"general","folderIds":["general","archive"]}"#,
+        );
+        assert_eq!(
+            tombstone,
+            DecodedSyncPayload::AdminChange {
+                subtree_tombstone_ids: Some(vec!["general".to_owned(), "archive".to_owned()]),
+            }
+        );
+        assert!(tombstone.is_folder_subtree_tombstone());
+
+        // A tombstone payload missing folderIds still classifies as the
+        // admin-change subtype; the missing field is the caller's error.
+        let missing_ids = decode_sync_payload(
+            r#"{"recordType":"folder_subtree_tombstone","folderId":"general"}"#,
+        );
+        assert_eq!(
+            missing_ids,
+            DecodedSyncPayload::AdminChange {
+                subtree_tombstone_ids: None,
+            }
+        );
+        // A non-string folderIds entry fails the whole field closed.
+        let mixed_ids = decode_sync_payload(
+            r#"{"recordType":"folder_subtree_tombstone","folderIds":["general",3]}"#,
+        );
+        assert_eq!(
+            mixed_ids,
+            DecodedSyncPayload::AdminChange {
+                subtree_tombstone_ids: None,
+            }
+        );
+
+        let grant = decode_sync_payload(
+            r#"{"id":"grant-1","folderId":"general","keyVersion":1,"issuerNpub":"npub-issuer","recipientNpub":"npub-recipient","format":"NIP-59","wrappedEventJson":"{}","accessChangeEventJson":null,"createdAt":"2026-08-20T00:00:00Z"}"#,
+        );
+        assert_eq!(
+            grant,
+            DecodedSyncPayload::KeyGrant {
+                recipient_npub: "npub-recipient".to_owned(),
+            }
+        );
+
+        let tombstone_record = decode_sync_payload(
+            r#"{"recordType":"folder_object_tombstone","folderId":"general","objectId":"obj_1","baseRevision":2,"tombstoneEvent":{}}"#,
+        );
+        assert_eq!(tombstone_record, DecodedSyncPayload::Tombstone);
+
+        // Other admin access-change payloads carry no sync facts.
+        let admin_change = decode_sync_payload(
+            r#"{"version":"finite-brain-admin-access-change-v1","brainId":"acme","changeId":"change-1","action":"remove-folder-access","adminNpub":"npub-admin","createdAt":"2026-08-20T00:00:00Z"}"#,
+        );
+        assert_eq!(admin_change, DecodedSyncPayload::Unknown);
+    }
+
+    #[test]
+    fn decode_sync_payload_fails_open_for_legacy_and_forward_compat_shapes() {
+        // Legacy bare ciphertext is not JSON at all.
+        let bare = decode_sync_payload("legacy-bare-ciphertext");
+        assert_eq!(bare, DecodedSyncPayload::Invalid);
+        assert_eq!(
+            bare.ciphertext_or_raw("legacy-bare-ciphertext"),
+            "legacy-bare-ciphertext"
+        );
+        assert!(bare.base_revision_is_none());
+
+        // Valid JSON without a recognized shape stays opaque.
+        let non_conforming = decode_sync_payload(r#"{"body":"encrypted payload"}"#);
+        assert_eq!(non_conforming, DecodedSyncPayload::Unknown);
+        assert_eq!(
+            non_conforming.ciphertext_or_raw(r#"{"body":"encrypted payload"}"#),
+            r#"{"body":"encrypted payload"}"#
+        );
+        assert!(non_conforming.base_revision_is_none());
+        assert!(!non_conforming.is_folder_subtree_tombstone());
+
+        // Non-object JSON is valid for ingest but carries no sync facts.
+        assert_eq!(
+            decode_sync_payload(r#""just a string""#),
+            DecodedSyncPayload::Unknown
+        );
+        assert_eq!(decode_sync_payload("[1,2,3]"), DecodedSyncPayload::Unknown);
+
+        // A legacy envelope JSON document yields its inner ciphertext field,
+        // exactly as the former per-consumer string sniffing did.
+        let envelope = decode_sync_payload(
+            r#"{"version":"finite-folder-object-v1","cipher":"AES-256-GCM","keyVersion":1,"nonce":"bnVjZQ==","ciphertext":"aW5uZXItY2lwaGVydGV4dA=="}"#,
+        );
+        assert_eq!(
+            envelope,
+            DecodedSyncPayload::Revision {
+                base_revision: None,
+                ciphertext: "aW5uZXItY2lwaGVydGV4dA==".to_owned(),
+            }
+        );
     }
 }

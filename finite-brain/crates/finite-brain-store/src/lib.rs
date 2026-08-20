@@ -9539,6 +9539,59 @@ mod tests {
     }
 
     #[test]
+    fn sync_payload_json_validation_rejects_non_json_and_accepts_unrecognized_shapes() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+
+        // A legacy bare ciphertext string is not JSON: rejected, as before.
+        let mut bare = revision_record_struct(
+            "event-bare-ciphertext",
+            "strategy",
+            "obj_000000000001",
+            1,
+            None,
+            "ignored",
+        );
+        bare.payload_json = "legacy-bare-ciphertext".to_owned();
+        assert_eq!(
+            store
+                .submit_sync_record(&brain_id, &SyncRecordInput::FolderObjectRevision(bare))
+                .unwrap_err(),
+            StoreError::InvalidRecord {
+                reason: "payload JSON is invalid".to_owned()
+            }
+        );
+
+        // Valid JSON without a recognized sync shape ingests exactly as before.
+        let non_conforming = revision_record(
+            "event-non-conforming",
+            "obj_000000000002",
+            1,
+            None,
+            "encrypted payload",
+        );
+        store
+            .submit_sync_record(&brain_id, &non_conforming)
+            .unwrap();
+
+        // Non-object JSON is still valid JSON and ingests as before.
+        let mut scalar = revision_record_struct(
+            "event-scalar-payload",
+            "strategy",
+            "obj_000000000003",
+            1,
+            None,
+            "ignored",
+        );
+        scalar.payload_json = "\"just a string\"".to_owned();
+        store
+            .submit_sync_record(&brain_id, &SyncRecordInput::FolderObjectRevision(scalar))
+            .unwrap();
+
+        assert_eq!(store.sync_bootstrap(&brain_id).unwrap().latest_sequence, 2);
+    }
+
+    #[test]
     fn sync_rejects_non_monotonic_revision() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
