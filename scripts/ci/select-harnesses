@@ -108,6 +108,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",
+    "scripts/check_runbook_facts_contract.py",
 }
 
 
@@ -245,6 +246,12 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if is_finite_skills_executable_doc(path):
         selection.run_skills_check = True
+        return
+
+    # Runbooks are fact-checked against their in-repo authorities by the
+    # runbook-facts contract in the nix-checks job.
+    if path.startswith("infra/runbooks/"):
+        selection.run_nix_checks = True
         return
 
     if is_docs_only_path(path):
