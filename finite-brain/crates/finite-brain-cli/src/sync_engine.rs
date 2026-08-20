@@ -19,10 +19,11 @@ use finite_brain_core::portability::{
     materialize_brain_working_tree, plan_working_tree_change_intents,
 };
 use finite_brain_core::{
-    Brain, BrainId, BrainKind, DisplayName, EncryptedFolderObjectEnvelope, Folder,
-    FolderAccessMode, FolderId, FolderKey, FolderObjectAad, FolderObjectOperation,
+    Brain, BrainId, BrainKind, DecodedSyncPayload, DisplayName, EncryptedFolderObjectEnvelope,
+    Folder, FolderAccessMode, FolderId, FolderKey, FolderObjectAad, FolderObjectOperation,
     FolderObjectRevisionPayload, FolderRole, ObjectId, RevisionValidation, SafeRelativePath,
-    TombstoneValidation, UserId, encrypt_folder_object, open_folder_object, sha256_hex,
+    TombstoneValidation, UserId, decode_sync_payload, encrypt_folder_object, open_folder_object,
+    sha256_hex,
 };
 use finite_nostr::{GiftWrapValidation, NostrPublicKey, open_gift_wrap};
 use nostr::{Event, Keys, Kind, Tag};
@@ -526,15 +527,7 @@ pub(crate) fn prepare_folder_access_removals(
                 object.object_id
             ))
         })?;
-        let envelope_json = serde_json::from_str::<serde_json::Value>(payload_json)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("ciphertext")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_else(|| payload_json.to_owned());
+        let envelope_json = decode_sync_payload(payload_json).ciphertext_or_raw(payload_json);
         let envelope = EncryptedFolderObjectEnvelope::from_json(&envelope_json)
             .map_err(|error| CliError::InvalidInput(error.to_string()))?;
         let object_id = ObjectId::new(object.object_id.clone())
@@ -886,6 +879,7 @@ fn apply_incremental_records_to_bootstrap(
                 record.sequence
             ));
         }
+        let payload = decode_sync_payload(&record.payload_json);
         match record.record_type.as_str() {
             "folder_object_revision" => {
                 let folder_id = record_folder_id(record)?;
@@ -896,7 +890,7 @@ fn apply_incremental_records_to_bootstrap(
                         folder_id,
                         object_id,
                         revision: record_revision(record)?,
-                        ciphertext: record_payload_ciphertext(record),
+                        ciphertext: payload.ciphertext_or_raw(&record.payload_json),
                         deleted: false,
                     },
                 );
@@ -915,8 +909,8 @@ fn apply_incremental_records_to_bootstrap(
                     },
                 );
             }
-            "brain_admin_access_change" if is_folder_subtree_tombstone_record(record) => {
-                let deleted_folder_ids = folder_subtree_tombstone_ids(record)?;
+            "brain_admin_access_change" if payload.is_folder_subtree_tombstone() => {
+                let deleted_folder_ids = folder_subtree_tombstone_ids(record, &payload)?;
                 objects.retain(|(folder_id, _), _| !deleted_folder_ids.contains(folder_id));
                 control_records.push(record.clone());
             }
@@ -989,18 +983,6 @@ fn record_revision(record: &CliSyncRecord) -> Result<u64, String> {
         .ok_or_else(|| format!("sync record {} is missing revision", record.sequence))
 }
 
-fn record_payload_ciphertext(record: &CliSyncRecord) -> String {
-    serde_json::from_str::<serde_json::Value>(&record.payload_json)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("ciphertext")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| record.payload_json.clone())
-}
-
 fn sync_record_reports(
     records: &[CliSyncRecord],
     prior_state: &finite_brain_core::portability::BrainWorkingTreeStateManifest,
@@ -1010,64 +992,61 @@ fn sync_record_reports(
 ) -> Vec<SyncChangeReport> {
     records
         .iter()
-        .map(|record| SyncChangeReport {
-            status: status.to_owned(),
-            action: sync_record_action(record),
-            actor_npub: Some(record.actor_npub.clone()),
-            sequence: Some(record.sequence),
-            path: sync_record_path(record, prior_state, applied_state),
-            from_path: None,
-            folder_id: record.folder_id.clone(),
-            source_brain_id: None,
-            object_id: record.object_id.clone(),
-            route: "sync-record".to_owned(),
-            reason: reason.map(ToOwned::to_owned),
+        .map(|record| {
+            let payload = decode_sync_payload(&record.payload_json);
+            SyncChangeReport {
+                status: status.to_owned(),
+                action: sync_record_action(record, &payload),
+                actor_npub: Some(record.actor_npub.clone()),
+                sequence: Some(record.sequence),
+                path: sync_record_path(record, prior_state, applied_state),
+                from_path: None,
+                folder_id: record.folder_id.clone(),
+                source_brain_id: None,
+                object_id: record.object_id.clone(),
+                route: "sync-record".to_owned(),
+                reason: reason.map(ToOwned::to_owned),
+            }
         })
         .collect()
 }
 
-fn sync_record_action(record: &CliSyncRecord) -> String {
+fn sync_record_action(record: &CliSyncRecord, payload: &DecodedSyncPayload) -> String {
     match record.record_type.as_str() {
         "folder_object_revision" => {
-            if sync_record_base_revision_is_none(record) {
+            if payload.base_revision_is_none() {
                 "create".to_owned()
             } else {
                 "update".to_owned()
             }
         }
         "folder_object_tombstone" => "delete".to_owned(),
-        "brain_admin_access_change" if is_folder_subtree_tombstone_record(record) => {
+        "brain_admin_access_change" if payload.is_folder_subtree_tombstone() => {
             "delete-folder-subtree".to_owned()
         }
         other => other.to_owned(),
     }
 }
 
-fn is_folder_subtree_tombstone_record(record: &CliSyncRecord) -> bool {
-    serde_json::from_str::<serde_json::Value>(&record.payload_json)
-        .ok()
-        .and_then(|payload| payload.get("recordType")?.as_str().map(ToOwned::to_owned))
-        .as_deref()
-        == Some("folder_subtree_tombstone")
-}
-
-fn folder_subtree_tombstone_ids(record: &CliSyncRecord) -> Result<BTreeSet<String>, String> {
-    let payload =
-        serde_json::from_str::<serde_json::Value>(&record.payload_json).map_err(|_| {
-            format!(
-                "sync record {} deletion payload is invalid",
-                record.sequence
-            )
-        })?;
-    let folder_ids = payload
-        .get("folderIds")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            format!(
-                "sync record {} deletion payload is missing folderIds",
-                record.sequence
-            )
-        })?;
+fn folder_subtree_tombstone_ids(
+    record: &CliSyncRecord,
+    payload: &DecodedSyncPayload,
+) -> Result<BTreeSet<String>, String> {
+    let DecodedSyncPayload::AdminChange {
+        subtree_tombstone_ids,
+    } = payload
+    else {
+        return Err(format!(
+            "sync record {} deletion payload is invalid",
+            record.sequence
+        ));
+    };
+    let folder_ids = subtree_tombstone_ids.as_ref().ok_or_else(|| {
+        format!(
+            "sync record {} deletion payload is missing folderIds",
+            record.sequence
+        )
+    })?;
     if folder_ids.is_empty() {
         return Err(format!(
             "sync record {} deletion payload has no folderIds",
@@ -1077,24 +1056,11 @@ fn folder_subtree_tombstone_ids(record: &CliSyncRecord) -> Result<BTreeSet<Strin
     folder_ids
         .iter()
         .map(|folder_id| {
-            let folder_id = folder_id.as_str().ok_or_else(|| {
-                format!(
-                    "sync record {} deletion payload has an invalid folderId",
-                    record.sequence
-                )
-            })?;
-            FolderId::new(folder_id.to_owned())
+            FolderId::new(folder_id.clone())
                 .map(|folder_id| folder_id.to_string())
                 .map_err(|error| error.to_string())
         })
         .collect()
-}
-
-fn sync_record_base_revision_is_none(record: &CliSyncRecord) -> bool {
-    serde_json::from_str::<serde_json::Value>(&record.payload_json)
-        .ok()
-        .and_then(|value| value.get("baseRevision").cloned())
-        .is_none_or(|value| value.is_null())
 }
 
 fn sync_record_path(
@@ -2262,10 +2228,13 @@ fn deleted_folder_routes(
 ) -> Result<BTreeSet<(String, String)>, CliError> {
     let mut routes = BTreeSet::new();
     for record in &bootstrap.control_records {
-        if !is_folder_subtree_tombstone_record(record) {
+        let payload = decode_sync_payload(&record.payload_json);
+        if !payload.is_folder_subtree_tombstone() {
             continue;
         }
-        for folder_id in folder_subtree_tombstone_ids(record).map_err(CliError::InvalidInput)? {
+        for folder_id in
+            folder_subtree_tombstone_ids(record, &payload).map_err(CliError::InvalidInput)?
+        {
             routes.insert((export.brain.id.clone(), folder_id));
         }
     }
@@ -4236,6 +4205,47 @@ mod tests {
                 .unwrap()
                 .ciphertext,
             "new-page-ciphertext"
+        );
+    }
+
+    #[test]
+    fn incremental_revision_keeps_legacy_bare_ciphertext_payload_byte_for_byte() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        write_json_file(
+            &root.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &CliSyncBootstrap {
+                latest_sequence: 0,
+                objects: Vec::new(),
+                control_records: Vec::new(),
+            },
+        )
+        .unwrap();
+        // A legacy record whose payload_json is the bare ciphertext string, not JSON.
+        let records = vec![CliSyncRecord {
+            sequence: 1,
+            record_event_id: "event-legacy-asset".to_owned(),
+            record_type: "folder_object_revision".to_owned(),
+            folder_id: Some("home".to_owned()),
+            object_id: Some("obj_legacyasset04".to_owned()),
+            revision: Some(1),
+            actor_npub: "npub-actor".to_owned(),
+            client_created_at: "2026-08-04T00:00:00Z".to_owned(),
+            payload_json: "legacy-bare-ciphertext".to_owned(),
+            record_event_kind: 30_101,
+        }];
+
+        let incremental = apply_incremental_records(root, 0, 1, &records).unwrap();
+
+        assert_eq!(
+            incremental
+                .objects
+                .iter()
+                .find(|object| object.object_id == "obj_legacyasset04")
+                .unwrap()
+                .ciphertext,
+            "legacy-bare-ciphertext"
         );
     }
 

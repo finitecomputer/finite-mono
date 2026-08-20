@@ -20,13 +20,14 @@ use axum::{Json, Router};
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
-    CoreError, CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder,
-    Folder, FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
-    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
-    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
-    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
-    bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
-    validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
+    CoreError, CryptoRecordError, DecodedSyncPayload, DisplayName, EmailInviteScopeError,
+    EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId, FolderObjectOperation,
+    FolderObjectRevisionPayload, FolderObjectTombstonePayload, FolderRotationFanout,
+    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, RevisionValidation,
+    SafeRelativePath, TombstoneValidation, UserId, bootstrap_organization_brain,
+    bootstrap_organization_brain_with_requester, bootstrap_personal_brain, decode_sync_payload,
+    derive_email_invite_scope, validate_admin_access_change_event, validate_folder_rotation_fanout,
+    validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
     BrainInvitationTargetKind, BrainStore, ControlSyncRecord, DepartureFactApplication,
@@ -2648,13 +2649,17 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
             .as_ref()
             .is_some_and(|folder_id| folder_visible(stored, folder_id, actor_npub)),
         SyncRecordType::FolderKeyGrant => {
-            is_admin || grant_payload_recipient(&record.payload_json).as_deref() == Some(actor_npub)
+            is_admin
+                || matches!(
+                    decode_sync_payload(&record.payload_json),
+                    DecodedSyncPayload::KeyGrant { recipient_npub } if recipient_npub == actor_npub
+                )
         }
         SyncRecordType::BrainAdminAccessChange => {
             is_owner
                 || is_admin
                 || is_personal_agent
-                || (is_folder_subtree_tombstone(&record.payload_json)
+                || (decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                     && stored
                         .folder_deletion_audience
                         .get(&record.record_event_id)
@@ -2665,32 +2670,8 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
     }
 }
 
-fn is_folder_subtree_tombstone(payload_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()
-        .and_then(|payload| payload.get("recordType")?.as_str().map(ToOwned::to_owned))
-        .as_deref()
-        == Some("folder_subtree_tombstone")
-}
-
-fn grant_payload_recipient(payload_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()?
-        .get("recipientNpub")?
-        .as_str()
-        .map(ToOwned::to_owned)
-}
-
 fn object_ciphertext(payload_json: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("ciphertext")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| payload_json.to_owned())
+    decode_sync_payload(payload_json).ciphertext_or_raw(payload_json)
 }
 
 fn lock_error<T>(_error: T) -> ApiError {
@@ -4666,7 +4647,7 @@ mod tests {
             assert_eq!(
                 pull.records.iter().any(|record| {
                     record.record_type == "brain_admin_access_change"
-                        && record.payload_json.contains("folder_subtree_tombstone")
+                        && decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                 }),
                 should_see_tombstone
             );
@@ -4685,7 +4666,7 @@ mod tests {
             assert_eq!(
                 bootstrap.control_records.iter().any(|record| {
                     record.record_type == "brain_admin_access_change"
-                        && record.payload_json.contains("folder_subtree_tombstone")
+                        && decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                 }),
                 should_see_tombstone
             );

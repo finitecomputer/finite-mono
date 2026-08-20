@@ -1,6 +1,8 @@
 //! Store-local sync append-log and current-projection helpers.
 
-use finite_brain_core::{BrainId, FolderId, ObjectId, UserId};
+use finite_brain_core::{
+    BrainId, DecodedSyncPayload, FolderId, ObjectId, UserId, decode_sync_payload,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
@@ -20,11 +22,14 @@ pub(crate) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreEr
             reason: "payload JSON is required".to_owned(),
         });
     }
-    serde_json::from_str::<serde_json::Value>(input.payload_json()).map_err(|_| {
-        StoreError::InvalidRecord {
+    if matches!(
+        decode_sync_payload(input.payload_json()),
+        DecodedSyncPayload::Invalid
+    ) {
+        return Err(StoreError::InvalidRecord {
             reason: "payload JSON is invalid".to_owned(),
-        }
-    })?;
+        });
+    }
     let expected_kind = match input {
         SyncRecordInput::Control(record)
             if record.record_type == SyncRecordType::FolderKeyGrant =>
