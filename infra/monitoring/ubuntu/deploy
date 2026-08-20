@@ -49,7 +49,7 @@ fi
 archive="$(mktemp "${TMPDIR:-/tmp}/finite-monitoring-ubuntu.XXXXXX.tar.gz")"
 trap 'rm -f "${archive}"' EXIT
 
-tar -czf "${archive}" \
+COPYFILE_DISABLE=1 tar -czf "${archive}" \
   infra/monitoring/ubuntu \
   infra/monitoring/grafana/dashboards/finite-production-mvp.json
 
@@ -146,7 +146,7 @@ download() {
   fi
   local temporary="${destination}.tmp"
   curl -fL --retry 3 --connect-timeout 20 -o "${temporary}" "${url}"
-  printf '%s  %s\n' "${expected}" "${temporary}" | "${algorithm}sum" -c -
+  printf '%s  %s\n' "${expected}" "${temporary}" | "${algorithm}sum" -c - >/dev/null
   mv "${temporary}" "${destination}"
   printf '%s\n' "${destination}"
 }
