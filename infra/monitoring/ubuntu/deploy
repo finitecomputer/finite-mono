@@ -97,9 +97,11 @@ install -d -m 0750 -o finite-monitoring -g finite-monitoring \
   /var/lib/finite-monitoring/caddy \
   /var/lib/finite-monitoring/grafana \
   /var/lib/finite-monitoring/grafana/dashboards \
+  /var/lib/finite-monitoring/grafana/plugins \
   /var/lib/finite-monitoring/loki \
   /var/lib/finite-monitoring/prometheus \
   /var/log/finite-monitoring \
+  /var/log/finite-monitoring/caddy \
   /var/log/finite-monitoring/grafana
 
 for required in \
@@ -202,7 +204,11 @@ if [[ -e "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" ]]; then
   mv "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.old"
 fi
 mv "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.new" "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}"
-ln -sfn "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" /opt/finite-monitoring/grafana
+if [[ -e /opt/finite-monitoring/grafana && ! -L /opt/finite-monitoring/grafana ]]; then
+  mv /opt/finite-monitoring/grafana "/opt/finite-monitoring/grafana.pre-systemd-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+ln -sfnT "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" /opt/finite-monitoring/grafana
+test -x /opt/finite-monitoring/grafana/bin/grafana
 rm -rf "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.old"
 rm -rf "${grafana_tmp}"
 
