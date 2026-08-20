@@ -55,7 +55,7 @@ use crate::{
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_runner_class,
     parse_runtime_artifact_kind, parse_runtime_control_kind, parse_runtime_control_request_status,
-    parse_runtime_resource_class, parse_runtime_summary_status, parse_time, parse_user_link_status,
+    parse_runtime_resource_class, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
@@ -4472,13 +4472,6 @@ where
         .map_err(store_error)?;
     client
         .execute(
-            "DELETE FROM runtime_status_snapshots WHERE agent_runtime_id = $1",
-            &[&runtime_id],
-        )
-        .await
-        .map_err(store_error)?;
-    client
-        .execute(
             "DELETE FROM runtime_relay_credentials WHERE agent_runtime_id = $1",
             &[&runtime_id],
         )
@@ -5885,43 +5878,6 @@ where
         runtime.updated_at = now.to_string();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    if let Some(upgrade) = upgrade {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, runtime_host = $3, hermes_available = TRUE,
-                     updated_at = $4::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[
-                    &agent_runtime_id,
-                    &status.as_str(),
-                    &upgrade.runtime_host,
-                    &now,
-                ],
-            )
-            .await
-            .map_err(store_error)?;
-    } else if destroy {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, hermes_available = FALSE, updated_at = $3::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[&agent_runtime_id, &status.as_str(), &now],
-            )
-            .await
-            .map_err(store_error)?;
-    } else {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, updated_at = $3::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[&agent_runtime_id, &status.as_str(), &now],
-            )
-            .await
-            .map_err(store_error)?;
-    }
     Ok(())
 }
 
@@ -6231,15 +6187,6 @@ where
         runtime.updated_at = now.clone();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    client
-        .execute(
-            "UPDATE runtime_status_snapshots
-             SET status = 'stale', updated_at = $2::text::timestamptz
-             WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
     Ok(request)
 }
 
@@ -6328,15 +6275,6 @@ where
         runtime.updated_at = now.clone();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    client
-        .execute(
-            "UPDATE runtime_status_snapshots
-             SET status = 'stale', updated_at = $2::text::timestamptz
-             WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
     Ok(request)
 }
 
@@ -6943,10 +6881,6 @@ where
                     core_rfc3339(runtime.updated_at) AS runtime_updated_at,
                     project.display_name AS project_display_name,
                     owner.normalized_email AS owner_email,
-                    snapshot.status AS snapshot_status,
-                    core_rfc3339(snapshot.last_heartbeat_at) AS last_heartbeat_at,
-                    core_rfc3339(snapshot.updated_at) AS status_updated_at,
-                    snapshot.hermes_available AS snapshot_hermes_available,
                     artifact.version_label AS runtime_artifact_version_label,
                     runtime.runtime_capabilities,
                     EXISTS (
@@ -6961,7 +6895,6 @@ where
              FROM agent_runtimes AS runtime
              LEFT JOIN projects AS project ON project.id = runtime.project_id
              LEFT JOIN users AS owner ON owner.id = project.owner_user_id
-             LEFT JOIN runtime_status_snapshots AS snapshot ON snapshot.agent_runtime_id = runtime.id
              LEFT JOIN runtime_artifacts AS artifact ON artifact.id = runtime.runtime_artifact_id
              ORDER BY runtime.source_host_id, runtime.source_machine_id, runtime.id",
             &[],
@@ -6971,21 +6904,12 @@ where
     rows.iter()
         .map(|row| {
             let host_facts: HostOwnedRuntimeFacts = json_column(row, "host_facts")?;
-            let snapshot_status: Option<String> = row.get("snapshot_status");
-            let snapshot_status = snapshot_status
-                .as_deref()
-                .map(|value| {
-                    parse_runtime_summary_status(value)
-                        .ok_or_else(|| CoreError::Store(format!("invalid runtime status {value}")))
-                })
-                .transpose()?;
             let runtime_capabilities: Option<RuntimeCapabilitiesEnvelope> =
                 optional_json_column(row, "runtime_capabilities")?
                     .map(serde_json::from_value)
                     .transpose()
                     .map_err(json_error)?;
             let project_display_name: Option<String> = row.get("project_display_name");
-            let snapshot_hermes: Option<bool> = row.get("snapshot_hermes_available");
             Ok(AdminRuntimeOverview {
                 project_id: row.get("project_id"),
                 project_display_name: project_display_name
@@ -6996,11 +6920,14 @@ where
                 source_machine_id: row.get("source_machine_id"),
                 runtime_artifact_id: row.get("runtime_artifact_id"),
                 runtime_artifact_version_label: row.get("runtime_artifact_version_label"),
-                runtime_status: snapshot_status.unwrap_or(host_facts.runtime_status),
-                last_heartbeat_at: row.get("last_heartbeat_at"),
-                status_updated_at: row.get("status_updated_at"),
+                runtime_status: host_facts.runtime_status,
+                // runtime_status_snapshots has no writer; the wire fields stay
+                // serialized as null for dashboard compatibility until the
+                // gated table drop and wire-type change land together.
+                last_heartbeat_at: None,
+                status_updated_at: None,
                 runtime_updated_at: row.get("runtime_updated_at"),
-                hermes_available: snapshot_hermes.or(host_facts.hermes_available),
+                hermes_available: host_facts.hermes_available,
                 published_app_urls: host_facts.published_app_urls.clone(),
                 active_finite_private_key_count: row.get("active_finite_private_key_count"),
                 runtime_link_active: row.get("runtime_link_active"),
@@ -12417,6 +12344,15 @@ mod tests {
                 .find(|o| o.agent_runtime_id == runtime_id)
                 .unwrap();
             assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            assert_eq!(
+                overview_online.runtime_status,
+                store
+                    .agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status
+            );
             assert!(overview_online.runtime_link_active);
 
             // Upgrade: target is an explicit promoted, digest-pinned artifact;

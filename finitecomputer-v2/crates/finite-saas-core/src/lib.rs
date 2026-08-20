@@ -7717,6 +7717,9 @@ mod tests {
             "project_runtime_links",
             "chat_identities",
             "project_room_memberships",
+            // Writer removed; the table stays because production may hold rows
+            // and dropping schema is a rollback boundary (separate gated
+            // migration).
             "runtime_status_snapshots",
             "inference_profiles",
             "agent_creation_entitlements",
@@ -8384,6 +8387,21 @@ mod tests {
                     .host_facts
                     .runtime_status,
                 RuntimeSummaryStatus::Stale
+            );
+            let stale_overview = db
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(
+                stale_overview.runtime_status,
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status
             );
 
             // Without the attestation, `stale` (and the missing stop
