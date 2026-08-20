@@ -1,0 +1,39 @@
+{
+	admin off
+	email ops@finite.computer
+}
+
+monitoring.finite.computer {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+}
+
+metrics-ingest.finite.computer {
+	@remote_write {
+		method POST
+		path /api/v1/write
+	}
+
+	@loki_push {
+		method POST
+		path /loki/api/v1/push
+	}
+
+	handle @remote_write {
+		basic_auth argon2id {
+			{$METRICS_USERNAME} {$METRICS_PASSWORD_HASH}
+		}
+		reverse_proxy 127.0.0.1:9090
+	}
+
+	handle @loki_push {
+		basic_auth argon2id {
+			{$LOGS_USERNAME} {$LOGS_PASSWORD_HASH}
+		}
+		reverse_proxy 127.0.0.1:3100
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET="${FINITE_MONITORING_TARGET:-ubuntu@152.236.5.27}"
+REPLACE_COMPOSE=0
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: infra/monitoring/ubuntu/deploy --replace-compose [ubuntu@host]
+
+Deploy the repo-owned Ubuntu/systemd monitoring receiver to the Latitude VM.
+The explicit --replace-compose flag is required because the deploy stops the
+old Compose stack before starting Caddy on ports 80 and 443.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --replace-compose)
+      REPLACE_COMPOSE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      TARGET="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "${REPLACE_COMPOSE}" -ne 1 ]]; then
+  usage
+  exit 64
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+rev="$(git rev-parse HEAD)"
+dirty="$(git status --porcelain)"
+if [[ -n "${dirty}" && "${FINITE_MONITORING_ALLOW_DIRTY:-0}" != "1" ]]; then
+  echo "refusing to deploy a dirty checkout; set FINITE_MONITORING_ALLOW_DIRTY=1 for an explicit local canary" >&2
+  exit 65
+fi
+
+archive="$(mktemp "${TMPDIR:-/tmp}/finite-monitoring-ubuntu.XXXXXX.tar.gz")"
+trap 'rm -f "${archive}"' EXIT
+
+tar -czf "${archive}" \
+  infra/monitoring/ubuntu \
+  infra/monitoring/grafana/dashboards/finite-production-mvp.json
+
+remote_archive="/tmp/finite-monitoring-ubuntu-${rev}.tar.gz"
+echo "==> uploading monitoring config ${rev} to ${TARGET}"
+scp -q "${archive}" "${TARGET}:${remote_archive}"
+
+echo "==> installing and restarting monitoring services"
+ssh -o BatchMode=yes "${TARGET}" sudo bash -s -- "${rev}" "${remote_archive}" <<'REMOTE'
+set -euo pipefail
+
+rev="$1"
+remote_archive="$2"
+[[ "${rev}" =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ "${remote_archive}" == "/tmp/finite-monitoring-ubuntu-${rev}.tar.gz" ]] || exit 64
+
+if [[ ! -r /etc/os-release ]]; then
+  echo "cannot identify the operating system" >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+source /etc/os-release
+if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
+  echo "this deploy supports Ubuntu 24.04; found ${PRETTY_NAME:-unknown}" >&2
+  exit 1
+fi
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar gzip unzip coreutils openssl
+
+if ! getent group finite-monitoring >/dev/null; then
+  groupadd --system finite-monitoring
+fi
+if ! id -u finite-monitoring >/dev/null 2>&1; then
+  useradd --system --gid finite-monitoring --home-dir /var/lib/finite-monitoring \
+    --create-home --shell /usr/sbin/nologin finite-monitoring
+fi
+
+install -d -m 0755 /opt/finite-monitoring/bin
+install -d -m 0755 /var/cache/finite-monitoring
+install -d -m 0750 -o root -g finite-monitoring /etc/finite/monitoring
+install -d -m 0750 -o finite-monitoring -g finite-monitoring \
+  /var/lib/finite-monitoring \
+  /var/lib/finite-monitoring/blackbox \
+  /var/lib/finite-monitoring/caddy \
+  /var/lib/finite-monitoring/grafana \
+  /var/lib/finite-monitoring/grafana/dashboards \
+  /var/lib/finite-monitoring/loki \
+  /var/lib/finite-monitoring/prometheus \
+  /var/log/finite-monitoring \
+  /var/log/finite-monitoring/grafana
+
+for required in \
+  /etc/finite/monitoring/grafana-admin-password \
+  /etc/finite/monitoring/grafana-secret-key \
+  /etc/finite/monitoring/caddy.env
+do
+  if [[ ! -s "${required}" ]]; then
+    echo "missing required monitoring secret file: ${required}" >&2
+    exit 66
+  fi
+done
+
+for key in METRICS_USERNAME METRICS_PASSWORD_HASH LOGS_USERNAME LOGS_PASSWORD_HASH; do
+  if ! grep -Eq "^${key}=" /etc/finite/monitoring/caddy.env; then
+    echo "/etc/finite/monitoring/caddy.env missing ${key}" >&2
+    exit 66
+  fi
+done
+chown root:finite-monitoring \
+  /etc/finite/monitoring/grafana-admin-password \
+  /etc/finite/monitoring/grafana-secret-key \
+  /etc/finite/monitoring/caddy.env
+chmod 0640 \
+  /etc/finite/monitoring/grafana-admin-password \
+  /etc/finite/monitoring/grafana-secret-key \
+  /etc/finite/monitoring/caddy.env
+
+staging="$(mktemp -d /tmp/finite-monitoring-ubuntu.XXXXXX)"
+trap 'rm -rf "${staging}"' EXIT
+tar -xzf "${remote_archive}" -C "${staging}"
+cd "${staging}/infra/monitoring/ubuntu"
+# shellcheck disable=SC1091
+source versions.env
+
+download() {
+  local name="$1" url="$2" algorithm="$3" expected="$4"
+  local destination="/var/cache/finite-monitoring/${name}"
+  if [[ -f "${destination}" ]]; then
+    printf '%s  %s\n' "${expected}" "${destination}" | "${algorithm}sum" -c - >/dev/null && {
+      printf '%s\n' "${destination}"
+      return 0
+    }
+  fi
+  local temporary="${destination}.tmp"
+  curl -fL --retry 3 --connect-timeout 20 -o "${temporary}" "${url}"
+  printf '%s  %s\n' "${expected}" "${temporary}" | "${algorithm}sum" -c -
+  mv "${temporary}" "${destination}"
+  printf '%s\n' "${destination}"
+}
+
+install_from_tar() {
+  local archive="$1" binary_name="$2" destination="$3"
+  local unpack
+  unpack="$(mktemp -d /tmp/finite-monitoring-tar.XXXXXX)"
+  tar -xzf "${archive}" -C "${unpack}"
+  local binary
+  binary="$(find "${unpack}" -type f -name "${binary_name}" | head -n 1)"
+  if [[ -z "${binary}" ]]; then
+    echo "archive ${archive} did not contain ${binary_name}" >&2
+    exit 70
+  fi
+  install -m 0755 "${binary}" "${destination}"
+  rm -rf "${unpack}"
+}
+
+install_from_zip() {
+  local archive="$1" binary_name="$2" destination="$3"
+  local unpack
+  unpack="$(mktemp -d /tmp/finite-monitoring-zip.XXXXXX)"
+  unzip -q "${archive}" -d "${unpack}"
+  local binary
+  binary="$(find "${unpack}" -type f -name "${binary_name}" | head -n 1)"
+  if [[ -z "${binary}" ]]; then
+    echo "archive ${archive} did not contain ${binary_name}" >&2
+    exit 70
+  fi
+  install -m 0755 "${binary}" "${destination}"
+  rm -rf "${unpack}"
+}
+
+grafana_archive="$(download "grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz" "${GRAFANA_URL}" sha256 "${GRAFANA_SHA256}")"
+prometheus_archive="$(download "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz" "${PROMETHEUS_URL}" sha256 "${PROMETHEUS_SHA256}")"
+blackbox_archive="$(download "blackbox_exporter-${BLACKBOX_EXPORTER_VERSION}.linux-amd64.tar.gz" "${BLACKBOX_EXPORTER_URL}" sha256 "${BLACKBOX_EXPORTER_SHA256}")"
+caddy_archive="$(download "caddy_${CADDY_VERSION}_linux_amd64.tar.gz" "${CADDY_URL}" sha512 "${CADDY_SHA512}")"
+loki_archive="$(download "loki-${LOKI_VERSION}.linux-amd64.zip" "${LOKI_URL}" sha256 "${LOKI_SHA256}")"
+
+grafana_tmp="$(mktemp -d /tmp/finite-monitoring-grafana.XXXXXX)"
+tar -xzf "${grafana_archive}" -C "${grafana_tmp}"
+grafana_source="$(find "${grafana_tmp}" -maxdepth 1 -type d -name 'grafana*' | head -n 1)"
+if [[ -z "${grafana_source}" || ! -x "${grafana_source}/bin/grafana" ]]; then
+  echo "Grafana archive did not contain an executable grafana binary" >&2
+  exit 70
+fi
+rm -rf "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.new"
+cp -a "${grafana_source}" "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.new"
+chown -R root:root "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.new"
+rm -rf "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.old"
+if [[ -e "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" ]]; then
+  mv "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.old"
+fi
+mv "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.new" "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}"
+ln -sfn "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}" /opt/finite-monitoring/grafana
+rm -rf "/opt/finite-monitoring/grafana-${GRAFANA_VERSION}.old"
+rm -rf "${grafana_tmp}"
+
+install_from_tar "${prometheus_archive}" prometheus /opt/finite-monitoring/bin/prometheus
+install_from_tar "${prometheus_archive}" promtool /opt/finite-monitoring/bin/promtool
+install_from_tar "${blackbox_archive}" blackbox_exporter /opt/finite-monitoring/bin/blackbox_exporter
+install_from_tar "${caddy_archive}" caddy /opt/finite-monitoring/bin/caddy
+install_from_zip "${loki_archive}" loki-linux-amd64 /opt/finite-monitoring/bin/loki
+
+install -m 0644 Caddyfile /etc/finite/monitoring/Caddyfile
+install -m 0644 prometheus.yml /etc/finite/monitoring/prometheus.yml
+install -m 0644 blackbox.yml /etc/finite/monitoring/blackbox.yml
+install -m 0644 loki.yml /etc/finite/monitoring/loki.yml
+install -d -m 0755 /etc/finite/monitoring/grafana/provisioning/datasources
+install -d -m 0755 /etc/finite/monitoring/grafana/provisioning/dashboards
+install -m 0644 grafana/grafana.ini /etc/finite/monitoring/grafana/grafana.ini
+install -m 0644 grafana/provisioning/datasources/finite.yml /etc/finite/monitoring/grafana/provisioning/datasources/finite.yml
+install -m 0644 grafana/provisioning/dashboards/finite.yml /etc/finite/monitoring/grafana/provisioning/dashboards/finite.yml
+install -m 0644 "${staging}/infra/monitoring/grafana/dashboards/finite-production-mvp.json" \
+  /var/lib/finite-monitoring/grafana/dashboards/finite-production-mvp.json
+chown -R finite-monitoring:finite-monitoring /var/lib/finite-monitoring /var/log/finite-monitoring
+
+install -m 0644 systemd/finite-monitoring-blackbox-exporter.service /etc/systemd/system/finite-monitoring-blackbox-exporter.service
+install -m 0644 systemd/finite-monitoring-prometheus.service /etc/systemd/system/finite-monitoring-prometheus.service
+install -m 0644 systemd/finite-monitoring-loki.service /etc/systemd/system/finite-monitoring-loki.service
+install -m 0644 systemd/finite-monitoring-grafana.service /etc/systemd/system/finite-monitoring-grafana.service
+install -m 0644 systemd/finite-monitoring-caddy.service /etc/systemd/system/finite-monitoring-caddy.service
+
+/opt/finite-monitoring/bin/promtool check config /etc/finite/monitoring/prometheus.yml
+/opt/finite-monitoring/bin/caddy validate \
+  --config /etc/finite/monitoring/Caddyfile \
+  --adapter caddyfile \
+  --envfile /etc/finite/monitoring/caddy.env
+
+if command -v docker >/dev/null 2>&1 && [[ -f /opt/finite-monitoring/compose.yaml ]]; then
+  echo "==> stopping old finite-monitoring Compose stack"
+  if [[ -r /etc/finite/monitoring/stack.env ]]; then
+    (cd /opt/finite-monitoring && docker compose --env-file /etc/finite/monitoring/stack.env down --remove-orphans) || true
+  else
+    (cd /opt/finite-monitoring && docker compose down --remove-orphans) || true
+  fi
+fi
+
+systemctl daemon-reload
+systemctl enable --now \
+  finite-monitoring-blackbox-exporter.service \
+  finite-monitoring-prometheus.service \
+  finite-monitoring-loki.service \
+  finite-monitoring-grafana.service \
+  finite-monitoring-caddy.service
+systemctl restart \
+  finite-monitoring-blackbox-exporter.service \
+  finite-monitoring-prometheus.service \
+  finite-monitoring-loki.service \
+  finite-monitoring-grafana.service \
+  finite-monitoring-caddy.service
+
+for unit in \
+  finite-monitoring-blackbox-exporter.service \
+  finite-monitoring-prometheus.service \
+  finite-monitoring-loki.service \
+  finite-monitoring-grafana.service \
+  finite-monitoring-caddy.service
+do
+  systemctl is-active --quiet "${unit}"
+done
+
+wait_http_status() {
+  local expected="$1" method="$2" url="$3" label="$4"
+  local status
+  for _ in {1..60}; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' -X "${method}" "${url}" || true)"
+    if [[ "${status}" == "${expected}" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "${label} returned ${status:-unreachable}, expected ${expected}" >&2
+  return 1
+}
+
+wait_http_status 200 GET http://127.0.0.1:9090/-/ready "local Prometheus readiness"
+wait_http_status 200 GET http://127.0.0.1:3100/ready "local Loki readiness"
+wait_http_status 200 GET http://127.0.0.1:3000/api/health "local Grafana health"
+wait_http_status 200 GET https://monitoring.finite.computer/api/health "public Grafana health"
+wait_http_status 401 POST https://metrics-ingest.finite.computer/api/v1/write "unauthenticated remote write"
+wait_http_status 401 POST https://metrics-ingest.finite.computer/loki/api/v1/push "unauthenticated Loki push"
+
+echo "monitoring Ubuntu deploy OK rev=${rev}"
+REMOTE

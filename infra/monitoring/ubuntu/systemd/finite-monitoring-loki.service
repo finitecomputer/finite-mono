@@ -1,0 +1,18 @@
+[Unit]
+Description=Finite monitoring Loki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=finite-monitoring
+Group=finite-monitoring
+ExecStart=/opt/finite-monitoring/bin/loki -config.file=/etc/finite/monitoring/loki.yml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/finite-monitoring/loki
+
+[Install]
+WantedBy=multi-user.target

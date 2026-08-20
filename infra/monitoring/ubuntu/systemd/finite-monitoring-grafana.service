@@ -1,0 +1,22 @@
+[Unit]
+Description=Finite monitoring Grafana
+After=network-online.target finite-monitoring-prometheus.service finite-monitoring-loki.service
+Wants=network-online.target finite-monitoring-prometheus.service finite-monitoring-loki.service
+
+[Service]
+User=finite-monitoring
+Group=finite-monitoring
+Environment=GF_PATHS_DATA=/var/lib/finite-monitoring/grafana
+Environment=GF_PATHS_LOGS=/var/log/finite-monitoring/grafana
+Environment=GF_PATHS_PLUGINS=/var/lib/finite-monitoring/grafana/plugins
+Environment=GF_PATHS_PROVISIONING=/etc/finite/monitoring/grafana/provisioning
+ExecStart=/opt/finite-monitoring/grafana/bin/grafana server --homepath=/opt/finite-monitoring/grafana --config=/etc/finite/monitoring/grafana/grafana.ini --packaging=tar
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/finite-monitoring/grafana /var/log/finite-monitoring/grafana
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +188,14 @@ def check_dashboard_contract() -> None:
     )
 
 
+def check_ubuntu_contract() -> None:
+    subprocess.run(
+        [sys.executable, "infra/monitoring/ubuntu/check_contract.py"],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def main() -> int:
     contract = nix_eval()
 
@@ -258,6 +267,7 @@ def main() -> int:
             require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
 
     check_dashboard_contract()
+    check_ubuntu_contract()
 
     print("monitoring NixOS contract OK")
     return 0

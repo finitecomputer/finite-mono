@@ -2,9 +2,10 @@
 
 Status: in progress
 
-Repository implementation has started with a hard-cut NixOS monitoring receiver.
-The old Docker Compose monitoring stack is removed from the active path. LAT
-host collection and production rollout remain separate steps.
+Repository implementation has pivoted to a hard-cut Ubuntu/systemd monitoring
+receiver because Latitude VMs do not offer NixOS as a supported VM image. The
+old Docker Compose monitoring stack is removed from the active path. LAT host
+collection and production rollout remain separate steps.
 
 Current implementation progress: steps 1 through 3 below are implemented;
 steps 4 and 5 remain pending.
@@ -33,8 +34,11 @@ inventory names it as a decommission target rather than production capacity.
 
 ## Existing Base
 
-- The repository now defines `nixosConfigurations.finite-monitoring` as the
-  dedicated Grafana, Prometheus, Loki, blackbox exporter, and Caddy receiver.
+- The active monitoring receiver is the Latitude Ubuntu VM, configured from
+  `infra/monitoring/ubuntu/` with systemd services for Grafana, Prometheus,
+  Loki, blackbox exporter, and Caddy.
+- The repository still contains the earlier `nixosConfigurations.finite-monitoring`
+  experiment, but it is not the deploy target for the Latitude VM path.
 - LAT NixOS hosts already run Grafana Alloy and node exporter through
   `infra/nixos/modules/metrics.nix`.
 - Alloy already remote-writes selected Prometheus series to
@@ -73,9 +77,9 @@ Bound the cardinality at collection time where practical:
 
 ### Logs
 
-Run Grafana Loki as a native NixOS service on `finite-monitoring` and keep
-Alloy as the only LAT-side collector. Alloy reads journald and pushes selected
-service logs to Loki over HTTPS.
+Run Grafana Loki as a native systemd service on the Ubuntu monitoring VM and
+keep Alloy as the only LAT-side collector. Alloy reads journald and pushes
+selected service logs to Loki over HTTPS.
 
 Initial Loki labels:
 
@@ -111,22 +115,22 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 
 ## Implementation Steps
 
-1. Add the NixOS monitoring receiver.
-   - Add `nixosConfigurations.finite-monitoring` on the same NixOS 26.05 pin
-     used by the LAT hosts.
+1. Add the Ubuntu/systemd monitoring receiver.
+   - Add repo-owned Ubuntu configs and systemd units for the existing Latitude
+     monitoring VM.
    - Run Grafana, Prometheus, blackbox exporter, Loki, and Caddy as native
-     NixOS services.
+     systemd services.
    - Keep Prometheus, Loki, blackbox exporter, and Grafana loopback-only behind
      Caddy.
    - Add repository-owned Loki configuration with local filesystem storage and
      bounded retention.
    - Add a Grafana Loki datasource with a stable UID.
-   - Add static contract checks for the NixOS host, services, datasources,
+   - Add static contract checks for the Ubuntu service files, datasources,
      retention, protected routes, and lack of direct public port exposure.
 
 2. Add protected Loki ingest.
    - Use a separate logs-write credential from the metrics-write credential.
-   - Extend the NixOS Caddy config with a TLS-only Loki push route.
+   - Extend the Ubuntu Caddy config with a TLS-only Loki push route.
    - Return 404 for non-push Loki routes.
    - Document the credential file names and env variable names without
      committing values.
