@@ -562,6 +562,7 @@ jobs:
 
           artifact_started="$SECONDS"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' "${cargo_artifacts[@]}" \
+            | sort -u \
             | tee "$CARGO_ARTIFACT_OUTPUTS"
           artifact_elapsed="$((SECONDS - artifact_started))"
 
@@ -572,6 +573,10 @@ jobs:
 
           artifact_count="$(wc -l < "$CARGO_ARTIFACT_OUTPUTS" | tr -d '[:space:]')"
           package_count="$(wc -l < "$PACKAGE_OUTPUTS" | tr -d '[:space:]')"
+          if [[ "$artifact_count" -ne 9 ]]; then
+            echo "::error::expected 9 distinct Cargo dependency artifacts for the 15 scoped packages; got $artifact_count"
+            exit 1
+          fi
           {
             echo "### Nix service package cache"
             echo
