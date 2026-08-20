@@ -11,6 +11,8 @@ import sys
 from collections import defaultdict, deque
 from pathlib import PurePosixPath
 
+import changed_paths
+
 
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
@@ -44,12 +46,7 @@ def main() -> int:
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
     parser.add_argument("--github-output")
     parser.add_argument("--summary")
-    parser.add_argument(
-        "--changed-file",
-        action="append",
-        dest="changed_files",
-        help="Override git diff input; useful for tests and local dry-runs.",
-    )
+    changed_paths.add_changed_file_argument(parser)
     args = parser.parse_args()
 
     selection = select_package_scope(args)
@@ -77,11 +74,11 @@ def select_package_scope(args: argparse.Namespace) -> dict[str, str]:
         print(f"failed to compute changed files; falling back to full Rust workspace: {error}", file=sys.stderr)
         return full_selection("could not compute the pull request diff")
 
-    normalized_paths = [normalize_path(path) for path in changed_files if normalize_path(path)]
-    if not normalized_paths:
+    normalized = changed_paths.normalized_paths(changed_files)
+    if not normalized:
         return full_selection("empty pull request diff")
 
-    global_path = next((path for path in normalized_paths if is_global_path(path)), None)
+    global_path = next((path for path in normalized if is_global_path(path)), None)
     if global_path is not None:
         return full_selection(f"{global_path} can affect the whole Rust workspace")
 
@@ -91,7 +88,7 @@ def select_package_scope(args: argparse.Namespace) -> dict[str, str]:
     package_dirs = package_directories(packages)
 
     changed_packages: set[str] = set()
-    for path in normalized_paths:
+    for path in normalized:
         owner = owning_package(path, package_dirs)
         if owner is None:
             return full_selection(f"{path} is not owned by a Cargo workspace package")
@@ -115,13 +112,7 @@ def select_package_scope(args: argparse.Namespace) -> dict[str, str]:
 def changed_files_from_git(base: str | None, head: str | None) -> list[str]:
     if not base or not head:
         raise subprocess.CalledProcessError(2, ["git", "diff"], "missing base or head")
-    completed = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}", "--"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-    return completed.stdout.splitlines()
+    return changed_paths.git_diff_changed_files(f"{base}...{head}")
 
 
 def cargo_metadata() -> dict:
@@ -142,7 +133,7 @@ def workspace_packages(metadata: dict) -> list[dict]:
 def package_directories(packages: list[dict]) -> list[tuple[str, str]]:
     package_dirs = []
     for package in packages:
-        manifest_path = normalize_path(package["manifest_path"])
+        manifest_path = changed_paths.normalize_path(package["manifest_path"])
         directory = str(PurePosixPath(manifest_path).parent)
         package_dirs.append((directory, package["name"]))
     package_dirs.sort(key=lambda item: len(item[0]), reverse=True)
@@ -185,17 +176,6 @@ def is_global_path(path: str) -> bool:
         or path.startswith(GLOBAL_PREFIXES)
         or path.endswith(GLOBAL_SUFFIXES)
     )
-
-
-def normalize_path(path: str) -> str:
-    if not path:
-        return ""
-    if os.path.isabs(path):
-        try:
-            path = os.path.relpath(path, os.getcwd())
-        except ValueError:
-            return path
-    return path.replace(os.sep, "/").lstrip("./")
 
 
 def full_selection(reason: str) -> dict[str, str]:
