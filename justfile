@@ -116,6 +116,7 @@ lat1-rollout-contract:
     bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
     python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
     python3 -m unittest scripts.tests.test_lat1_closure_artifact
+    python3 -m unittest scripts.tests.test_deploy_lat1_service_exes
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint
 # behavior for the aggregate production healthcheck.
