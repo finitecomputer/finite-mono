@@ -20,16 +20,16 @@ Concise command reference:
 - A SOPS file is decryptable by every recipient listed in that file metadata.
 - During bootstrap, files may be staged for human/recovery recipients before
   host recipients exist. They are not deployable until host recipients are added
-  and `just nixos-sops-updatekeys` is run.
+  and `just nixos nixos-sops-updatekeys` is run.
 - Updating `.sops.yaml` affects new files. Existing files must be rekeyed with
-  `just nixos-sops-updatekeys`.
+  `just nixos nixos-sops-updatekeys`.
 
 ## Become An Operator Recipient
 
 Run:
 
 ```sh
-just nixos-sops-operator-key
+just nixos nixos-sops-operator-key
 ```
 
 The helper creates the local private key if missing, fixes permissions, and
@@ -50,13 +50,13 @@ private key file.
 
 ## Add A New Operator
 
-1. The new operator runs `just nixos-sops-operator-key`.
+1. The new operator runs `just nixos nixos-sops-operator-key`.
 2. They add only their public `age1...` recipient to
    `infra/nixos/secrets/.sops.yaml`.
 3. An existing operator who can decrypt current files runs:
 
 ```sh
-just nixos-sops-updatekeys
+just nixos nixos-sops-updatekeys
 ```
 
 4. Commit `.sops.yaml` and the rekeyed SOPS files together.
@@ -70,7 +70,7 @@ files.
 Run:
 
 ```sh
-just test-sops-decrypt
+just nixos test-sops-decrypt
 ```
 
 The helper prints `true` when the current local age key can decrypt every
@@ -92,7 +92,7 @@ pilot:
 
 ```sh
 ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
-  | just nixos-sops-ingest \
+  | just nixos nixos-sops-ingest \
       shared metrics-remote-write.env \
       --logical-name metrics-remote-write \
       --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME \
@@ -117,23 +117,23 @@ The helper:
 
 If either decrypt verification fails, the operator is not a current usable
 recipient for the SOPS set. Add their public recipient to `.sops.yaml`, have an
-existing operator run `just nixos-sops-updatekeys`, then retry. If the recipient
-set check fails, `.sops.yaml` and the encrypted files disagree; run
-`just nixos-sops-updatekeys` after reviewing the `.sops.yaml` change, then retry
-the ingest.
+existing operator run `just nixos nixos-sops-updatekeys`, then retry. If the
+recipient set check fails, `.sops.yaml` and the encrypted files disagree; run
+`just nixos nixos-sops-updatekeys` after reviewing the `.sops.yaml` change,
+then retry the ingest.
 
 ## Update Recipients
 
 After changing `.sops.yaml`, preview affected files:
 
 ```sh
-just nixos-sops-updatekeys --dry-run
+just nixos nixos-sops-updatekeys --dry-run
 ```
 
 Then update metadata:
 
 ```sh
-just nixos-sops-updatekeys
+just nixos nixos-sops-updatekeys
 ```
 
 This changes SOPS recipient metadata. It does not change the secret values.

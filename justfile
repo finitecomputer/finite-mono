@@ -102,21 +102,6 @@ monitoring-nixos-contract:
 nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     just nixos nixos-build-lat1-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
-nixos-secrets-contract:
-    just nixos nixos-secrets-contract
-
-[positional-arguments]
-nixos-sops-ingest *args:
-    just nixos nixos-sops-ingest "$@"
-
-[positional-arguments]
-nixos-sops-operator-key *args:
-    just nixos nixos-sops-operator-key "$@"
-
-[positional-arguments]
-nixos-sops-updatekeys *args:
-    just nixos nixos-sops-updatekeys "$@"
-
 runbook-facts-contract:
     just infra runbook-facts-contract
 
@@ -131,10 +116,6 @@ stripe-billing-clock:
 
 stripe-price-contract:
     just dashboard stripe-price-contract
-
-[positional-arguments]
-test-sops-decrypt *args:
-    just nixos test-sops-decrypt "$@"
 
 web-check:
     just dashboard web-check

@@ -149,8 +149,8 @@ required before switching any consumer.
       `/var/lib/sops-nix/finite-lat-3.agekey`, root-only.
 - [x] Add bootstrap `infra/nixos/secrets/.sops.yaml` with the first operator
       recipient for human-decryptable staging.
-- [ ] Add recovery and host recipients, then run `just nixos-sops-updatekeys`
-      before any rollout depends on SOPS.
+- [ ] Add recovery and host recipients, then run
+      `just nixos nixos-sops-updatekeys` before any rollout depends on SOPS.
 - [x] Add `infra/nixos/modules/secrets.nix` with the `finite.secrets.files`
       option schema.
 - [x] Implement path resolution so `config.finite.secrets.files.<name>.path`
@@ -174,8 +174,8 @@ Progress 2026-08-12: selected `metrics-remote-write.env` as the pilot. Alloy is
 the only prepared consumer: it falls back to `/etc/finite/metrics-remote-write.env`
 while the SOPS contract entry is absent, and will read
 `config.finite.secrets.files."metrics-remote-write".path` after the pilot entry
-is added. A stdin-only `just nixos-sops-ingest` helper is available for the
-staging step.
+is added. A stdin-only `just nixos nixos-sops-ingest` helper is available for
+the staging step.
 
 Progress 2026-08-20: staged the live pilot value at
 `infra/nixos/secrets/shared/metrics-remote-write.env` encrypted to the bootstrap

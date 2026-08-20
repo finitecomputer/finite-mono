@@ -4,17 +4,16 @@ This is the operator command reference for NixOS SOPS-managed secret source
 files. Do not paste plaintext secrets, decrypted values, hashes, fingerprints,
 or private keys into docs, commits, issues, chat, or logs.
 
-Use the root `just` wrappers from the repository root. The same recipes also
-exist under the modular NixOS namespace, for example
-`just nixos nixos-sops-ingest`, but the root names remain the stable operator
-interface.
+Use the modular NixOS `just` recipes from the repository root. Keep SOPS
+commands under `just nixos ...` so NixOS-only recipe changes stay in the NixOS
+module instead of the root command router.
 
 ## Generate An Operator Recipient
 
 Run:
 
 ```sh
-just nixos-sops-operator-key
+just nixos nixos-sops-operator-key
 ```
 
 Commit or send only the printed `age1...` public recipient. Never commit or
@@ -25,7 +24,7 @@ share `~/.config/sops/age/keys.txt` or any private key material.
 1. The new operator runs:
 
    ```sh
-   just nixos-sops-operator-key
+   just nixos nixos-sops-operator-key
    ```
 
 2. Add only their printed `age1...` public recipient to
@@ -34,8 +33,8 @@ share `~/.config/sops/age/keys.txt` or any private key material.
 3. An existing operator who can decrypt current files runs:
 
    ```sh
-   just nixos-sops-updatekeys --dry-run
-   just nixos-sops-updatekeys
+   just nixos nixos-sops-updatekeys --dry-run
+   just nixos nixos-sops-updatekeys
    ```
 
 4. Commit `.sops.yaml` and the rekeyed encrypted files together.
@@ -47,7 +46,7 @@ The new operator cannot decrypt existing files until step 3 is complete.
 Run:
 
 ```sh
-just test-sops-decrypt
+just nixos test-sops-decrypt
 ```
 
 Expected success starts with:
@@ -59,7 +58,7 @@ true
 The helper captures decrypted output and never prints plaintext. If it prints
 `false`, follow the next-step message: usually add the operator public recipient
 to `.sops.yaml`, then ask an existing operator to run
-`just nixos-sops-updatekeys`.
+`just nixos nixos-sops-updatekeys`.
 
 ## Add A New Secret Source
 
@@ -70,7 +69,7 @@ Example:
 
 ```sh
 some-command-that-prints-secret \
-  | just nixos-sops-ingest \
+  | just nixos nixos-sops-ingest \
       shared some-secret.env \
       --logical-name some-secret \
       --required-env-name SOME_ENV_NAME \
@@ -81,7 +80,7 @@ For host-specific secrets, use the host scope instead of `shared`:
 
 ```sh
 some-command-that-prints-secret \
-  | just nixos-sops-ingest finite-lat-3 runner.env \
+  | just nixos nixos-sops-ingest finite-lat-3 runner.env \
       --logical-name runner-env \
       --required-env-name FC_CORE_RUNNER_API_TOKEN \
       --consumer finite-saas-runner.service
@@ -96,8 +95,8 @@ contract sketch. It does not add the `finite.secrets.files` entry for you.
 After changing `.sops.yaml`, preview and apply recipient metadata updates:
 
 ```sh
-just nixos-sops-updatekeys --dry-run
-just nixos-sops-updatekeys
+just nixos nixos-sops-updatekeys --dry-run
+just nixos nixos-sops-updatekeys
 ```
 
 This changes who can decrypt future encrypted file revisions. It does not
@@ -109,7 +108,7 @@ Rotate underlying secrets when offboarding or changing trust boundaries.
 Prefer:
 
 ```sh
-just test-sops-decrypt
+just nixos test-sops-decrypt
 ```
 
 If you must test one file with raw SOPS, redirect output away from the terminal:
@@ -126,7 +125,7 @@ An encrypted source file is not used by NixOS until all of the following are
 true:
 
 - the relevant host public recipients are in `.sops.yaml`;
-- `just nixos-sops-updatekeys` has refreshed the encrypted file metadata;
+- `just nixos nixos-sops-updatekeys` has refreshed the encrypted file metadata;
 - a `finite.secrets.files.<name>` entry points at the encrypted file;
 - the affected host closure has been evaluated and rolled out.
 

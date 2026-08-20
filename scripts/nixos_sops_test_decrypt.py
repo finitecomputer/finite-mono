@@ -110,9 +110,9 @@ def main() -> int:
         print(
             "This operator cannot decrypt existing NixOS SOPS secrets. "
             f"First failing file: {display_path(path)}. Run "
-            "`just nixos-sops-operator-key`, add only the printed public "
+            "`just nixos nixos-sops-operator-key`, add only the printed public "
             "age recipient to infra/nixos/secrets/.sops.yaml, then ask an "
-            "existing operator to run `just nixos-sops-updatekeys` and retry."
+            "existing operator to run `just nixos nixos-sops-updatekeys` and retry."
         )
         return 1
 

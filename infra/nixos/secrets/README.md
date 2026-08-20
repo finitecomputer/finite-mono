@@ -26,14 +26,14 @@ Human and recovery private keys stay outside this repository under operator or
 break-glass custody. The initial `.sops.yaml` may contain only human/recovery
 recipients while encrypted sources are being staged, but those files are not
 deployable until the host public recipients are added and
-`just nixos-sops-updatekeys` has refreshed every encrypted file.
+`just nixos nixos-sops-updatekeys` has refreshed every encrypted file.
 
 ## Operator Key Setup
 
 Run:
 
 ```sh
-just nixos-sops-operator-key
+just nixos nixos-sops-operator-key
 ```
 
 The helper creates `~/.config/sops/age/keys.txt` if it is missing, or uses
@@ -47,7 +47,7 @@ share the private key file.
 Run:
 
 ```sh
-just test-sops-decrypt
+just nixos test-sops-decrypt
 ```
 
 The helper prints `true` when your current local age key can decrypt every
@@ -57,7 +57,7 @@ yet. It never prints plaintext secret values.
 
 ## Ingesting A Secret
 
-Use `just nixos-sops-ingest` to encrypt plaintext from stdin into this
+Use `just nixos nixos-sops-ingest` to encrypt plaintext from stdin into this
 directory. The helper refuses interactive input, refuses path traversal, refuses
 to overwrite by default, verifies local decrypt access, checks that the new
 file's recipients match existing files in the same scope, and prints only the
@@ -67,7 +67,7 @@ Example for the metrics pilot:
 
 ```sh
 ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
-  | just nixos-sops-ingest \
+  | just nixos nixos-sops-ingest \
       shared metrics-remote-write.env \
       --logical-name metrics-remote-write \
       --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME \
@@ -83,8 +83,8 @@ module in a separate commit.
 
 If the helper says the current operator cannot decrypt existing files, add the
 operator's public recipient to `.sops.yaml` and ask an existing operator to run
-`just nixos-sops-updatekeys`. If it says recipient sets differ, review the
-`.sops.yaml` change and run `just nixos-sops-updatekeys` before retrying.
+`just nixos nixos-sops-updatekeys`. If it says recipient sets differ, review the
+`.sops.yaml` change and run `just nixos nixos-sops-updatekeys` before retrying.
 
 ## Updating Recipients
 
@@ -92,7 +92,7 @@ After adding or removing public recipients in `.sops.yaml`, refresh existing
 encrypted files with:
 
 ```sh
-just nixos-sops-updatekeys
+just nixos nixos-sops-updatekeys
 ```
 
 The helper updates only SOPS JSON files under `infra/nixos/secrets`, skips
@@ -100,7 +100,7 @@ The helper updates only SOPS JSON files under `infra/nixos/secrets`, skips
 and prints only file paths. Use `--dry-run` to preview the file set:
 
 ```sh
-just nixos-sops-updatekeys --dry-run
+just nixos nixos-sops-updatekeys --dry-run
 ```
 
 Removing a recipient and updating keys prevents that recipient from decrypting
