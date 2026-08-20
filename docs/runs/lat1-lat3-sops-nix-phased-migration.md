@@ -147,8 +147,10 @@ required before switching any consumer.
 - [x] Add host `age` identity installation instructions:
       `/var/lib/sops-nix/finite-lat-1.agekey` and
       `/var/lib/sops-nix/finite-lat-3.agekey`, root-only.
-- [ ] Add `infra/nixos/secrets/.sops.yaml` with human/recovery recipients and
-      host recipients.
+- [x] Add bootstrap `infra/nixos/secrets/.sops.yaml` with the first operator
+      recipient for human-decryptable staging.
+- [ ] Add recovery and host recipients, then run `just nixos-sops-updatekeys`
+      before any rollout depends on SOPS.
 - [x] Add `infra/nixos/modules/secrets.nix` with the `finite.secrets.files`
       option schema.
 - [x] Implement path resolution so `config.finite.secrets.files.<name>.path`
@@ -172,17 +174,22 @@ Progress 2026-08-12: selected `metrics-remote-write.env` as the pilot. Alloy is
 the only prepared consumer: it falls back to `/etc/finite/metrics-remote-write.env`
 while the SOPS contract entry is absent, and will read
 `config.finite.secrets.files."metrics-remote-write".path` after the pilot entry
-is added. Encryption and the actual switch are blocked until real
-human/recovery and host recipients are recorded in `.sops.yaml` and the live
-pilot value is staged without printing it. A stdin-only `just nixos-sops-ingest`
-helper is available for the staging step.
+is added. A stdin-only `just nixos-sops-ingest` helper is available for the
+staging step.
+
+Progress 2026-08-20: staged the live pilot value at
+`infra/nixos/secrets/shared/metrics-remote-write.env` encrypted to the bootstrap
+operator recipient only. This is intentionally not deployable yet: host
+recipients are deferred, `sops.secrets` still evaluates to `{ }`, and Alloy
+still reads `/etc/finite/metrics-remote-write.env` until the contract entry is
+added.
 
 - [x] Choose exactly one pilot secret.
 - [x] Leave all other secrets absent from `finite.secrets.files` and on their
       existing host-file paths.
 - [x] Add a stdin-only SOPS ingestion helper so operators do not hand-roll the
       encryption command.
-- [ ] Encrypt the pilot value into its planned SOPS file without printing it.
+- [x] Encrypt the pilot value into its planned SOPS file without printing it.
 - [ ] Add only the pilot contract entry to `finite.secrets.files`.
 - [x] Update only the pilot consumer to use
       `config.finite.secrets.files.<name>.path` when the pilot entry exists.

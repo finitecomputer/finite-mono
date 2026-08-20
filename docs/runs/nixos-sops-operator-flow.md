@@ -15,6 +15,9 @@ this document, commits, issues, chat, or logs.
   private key.
 - Host private age keys live only on their hosts under `/var/lib/sops-nix`.
 - A SOPS file is decryptable by every recipient listed in that file metadata.
+- During bootstrap, files may be staged for human/recovery recipients before
+  host recipients exist. They are not deployable until host recipients are added
+  and `just nixos-sops-updatekeys` is run.
 - Updating `.sops.yaml` affects new files. Existing files must be rekeyed with
   `just nixos-sops-updatekeys`.
 

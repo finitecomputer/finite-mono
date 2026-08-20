@@ -22,9 +22,10 @@ age-keygen -y /var/lib/sops-nix/finite-lat-3.agekey
 ```
 
 Human and recovery private keys stay outside this repository under operator or
-break-glass custody. After those public recipients and the host public
-recipients are known, add `infra/nixos/secrets/.sops.yaml` creation rules before
-encrypting any production material.
+break-glass custody. The initial `.sops.yaml` may contain only human/recovery
+recipients while encrypted sources are being staged, but those files are not
+deployable until the host public recipients are added and
+`just nixos-sops-updatekeys` has refreshed every encrypted file.
 
 ## Operator Key Setup
 
