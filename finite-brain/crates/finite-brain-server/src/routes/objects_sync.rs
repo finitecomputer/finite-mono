@@ -273,20 +273,15 @@ pub(crate) async fn submit_sync_record_handler(
     body: Bytes,
 ) -> Result<Json<ObjectWriteResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let value: serde_json::Value = serde_json::from_slice(&body)
+    let request: SyncRecordSubmitRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let record_type = value
-        .get("recordType")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "recordType is required"))?;
     let notification_brain_id = brain_id.clone();
-    let record_type = record_type.to_owned();
-    let response = spawn_store(state.clone(), move |state| match record_type.as_str() {
-        "folder_object_revision" => {
-            let request: ObjectWriteRequest = serde_json::from_value(value)
-                .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid revision record"))?;
-            let folder_id = request_field(&body, "folderId")?;
-            let object_id = request_field(&body, "objectId")?;
+    let response = spawn_store(state.clone(), move |state| match request {
+        SyncRecordSubmitRequest::FolderObjectRevision {
+            folder_id,
+            object_id,
+            request,
+        } => {
             let operation = if request.base_revision.is_some() {
                 FolderObjectOperation::Update
             } else {
@@ -296,17 +291,11 @@ pub(crate) async fn submit_sync_record_handler(
                 state, brain_id, folder_id, object_id, actor, request, operation,
             )
         }
-        "folder_object_tombstone" => {
-            let request: ObjectDeleteRequest = serde_json::from_value(value)
-                .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid tombstone record"))?;
-            let folder_id = request_field(&body, "folderId")?;
-            let object_id = request_field(&body, "objectId")?;
-            accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request)
-        }
-        _ => Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported recordType",
-        )),
+        SyncRecordSubmitRequest::FolderObjectTombstone {
+            folder_id,
+            object_id,
+            request,
+        } => accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request),
     })
     .await?;
     if !response.duplicate {
