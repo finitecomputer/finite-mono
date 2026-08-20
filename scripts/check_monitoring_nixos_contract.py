@@ -10,6 +10,42 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
+
+HOST_METRIC_NAMES = [
+    "node_cpu_seconds_total",
+    "node_load1",
+    "node_load5",
+    "node_load15",
+    "node_memory_MemTotal_bytes",
+    "node_memory_MemAvailable_bytes",
+    "node_memory_SwapTotal_bytes",
+    "node_memory_SwapFree_bytes",
+    "node_filesystem_size_bytes",
+    "node_filesystem_avail_bytes",
+    "node_filesystem_readonly",
+    "node_disk_read_bytes_total",
+    "node_disk_written_bytes_total",
+    "node_disk_io_time_seconds_total",
+    "node_network_receive_bytes_total",
+    "node_network_transmit_bytes_total",
+    "node_network_receive_errs_total",
+    "node_network_transmit_errs_total",
+]
+
+HOST_PANEL_TITLES = [
+    "LAT Host Scrape Health",
+    "LAT CPU Busy",
+    "LAT Load Average",
+    "LAT Memory Used",
+    "LAT Swap Used",
+    "LAT Filesystem Used",
+    "LAT Disk Throughput",
+    "LAT Disk I/O Time",
+    "LAT Network Throughput",
+    "LAT Network Errors",
+    "LAT Filesystem Read-only",
+]
 
 
 def nix_eval() -> dict[str, Any]:
@@ -62,6 +98,10 @@ def nix_eval() -> dict[str, Any]:
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
+        latMetrics = {
+          finite-lat-1 = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
+          finite-lat-3 = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
+        };
       }
     '''
     completed = subprocess.run(
@@ -88,6 +128,63 @@ def require(condition: bool, message: str) -> None:
 
 def require_contains(haystack: str, needle: str, subject: str) -> None:
     require(needle in haystack, f"{subject} missing {needle!r}")
+
+
+def panel_targets(panel: dict[str, Any]) -> list[dict[str, Any]]:
+    return panel.get("targets", [])
+
+
+def panel_rect(panel: dict[str, Any]) -> tuple[int, int, int, int]:
+    grid = panel["gridPos"]
+    return (grid["x"], grid["y"], grid["x"] + grid["w"], grid["y"] + grid["h"])
+
+
+def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_x1, left_y1, left_x2, left_y2 = panel_rect(left)
+    right_x1, right_y1, right_x2, right_y2 = panel_rect(right)
+    return left_x1 < right_x2 and right_x1 < left_x2 and left_y1 < right_y2 and right_y1 < left_y2
+
+
+def check_dashboard_contract() -> None:
+    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    panels = dashboard["panels"]
+    panel_ids = [panel["id"] for panel in panels]
+    require(len(panel_ids) == len(set(panel_ids)), "Grafana panel IDs must be unique")
+
+    for index, left in enumerate(panels):
+        for right in panels[index + 1 :]:
+            require(
+                not overlaps(left, right),
+                f"Grafana panels overlap: {left['title']!r} and {right['title']!r}",
+            )
+
+    panels_by_title = {panel["title"]: panel for panel in panels}
+    for title in HOST_PANEL_TITLES:
+        require(title in panels_by_title, f"missing Grafana host panel {title!r}")
+
+    rendered_dashboard = json.dumps(dashboard)
+    for metric_name in HOST_METRIC_NAMES:
+        require_contains(rendered_dashboard, metric_name, "Grafana host panels")
+
+    for title in HOST_PANEL_TITLES:
+        for target in panel_targets(panels_by_title[title]):
+            expression = target["expr"]
+            require_contains(expression, 'instance=~"finite-lat-1|finite-lat-3"', title)
+            require(
+                "finite-lat-2" not in expression,
+                f"{title} must not include finite-lat-2 in production host panels",
+            )
+
+    require_contains(
+        panels_by_title["LAT Filesystem Used"]["targets"][0]["expr"],
+        'mountpoint=~"/|/data"',
+        "LAT Filesystem Used",
+    )
+    require_contains(
+        panels_by_title["LAT Network Throughput"]["targets"][0]["expr"],
+        'device=~"en.*|eth.*|wg-finite"',
+        "LAT Network Throughput",
+    )
 
 
 def main() -> int:
@@ -155,6 +252,12 @@ def main() -> int:
     require_contains(caddy["ingestVhost"], "{$LOGS_USERNAME}", "ingest vhost")
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost")
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost")
+
+    for host_name, alloy_config in contract["latMetrics"].items():
+        for metric_name in HOST_METRIC_NAMES:
+            require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
+
+    check_dashboard_contract()
 
     print("monitoring NixOS contract OK")
     return 0

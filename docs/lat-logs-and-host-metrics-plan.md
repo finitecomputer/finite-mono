@@ -6,8 +6,8 @@ Repository implementation has started with a hard-cut NixOS monitoring receiver.
 The old Docker Compose monitoring stack is removed from the active path. LAT
 host collection and production rollout remain separate steps.
 
-Current implementation progress: steps 1 and 2 below are implemented for the
-NixOS receiver; steps 3 through 5 remain pending.
+Current implementation progress: steps 1 through 3 below are implemented;
+steps 4 and 5 remain pending.
 
 ## Goal
 
