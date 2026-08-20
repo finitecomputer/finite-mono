@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { randomUUID } from "node:crypto";
+import type { ReactNode } from "react";
 import {
   ActivityIcon,
   BanIcon,
@@ -64,6 +65,10 @@ import {
   resolveBillingReturnStateNow,
 } from "@/lib/billing-return";
 import { coreProjectOverviewHref } from "@/lib/dashboard-machine-access";
+import {
+  resolveDashboardHomeView,
+  type DashboardHomeView,
+} from "@/lib/dashboard-home-view";
 import {
   getAccountAuthContext,
   loadOptionalViewerContext,
@@ -165,11 +170,15 @@ export default async function DashboardPage({
     const trackedProjectHref = trackedProject
       ? coreProjectOverviewHref(trackedProject)
       : null;
-    const showAgentReady = Boolean(
+    const readyAgent =
       isNewAgentFlow &&
       trackedCreationRequest?.status === "running" &&
       trackedProjectHref
-    );
+        ? {
+            chatHref: `${trackedProjectHref}/chat`,
+            name: trackedCreationRequest.display_name,
+          }
+        : null;
 
     const pendingAgentCreationRequests =
       trackedCreationRequest?.status === "running" && !trackedProjectHref
@@ -193,8 +202,6 @@ export default async function DashboardPage({
         })
       );
     }
-    const billingSyncPending =
-      billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
 
     // Core may have durably accepted this exact creation request before chat
     // bootstrap authorization failed. Keep the retry form visible; the POST
@@ -212,65 +219,22 @@ export default async function DashboardPage({
       redirect("/dashboard/agent-creation-requests/complete");
     }
 
-    const showCreateAgent =
-      core.configured &&
-      Boolean(core.account.email) &&
-      (coreProjects.length === 0 || isNewAgentFlow) &&
-      !billingSyncPending &&
-      !showAgentReady &&
-      (creationAuthorizationRetry ||
-        (pendingAgentCreationRequests.length === 0 &&
-          failedAgentCreationRequests.length === 0));
-    // While a successful checkout is still syncing, the billing setup panel
-    // (and its Start checkout button) must stay hidden to avoid a second
-    // subscription attempt.
-    const showBillingSyncState =
-      billingSyncPending &&
-      core.configured &&
-      Boolean(core.account.email) &&
-      !showCreateAgent &&
-      (coreProjects.length === 0 || isNewAgentFlow) &&
-      pendingAgentCreationRequests.length === 0 &&
-      failedAgentCreationRequests.length === 0;
-    const showEmptyAccount =
-      coreProjects.length === 0 &&
-      pendingAgentCreationRequests.length === 0 &&
-      failedAgentCreationRequests.length === 0 &&
-      !showCreateAgent &&
-      !showAgentReady &&
-      !showBillingSyncState;
+    const homeView = resolveDashboardHomeView({
+      coreConfigured: core.configured,
+      hasAccountEmail: Boolean(core.account.email),
+      isNewAgentFlow,
+      hasProjects: coreProjects.length > 0,
+      hasPendingAgentCreation,
+      hasFailedAgentCreation: failedAgentCreationRequests.length > 0,
+      creationAuthorizationRetry,
+      readyAgent,
+      billingReturn,
+    });
 
-    return (
-      <div
-        className={
-          isNewAgentFlow
-            ? "ocean-page-stack w-full max-w-3xl"
-            : "ocean-page-stack"
-        }
-      >
-        <PendingRefresh enabled={hasPendingAgentCreation} />
-        {showAgentReady && trackedProjectHref && trackedCreationRequest ? (
-          <CoreAgentReadyPanel
-            chatHref={`${trackedProjectHref}/chat`}
-            name={trackedCreationRequest.display_name}
-          />
-        ) : null}
-        {isNewAgentFlow &&
-        !showAgentReady &&
-        returnAgentHref &&
-        returnAgentLabel ? (
-          <ExistingAgentReturnPanel
-            label={returnAgentLabel}
-            overviewHref={returnAgentHref}
-          />
-        ) : null}
-        {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
-        {coreProjects.length > 0 && !isNewAgentFlow ? (
-          <CoreProjectsPanel
-            projects={coreProjects}
-            agentCreationRequests={agentCreationRequests}
-          />
-        ) : null}
+    // Account billing and usage sections follow the primary home view; the
+    // immersive new-agent flow hides them through their own guard.
+    const renderAccountSections = () => (
+      <>
         {!isNewAgentFlow && billing.billing ? (
           <AccountBillingPanel
             billingClass={billing.billing.customer_org.billing_class}
@@ -282,53 +246,143 @@ export default async function DashboardPage({
         {!isNewAgentFlow && !finitePrivateUsage.usage && finitePrivateUsage.error ? (
           <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
         ) : null}
-        {pendingAgentCreationRequests.length && !creationAuthorizationRetry ? (
-          <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
-        ) : null}
-        {failedAgentCreationRequests.length ? (
-          <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
-        ) : null}
-        {showBillingSyncState && billingReturn.kind === "confirming" ? (
-          <BillingSyncWaitPanel deadlineAtMs={billingReturn.deadlineAtMs} />
-        ) : null}
-        {showBillingSyncState && billingReturn.kind === "sync-timeout" ? (
-          <BillingSyncTimeoutPanel
-            returnMachineId={returnProject?.runtime?.id ?? null}
+      </>
+    );
+
+    // Outside their own primary views, the pending and failed creation panels
+    // keep their previous additive placements alongside other views.
+    const showPendingCreationPanel =
+      hasPendingAgentCreation && !creationAuthorizationRetry;
+    const showFailedCreationPanel = failedAgentCreationRequests.length > 0;
+
+    const renderHomePanels = (view: DashboardHomeView): ReactNode => {
+      switch (view.kind) {
+        case "agent-ready":
+          return (
+            <>
+              <CoreAgentReadyPanel chatHref={view.chatHref} name={view.name} />
+              {renderAccountSections()}
+              {showPendingCreationPanel ? (
+                <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
+              ) : null}
+              {showFailedCreationPanel ? (
+                <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
+              ) : null}
+            </>
+          );
+        case "billing-sync":
+          return (
+            <>
+              {renderAccountSections()}
+              {view.returnState.kind === "confirming" ? (
+                <BillingSyncWaitPanel deadlineAtMs={view.returnState.deadlineAtMs} />
+              ) : (
+                <BillingSyncTimeoutPanel
+                  returnMachineId={returnProject?.runtime?.id ?? null}
+                />
+              )}
+            </>
+          );
+        case "create-agent":
+          return (
+            <>
+              {renderAccountSections()}
+              {showFailedCreationPanel ? (
+                <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
+              ) : null}
+              {billingReturn.kind === "cancelled" ? (
+                <BillingCheckoutCancelledNotice />
+              ) : null}
+              <CoreAgentCreationPanel
+                allowConfidentialHosting={viewer.isAdmin}
+                error={agentCreationError}
+                draft={draft}
+                immersive={isNewAgentFlow}
+                returnMachineId={returnProject?.runtime?.id ?? null}
+                requiresAccess={agentCreationRequiresAccess({
+                  runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
+                  canCreateAgent: Boolean(billing.billing?.can_create_agent),
+                  requiresBilling: Boolean(billing.billing?.requires_billing),
+                  recovery: agentCreationRecovery,
+                })}
+              />
+            </>
+          );
+        case "projects":
+          return (
+            <>
+              <CoreProjectsPanel
+                projects={coreProjects}
+                agentCreationRequests={agentCreationRequests}
+              />
+              {renderAccountSections()}
+              {showPendingCreationPanel ? (
+                <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
+              ) : null}
+              {showFailedCreationPanel ? (
+                <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
+              ) : null}
+            </>
+          );
+        case "pending":
+          return (
+            <>
+              {renderAccountSections()}
+              <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
+              {showFailedCreationPanel ? (
+                <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
+              ) : null}
+            </>
+          );
+        case "failed":
+          return (
+            <>
+              {renderAccountSections()}
+              <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
+            </>
+          );
+        case "empty-account":
+          return (
+            <>
+              {renderAccountSections()}
+              <section className="ocean-utility-card">
+                <div className="ocean-utility-card__header">
+                  <span className="ocean-utility-card__icon" aria-hidden>
+                    <ServerIcon className="size-5" />
+                  </span>
+                  <div>
+                    <h1 className="ocean-utility-card__title">No agent yet</h1>
+                    <p className="text-sm text-muted-foreground">
+                      {emptyAccountMessage(core)}
+                    </p>
+                  </div>
+                </div>
+              </section>
+            </>
+          );
+      }
+    };
+
+    return (
+      <div
+        className={
+          isNewAgentFlow
+            ? "ocean-page-stack w-full max-w-3xl"
+            : "ocean-page-stack"
+        }
+      >
+        <PendingRefresh enabled={hasPendingAgentCreation} />
+        {isNewAgentFlow &&
+        homeView.kind !== "agent-ready" &&
+        returnAgentHref &&
+        returnAgentLabel ? (
+          <ExistingAgentReturnPanel
+            label={returnAgentLabel}
+            overviewHref={returnAgentHref}
           />
         ) : null}
-        {showCreateAgent && billingReturn.kind === "cancelled" ? (
-          <BillingCheckoutCancelledNotice />
-        ) : null}
-        {showCreateAgent ? (
-          <CoreAgentCreationPanel
-            allowConfidentialHosting={viewer.isAdmin}
-            error={agentCreationError}
-            draft={draft}
-            immersive={isNewAgentFlow}
-            returnMachineId={returnProject?.runtime?.id ?? null}
-            requiresAccess={agentCreationRequiresAccess({
-              runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
-              canCreateAgent: Boolean(billing.billing?.can_create_agent),
-              requiresBilling: Boolean(billing.billing?.requires_billing),
-              recovery: agentCreationRecovery,
-            })}
-          />
-        ) : null}
-        {showEmptyAccount ? (
-          <section className="ocean-utility-card">
-            <div className="ocean-utility-card__header">
-              <span className="ocean-utility-card__icon" aria-hidden>
-                <ServerIcon className="size-5" />
-              </span>
-              <div>
-                <h1 className="ocean-utility-card__title">No agent yet</h1>
-                <p className="text-sm text-muted-foreground">
-                  {emptyAccountMessage(core)}
-                </p>
-              </div>
-            </div>
-          </section>
-        ) : null}
+        {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
+        {renderHomePanels(homeView)}
       </div>
     );
   }
