@@ -1,0 +1,10 @@
+set shell := ["../../scripts/dev-shell", "-cu"]
+
+# Lists monitoring commands
+default:
+    just --list
+
+# Values-free service contract for the dedicated NixOS monitoring receiver.
+monitoring-nixos-contract:
+    cd ../.. && python3 scripts/check_monitoring_nixos_contract.py
+    cd ../.. && python3 -m unittest discover -s infra/nixos/tests -p 'test_finite_runtime_metrics.py'

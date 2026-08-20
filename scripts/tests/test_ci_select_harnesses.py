@@ -41,6 +41,62 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_monitoring_nixos_contract"},
         )
 
+    def test_monitoring_justfile_runs_only_monitoring_contract(self) -> None:
+        self.assertEqual(
+            selected("infra/monitoring/justfile"),
+            {"run_monitoring_nixos_contract"},
+        )
+
+    def test_nixos_justfile_runs_nixos_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/nixos/justfile"),
+            {"run_nix_checks", "run_nix_service_packages"},
+        )
+
+    def test_infra_justfile_runs_platform_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/justfile"),
+            {"run_finite_status_contract", "run_nix_checks"},
+        )
+
+    def test_brain_justfile_runs_brain_contracts(self) -> None:
+        self.assertEqual(
+            selected("finite-brain/justfile"),
+            {
+                "run_brain_product_matrix",
+                "run_nix_checks",
+                "run_nix_service_packages",
+            },
+        )
+
+    def test_chat_justfile_runs_chat_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitechat/justfile"),
+            {"run_hermes_bridge", "run_rust"},
+        )
+
+    def test_identity_justfile_runs_identity_contracts(self) -> None:
+        self.assertEqual(
+            selected("finite-identity/justfile"),
+            {"run_nix_checks"},
+        )
+
+    def test_dashboard_justfile_runs_dashboard_and_nix_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitecomputer-v2/apps/dashboard/justfile"),
+            {"run_dashboard", "run_nix_checks"},
+        )
+
+    def test_finitecomputer_justfiles_run_nix_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitecomputer-v2/justfile"),
+            {"run_nix_checks"},
+        )
+        self.assertEqual(
+            selected("finitecomputer-v2/deploy/finite-computer/images/justfile"),
+            {"run_nix_checks"},
+        )
+
     def test_dashboard_readme_is_docs_only(self) -> None:
         self.assertEqual(
             selected("finitecomputer-v2/apps/dashboard/README.md"),

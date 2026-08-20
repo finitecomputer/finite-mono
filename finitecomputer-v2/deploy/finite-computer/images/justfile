@@ -1,0 +1,11 @@
+set shell := ["../../../../scripts/dev-shell", "-cu"]
+
+# Lists Runtime image commands
+default:
+    just --list
+
+# Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
+runtime-image-contract:
+    cd ../../../.. && python3 finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py
+    cd ../../../.. && python3 -m unittest discover -s finitecomputer-v2/deploy/finite-computer/images/tests -p 'test_runtime_image_contract.py'
+    cd ../../../.. && python3 -m unittest discover -s scripts/tests -p 'test_hermes_nix_runtime.py'
