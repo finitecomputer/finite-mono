@@ -28,13 +28,15 @@ let
       finite_component_version_mismatch{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}"} 0
     '';
   last = values: builtins.elemAt values (builtins.length values - 1);
-  imageDigest = image: if lib.hasInfix "@" image then last (lib.splitString "@" image) else "";
+  imageDigest =
+    containerImage:
+    if lib.hasInfix "@" containerImage then last (lib.splitString "@" containerImage) else "";
   imageVersion =
-    image:
+    containerImage:
     let
-      digest = imageDigest image;
+      digest = imageDigest containerImage;
     in
-    if digest != "" then digest else last (lib.splitString ":" image);
+    if digest != "" then digest else last (lib.splitString ":" containerImage);
   dashboardImage = config.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
   searxngImage = config.virtualisation.oci-containers.containers.searxng.image;
   firecrawlImage = config.virtualisation.oci-containers.containers.firecrawl-api.image;
