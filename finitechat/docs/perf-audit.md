@@ -76,7 +76,7 @@ matrix tests pin that behavior. Replacing it wholesale is risky; bounding it
 is not. Two options in order of preference:
 
 1. **Cheap structural fix:** make the clones shallow. Wrap each
-   `GroupQueue.entries` / `InboxQueue.entries` in `Arc<…>` (or store
+   `DeliveryQueue.entries` in `Arc<…>` (or store
    `Arc<TransportMessage>` per entry) so cloning the service shares the logs
    and only copies map skeletons. Append then uses `Arc::make_mut` /
    copy-on-write at the single queue being touched. This keeps the
