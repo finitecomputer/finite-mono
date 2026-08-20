@@ -47,6 +47,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
             set(),
         )
 
+    def test_runbook_markdown_runs_nix_checks(self) -> None:
+        self.assertEqual(
+            selected("infra/runbooks/deploy-core.md"),
+            {"run_nix_checks"},
+        )
+
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
 

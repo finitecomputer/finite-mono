@@ -134,6 +134,11 @@ monitoring-nixos-contract:
 runner-host-contract:
     python3 scripts/check_runner_host_contract.py
 
+# Runbook statements of table names, migration versions, and systemd units
+# resolve against their in-repo authorities (migrations, nixos modules).
+runbook-facts-contract:
+    python3 scripts/check_runbook_facts_contract.py
+
 # Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
 finite-status-contract:
     python3 scripts/check_finite_status_contract.py
