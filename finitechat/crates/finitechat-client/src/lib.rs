@@ -1076,6 +1076,15 @@ impl RuntimeLinkFanoutReport {
     }
 }
 
+/// In-memory per-room state: a direct projection of `PersistedRoomState`
+/// that joins the MLS group with its sync cursor and hosting server in one
+/// map entry, so the three can never skew.
+struct RoomEntry {
+    group: MlsGroup,
+    last_applied_seq: u64,
+    server_url: Option<String>,
+}
+
 pub struct FiniteChatDevice {
     provider: OpenMlsRustCrypto,
     device_ref: DeviceRef,
@@ -1083,9 +1092,7 @@ pub struct FiniteChatDevice {
     credential: FiniteDeviceCredentialV1,
     credential_with_key: CredentialWithKey,
     signer: SignatureKeyPair,
-    groups: BTreeMap<RoomId, MlsGroup>,
-    room_cursors: BTreeMap<RoomId, u64>,
-    room_server_urls: BTreeMap<RoomId, String>,
+    rooms: BTreeMap<RoomId, RoomEntry>,
     pending_welcomes: BTreeMap<WelcomeId, PendingWelcomeState>,
     pending_welcome_acks: BTreeMap<WelcomeId, PendingWelcomeAckState>,
     pending_key_package_uploads: BTreeMap<KeyPackageId, UploadKeyPackageRequest>,
@@ -1130,9 +1137,7 @@ impl FiniteChatDevice {
             credential,
             credential_with_key,
             signer,
-            groups: BTreeMap::new(),
-            room_cursors: BTreeMap::new(),
-            room_server_urls: BTreeMap::new(),
+            rooms: BTreeMap::new(),
             pending_welcomes: BTreeMap::new(),
             pending_welcome_acks: BTreeMap::new(),
             pending_key_package_uploads: BTreeMap::new(),
@@ -1198,7 +1203,7 @@ impl FiniteChatDevice {
             return Err(ClientError::PersistedDeviceMismatch);
         }
 
-        let mut groups = BTreeMap::new();
+        let mut rooms = BTreeMap::new();
         for room in &state.rooms {
             let group_id = GroupId::from_slice(room.mls_group_id.as_bytes());
             let group = MlsGroup::load(provider.storage(), &group_id)
@@ -1207,24 +1212,15 @@ impl FiniteChatDevice {
             if mls_group_id_string(group.group_id())? != room.mls_group_id {
                 return Err(ClientError::PersistedGroupIdMismatch(room.room_id.clone()));
             }
-            if groups.insert(room.room_id.clone(), group).is_some() {
+            let entry = RoomEntry {
+                group,
+                last_applied_seq: room.last_applied_seq,
+                server_url: room.server_url.clone(),
+            };
+            if rooms.insert(room.room_id.clone(), entry).is_some() {
                 return Err(ClientError::DuplicatePersistedRoom(room.room_id.clone()));
             }
         }
-        let room_server_urls = state
-            .rooms
-            .iter()
-            .filter_map(|room| {
-                room.server_url
-                    .clone()
-                    .map(|server_url| (room.room_id.clone(), server_url))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let room_cursors = state
-            .rooms
-            .iter()
-            .map(|room| (room.room_id.clone(), room.last_applied_seq))
-            .collect::<BTreeMap<_, _>>();
         let pending_welcomes = state
             .pending_welcomes
             .iter()
@@ -1253,9 +1249,7 @@ impl FiniteChatDevice {
             credential,
             credential_with_key,
             signer,
-            groups,
-            room_cursors,
-            room_server_urls,
+            rooms,
             pending_welcomes,
             pending_welcome_acks,
             pending_key_package_uploads,
@@ -1285,18 +1279,18 @@ impl FiniteChatDevice {
         openmls_storage_records.sort_by(|left, right| left.key.cmp(&right.key));
 
         let rooms = self
-            .groups
+            .rooms
             .iter()
-            .map(|(room_id, group)| {
+            .map(|(room_id, entry)| {
                 Ok(PersistedRoomState {
                     room_id: room_id.clone(),
-                    mls_group_id: mls_group_id_string(group.group_id())?,
-                    last_applied_seq: *self.room_cursors.get(room_id).unwrap_or(&0),
-                    server_url: self.room_server_urls.get(room_id).cloned(),
+                    mls_group_id: mls_group_id_string(entry.group.group_id())?,
+                    last_applied_seq: entry.last_applied_seq,
+                    server_url: entry.server_url.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ClientError>>()?;
-        // self.groups is a BTreeMap, so rooms are already sorted by room_id.
+        // self.rooms is a BTreeMap, so rooms are already sorted by room_id.
         let pending_welcomes = self.pending_welcomes.values().cloned().collect::<Vec<_>>();
         let pending_welcome_acks = self
             .pending_welcome_acks
@@ -1339,7 +1333,7 @@ impl FiniteChatDevice {
         mls_group_id: impl AsRef<str>,
     ) -> Result<(), ClientError> {
         let room_id = room_id.into();
-        if self.groups.contains_key(&room_id) {
+        if self.rooms.contains_key(&room_id) {
             return Err(ClientError::GroupAlreadyExists(room_id));
         }
 
@@ -1351,8 +1345,14 @@ impl FiniteChatDevice {
             self.credential_with_key.clone(),
         )
         .map_err(|_| ClientError::CreateGroup)?;
-        self.groups.insert(room_id.clone(), group);
-        self.room_cursors.insert(room_id, 0);
+        self.rooms.insert(
+            room_id,
+            RoomEntry {
+                group,
+                last_applied_seq: 0,
+                server_url: None,
+            },
+        );
         Ok(())
     }
 
@@ -1601,10 +1601,11 @@ impl FiniteChatDevice {
         let provider = &self.provider;
         let signer = &self.signer;
         let sender = self.device_ref.clone();
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         if group.pending_commit().is_some() {
             return Err(ClientError::PendingCommitExists(room_id.to_string()));
         }
@@ -1694,10 +1695,11 @@ impl FiniteChatDevice {
         let signer = &self.signer;
         let sender = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         if group.pending_commit().is_some() {
             return Err(ClientError::PendingCommitExists(room_id.to_string()));
         }
@@ -1761,10 +1763,11 @@ impl FiniteChatDevice {
         let provider = &self.provider;
         let signer = &self.signer;
         let sender = self.device_ref.clone();
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         if group.pending_commit().is_some() {
             return Err(ClientError::PendingCommitExists(room_id.to_string()));
         }
@@ -1831,10 +1834,11 @@ impl FiniteChatDevice {
         }
 
         let provider = &self.provider;
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         if group.pending_commit().is_none() {
             return Err(ClientError::MissingPendingCommit(room_id.to_string()));
         }
@@ -1879,10 +1883,11 @@ impl FiniteChatDevice {
         let own_device_ref = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
         let provider = &self.provider;
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         let current_epoch = group.epoch().as_u64();
         if current_epoch != entry.epoch {
             return Err(ClientError::UnexpectedCommitEpoch {
@@ -1952,7 +1957,7 @@ impl FiniteChatDevice {
         ratchet_tree_payload: &[u8],
     ) -> Result<(), ClientError> {
         let room_id = room_id.into();
-        if self.groups.contains_key(&room_id) {
+        if self.rooms.contains_key(&room_id) {
             return Err(ClientError::GroupAlreadyExists(room_id));
         }
 
@@ -1967,24 +1972,29 @@ impl FiniteChatDevice {
         .into_group(&self.provider)
         .map_err(|_| ClientError::ActivateWelcome)?;
         self.verify_member_in_group(&group, &self.device_ref)?;
-        self.groups.insert(room_id.clone(), group);
-        self.room_cursors.insert(room_id, 0);
+        self.rooms.insert(
+            room_id,
+            RoomEntry {
+                group,
+                last_applied_seq: 0,
+                server_url: None,
+            },
+        );
         Ok(())
     }
 
     pub fn last_applied_seq(&self, room_id: &str) -> Result<u64, ClientError> {
         validate_room_id(room_id)?;
-        self.group(room_id)?;
-        Ok(*self.room_cursors.get(room_id).unwrap_or(&0))
+        Ok(self.room_entry(room_id)?.last_applied_seq)
     }
 
     pub fn room_sync_cursors(&self) -> Vec<RoomSyncCursor> {
-        self.groups
-            .keys()
-            .map(|room_id| RoomSyncCursor {
+        self.rooms
+            .iter()
+            .map(|(room_id, entry)| RoomSyncCursor {
                 room_id: room_id.clone(),
-                after_seq: *self.room_cursors.get(room_id).unwrap_or(&0),
-                server_url: self.room_server_urls.get(room_id).cloned(),
+                after_seq: entry.last_applied_seq,
+                server_url: entry.server_url.clone(),
             })
             .collect()
     }
@@ -1998,23 +2008,17 @@ impl FiniteChatDevice {
         server_url: Option<String>,
     ) -> Result<(), ClientError> {
         validate_room_id(room_id)?;
-        self.group(room_id)?;
         if let Some(server_url) = &server_url {
             validate_string_bytes("room.server_url", server_url, MAX_ROOM_SERVER_URL_BYTES)?;
         }
-        match server_url {
-            Some(server_url) => {
-                self.room_server_urls.insert(room_id.to_owned(), server_url);
-            }
-            None => {
-                self.room_server_urls.remove(room_id);
-            }
-        }
+        self.room_entry_mut(room_id)?.server_url = server_url;
         Ok(())
     }
 
     pub fn room_server_url(&self, room_id: &str) -> Option<&str> {
-        self.room_server_urls.get(room_id).map(String::as_str)
+        self.rooms
+            .get(room_id)
+            .and_then(|entry| entry.server_url.as_deref())
     }
 
     pub fn pending_welcome_count(&self) -> usize {
@@ -2627,10 +2631,11 @@ impl FiniteChatDevice {
         let own_device_ref = self.device_ref.clone();
         let provider = &self.provider;
         let signer = &self.signer;
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         if group.pending_commit().is_some() {
             return Err(ClientError::PendingCommitMustBeMerged(room_id.to_string()));
         }
@@ -2663,10 +2668,11 @@ impl FiniteChatDevice {
     ) -> Result<DecryptedApplicationEntry, ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Application)?;
         let provider = &self.provider;
-        let group = self
-            .groups
+        let group = &mut self
+            .rooms
             .get_mut(room_id)
-            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?;
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
         let processed = group
             .process_message(
                 provider,
@@ -2894,25 +2900,33 @@ impl FiniteChatDevice {
         }
     }
 
-    fn group(&self, room_id: &str) -> Result<&MlsGroup, ClientError> {
-        self.groups
+    fn room_entry(&self, room_id: &str) -> Result<&RoomEntry, ClientError> {
+        self.rooms
             .get(room_id)
             .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))
     }
 
+    fn room_entry_mut(&mut self, room_id: &str) -> Result<&mut RoomEntry, ClientError> {
+        self.rooms
+            .get_mut(room_id)
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))
+    }
+
+    fn group(&self, room_id: &str) -> Result<&MlsGroup, ClientError> {
+        Ok(&self.room_entry(room_id)?.group)
+    }
+
     fn set_last_applied_seq(&mut self, room_id: &str, seq: u64) -> Result<(), ClientError> {
         validate_room_id(room_id)?;
-        self.group(room_id)?;
-        let current_seq = self.room_cursors.get(room_id).copied().unwrap_or(0);
-        if seq < current_seq {
+        let entry = self.room_entry_mut(room_id)?;
+        if seq < entry.last_applied_seq {
             return Err(ClientError::AppliedSeqRegression {
                 room_id: room_id.to_string(),
-                current_seq,
+                current_seq: entry.last_applied_seq,
                 attempted_seq: seq,
             });
         }
-        self.room_cursors.insert(room_id.to_string(), seq);
-        debug_assert!(self.room_cursors.contains_key(room_id));
+        entry.last_applied_seq = seq;
         Ok(())
     }
 }
@@ -11638,6 +11652,41 @@ mod tests {
             !alice.has_pending_commit(room_id).unwrap(),
             "own commit at or behind the cursor must clear pending MLS state"
         );
+    }
+
+    #[test]
+    fn applied_seq_regression_guard_survives_state_round_trip() {
+        let secret = NostrSecretKey::from_bytes([23; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret,
+            device_id: "device-cursor-guard".to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        };
+        let mut device = FiniteChatDevice::new(config.clone()).unwrap();
+        device
+            .create_group_state("room-cursor-guard", "mls-room-cursor-guard")
+            .unwrap();
+        device
+            .set_last_applied_seq("room-cursor-guard", 42)
+            .unwrap();
+
+        let state = device.export_state().unwrap();
+        let mut reloaded = FiniteChatDevice::from_state(config, state).unwrap();
+        assert_eq!(reloaded.last_applied_seq("room-cursor-guard").unwrap(), 42);
+        assert!(matches!(
+            reloaded.set_last_applied_seq("room-cursor-guard", 41),
+            Err(ClientError::AppliedSeqRegression {
+                current_seq: 42,
+                attempted_seq: 41,
+                ..
+            })
+        ));
+        reloaded
+            .set_last_applied_seq("room-cursor-guard", 43)
+            .unwrap();
+        assert_eq!(reloaded.last_applied_seq("room-cursor-guard").unwrap(), 43);
     }
 
     #[test]
