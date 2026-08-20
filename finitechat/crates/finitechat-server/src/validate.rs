@@ -390,11 +390,20 @@ fn patched_nostr_profile_metadata_json(
     patch_json_string_field(&mut object, "finite_role", incoming.finite_role.as_deref());
     object.remove("finiteRole");
 
-    serde_json::to_string(&serde_json::Value::Object(object)).map_err(|error| {
+    let encoded = serde_json::to_string(&serde_json::Value::Object(object)).map_err(|error| {
         ServerHttpError::InvalidNostrProfileRequest {
             reason: format!("profile.metadata_json could not be encoded: {error}"),
         }
-    })
+    })?;
+    validate_bytes_len(
+        "profile.metadata_json",
+        encoded.len(),
+        MAX_NOSTR_PROFILE_METADATA_JSON_BYTES as u32,
+    )
+    .map_err(|error| ServerHttpError::InvalidNostrProfileRequest {
+        reason: error.to_string(),
+    })?;
+    Ok(encoded)
 }
 
 fn nostr_profile_metadata_object(
@@ -471,6 +480,9 @@ pub(crate) fn validate_nostr_profile_record(
     Ok(())
 }
 
+// Only the byte cap is re-checked here: every caller passes a record fresh
+// from `normalize_nostr_profile_record`, which already parsed, patched, and
+// length-checked the metadata before re-serializing it.
 fn validate_nostr_profile_metadata_json(
     metadata_json: Option<&str>,
 ) -> Result<(), ServerHttpError> {
@@ -484,18 +496,7 @@ fn validate_nostr_profile_metadata_json(
     )
     .map_err(|error| ServerHttpError::InvalidNostrProfileRequest {
         reason: error.to_string(),
-    })?;
-    let value: serde_json::Value = serde_json::from_str(metadata_json).map_err(|error| {
-        ServerHttpError::InvalidNostrProfileRequest {
-            reason: format!("profile.metadata_json must be valid JSON: {error}"),
-        }
-    })?;
-    if !value.is_object() {
-        return Err(ServerHttpError::InvalidNostrProfileRequest {
-            reason: "profile.metadata_json must be a JSON object".to_owned(),
-        });
-    }
-    Ok(())
+    })
 }
 
 pub(crate) fn validate_nostr_profile_batch(account_ids: &[String]) -> Result<(), ServerHttpError> {

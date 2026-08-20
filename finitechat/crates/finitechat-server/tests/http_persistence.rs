@@ -5177,6 +5177,77 @@ async fn sqlite_nostr_profile_cache_rejects_invalid_records_without_side_effects
 }
 
 #[tokio::test]
+async fn sqlite_nostr_profile_cache_rejects_invalid_metadata_json_without_side_effects() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let app = persistent_app(&db_path);
+    let account_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+
+    let profile = |metadata_json: String| NostrProfileRecord {
+        account_id: account_id.clone(),
+        name: Some("alice".to_owned()),
+        display_name: None,
+        about: None,
+        picture: None,
+        bot: None,
+        finite_role: None,
+        metadata_json: Some(metadata_json),
+        fetched_at_ms: 1_000,
+        expires_at_ms: 2_000,
+    };
+
+    let oversized = format!(r#"{{"big":"{}"}}"#, "x".repeat(16 * 1024));
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile(oversized),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile("not json".to_owned()),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile(r#"["not","an","object"]"#.to_owned()),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app,
+        "/profiles/nostr/get",
+        &GetNostrProfilesRequest {
+            account_ids: vec![account_id],
+            now_ms: 1_500,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let profiles: GetNostrProfilesResponse = read_json(response).await;
+    assert!(profiles.profiles.is_empty());
+}
+
+#[tokio::test]
 async fn sqlite_device_liveness_is_volatile_and_does_not_advance_room_state() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
