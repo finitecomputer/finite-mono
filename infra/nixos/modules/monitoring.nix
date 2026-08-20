@@ -56,6 +56,30 @@ in
   finite.metrics = {
     enable = true;
     collectRuntimeArtifacts = true;
+    logRole = "app";
+    journalLogUnits = lib.unique (
+      probedServiceUnits
+      ++ [
+        "alloy.service"
+        "borgbackup-job-finite-hosted-web-chat-offsite.service"
+        "caddy.service"
+        "finite-core-private-proxy.service"
+        "finite-healthcheck.service"
+        "finite-hosted-web-chat-offsite-health.service"
+        "finite-hosted-web-chat-snapshot-health.service"
+        "finite-identity-backup-health.service"
+        "finite-identity-backup.service"
+        "finite-identity-private-proxy.service"
+        "finite-identity.service"
+        "finite-litestream-finite-brain.service"
+        "finite-litestream-finite-chat-server.service"
+        "finite-litestream-health.service"
+        "finite-postgres-backup.service"
+        "finite-runtime-metrics.service"
+        "finite-saas-runner-phala.service"
+        "finite-saas-runner.service"
+      ]
+    );
     staticVersionMetrics = lib.concatMapStrings versionMetric [
       {
         component = "finite-saas-core";

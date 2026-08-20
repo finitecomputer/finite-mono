@@ -34,6 +34,16 @@ LOGS_PASSWORD_HASH=...
 Do not put credential values, password hashes, or generated Grafana secrets in
 this repository.
 
+LAT hosts send data with separate root-owned env files:
+
+- `/etc/finite/metrics-remote-write.env`
+- `/etc/finite/logs-write.env`
+
+The logs file must contain `FINITE_LOGS_WRITE_USERNAME` and
+`FINITE_LOGS_WRITE_PASSWORD`, matching the monitoring receiver's logs-write
+credential. It is intentionally separate from the Prometheus remote-write
+credential.
+
 Deploy from a clean checkout after the change is on `origin/main`:
 
 ```sh

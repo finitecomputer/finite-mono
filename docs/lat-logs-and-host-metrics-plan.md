@@ -151,6 +151,11 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    - Keep the Loki credential in a root-owned environment file or SOPS-managed
      equivalent; do not reuse the Prometheus credential.
 
+   Repo status: implemented in `infra/nixos/modules/metrics.nix` for
+   `finite-lat-1` and `finite-lat-3`. The next LAT NixOS activation will require
+   `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
+   and `FINITE_LOGS_WRITE_PASSWORD`.
+
 5. Roll out one host at a time.
    - Run `scripts/finite-status --json` before each host rollout.
    - Roll out `finite-lat-3` first.
