@@ -6459,18 +6459,17 @@ impl AppRuntimeState {
         }));
         let mut archive_state_changed = false;
         for event in projection_events {
-            if let Ok(app_event) =
-                serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
-            {
+            let parsed = ParsedAppEvent::decode(event);
+            if let Some(app_event) = &parsed.envelope {
                 let _ = self
                     .activity_projection
                     .clear_from_durable_application_event(
-                        &event.room_id,
-                        &event.sender,
-                        &app_event,
+                        &parsed.event.room_id,
+                        &parsed.event.sender,
+                        app_event,
                     );
             }
-            archive_state_changed |= self.chat_projection.apply_event(event, &owner);
+            archive_state_changed |= self.chat_projection.apply_parsed_event(parsed, &owner);
         }
         self.sync_chat_projection();
         if archive_state_changed {
@@ -6679,7 +6678,9 @@ impl AppRuntimeState {
                 after_seq = event.seq;
                 after_message_id.clone_from(&event.message_id);
                 if !is_device_link_control_event(&event.plaintext) {
-                    archive_state_changed |= self.chat_projection.apply_event(event, &owner);
+                    archive_state_changed |= self
+                        .chat_projection
+                        .apply_parsed_event(ParsedAppEvent::decode(event), &owner);
                 }
             }
             if page_len < DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE as usize {
@@ -9710,31 +9711,70 @@ fn chat_message_status(status: HermesMessageStatusV1) -> ChatMessageStatus {
     }
 }
 
-fn decode_application_event(plaintext: &[u8]) -> DecodedAppEvent {
-    match serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext) {
-        Ok(event) => decoded_typed_application_event(event),
-        Err(_) => DecodedAppEvent::ChatMessage(DecodedChatMessage {
-            conversation_id: None,
-            segment_id: None,
-            raw_payload: plaintext.to_vec(),
-            // An envelope-less payload can still be a typed chat payload
-            // (e.g. a bare hermes message); resolve it the same way.
-            payload: resolve_chat_message_payload(plaintext),
-        }),
+/// A stored application event paired with its single-decode interpretation.
+/// `ChatProjectionState` consumes only this form, so application plaintext
+/// is parsed exactly once per event, at the door — future callers cannot
+/// hand the projection raw bytes to re-interpret.
+struct ParsedAppEvent {
+    event: StoredAppEvent,
+    decoded: DecodedAppEvent,
+    /// The envelope when the plaintext parses as an application event,
+    /// regardless of limits validity, for consumers that need envelope
+    /// fields the decoded form does not carry (conversation lifecycle
+    /// payloads, durable-terminal activity clears).
+    envelope: Option<DecryptedApplicationEventV1>,
+}
+
+impl ParsedAppEvent {
+    fn decode(event: StoredAppEvent) -> Self {
+        let (decoded, envelope) = decode_application_plaintext(&event.plaintext);
+        Self {
+            event,
+            decoded,
+            envelope,
+        }
     }
 }
 
-fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> DecodedAppEvent {
+fn decode_application_event(plaintext: &[u8]) -> DecodedAppEvent {
+    decode_application_plaintext(plaintext).0
+}
+
+/// The single interpreter of application plaintext: parse the envelope at
+/// most once and resolve the decoded form from it.
+fn decode_application_plaintext(
+    plaintext: &[u8],
+) -> (DecodedAppEvent, Option<DecryptedApplicationEventV1>) {
+    match serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext) {
+        Ok(envelope) => {
+            let decoded = decoded_typed_application_event(&envelope);
+            (decoded, Some(envelope))
+        }
+        Err(_) => (
+            DecodedAppEvent::ChatMessage(DecodedChatMessage {
+                conversation_id: None,
+                segment_id: None,
+                raw_payload: plaintext.to_vec(),
+                // An envelope-less payload can still be a typed chat payload
+                // (e.g. a bare hermes message); resolve it the same way.
+                payload: resolve_chat_message_payload(plaintext),
+            }),
+            None,
+        ),
+    }
+}
+
+fn decoded_typed_application_event(event: &DecryptedApplicationEventV1) -> DecodedAppEvent {
     if event.validate_limits().is_err() {
         return DecodedAppEvent::Ignored;
     }
-    match event.kind {
+    match &event.kind {
         DurableAppEventKind::ChatMessage => {
-            let raw_payload = event.payload;
+            let raw_payload = event.payload.clone();
             let payload = resolve_chat_message_payload(&raw_payload);
             DecodedAppEvent::ChatMessage(DecodedChatMessage {
-                conversation_id: event.conversation_id,
-                segment_id: event.segment_id,
+                conversation_id: event.conversation_id.clone(),
+                segment_id: event.segment_id.clone(),
                 raw_payload,
                 payload,
             })
@@ -9753,7 +9793,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
             .unwrap_or(DecodedAppEvent::Ignored),
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_POLL_VOTE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatPollVoteV1>(&event.payload)
                 .ok()
@@ -9763,7 +9803,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_ARCHIVE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatArchiveV1>(&event.payload)
                 .ok()
@@ -9777,7 +9817,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_RENAME_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatRenameV1>(&event.payload)
                 .ok()
@@ -10549,7 +10589,7 @@ impl ChatProjectionState {
             }
         }
         for event in stored_events {
-            let _ = projection.apply_event(event, owner);
+            let _ = projection.apply_parsed_event(ParsedAppEvent::decode(event), owner);
         }
         projection.trim_to_limit();
         projection
@@ -10562,8 +10602,15 @@ impl ChatProjectionState {
         self.trim_to_limit();
     }
 
-    fn apply_event(&mut self, event: StoredAppEvent, owner: &DeviceRef) -> bool {
-        let decoded = decode_application_event(&event.plaintext);
+    /// Apply one application event to the projection. This is the only
+    /// entry point for events, and it takes the pre-decoded
+    /// [`ParsedAppEvent`] — nothing below this boundary parses plaintext.
+    fn apply_parsed_event(&mut self, parsed: ParsedAppEvent, owner: &DeviceRef) -> bool {
+        let ParsedAppEvent {
+            event,
+            decoded,
+            envelope,
+        } = parsed;
         let decoded_conversation_id = conversation_id_from_decoded_event(&decoded);
         let duplicate_projected_message = matches!(decoded, DecodedAppEvent::ChatMessage(_))
             && self
@@ -10574,6 +10621,7 @@ impl ChatProjectionState {
             self.apply_conversation_projection_from_decoded(
                 &decoded,
                 &event,
+                envelope.as_ref(),
                 decoded_conversation_id.as_deref(),
             );
         }
@@ -10619,13 +10667,14 @@ impl ChatProjectionState {
     /// Drive the conversation projection from the single decode pass. A
     /// chat message needs only its decoded kind and scoping (the
     /// conversation projection's ChatMessage arm reads no payload).
-    /// Conversation lifecycle kinds keep their envelope payload and are rare
-    /// control events, so they alone still pay an envelope parse; kinds the
-    /// conversation projection ignores are skipped outright.
+    /// Conversation lifecycle kinds use the envelope carried by
+    /// [`ParsedAppEvent`]; kinds the conversation projection ignores are
+    /// skipped outright.
     fn apply_conversation_projection_from_decoded(
         &mut self,
         decoded: &DecodedAppEvent,
         event: &StoredAppEvent,
+        envelope: Option<&DecryptedApplicationEventV1>,
         decoded_conversation_id: Option<&str>,
     ) {
         let (app_event, conversation_id) = match decoded {
@@ -10649,9 +10698,7 @@ impl ChatProjectionState {
             | DecodedAppEvent::ChatArchive(_)
             | DecodedAppEvent::ChatRename(_) => return,
             DecodedAppEvent::Ignored => {
-                let Ok(app_event) =
-                    serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
-                else {
+                let Some(app_event) = envelope else {
                     return;
                 };
                 let conversation_id = app_event
@@ -10659,7 +10706,7 @@ impl ChatProjectionState {
                     .as_deref()
                     .or(decoded_conversation_id)
                     .map(str::to_owned);
-                (app_event, conversation_id)
+                (app_event.clone(), conversation_id)
             }
         };
         let Some(conversation_id) = conversation_id else {
@@ -12453,6 +12500,37 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn application_envelope_parsing_stays_within_decode_authority() {
+        // ChatProjectionState consumes ParsedAppEvent, so application
+        // plaintext is decoded once at the boundary and never re-parsed
+        // below it. This gate makes a NEW parse of the application envelope
+        // a conscious, reviewed change: the production region of this file
+        // may parse DecryptedApplicationEventV1 only in
+        //
+        //   - decode_application_plaintext (the decode authority),
+        //   - typed_namespaced_payload (the namespaced-event authority),
+        //   - apply_conversation_projection_from_message (the documented
+        //     fallback for appending already-projected messages that have
+        //     no carried scope).
+        //
+        // Adding a fourth site means re-introducing re-parsing; thread
+        // ParsedAppEvent/ChatEventScope instead, or — if genuinely new —
+        // update this count with a comment naming the new authority.
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("tests module delimits the production region");
+        let sites = production
+            .match_indices("from_slice::<DecryptedApplicationEventV1>")
+            .count();
+        assert_eq!(
+            sites, 3,
+            "application envelope is parsed outside the sanctioned decode sites"
+        );
+    }
 
     #[test]
     fn text_payload_carries_requester_context_only_when_hosted_dispatch_supplies_it() {
@@ -15102,8 +15180,8 @@ mod tests {
             segment_id: second_chat_id.to_owned(),
             reason: None,
         };
-        projection.apply_event(
-            StoredAppEvent {
+        projection.apply_parsed_event(
+            ParsedAppEvent::decode(StoredAppEvent {
                 room_id: "room-main".to_owned(),
                 seq: 11,
                 message_id: "segment-11".to_owned(),
@@ -15115,7 +15193,7 @@ mod tests {
                 )
                 .unwrap(),
                 timestamp_unix_seconds: NOW + 1,
-            },
+            }),
             &owner,
         );
         projection.append_messages(vec![message], &owner);
