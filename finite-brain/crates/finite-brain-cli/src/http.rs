@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::{
-    CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport, find_agent_state,
-    load_signer, mutate_agent_state, option_value, pending_working_tree_change_paths,
-    read_agent_state, reconcile_local_search_paths, reconcile_search_changes,
-    run_working_tree_sync, signed_http_auth_header,
+    AgentSyncStatus, CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport,
+    find_agent_state, load_signer, mutate_agent_state, option_value,
+    pending_working_tree_change_paths, read_agent_state, reconcile_local_search_paths,
+    reconcile_search_changes, run_working_tree_sync, signed_http_auth_header,
 };
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
@@ -154,7 +154,7 @@ fn sync_once_with_local_paths_holding_lock(
     let report = run_working_tree_sync(env, args, activity_kind);
     if report.as_ref().is_err_and(is_brain_access_loss) {
         let _ = mutate_agent_state(env, |state, now| {
-            state.sync.status = "paused-access-revoked".to_owned();
+            state.sync.status = AgentSyncStatus::PausedAccessRevoked;
             state.daemon.last_error =
                 Some("authoritative Brain access is no longer available".to_owned());
             state.add_activity(

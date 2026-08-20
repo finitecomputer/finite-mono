@@ -46,7 +46,7 @@ impl AgentState {
             },
             sync: AgentSyncState {
                 mode: "automatic".to_owned(),
-                status: "idle".to_owned(),
+                status: AgentSyncStatus::Idle,
             },
             search_lifecycle: SearchLifecycleState::default(),
             conflicts: Vec::new(),
@@ -76,6 +76,23 @@ impl AgentState {
                 .drain(..self.activity.len() - MAX_ACTIVITY_ENTRIES);
         }
         self.updated_at = at;
+    }
+
+    /// Record one daemon-driven sync attempt: success clears the daemon error
+    /// and publishes the engine's status; failure grows the failure streak
+    /// and blocks sync with the error as the reason.
+    pub(crate) fn record_sync_outcome(&mut self, outcome: Result<AgentSyncStatus, String>) {
+        match outcome {
+            Ok(status) => {
+                self.daemon.last_error = None;
+                self.sync.status = status;
+            }
+            Err(reason) => {
+                self.daemon.failure_count = self.daemon.failure_count.saturating_add(1);
+                self.daemon.last_error = Some(reason.clone());
+                self.sync.status = AgentSyncStatus::Blocked { reason };
+            }
+        }
     }
 }
 
@@ -149,7 +166,75 @@ impl fmt::Display for DaemonRunState {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentSyncState {
     pub(crate) mode: String,
-    pub(crate) status: String,
+    pub(crate) status: AgentSyncStatus,
+}
+
+/// Daemon-managed sync outcome. Serialized with serde's default externally
+/// tagged form, so unit variants keep their legacy string spellings in
+/// `agent-state.json`; only `Blocked` carries data and serializes as an
+/// object. `Display` renders the legacy CLI string for every variant.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AgentSyncStatus {
+    Idle,
+    Paused,
+    PausedAccessRevoked,
+    Reconnecting,
+    Watching,
+    IdleNoLocalChanges,
+    CaughtUp,
+    PushedLocalChanges,
+    AppliedRemoteRecords,
+    /// A completed sync that recorded local conflicts; success-class despite
+    /// the `blocked-` prefix in its legacy spelling.
+    BlockedLocalConflicts,
+    Blocked {
+        reason: String,
+    },
+}
+
+impl AgentSyncStatus {
+    /// Legacy state files recorded a blocked outcome as one free-form
+    /// `blocked: <error>` string; split the reason back out. Every other
+    /// legacy status already matches a unit variant's serde name.
+    pub(crate) fn from_legacy_blocked_str(status: &str) -> Option<Self> {
+        status
+            .strip_prefix("blocked: ")
+            .map(|reason| Self::Blocked {
+                reason: reason.to_owned(),
+            })
+    }
+}
+
+impl fmt::Display for AgentSyncStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idle => f.write_str("idle"),
+            Self::Paused => f.write_str("paused"),
+            Self::PausedAccessRevoked => f.write_str("paused-access-revoked"),
+            Self::Reconnecting => f.write_str("reconnecting"),
+            Self::Watching => f.write_str("watching"),
+            Self::IdleNoLocalChanges => f.write_str("idle-no-local-changes"),
+            Self::CaughtUp => f.write_str("caught-up"),
+            Self::PushedLocalChanges => f.write_str("pushed-local-changes"),
+            Self::AppliedRemoteRecords => f.write_str("applied-remote-records"),
+            Self::BlockedLocalConflicts => f.write_str("blocked-local-conflicts"),
+            Self::Blocked { reason } => write!(f, "blocked: {reason}"),
+        }
+    }
+}
+
+/// CLI JSON contract: sync statuses render as their legacy display strings
+/// (`blocked-local-conflicts`, `blocked: <error>`, ...), never the tagged
+/// state-file form.
+fn serialize_sync_status_display<S>(
+    status: &AgentSyncStatus,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_str(status)
 }
 
 #[derive(Default)]
@@ -258,7 +343,8 @@ pub(crate) struct SyncStatus {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SyncOnceReport {
-    pub(crate) status: String,
+    #[serde(serialize_with = "serialize_sync_status_display")]
+    pub(crate) status: AgentSyncStatus,
     pub(crate) latest_sequence: u64,
     pub(crate) record_count: usize,
     pub(crate) server_url: String,

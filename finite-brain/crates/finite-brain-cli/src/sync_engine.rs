@@ -33,8 +33,8 @@ use serde::Deserialize;
 #[cfg(test)]
 use crate::initialize_private_working_tree;
 use crate::{
-    APP_SPECIFIC_KIND, AdminAccessAction, AgentState, BrainMetadataView, CliEnvironment, CliError,
-    CompletedWrapReport, ConflictEntry, ConflictState, LocalSigner,
+    APP_SPECIFIC_KIND, AdminAccessAction, AgentState, AgentSyncStatus, BrainMetadataView,
+    CliEnvironment, CliError, CompletedWrapReport, ConflictEntry, ConflictState, LocalSigner,
     SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES, SessionFolderKeyring, SyncChangeReport, SyncOnceReport,
     admin_access_change_event, current_tree_root, deterministic_id, folder_key_grant_request,
     folder_required_recipients, load_signer, read_agent_state, read_json_file,
@@ -247,18 +247,18 @@ pub(crate) fn run_working_tree_sync(
         remote_changes.len()
     };
     let status = if local_result.conflict_count > 0 {
-        "blocked-local-conflicts".to_owned()
+        AgentSyncStatus::BlockedLocalConflicts
     } else if local_result.pushed_count > 0 {
-        "pushed-local-changes".to_owned()
+        AgentSyncStatus::PushedLocalChanges
     } else if !remote_changes.is_empty()
         || newly_readable_keys > 0
         || (remote_result.used_bootstrap
             && latest_sequence > prior_tree_state.sync.latest_sequence
             && active_remote_object_count > 0)
     {
-        "applied-remote-records".to_owned()
+        AgentSyncStatus::AppliedRemoteRecords
     } else {
-        "caught-up".to_owned()
+        AgentSyncStatus::CaughtUp
     };
 
     mutate_agent_state_at_root(&root, timestamp(env), |state, now| {

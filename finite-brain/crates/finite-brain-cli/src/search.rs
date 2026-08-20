@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentState, CliEnvironment, CliError, ConflictState, EmbeddingProviderAdapter,
+    AgentState, AgentSyncStatus, CliEnvironment, CliError, ConflictState, EmbeddingProviderAdapter,
     EmbeddingProviderConfig, EmbeddingProviderInput, SyncChangeReport, SyncOnceReport,
     create_private_directory_if_missing, current_tree_root, read_agent_state,
     read_working_tree_state, semantic_index, set_private_file_permissions, write_json,
@@ -857,7 +857,9 @@ pub(crate) fn reconcile_local_search_paths(
     paths: &[String],
 ) -> Result<usize, CliError> {
     let report = SyncOnceReport {
-        status: "local".to_owned(),
+        // Search reconciliation reads only the change lists; the status is a
+        // placeholder that is never persisted or rendered.
+        status: AgentSyncStatus::Idle,
         latest_sequence: 0,
         record_count: paths.len(),
         server_url: String::new(),

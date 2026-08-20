@@ -6,10 +6,11 @@ use finite_brain_core::portability::BrainWorkingTreeStateManifest;
 use serde::Deserialize;
 
 use crate::{
-    AccessExplanation, AgentState, AuthStatus, CliEnvironment, CliError, ConflictState,
-    DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional, option_value,
-    timestamp, validate_private_working_tree, validate_working_tree_managed_structure,
-    write_json_file, write_private_file_atomic_for_migration,
+    AccessExplanation, AgentState, AgentSyncStatus, AuthStatus, CliEnvironment, CliError,
+    ConflictState, DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional,
+    option_value, timestamp, validate_private_working_tree,
+    validate_working_tree_managed_structure, write_json_file,
+    write_private_file_atomic_for_migration,
 };
 
 pub(crate) fn write_working_tree_state(
@@ -113,7 +114,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         daemon: daemon_status_from_state(&state, live_supervisor_state(env)),
         sync: SyncStatus {
             mode: state.sync.mode,
-            status: state.sync.status,
+            status: state.sync.status.to_string(),
             latest_sequence: tree_state.sync.latest_sequence,
         },
         conflicts: open_conflicts,
@@ -126,21 +127,18 @@ fn live_supervisor_state(env: &CliEnvironment) -> bool {
     crate::supervisor_is_running(env)
 }
 
-fn daemon_status_from_state(state: &AgentState, running: bool) -> DaemonStatus {
-    let live_state = if state.sync.status == "paused-access-revoked" {
-        "paused"
-    } else if state.daemon.notification_status.as_deref() == Some("reconnecting")
-        || state.sync.status == "reconnecting"
-    {
-        "reconnecting"
-    } else if state.daemon.notification_status.as_deref() == Some("unsupported") {
-        "degraded"
-    } else if state.sync.status.starts_with("blocked") {
-        "blocked"
-    } else if running {
-        "running"
-    } else {
-        "stopped"
+pub(crate) fn daemon_status_from_state(state: &AgentState, running: bool) -> DaemonStatus {
+    let live_state = match &state.sync.status {
+        AgentSyncStatus::PausedAccessRevoked => "paused",
+        AgentSyncStatus::Reconnecting => "reconnecting",
+        _ if state.daemon.notification_status.as_deref() == Some("reconnecting") => "reconnecting",
+        _ if state.daemon.notification_status.as_deref() == Some("unsupported") => "degraded",
+        AgentSyncStatus::Blocked { .. } => "blocked",
+        // `BlockedLocalConflicts` is a completed sync with recorded conflicts,
+        // not a blockage: like every other success-class status it falls
+        // through to running/stopped and never reports "blocked".
+        _ if running => "running",
+        _ => "stopped",
     };
     DaemonStatus {
         state: live_state.to_owned(),
@@ -299,7 +297,7 @@ pub(crate) fn read_agent_state(root: &Path) -> Result<AgentState, CliError> {
         .map(str::to_owned);
     let contains_legacy_state =
         object.contains_key("localFolderKeys") || object.contains_key("unlockedFolders");
-    let needs_hard_migration = match version.as_deref() {
+    let mut needs_hard_migration = match version.as_deref() {
         Some("finitebrain-agent-state-v1") => true,
         Some(crate::AGENT_STATE_VERSION) => contains_legacy_state,
         Some(other) => {
@@ -315,6 +313,28 @@ pub(crate) fn read_agent_state(root: &Path) -> Result<AgentState, CliError> {
             });
         }
     };
+    // Pre-typed state files recorded blocked outcomes as free-form
+    // `blocked: <error>` strings; rewrite them into the tagged
+    // `AgentSyncStatus` form. Unit-variant status strings already load as-is.
+    let legacy_blocked = object
+        .get("sync")
+        .and_then(|sync| sync.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(AgentSyncStatus::from_legacy_blocked_str);
+    if let Some(status) = legacy_blocked {
+        if let Some(sync) = object
+            .get_mut("sync")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let tagged =
+                serde_json::to_value(&status).map_err(|_| CliError::AgentStateMigration {
+                    path: path.clone(),
+                    reason: "active state could not be serialized safely".to_owned(),
+                })?;
+            sync.insert("status".to_owned(), tagged);
+        }
+        needs_hard_migration = true;
+    }
     if needs_hard_migration {
         object.remove("localFolderKeys");
         object.remove("unlockedFolders");
