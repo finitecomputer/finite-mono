@@ -11067,11 +11067,20 @@ impl ChatProjectionState {
     }
 
     fn trim_to_limit(&mut self) {
+        // The derived-index cleanup below rebuilds key sets over every stored
+        // message, so it must only run when an eviction actually happened.
+        // `apply_event` calls this after each replayed event; doing the
+        // rebuild unconditionally made boot replay O(messages²) (#596).
+        let mut evicted = false;
         while self.messages.len() > MAX_APP_MESSAGES {
             let Some(key) = self.message_arrival_order.pop_front() else {
                 break;
             };
             self.messages.remove(&key);
+            evicted = true;
+        }
+        if !evicted {
+            return;
         }
         let message_keys = self.messages.keys().cloned().collect::<BTreeSet<_>>();
         self.reaction_senders.retain(|(room_id, message_id, _, _)| {
