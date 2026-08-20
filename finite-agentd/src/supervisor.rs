@@ -324,4 +324,97 @@ mod tests {
         .await
         .unwrap()
     }
+
+    // The serialized ProcessStatus shape is a cross-process contract: it ships
+    // in the published `finite.agent.status.v1` snapshot and in status.json,
+    // which `finite-agentd status --json` prints for external consumers. These
+    // tests pin the exact bytes per state.
+    fn assert_wire_shape(status: ProcessStatus, json: &str) {
+        assert_eq!(serde_json::to_string(&status).unwrap(), json);
+        assert_eq!(serde_json::from_str::<ProcessStatus>(json).unwrap(), status);
+    }
+
+    #[test]
+    fn starting_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "starting".to_owned(),
+                pid: None,
+                restart_count: 0,
+                last_exit: None,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn restarting_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "restarting".to_owned(),
+                pid: None,
+                restart_count: 1,
+                last_exit: None,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn running_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "running".to_owned(),
+                pid: Some(4242),
+                restart_count: 1,
+                last_exit: None,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn unavailable_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "unavailable".to_owned(),
+                pid: None,
+                restart_count: 2,
+                last_exit: Some("program not found".to_owned()),
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn exited_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "exited".to_owned(),
+                pid: None,
+                restart_count: 3,
+                last_exit: Some("exit status: 1".to_owned()),
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn stopped_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: "stopped".to_owned(),
+                pid: None,
+                restart_count: 4,
+                last_exit: None,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
 }
