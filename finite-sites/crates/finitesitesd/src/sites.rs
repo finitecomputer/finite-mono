@@ -321,7 +321,7 @@ async fn serve_path(
                         &project.slug,
                         &git_remote_url,
                         &output.output_id,
-                        &output.kind,
+                        output.kind.as_str(),
                         &output.branch,
                         &output.path,
                         output.start_command.as_deref(),

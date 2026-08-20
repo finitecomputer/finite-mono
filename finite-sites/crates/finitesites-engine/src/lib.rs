@@ -106,10 +106,10 @@ impl EngineConfig {
         self.url_for_domain(name, &self.document_base_domain)
     }
 
-    pub fn output_url(&self, kind: &str, name: &str) -> String {
+    pub fn output_url(&self, kind: ProjectOutputKind, name: &str) -> String {
         match kind {
-            "document" => self.document_url(name),
-            _ => self.site_url(name),
+            ProjectOutputKind::Document => self.document_url(name),
+            ProjectOutputKind::Site | ProjectOutputKind::App => self.site_url(name),
         }
     }
 
@@ -398,19 +398,19 @@ impl Engine {
             }
             if self
                 .store
-                .site_by_output_name(output_claim_kind(&output.kind), &output.site_name)?
+                .site_by_output_name(output_claim_kind(output.kind), &output.site_name)?
                 .is_some()
             {
                 return Err(EngineError::NameTaken);
             }
-            let output_url = self.config.output_url(&output.kind, &output.site_name);
+            let output_url = self.config.output_url(output.kind, &output.site_name);
             output_summaries.push(ProjectOutputSummary {
                 output_id: output.output_id.clone(),
-                kind: output.kind.clone(),
+                kind: output.kind.as_str().to_string(),
                 output_name: output.site_name.clone(),
                 output_url: output_url.clone(),
                 site_name: output.site_name.clone(),
-                document_name: document_name_for_output(&output.kind, &output.site_name),
+                document_name: document_name_for_output(output.kind, &output.site_name),
                 site_id: None,
                 site_url: output_url,
                 status: "planned".to_string(),
@@ -653,13 +653,13 @@ impl Engine {
             ))?;
         Ok(ProjectOutputSummary {
             output_id: record.output_id.clone(),
-            kind: record.kind.clone(),
+            kind: record.kind.as_str().to_string(),
             output_name: record.site_name.clone(),
-            output_url: self.config.output_url(&record.kind, &record.site_name),
+            output_url: self.config.output_url(record.kind, &record.site_name),
             site_name: record.site_name.clone(),
-            document_name: document_name_for_output(&record.kind, &record.site_name),
+            document_name: document_name_for_output(record.kind, &record.site_name),
             site_id: Some(record.site_id.clone()),
-            site_url: self.config.output_url(&record.kind, &record.site_name),
+            site_url: self.config.output_url(record.kind, &record.site_name),
             status: site.status.as_str().to_string(),
             visibility: site.visibility.as_str().to_string(),
             active_version: site.active_version_number,
@@ -2153,7 +2153,7 @@ fn output_apply_inputs(request: &ProjectInitRequest) -> Vec<ProjectOutputApply> 
             .expect("project config validated before output apply");
         outputs.push(ProjectOutputApply {
             output_id: output_id.clone(),
-            kind: output.kind.as_str().to_string(),
+            kind: output.kind,
             site_name: routing_name.to_string(),
             branch: output.branch.clone(),
             path: output.path.clone(),
@@ -2172,15 +2172,15 @@ fn native_npubs(pubkeys: &[String]) -> Result<Vec<String>, EngineError> {
         .collect()
 }
 
-fn output_claim_kind(output_kind: &str) -> &str {
+fn output_claim_kind(output_kind: ProjectOutputKind) -> &'static str {
     match output_kind {
-        "app" => ProjectOutputKind::Site.as_str(),
-        other => other,
+        ProjectOutputKind::App => ProjectOutputKind::Site.as_str(),
+        other => other.as_str(),
     }
 }
 
-fn document_name_for_output(kind: &str, name: &str) -> Option<String> {
-    if kind == ProjectOutputKind::Document.as_str() {
+fn document_name_for_output(kind: ProjectOutputKind, name: &str) -> Option<String> {
+    if kind == ProjectOutputKind::Document {
         Some(name.to_string())
     } else {
         None
