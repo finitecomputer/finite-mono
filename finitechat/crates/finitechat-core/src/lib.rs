@@ -5045,7 +5045,9 @@ impl AppRuntimeState {
         }
         let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
         let chat_payload = encode_poll_message_payload(&question, options)?;
-        let preview = chat_projection_payload(&chat_payload).text;
+        // The poll payload was just encoded from `question`; projecting it
+        // again would only round-trip that value through a JSON parse.
+        let preview = question.clone();
         let app_event_plaintext = encode_application_event_with_segment(
             DurableAppEventKind::ChatMessage,
             Some(topic_id.clone()),
@@ -5074,7 +5076,9 @@ impl AppRuntimeState {
             });
         }
         let chat_payload = encode_poll_message_payload(&question, options)?;
-        let preview = chat_projection_payload(&chat_payload).text;
+        // The poll payload was just encoded from `question`; projecting it
+        // again would only round-trip that value through a JSON parse.
+        let preview = question.clone();
         let app_event_plaintext = encode_application_event_with_segment(
             DurableAppEventKind::ChatMessage,
             Some(topic_id.clone()),
@@ -6455,18 +6459,17 @@ impl AppRuntimeState {
         }));
         let mut archive_state_changed = false;
         for event in projection_events {
-            if let Ok(app_event) =
-                serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
-            {
+            let parsed = ParsedAppEvent::decode(event);
+            if let Some(app_event) = &parsed.envelope {
                 let _ = self
                     .activity_projection
                     .clear_from_durable_application_event(
-                        &event.room_id,
-                        &event.sender,
-                        &app_event,
+                        &parsed.event.room_id,
+                        &parsed.event.sender,
+                        app_event,
                     );
             }
-            archive_state_changed |= self.chat_projection.apply_event(event, &owner);
+            archive_state_changed |= self.chat_projection.apply_parsed_event(parsed, &owner);
         }
         self.sync_chat_projection();
         if archive_state_changed {
@@ -6675,7 +6678,9 @@ impl AppRuntimeState {
                 after_seq = event.seq;
                 after_message_id.clone_from(&event.message_id);
                 if !is_device_link_control_event(&event.plaintext) {
-                    archive_state_changed |= self.chat_projection.apply_event(event, &owner);
+                    archive_state_changed |= self
+                        .chat_projection
+                        .apply_parsed_event(ParsedAppEvent::decode(event), &owner);
                 }
             }
             if page_len < DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE as usize {
@@ -7350,21 +7355,19 @@ impl AppRuntimeState {
         room_id: &str,
         app_event_plaintext: Vec<u8>,
     ) -> Result<(Vec<u8>, Option<String>, Option<String>), FiniteChatCoreError> {
-        let DecodedAppEvent::ChatMessage {
-            conversation_id,
-            segment_id,
-            payload,
-        } = decode_application_event(&app_event_plaintext)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&app_event_plaintext)
         else {
             return Ok((app_event_plaintext, None, None));
         };
-        let projection = chat_projection_payload(&payload);
-        let has_topic = conversation_id
+        let projection = chat_projection_payload(&decoded.payload);
+        let has_topic = decoded
+            .conversation_id
             .as_deref()
             .or(projection.conversation_id.as_deref())
             .map(str::trim)
             .is_some_and(|value| !value.is_empty());
-        let has_chat = segment_id
+        let has_chat = decoded
+            .segment_id
             .as_deref()
             .or(projection.chat_id.as_deref())
             .map(str::trim)
@@ -7377,7 +7380,7 @@ impl AppRuntimeState {
             DurableAppEventKind::ChatMessage,
             Some(topic_id.clone()),
             Some(chat_id.clone()),
-            &payload,
+            &decoded.raw_payload,
         )?;
         Ok((scoped, Some(topic_id), Some(chat_id)))
     }
@@ -9293,19 +9296,88 @@ fn chat_display_text(plaintext: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+// One decoded event is held at a time and moved, not stored in bulk, so
+// the chat-message variant's size is not worth boxing every match over.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DecodedAppEvent {
-    ChatMessage {
-        conversation_id: Option<String>,
-        segment_id: Option<String>,
-        payload: Vec<u8>,
-    },
+    ChatMessage(DecodedChatMessage),
     ChatReaction(ChatReactionV1),
     ChatReceipt(ChatReceiptV1),
     PollVote(ChatPollVoteV1),
     ChatArchive(ChatArchiveV1),
     ChatRename(ChatRenameV1),
     Ignored,
+}
+
+/// A decoded `finitechat` chat-message application event. This is the single
+/// interpreted form of an application plaintext: `decode_application_event`
+/// resolves the payload once, and every projection consumes these fields
+/// instead of re-parsing the raw bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DecodedChatMessage {
+    /// Conversation scoping from the application-event envelope.
+    conversation_id: Option<String>,
+    /// Segment scoping from the application-event envelope.
+    segment_id: Option<String>,
+    /// The envelope's payload bytes, retained for wire-faithful re-use
+    /// (e.g. re-scoping an unscoped outbound event).
+    raw_payload: Vec<u8>,
+    /// The payload resolved to its typed form exactly once at decode time.
+    payload: ChatMessagePayload,
+}
+
+/// Envelope scoping for one decoded chat-message event. Conversation
+/// projection contexts are envelope-first while projected messages are
+/// payload-first; carrying both values separately preserves that.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ChatEventScope {
+    conversation_id: Option<String>,
+    segment_id: Option<String>,
+}
+
+impl ChatEventScope {
+    fn from_decoded(decoded: &DecodedAppEvent) -> Self {
+        match decoded {
+            DecodedAppEvent::ChatMessage(decoded) => Self {
+                conversation_id: decoded.conversation_id.clone(),
+                segment_id: decoded.segment_id.clone(),
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChatMessagePayload {
+    Poll(ChatPollPayloadV1),
+    Hermes(HermesMessagePayloadV1),
+    /// Anything else (non-JSON traffic, unknown payload types, payloads that
+    /// fail validation): projected as plain lossy text.
+    Raw(Vec<u8>),
+}
+
+/// Resolve a chat-message payload with a single JSON pass: parse the bytes
+/// into one `Value`, dispatch on its `"type"` tag, and convert only the
+/// matching typed form. Callers previously did this twice — the poll probe
+/// and the hermes probe each fully parsed the payload just to read the tag.
+fn resolve_chat_message_payload(payload_bytes: &[u8]) -> ChatMessagePayload {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload_bytes) else {
+        return ChatMessagePayload::Raw(payload_bytes.to_vec());
+    };
+    if value.get("type").and_then(serde_json::Value::as_str)
+        == Some(FINITECHAT_POLL_PAYLOAD_TYPE_V1)
+    {
+        return serde_json::from_value::<ChatPollPayloadV1>(value)
+            .ok()
+            .filter(|poll| validate_poll_payload(poll).is_ok())
+            .map(ChatMessagePayload::Poll)
+            .unwrap_or_else(|| ChatMessagePayload::Raw(payload_bytes.to_vec()));
+    }
+    match HermesMessagePayloadV1::decode_value(value) {
+        Ok(Some(hermes)) => ChatMessagePayload::Hermes(hermes),
+        Ok(None) | Err(_) => ChatMessagePayload::Raw(payload_bytes.to_vec()),
+    }
 }
 
 struct ChatProjectionPayload {
@@ -9353,7 +9425,38 @@ fn project_chat_message(
     timestamp_unix_seconds: u64,
     owner: &DeviceRef,
 ) -> Option<ChatMessage> {
-    let projection = chat_projection_payload_from_application_plaintext(&plaintext)?;
+    let event = StoredAppEvent {
+        room_id,
+        seq,
+        message_id,
+        sender,
+        plaintext,
+        timestamp_unix_seconds,
+    };
+    let decoded = decode_application_event(&event.plaintext);
+    project_decoded_chat_message(event, decoded, owner)
+}
+
+/// Project a chat message from an already-decoded application event, so
+/// callers on the replay path decode once instead of re-parsing the
+/// envelope and payload per projection.
+fn project_decoded_chat_message(
+    event: StoredAppEvent,
+    decoded: DecodedAppEvent,
+    owner: &DeviceRef,
+) -> Option<ChatMessage> {
+    let DecodedAppEvent::ChatMessage(decoded_message) = decoded else {
+        return None;
+    };
+    let StoredAppEvent {
+        room_id,
+        seq,
+        message_id,
+        sender,
+        plaintext,
+        timestamp_unix_seconds,
+    } = event;
+    let projection = chat_projection_for_decoded(decoded_message);
     // Product authorship is account-scoped: another Device enrolled under the
     // same Principal is still "you". Delivery state, however, belongs only to
     // the Device that actually authored this local outbound message.
@@ -9450,25 +9553,12 @@ fn chat_rich_text_json(body_text: &str) -> String {
     hypernote_mdx::serialize_tree(&hypernote_mdx::parse(body_text))
 }
 
+#[cfg(test)]
 fn chat_projection_payload_from_application_plaintext(
     plaintext: &[u8],
 ) -> Option<ChatProjectionPayload> {
     match decode_application_event(plaintext) {
-        DecodedAppEvent::ChatMessage {
-            conversation_id,
-            segment_id,
-            payload,
-        } => {
-            let mut projection = chat_projection_payload(&payload);
-            if projection.conversation_id.is_none() {
-                projection.conversation_id = conversation_id;
-            }
-            if projection.chat_id.is_none() {
-                projection.chat_id = segment_id;
-            }
-            apply_default_chat_projection_scope(&mut projection);
-            Some(projection)
-        }
+        DecodedAppEvent::ChatMessage(decoded) => Some(chat_projection_for_decoded(decoded)),
         DecodedAppEvent::ChatReaction(_)
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
@@ -9476,6 +9566,23 @@ fn chat_projection_payload_from_application_plaintext(
         | DecodedAppEvent::ChatRename(_)
         | DecodedAppEvent::Ignored => None,
     }
+}
+
+/// Merge a decoded chat message into its projection fields: the payload's
+/// own scoping wins, with the envelope's scoping as fallback, then default
+/// scoping applies. This precedence is product behavior — the message's
+/// conversation is payload-first while conversation projection contexts are
+/// envelope-first — and must not be silently unified.
+fn chat_projection_for_decoded(decoded: DecodedChatMessage) -> ChatProjectionPayload {
+    let mut projection = chat_projection_payload(&decoded.payload);
+    if projection.conversation_id.is_none() {
+        projection.conversation_id = decoded.conversation_id;
+    }
+    if projection.chat_id.is_none() {
+        projection.chat_id = decoded.segment_id;
+    }
+    apply_default_chat_projection_scope(&mut projection);
+    projection
 }
 
 fn apply_default_chat_projection_scope(projection: &mut ChatProjectionPayload) {
@@ -9500,67 +9607,72 @@ fn apply_default_chat_projection_scope(projection: &mut ChatProjectionPayload) {
     }
 }
 
-fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
-    if let Some(payload) = poll_message_payload(payload_bytes) {
-        let question = payload.question.clone();
-        return ChatProjectionPayload {
-            display_content: question.clone(),
-            text: question,
-            metadata: BTreeMap::new(),
-            kind: ChatMessageKind::Message,
-            status: ChatMessageStatus::Complete,
-            final_delivery: false,
-            edit_of_message_id: None,
-            conversation_id: None,
-            chat_id: None,
-            reply_to_message_id: None,
-            sender_name: None,
-            media: Vec::new(),
-            poll: Some(chat_poll_from_payload(payload)),
-        };
-    }
-    if let Ok(Some(payload)) = HermesMessagePayloadV1::decode(payload_bytes) {
-        let final_delivery = payload
-            .metadata
-            .get("notify")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
-        return ChatProjectionPayload {
-            display_content: payload.text.clone(),
-            text: payload.text,
-            metadata: surfaced_message_metadata(payload.metadata),
-            kind: chat_message_kind(payload.kind),
-            status: chat_message_status(payload.status),
-            final_delivery,
-            edit_of_message_id: payload.edit_of,
-            conversation_id: payload.conversation_id,
-            chat_id: payload.segment_id,
-            reply_to_message_id: payload.reply_to_message_id,
-            sender_name: payload.sender_name,
-            media: payload
-                .attachments
-                .into_iter()
-                .enumerate()
-                .map(|(index, attachment)| chat_media_attachment(index, attachment))
-                .collect(),
-            poll: None,
-        };
-    }
-    let text = String::from_utf8_lossy(payload_bytes).into_owned();
-    ChatProjectionPayload {
-        display_content: text.clone(),
-        text,
-        metadata: BTreeMap::new(),
-        kind: ChatMessageKind::Message,
-        status: ChatMessageStatus::Complete,
-        final_delivery: false,
-        edit_of_message_id: None,
-        conversation_id: None,
-        chat_id: None,
-        reply_to_message_id: None,
-        sender_name: None,
-        media: Vec::new(),
-        poll: None,
+fn chat_projection_payload(payload: &ChatMessagePayload) -> ChatProjectionPayload {
+    match payload {
+        ChatMessagePayload::Poll(payload) => {
+            let question = payload.question.clone();
+            ChatProjectionPayload {
+                display_content: question.clone(),
+                text: question,
+                metadata: BTreeMap::new(),
+                kind: ChatMessageKind::Message,
+                status: ChatMessageStatus::Complete,
+                final_delivery: false,
+                edit_of_message_id: None,
+                conversation_id: None,
+                chat_id: None,
+                reply_to_message_id: None,
+                sender_name: None,
+                media: Vec::new(),
+                poll: Some(chat_poll_from_payload(payload.clone())),
+            }
+        }
+        ChatMessagePayload::Hermes(payload) => {
+            let final_delivery = payload
+                .metadata
+                .get("notify")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            ChatProjectionPayload {
+                display_content: payload.text.clone(),
+                text: payload.text.clone(),
+                metadata: surfaced_message_metadata(payload.metadata.clone()),
+                kind: chat_message_kind(payload.kind),
+                status: chat_message_status(payload.status),
+                final_delivery,
+                edit_of_message_id: payload.edit_of.clone(),
+                conversation_id: payload.conversation_id.clone(),
+                chat_id: payload.segment_id.clone(),
+                reply_to_message_id: payload.reply_to_message_id.clone(),
+                sender_name: payload.sender_name.clone(),
+                media: payload
+                    .attachments
+                    .clone()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, attachment)| chat_media_attachment(index, attachment))
+                    .collect(),
+                poll: None,
+            }
+        }
+        ChatMessagePayload::Raw(payload_bytes) => {
+            let text = String::from_utf8_lossy(payload_bytes).into_owned();
+            ChatProjectionPayload {
+                display_content: text.clone(),
+                text,
+                metadata: BTreeMap::new(),
+                kind: ChatMessageKind::Message,
+                status: ChatMessageStatus::Complete,
+                final_delivery: false,
+                edit_of_message_id: None,
+                conversation_id: None,
+                chat_id: None,
+                reply_to_message_id: None,
+                sender_name: None,
+                media: Vec::new(),
+                poll: None,
+            }
+        }
     }
 }
 
@@ -9599,27 +9711,74 @@ fn chat_message_status(status: HermesMessageStatusV1) -> ChatMessageStatus {
     }
 }
 
-fn decode_application_event(plaintext: &[u8]) -> DecodedAppEvent {
-    match serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext) {
-        Ok(event) => decoded_typed_application_event(event),
-        Err(_) => DecodedAppEvent::ChatMessage {
-            conversation_id: None,
-            segment_id: None,
-            payload: plaintext.to_vec(),
-        },
+/// A stored application event paired with its single-decode interpretation.
+/// `ChatProjectionState` consumes only this form, so application plaintext
+/// is parsed exactly once per event, at the door — future callers cannot
+/// hand the projection raw bytes to re-interpret.
+struct ParsedAppEvent {
+    event: StoredAppEvent,
+    decoded: DecodedAppEvent,
+    /// The envelope when the plaintext parses as an application event,
+    /// regardless of limits validity, for consumers that need envelope
+    /// fields the decoded form does not carry (conversation lifecycle
+    /// payloads, durable-terminal activity clears).
+    envelope: Option<DecryptedApplicationEventV1>,
+}
+
+impl ParsedAppEvent {
+    fn decode(event: StoredAppEvent) -> Self {
+        let (decoded, envelope) = decode_application_plaintext(&event.plaintext);
+        Self {
+            event,
+            decoded,
+            envelope,
+        }
     }
 }
 
-fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> DecodedAppEvent {
+fn decode_application_event(plaintext: &[u8]) -> DecodedAppEvent {
+    decode_application_plaintext(plaintext).0
+}
+
+/// The single interpreter of application plaintext: parse the envelope at
+/// most once and resolve the decoded form from it.
+fn decode_application_plaintext(
+    plaintext: &[u8],
+) -> (DecodedAppEvent, Option<DecryptedApplicationEventV1>) {
+    match serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext) {
+        Ok(envelope) => {
+            let decoded = decoded_typed_application_event(&envelope);
+            (decoded, Some(envelope))
+        }
+        Err(_) => (
+            DecodedAppEvent::ChatMessage(DecodedChatMessage {
+                conversation_id: None,
+                segment_id: None,
+                raw_payload: plaintext.to_vec(),
+                // An envelope-less payload can still be a typed chat payload
+                // (e.g. a bare hermes message); resolve it the same way.
+                payload: resolve_chat_message_payload(plaintext),
+            }),
+            None,
+        ),
+    }
+}
+
+fn decoded_typed_application_event(event: &DecryptedApplicationEventV1) -> DecodedAppEvent {
     if event.validate_limits().is_err() {
         return DecodedAppEvent::Ignored;
     }
-    match event.kind {
-        DurableAppEventKind::ChatMessage => DecodedAppEvent::ChatMessage {
-            conversation_id: event.conversation_id,
-            segment_id: event.segment_id,
-            payload: event.payload,
-        },
+    match &event.kind {
+        DurableAppEventKind::ChatMessage => {
+            let raw_payload = event.payload.clone();
+            let payload = resolve_chat_message_payload(&raw_payload);
+            DecodedAppEvent::ChatMessage(DecodedChatMessage {
+                conversation_id: event.conversation_id.clone(),
+                segment_id: event.segment_id.clone(),
+                raw_payload,
+                payload,
+            })
+        }
         DurableAppEventKind::ChatReaction => {
             serde_json::from_slice::<ChatReactionV1>(&event.payload)
                 .ok()
@@ -9634,7 +9793,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
             .unwrap_or(DecodedAppEvent::Ignored),
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_POLL_VOTE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatPollVoteV1>(&event.payload)
                 .ok()
@@ -9644,7 +9803,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_ARCHIVE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatArchiveV1>(&event.payload)
                 .ok()
@@ -9658,7 +9817,7 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_RENAME_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
             serde_json::from_slice::<ChatRenameV1>(&event.payload)
                 .ok()
@@ -9864,13 +10023,13 @@ fn app_device_link_bootstrap_receipt(
 
 fn conversation_id_from_decoded_event(event: &DecodedAppEvent) -> Option<String> {
     match event {
-        DecodedAppEvent::ChatMessage {
-            conversation_id,
-            payload,
-            ..
-        } => conversation_id
-            .clone()
-            .or_else(|| chat_projection_payload(payload).conversation_id),
+        DecodedAppEvent::ChatMessage(decoded) => {
+            let payload_conversation_id = match &decoded.payload {
+                ChatMessagePayload::Hermes(payload) => payload.conversation_id.clone(),
+                ChatMessagePayload::Poll(_) | ChatMessagePayload::Raw(_) => None,
+            };
+            decoded.conversation_id.clone().or(payload_conversation_id)
+        }
         DecodedAppEvent::ChatReaction(_)
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
@@ -9977,20 +10136,6 @@ fn encode_poll_message_payload(
     };
     validate_poll_payload(&payload)?;
     serde_json::to_vec(&payload).map_err(client_error)
-}
-
-fn poll_message_payload(payload_bytes: &[u8]) -> Option<ChatPollPayloadV1> {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload_bytes) else {
-        return None;
-    };
-    if value.get("type").and_then(serde_json::Value::as_str)
-        != Some(FINITECHAT_POLL_PAYLOAD_TYPE_V1)
-    {
-        return None;
-    }
-    let payload = serde_json::from_value::<ChatPollPayloadV1>(value).ok()?;
-    validate_poll_payload(&payload).ok()?;
-    Some(payload)
 }
 
 fn normalized_poll_options(
@@ -10208,11 +10353,10 @@ fn attachment_download_key(
 fn attachment_references_by_id(
     message: &ChatMessage,
 ) -> BTreeMap<String, AttachmentBlobReferenceV1> {
-    let DecodedAppEvent::ChatMessage { payload, .. } = decode_application_event(&message.payload)
-    else {
+    let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&message.payload) else {
         return BTreeMap::new();
     };
-    let Ok(Some(payload)) = HermesMessagePayloadV1::decode(&payload) else {
+    let ChatMessagePayload::Hermes(payload) = decoded.payload else {
         return BTreeMap::new();
     };
 
@@ -10319,16 +10463,20 @@ fn live_indicator_activity_priority(activity_kind: &str) -> u8 {
     }
 }
 
-fn chat_message_from_stored(message: StoredAppMessage, owner: &DeviceRef) -> Option<ChatMessage> {
-    project_chat_message(
-        message.room_id,
-        message.seq,
-        message.message_id,
-        message.sender,
-        message.plaintext,
-        message.timestamp_unix_seconds,
-        owner,
-    )
+fn chat_message_from_stored_decoded(
+    message: StoredAppMessage,
+    decoded: DecodedAppEvent,
+    owner: &DeviceRef,
+) -> Option<ChatMessage> {
+    let event = StoredAppEvent {
+        room_id: message.room_id,
+        seq: message.seq,
+        message_id: message.message_id,
+        sender: message.sender,
+        plaintext: message.plaintext,
+        timestamp_unix_seconds: message.timestamp_unix_seconds,
+    };
+    project_decoded_chat_message(event, decoded, owner)
 }
 
 fn chat_message_from_outbox(
@@ -10432,12 +10580,16 @@ impl ChatProjectionState {
     ) -> Self {
         let mut projection = Self::default();
         for message in stored_messages {
-            if let Some(projected) = chat_message_from_stored(message, owner) {
-                projection.insert_message(projected, owner);
+            // One decode per stored message drives the message projection
+            // and the conversation projection; neither re-parses plaintext.
+            let decoded = decode_application_event(&message.plaintext);
+            let scope = ChatEventScope::from_decoded(&decoded);
+            if let Some(projected) = chat_message_from_stored_decoded(message, decoded, owner) {
+                projection.insert_message_scoped(projected, Some(scope), owner);
             }
         }
         for event in stored_events {
-            let _ = projection.apply_event(event, owner);
+            let _ = projection.apply_parsed_event(ParsedAppEvent::decode(event), owner);
         }
         projection.trim_to_limit();
         projection
@@ -10450,40 +10602,36 @@ impl ChatProjectionState {
         self.trim_to_limit();
     }
 
-    fn apply_event(&mut self, event: StoredAppEvent, owner: &DeviceRef) -> bool {
-        let decoded = decode_application_event(&event.plaintext);
+    /// Apply one application event to the projection. This is the only
+    /// entry point for events, and it takes the pre-decoded
+    /// [`ParsedAppEvent`] — nothing below this boundary parses plaintext.
+    fn apply_parsed_event(&mut self, parsed: ParsedAppEvent, owner: &DeviceRef) -> bool {
+        let ParsedAppEvent {
+            event,
+            decoded,
+            envelope,
+        } = parsed;
         let decoded_conversation_id = conversation_id_from_decoded_event(&decoded);
-        let duplicate_projected_message = matches!(decoded, DecodedAppEvent::ChatMessage { .. })
+        let duplicate_projected_message = matches!(decoded, DecodedAppEvent::ChatMessage(_))
             && self
                 .messages
                 .get(&(event.room_id.clone(), event.message_id.clone()))
                 .is_some_and(|message| message.seq == event.seq);
-        if !duplicate_projected_message
-            && let Ok(app_event) =
-                serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
-        {
-            let conversation_id = app_event
-                .conversation_id
-                .as_deref()
-                .or(decoded_conversation_id.as_deref());
-            let context = ConversationProjectionEventContext {
-                room_id: &event.room_id,
-                accepted_seq: event.seq,
-                conversation_id,
-            };
-            let _ = self.conversations.apply_event(context, &app_event);
+        if !duplicate_projected_message {
+            self.apply_conversation_projection_from_decoded(
+                &decoded,
+                &event,
+                envelope.as_ref(),
+                decoded_conversation_id.as_deref(),
+            );
         }
         let archive_changed = match decoded {
-            DecodedAppEvent::ChatMessage { .. } => {
-                if let Some(message) = project_chat_message(
-                    event.room_id,
-                    event.seq,
-                    event.message_id,
-                    event.sender,
-                    event.plaintext,
-                    event.timestamp_unix_seconds,
-                    owner,
-                ) {
+            // A duplicate (same room, message id, and seq) was already
+            // projected from its stored message row with identical inputs;
+            // re-running the projection would only repeat its parse work.
+            DecodedAppEvent::ChatMessage(_) if duplicate_projected_message => false,
+            DecodedAppEvent::ChatMessage(_) => {
+                if let Some(message) = project_decoded_chat_message(event, decoded, owner) {
                     self.insert_message_record(message, owner);
                 }
                 false
@@ -10514,6 +10662,62 @@ impl ChatProjectionState {
         };
         self.trim_to_limit();
         archive_changed
+    }
+
+    /// Drive the conversation projection from the single decode pass. A
+    /// chat message needs only its decoded kind and scoping (the
+    /// conversation projection's ChatMessage arm reads no payload).
+    /// Conversation lifecycle kinds use the envelope carried by
+    /// [`ParsedAppEvent`]; kinds the conversation projection ignores are
+    /// skipped outright.
+    fn apply_conversation_projection_from_decoded(
+        &mut self,
+        decoded: &DecodedAppEvent,
+        event: &StoredAppEvent,
+        envelope: Option<&DecryptedApplicationEventV1>,
+        decoded_conversation_id: Option<&str>,
+    ) {
+        let (app_event, conversation_id) = match decoded {
+            DecodedAppEvent::ChatMessage(decoded_message) => {
+                let conversation_id = decoded_message
+                    .conversation_id
+                    .as_deref()
+                    .or(decoded_conversation_id)
+                    .map(str::to_owned);
+                let app_event = DecryptedApplicationEventV1 {
+                    kind: DurableAppEventKind::ChatMessage,
+                    conversation_id: decoded_message.conversation_id.clone(),
+                    segment_id: decoded_message.segment_id.clone(),
+                    payload: Vec::new(),
+                };
+                (app_event, conversation_id)
+            }
+            DecodedAppEvent::ChatReaction(_)
+            | DecodedAppEvent::ChatReceipt(_)
+            | DecodedAppEvent::PollVote(_)
+            | DecodedAppEvent::ChatArchive(_)
+            | DecodedAppEvent::ChatRename(_) => return,
+            DecodedAppEvent::Ignored => {
+                let Some(app_event) = envelope else {
+                    return;
+                };
+                let conversation_id = app_event
+                    .conversation_id
+                    .as_deref()
+                    .or(decoded_conversation_id)
+                    .map(str::to_owned);
+                (app_event.clone(), conversation_id)
+            }
+        };
+        let Some(conversation_id) = conversation_id else {
+            return;
+        };
+        let context = ConversationProjectionEventContext {
+            room_id: &event.room_id,
+            accepted_seq: event.seq,
+            conversation_id: Some(conversation_id.as_str()),
+        };
+        let _ = self.conversations.apply_event(context, &app_event);
     }
 
     fn restore_chat_archives(&mut self, archives: &[StoredChatArchiveState]) {
@@ -10771,6 +10975,19 @@ impl ChatProjectionState {
     }
 
     fn insert_message(&mut self, message: ChatMessage, owner: &DeviceRef) {
+        self.insert_message_scoped(message, None, owner);
+    }
+
+    /// Insert a chat message whose application event was already decoded.
+    /// `scope` carries the envelope scoping so the conversation projection
+    /// does not have to re-parse the plaintext; without it (live appends of
+    /// already-projected messages) the envelope is parsed as before.
+    fn insert_message_scoped(
+        &mut self,
+        message: ChatMessage,
+        scope: Option<ChatEventScope>,
+        owner: &DeviceRef,
+    ) {
         let key = message_key(&message);
         let should_apply_conversation = message.seq != u64::MAX
             && self
@@ -10778,7 +10995,7 @@ impl ChatProjectionState {
                 .get(&key)
                 .is_none_or(|existing| existing.seq != message.seq);
         if should_apply_conversation {
-            self.apply_conversation_projection_from_message(&message);
+            self.apply_conversation_projection_from_message(&message, scope.as_ref());
         }
         self.insert_message_record(message, owner);
     }
@@ -10835,13 +11052,33 @@ impl ChatProjectionState {
         self.messages.insert(key, message);
     }
 
-    fn apply_conversation_projection_from_message(&mut self, message: &ChatMessage) {
+    fn apply_conversation_projection_from_message(
+        &mut self,
+        message: &ChatMessage,
+        scope: Option<&ChatEventScope>,
+    ) {
         let Some(conversation_id) = message.conversation_id.as_deref() else {
             return;
         };
-        let Ok(app_event) = serde_json::from_slice::<DecryptedApplicationEventV1>(&message.payload)
-        else {
-            return;
+        let app_event = match scope {
+            // The conversation projection reads only the kind and scoping of
+            // a chat-message envelope, both already decoded here; the empty
+            // payload is never read for this kind. Rebuilding the envelope
+            // avoids re-parsing the full plaintext per stored message.
+            Some(scope) => DecryptedApplicationEventV1 {
+                kind: DurableAppEventKind::ChatMessage,
+                conversation_id: scope.conversation_id.clone(),
+                segment_id: scope.segment_id.clone(),
+                payload: Vec::new(),
+            },
+            None => {
+                let Ok(app_event) =
+                    serde_json::from_slice::<DecryptedApplicationEventV1>(&message.payload)
+                else {
+                    return;
+                };
+                app_event
+            }
         };
         let context = ConversationProjectionEventContext {
             room_id: &message.room_id,
@@ -11067,11 +11304,20 @@ impl ChatProjectionState {
     }
 
     fn trim_to_limit(&mut self) {
+        // The derived-index cleanup below rebuilds key sets over every stored
+        // message, so it must only run when an eviction actually happened.
+        // `apply_event` calls this after each replayed event; doing the
+        // rebuild unconditionally made boot replay O(messages²) (#596).
+        let mut evicted = false;
         while self.messages.len() > MAX_APP_MESSAGES {
             let Some(key) = self.message_arrival_order.pop_front() else {
                 break;
             };
             self.messages.remove(&key);
+            evicted = true;
+        }
+        if !evicted {
+            return;
         }
         let message_keys = self.messages.keys().cloned().collect::<BTreeSet<_>>();
         self.reaction_senders.retain(|(room_id, message_id, _, _)| {
@@ -12256,6 +12502,37 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
 
     #[test]
+    fn application_envelope_parsing_stays_within_decode_authority() {
+        // ChatProjectionState consumes ParsedAppEvent, so application
+        // plaintext is decoded once at the boundary and never re-parsed
+        // below it. This gate makes a NEW parse of the application envelope
+        // a conscious, reviewed change: the production region of this file
+        // may parse DecryptedApplicationEventV1 only in
+        //
+        //   - decode_application_plaintext (the decode authority),
+        //   - typed_namespaced_payload (the namespaced-event authority),
+        //   - apply_conversation_projection_from_message (the documented
+        //     fallback for appending already-projected messages that have
+        //     no carried scope).
+        //
+        // Adding a fourth site means re-introducing re-parsing; thread
+        // ParsedAppEvent/ChatEventScope instead, or — if genuinely new —
+        // update this count with a comment naming the new authority.
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("tests module delimits the production region");
+        let sites = production
+            .match_indices("from_slice::<DecryptedApplicationEventV1>")
+            .count();
+        assert_eq!(
+            sites, 3,
+            "application envelope is parsed outside the sanctioned decode sites"
+        );
+    }
+
+    #[test]
     fn text_payload_carries_requester_context_only_when_hosted_dispatch_supplies_it() {
         let plain =
             encode_text_message_payload_scoped("hello", None, None, None, None, None).unwrap();
@@ -12307,7 +12584,7 @@ mod tests {
         )
         .unwrap();
 
-        let projected = chat_projection_payload(&encoded);
+        let projected = chat_projection_payload(&resolve_chat_message_payload(&encoded));
         assert_eq!(
             projected.metadata.get("approve"),
             Some(&serde_json::json!({
@@ -13225,19 +13502,14 @@ mod tests {
             reply.reply_to_message_id.as_deref(),
             Some(home_parent_id.as_str())
         );
-        let DecodedAppEvent::ChatMessage {
-            conversation_id,
-            segment_id,
-            payload,
-        } = decode_application_event(&reply.payload)
-        else {
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&reply.payload) else {
             panic!("scoped reply row must carry a chat message application event");
         };
-        assert_eq!(conversation_id.as_deref(), Some(HOME_TOPIC_ID));
-        assert_eq!(segment_id.as_deref(), Some(home_chat_id.as_str()));
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("scoped reply row must carry Hermes message payload");
+        assert_eq!(decoded.conversation_id.as_deref(), Some(HOME_TOPIC_ID));
+        assert_eq!(decoded.segment_id.as_deref(), Some(home_chat_id.as_str()));
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("scoped reply row must carry Hermes message payload");
+        };
         assert_eq!(hermes.conversation_id.as_deref(), Some(HOME_TOPIC_ID));
         assert_eq!(hermes.segment_id.as_deref(), Some(home_chat_id.as_str()));
         assert_eq!(
@@ -13306,19 +13578,19 @@ mod tests {
             Some(build_chat_id.as_str())
         );
         assert_eq!(media_message.media.len(), 1);
-        let DecodedAppEvent::ChatMessage {
-            conversation_id,
-            segment_id,
-            payload,
-        } = decode_application_event(&media_message.payload)
+        let DecodedAppEvent::ChatMessage(decoded) =
+            decode_application_event(&media_message.payload)
         else {
             panic!("scoped attachment row must carry a chat message application event");
         };
-        assert_eq!(conversation_id.as_deref(), Some(build_topic_id.as_str()));
-        assert_eq!(segment_id.as_deref(), Some(build_chat_id.as_str()));
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("scoped attachment row must carry Hermes message payload");
+        assert_eq!(
+            decoded.conversation_id.as_deref(),
+            Some(build_topic_id.as_str())
+        );
+        assert_eq!(decoded.segment_id.as_deref(), Some(build_chat_id.as_str()));
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("scoped attachment row must carry Hermes message payload");
+        };
         assert_eq!(
             hermes.conversation_id.as_deref(),
             Some(build_topic_id.as_str())
@@ -13347,22 +13619,19 @@ mod tests {
             poll_message.chat_id.as_deref(),
             Some(build_chat_id.as_str())
         );
-        let DecodedAppEvent::ChatMessage {
-            conversation_id,
-            segment_id,
-            payload,
-        } = decode_application_event(&poll_message.payload)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&poll_message.payload)
         else {
             panic!("scoped poll row must carry a chat message application event");
         };
-        assert_eq!(conversation_id.as_deref(), Some(build_topic_id.as_str()));
-        assert_eq!(segment_id.as_deref(), Some(build_chat_id.as_str()));
         assert_eq!(
-            poll_message_payload(&payload)
-                .expect("scoped poll payload decodes")
-                .question,
-            "Ship scoped rich messages?"
+            decoded.conversation_id.as_deref(),
+            Some(build_topic_id.as_str())
         );
+        assert_eq!(decoded.segment_id.as_deref(), Some(build_chat_id.as_str()));
+        let ChatMessagePayload::Poll(poll) = decoded.payload else {
+            panic!("scoped poll payload decodes")
+        };
+        assert_eq!(poll.question, "Ship scoped rich messages?");
 
         let reopened_home = app
             .dispatch_and_wait(AppAction::OpenChat {
@@ -14911,8 +15180,8 @@ mod tests {
             segment_id: second_chat_id.to_owned(),
             reason: None,
         };
-        projection.apply_event(
-            StoredAppEvent {
+        projection.apply_parsed_event(
+            ParsedAppEvent::decode(StoredAppEvent {
                 room_id: "room-main".to_owned(),
                 seq: 11,
                 message_id: "segment-11".to_owned(),
@@ -14924,7 +15193,7 @@ mod tests {
                 )
                 .unwrap(),
                 timestamp_unix_seconds: NOW + 1,
-            },
+            }),
             &owner,
         );
         projection.append_messages(vec![message], &owner);
@@ -19143,13 +19412,12 @@ mod tests {
             Some(parent_id.as_str())
         );
 
-        let DecodedAppEvent::ChatMessage { payload, .. } = decode_application_event(&reply.payload)
-        else {
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&reply.payload) else {
             panic!("reply row must carry a chat message application event");
         };
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("reply row must carry Hermes message payload");
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("reply row must carry Hermes message payload");
+        };
         assert_eq!(
             hermes.reply_to_message_id.as_deref(),
             Some(parent_id.as_str())
@@ -19176,14 +19444,13 @@ mod tests {
             Some(parent_id.as_str())
         );
 
-        let DecodedAppEvent::ChatMessage { payload, .. } =
-            decode_application_event(&media_reply.payload)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&media_reply.payload)
         else {
             panic!("media reply row must carry a chat message application event");
         };
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("media reply row must carry Hermes message payload");
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("media reply row must carry Hermes message payload");
+        };
         assert_eq!(
             hermes.reply_to_message_id.as_deref(),
             Some(parent_id.as_str())
@@ -19374,14 +19641,13 @@ mod tests {
         assert_eq!(message.media[1].kind, ChatMediaKind::Video);
         assert!(message.media.iter().all(|media| media.local_path.is_some()));
 
-        let DecodedAppEvent::ChatMessage { payload, .. } =
-            decode_application_event(&message.payload)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&message.payload)
         else {
             panic!("batch media row must carry a chat message application event");
         };
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("batch media row must carry Hermes message payload");
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("batch media row must carry Hermes message payload");
+        };
         assert_eq!(hermes.attachments.len(), 2);
         assert!(
             hermes
@@ -19457,14 +19723,13 @@ mod tests {
         assert_eq!(message.media[0].kind, ChatMediaKind::VoiceNote);
         assert!(message.media[0].local_path.is_some());
 
-        let DecodedAppEvent::ChatMessage { payload, .. } =
-            decode_application_event(&message.payload)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&message.payload)
         else {
             panic!("voice media row must carry a chat message application event");
         };
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("voice media row must carry Hermes message payload");
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("voice media row must carry Hermes message payload");
+        };
         assert_eq!(hermes.attachments.len(), 1);
         assert_eq!(hermes.attachments[0].kind, HermesAttachmentKindV1::Audio);
         let blob = hermes.attachments[0]
@@ -21387,14 +21652,13 @@ mod tests {
     }
 
     fn attachment_reference_from_message(message: &ChatMessage) -> AttachmentBlobReferenceV1 {
-        let DecodedAppEvent::ChatMessage { payload, .. } =
-            decode_application_event(&message.payload)
+        let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&message.payload)
         else {
             panic!("expected chat message application event");
         };
-        let hermes = HermesMessagePayloadV1::decode(&payload)
-            .unwrap()
-            .expect("Hermes payload");
+        let ChatMessagePayload::Hermes(hermes) = decoded.payload else {
+            panic!("Hermes payload");
+        };
         hermes
             .attachments
             .first()

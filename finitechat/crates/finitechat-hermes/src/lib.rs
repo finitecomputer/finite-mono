@@ -789,7 +789,7 @@ fn take_attachments(
 /// with other application traffic.
 pub const HERMES_MESSAGE_PAYLOAD_TYPE_V1: &str = "finitechat.hermes.message.v1";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HermesMessagePayloadV1 {
     #[serde(rename = "type")]
     pub payload_type: String,
@@ -859,6 +859,13 @@ impl HermesMessagePayloadV1 {
         let Ok(value) = serde_json::from_slice::<Value>(plaintext) else {
             return Ok(None);
         };
+        Self::decode_value(value)
+    }
+
+    /// Tag check plus typed conversion over an already-parsed JSON value, so
+    /// callers that parsed the payload once (e.g. the chat projection's
+    /// single decode pass) do not have to parse it a second time.
+    pub fn decode_value(value: Value) -> Result<Option<Self>, HermesBridgeError> {
         if value.get("type").and_then(Value::as_str) != Some(HERMES_MESSAGE_PAYLOAD_TYPE_V1) {
             return Ok(None);
         }
