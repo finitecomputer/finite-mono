@@ -5103,6 +5103,19 @@ button.finite-chat__folder-summary {
   box-shadow: inset 0 0 0 1px var(--bui-line);
 }
 
+.finite-chat__thread-row:has(.finite-chat__thread-actions) .finite-chat__thread-open {
+  padding-right: 68px;
+}
+
+.finite-chat__thread-actions {
+  z-index: 3;
+}
+
+.finite-chat__thread-row.is-active .finite-chat__thread-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .finite-chat__folder-icon {
   border-radius: 6px;
   background: var(--bui-field) !important;
