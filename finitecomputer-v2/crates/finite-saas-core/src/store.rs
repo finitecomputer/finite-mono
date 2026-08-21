@@ -4470,6 +4470,17 @@ where
         )
         .await
         .map_err(store_error)?;
+    // runtime_status_snapshots has no writer anymore, but production still
+    // holds rows written before the writer was removed and the table's FK to
+    // agent_runtimes has no ON DELETE CASCADE. This DELETE must stay until the
+    // table itself is dropped, or deleting such a runtime fails the FK check.
+    client
+        .execute(
+            "DELETE FROM runtime_status_snapshots WHERE agent_runtime_id = $1",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
     client
         .execute(
             "DELETE FROM runtime_relay_credentials WHERE agent_runtime_id = $1",
