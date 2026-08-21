@@ -156,14 +156,14 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
    and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
    covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
-   deploys run it automatically for revisions with log shipping, and lat3/manual
-   activations should run it over SSH before switching.
+   deploys run it before activation, and NixOS activation runs it on every host
+   with log shipping configured.
 
 5. Roll out one host at a time.
    - Run `scripts/finite-status --json` before each host rollout.
-   - Run `infra/nixos/scripts/check-lat-monitoring-secrets` on the target host
-     before activation; this is automatic for lat1 through
-     `scripts/deploy-lat1-closure-cache`.
+   - Optionally run `infra/nixos/scripts/check-lat-monitoring-secrets` on the
+     target host before activation for an early failure; NixOS activation also
+     enforces the same check.
    - Roll out `finite-lat-3` first.
    - Verify Prometheus host metrics and Loki logs in Grafana.
    - Roll out `finite-lat-1` after `finite-lat-3` is clean.
