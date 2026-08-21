@@ -116,9 +116,7 @@ scripts/probe-stack.sh
 - `tinfoil/searxng-public/` - public-repo-ready SearXNG Tinfoil prototype
   bundle.
 - `scripts/` - preflight and smoke scripts.
-- `docs/feature-dev/` - plebdev feature-dev run ledger.
-- `docs/prd/` and `docs/issues/` - local copies of the GitHub PRD and
-  tracer-bullet issues.
+- `docs/prd/` - local copy of the bootstrap PRD; active issues live in GitHub.
 
 ## Completed Milestone
 
