@@ -154,6 +154,103 @@ struct AgentBootstrapAuthorities {
     identity_token: Arc<str>,
 }
 
+impl AgentBootstrapAuthorities {
+    async fn identity_post<T>(
+        &self,
+        route: &str,
+        request: serde_json::Value,
+        operation: &str,
+    ) -> Result<Option<T>, ApiError>
+    where
+        T: for<'de> Deserialize<'de> + Send + 'static,
+    {
+        post_authority_json_optional(
+            &format!("{}/api/v1/operator/brain/{route}", self.identity_base_url),
+            "X-Finite-Operator-Token",
+            &self.identity_token,
+            &request,
+            operation,
+        )
+        .await
+    }
+
+    async fn core_post<T>(
+        &self,
+        route: &str,
+        request: serde_json::Value,
+        operation: &str,
+    ) -> Result<Option<T>, ApiError>
+    where
+        T: for<'de> Deserialize<'de> + Send + 'static,
+    {
+        post_authority_json_optional(
+            &format!("{}/api/core/v1/brain/{route}", self.core_base_url),
+            "Authorization",
+            &format!("Bearer {}", self.core_token),
+            &request,
+            operation,
+        )
+        .await
+    }
+
+    /// Finite Identity's npub for a WorkOS account; `None` when unbound.
+    async fn identity_user_resolution(
+        &self,
+        workos_user_id: &str,
+        operation: &str,
+    ) -> Result<Option<IdentityUserResolutionResponse>, ApiError> {
+        self.identity_post(
+            "user-resolution",
+            serde_json::json!({ "workosUserId": workos_user_id }),
+            operation,
+        )
+        .await
+    }
+
+    /// Finite Identity's Managed Agent binding for an npub; `None` when unbound.
+    async fn identity_agent_resolution(
+        &self,
+        agent_npub: &str,
+        operation: &str,
+    ) -> Result<Option<IdentityAgentResolutionResponse>, ApiError> {
+        self.identity_post(
+            "agent-resolution",
+            serde_json::json!({ "agentNpub": agent_npub }),
+            operation,
+        )
+        .await
+    }
+
+    /// Core's account-agent roster for an account email; `None` when the
+    /// email binds to no Finite account.
+    async fn core_account_agent_roster(
+        &self,
+        email: &str,
+    ) -> Result<Option<CoreAccountAgentRosterResponse>, ApiError> {
+        self.core_post(
+            "account-agent-roster",
+            serde_json::json!({ "email": email }),
+            "Finite Core account agent roster",
+        )
+        .await
+    }
+
+    /// Core's account association for a Managed Agent mailbox.
+    async fn core_agent_account(
+        &self,
+        managed_agent_email: &str,
+        operation: &str,
+    ) -> Result<CoreAgentAccountResponse, ApiError> {
+        self.core_post(
+            "agent-account",
+            serde_json::json!({ "managedAgentEmail": managed_agent_email }),
+            operation,
+        )
+        .await?
+        .ok_or_else(|| AuthorityFailure::Status.api_error(operation))
+    }
+}
+
 #[derive(Debug)]
 enum EmailProofFailure {
     Authority(AuthorityFailure),
@@ -229,6 +326,15 @@ struct RateLimitConfig {
 }
 
 impl ServerState {
+    fn account_agent_authorities(&self) -> Result<&AgentBootstrapAuthorities, ApiError> {
+        self.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Brain account-agent authority is not configured",
+            )
+        })
+    }
+
     /// Build state around an existing store.
     pub fn new(store: BrainStore, public_base_url: impl Into<String>) -> Self {
         let public_base_url = public_base_url.into();
@@ -866,30 +972,52 @@ fn fetch_nip05_document(request: &Nip05WellKnownRequest, url: &str) -> Result<Ve
     Ok(bytes)
 }
 
-async fn resolve_identity_input(
+/// Which authorities answer for a typed identity, and in which order. Every
+/// server-side resolution goes through [`resolve_principal`] with one of
+/// these, and each variant's sequence is pinned by a test: change the order
+/// with the test, never with a carve-out inside the resolver.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ResolutionPolicy {
+    /// A target a human types at an admin, sharing, or identity surface.
+    /// An npub is final. An account email asks the Core account-agent
+    /// roster and Finite Identity first, because public NIP-05 cannot answer
+    /// for mailboxes on domains that serve no nostr.json; an unbound email
+    /// then falls back to NIP-05 like everything else. finite.vip mailboxes
+    /// never consult the roster: the identity authority's own NIP-05
+    /// document answers for them.
+    AdminTarget,
+    /// A Managed Agent mailbox: departure facts, roster agents without a
+    /// roster npub, and Personal or initial Agent selection. An npub is
+    /// final; everything else is NIP-05 through the identity authority. The
+    /// account roster is never consulted, and the caller confirms Finite
+    /// Identity's agent binding for the answer before trusting it.
+    ManagedAgentMailbox,
+}
+
+async fn resolve_principal(
     state: &ServerState,
     input: &str,
+    policy: ResolutionPolicy,
 ) -> Result<ResolvedIdentity, ApiError> {
     let input = input.trim();
-    match IdentityInput::parse(input)? {
-        IdentityInput::Npub(public_key) => {
+    match (IdentityInput::parse(input)?, policy) {
+        (IdentityInput::Npub(public_key), _) => {
             return resolved_identity(public_key, None, Vec::new());
         }
-        // An account email may bind to a Finite account whose npub only the
-        // account authorities know; resolve it exactly like the invitation
-        // plan flow before falling back to public NIP-05, which cannot answer
-        // for mailboxes on domains that serve no nostr.json document.
-        // finite.vip identifiers stay on the NIP-05 path: it is already
-        // routed to the identity authority and answers for managed agent
-        // mailboxes.
-        IdentityInput::AccountEmail(email) => {
+        (IdentityInput::AccountEmail(email), ResolutionPolicy::AdminTarget) => {
             if let Some(resolved) = resolve_account_email_identity(state, &email).await? {
                 return Ok(resolved);
             }
         }
-        IdentityInput::FiniteVipEmail(_) | IdentityInput::Nip05(_) => {}
+        (IdentityInput::AccountEmail(_), ResolutionPolicy::ManagedAgentMailbox)
+        | (IdentityInput::FiniteVipEmail(_) | IdentityInput::Nip05(_), _) => {}
     }
+    resolve_nip05(state, input).await
+}
 
+/// Resolve a NIP-05 identifier through the configured fetcher. finite.vip
+/// names are routed to the identity authority by the fetcher itself.
+async fn resolve_nip05(state: &ServerState, input: &str) -> Result<ResolvedIdentity, ApiError> {
     let identifier = Nip05Identifier::parse(input).map_err(nostr_identity_error)?;
     let request = identifier.well_known_request();
     let fetcher = state.nip05_fetcher.clone();
@@ -930,18 +1058,7 @@ async fn resolve_account_email_identity(
     let Some(authorities) = state.agent_bootstrap_authorities.as_ref() else {
         return Ok(None);
     };
-    let roster: Option<CoreAccountAgentRosterResponse> = post_authority_json_optional(
-        &format!(
-            "{}/api/core/v1/brain/account-agent-roster",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "email": email }),
-        "Finite Core account agent roster",
-    )
-    .await?;
-    let Some(roster) = roster else {
+    let Some(roster) = authorities.core_account_agent_roster(email).await? else {
         return Ok(None);
     };
     if canonical_email(&roster.human_mailbox)? != email {
@@ -950,38 +1067,42 @@ async fn resolve_account_email_identity(
         // input is not itself an account email.
         return Ok(None);
     }
+    let owner = resolve_account_owner(authorities, &roster).await?;
+    let public_key = NostrPublicKey::parse(&owner.user_npub).map_err(nostr_identity_error)?;
+    resolved_identity(public_key, None, Vec::new()).map(Some)
+}
+
+/// Resolve a roster's account owner to its npub through Finite Identity,
+/// rejecting rosters and bindings that disagree about the WorkOS account.
+async fn resolve_account_owner(
+    authorities: &AgentBootstrapAuthorities,
+    roster: &CoreAccountAgentRosterResponse,
+) -> Result<IdentityUserResolutionResponse, ApiError> {
     if roster.workos_user_id.trim().is_empty() {
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "Finite Core returned an empty account id",
         ));
     }
-    let owner: IdentityUserResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/user-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "workosUserId": roster.workos_user_id }),
-        "Finite Identity User Nostr Identity resolution",
-    )
-    .await?;
+    let operation = "Finite Identity User Nostr Identity resolution";
+    let owner = authorities
+        .identity_user_resolution(&roster.workos_user_id, operation)
+        .await?
+        .ok_or_else(|| AuthorityFailure::Status.api_error(operation))?;
     if owner.workos_user_id != roster.workos_user_id {
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "Finite Identity returned a mismatched WorkOS account",
         ));
     }
-    let public_key = NostrPublicKey::parse(&owner.user_npub).map_err(nostr_identity_error)?;
-    resolved_identity(public_key, None, Vec::new()).map(Some)
+    Ok(owner)
 }
 
 async fn resolve_and_record_identity(
     state: &ServerState,
     input: &str,
 ) -> Result<ResolvedIdentityResponse, ApiError> {
-    let resolved = resolve_identity_input(state, input).await?;
+    let resolved = resolve_principal(state, input, ResolutionPolicy::AdminTarget).await?;
     record_resolved_identity(state, resolved)
 }
 
@@ -1009,30 +1130,33 @@ fn record_resolved_identity(
     })
 }
 
+/// Resolve a Managed Agent mailbox and prove, through Finite Identity and
+/// Core, that the agent is active and belongs to `expected_owner_npub`'s
+/// account. This is an ownership check layered on [`resolve_principal`],
+/// not another resolution sequence.
 async fn resolve_managed_agent_email(
     state: &ServerState,
     email: &str,
     expected_owner_npub: &UserId,
 ) -> Result<ResolvedIdentity, ApiError> {
     let managed_agent_email = canonical_email(email)?;
-    let resolved = resolve_identity_input(state, &managed_agent_email).await?;
+    let resolved = resolve_principal(
+        state,
+        &managed_agent_email,
+        ResolutionPolicy::ManagedAgentMailbox,
+    )
+    .await?;
     let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "Managed Agent resolution is not configured",
         )
     })?;
-    let agent: IdentityAgentResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/agent-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "agentNpub": resolved.npub }),
-        "Finite Identity Managed Agent resolution",
-    )
-    .await?;
+    let operation = "Finite Identity Managed Agent resolution";
+    let agent = authorities
+        .identity_agent_resolution(&resolved.npub, operation)
+        .await?
+        .ok_or_else(|| AuthorityFailure::Status.api_error(operation))?;
     if agent.agent_npub != resolved.npub
         || canonical_email(&agent.managed_agent_email)? != managed_agent_email
     {
@@ -1041,17 +1165,9 @@ async fn resolve_managed_agent_email(
             "Finite Identity returned a mismatched Managed Agent",
         ));
     }
-    let account: CoreAgentAccountResponse = post_authority_json(
-        &format!(
-            "{}/api/core/v1/brain/agent-account",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "managedAgentEmail": managed_agent_email }),
-        "Finite Core Managed Agent resolution",
-    )
-    .await?;
+    let account = authorities
+        .core_agent_account(&managed_agent_email, "Finite Core Managed Agent resolution")
+        .await?;
     if account.status != "active"
         || canonical_email(&account.managed_agent_email)? != managed_agent_email
         || account.workos_user_id.trim().is_empty()
@@ -1061,17 +1177,11 @@ async fn resolve_managed_agent_email(
             "Finite Core returned an inactive or mismatched Managed Agent",
         ));
     }
-    let owner: IdentityUserResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/user-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "workosUserId": account.workos_user_id }),
-        "Finite Identity Managed Agent owner resolution",
-    )
-    .await?;
+    let operation = "Finite Identity Managed Agent owner resolution";
+    let owner = authorities
+        .identity_user_resolution(&account.workos_user_id, operation)
+        .await?
+        .ok_or_else(|| AuthorityFailure::Status.api_error(operation))?;
     if owner.workos_user_id != account.workos_user_id
         || UserId::new(owner.user_npub)? != *expected_owner_npub
     {
@@ -1082,7 +1192,6 @@ async fn resolve_managed_agent_email(
     }
     Ok(resolved)
 }
-
 async fn resolve_account_agent_principals(
     state: &ServerState,
     agent_npub: &UserId,
@@ -1101,23 +1210,13 @@ async fn try_resolve_account_agent_principals(
     state: &ServerState,
     agent_npub: &UserId,
 ) -> Result<Option<AccountAgentPrincipals>, ApiError> {
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Brain account-agent authority is not configured",
+    let authorities = state.account_agent_authorities()?;
+    let Some(agent) = authorities
+        .identity_agent_resolution(
+            agent_npub.as_str(),
+            "Finite Identity Agent Principal resolution",
         )
-    })?;
-    let Some(agent): Option<IdentityAgentResolutionResponse> = post_authority_json_optional(
-        &format!(
-            "{}/api/v1/operator/brain/agent-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "agentNpub": agent_npub.as_str() }),
-        "Finite Identity Agent Principal resolution",
-    )
-    .await?
+        .await?
     else {
         return Ok(None);
     };
@@ -1130,17 +1229,9 @@ async fn try_resolve_account_agent_principals(
     }
     let managed_agent_email = canonical_email(&agent.managed_agent_email)?;
 
-    let account: CoreAgentAccountResponse = post_authority_json(
-        &format!(
-            "{}/api/core/v1/brain/agent-account",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "managedAgentEmail": managed_agent_email }),
-        "Finite Core account-agent resolution",
-    )
-    .await?;
+    let account = authorities
+        .core_agent_account(&managed_agent_email, "Finite Core account-agent resolution")
+        .await?;
     if account.status != "active"
         || account.managed_agent_email.trim().to_ascii_lowercase() != managed_agent_email
         || account.workos_user_id.trim().is_empty()
@@ -1151,17 +1242,11 @@ async fn try_resolve_account_agent_principals(
         ));
     }
 
-    let owner: IdentityUserResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/user-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "workosUserId": account.workos_user_id }),
-        "Finite Identity User Nostr Identity resolution",
-    )
-    .await?;
+    let operation = "Finite Identity User Nostr Identity resolution";
+    let owner = authorities
+        .identity_user_resolution(&account.workos_user_id, operation)
+        .await?
+        .ok_or_else(|| AuthorityFailure::Status.api_error(operation))?;
     if owner.workos_user_id != account.workos_user_id {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -5887,6 +5972,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_agent_mailbox_policy_never_consults_the_account_roster() {
+        let agent_key = NostrPublicKey::from_protocol(Keys::generate().public_key());
+        let agent_hex = agent_key.to_hex();
+        let identifier = Nip05Identifier::parse("agent@teams.example.com").unwrap();
+        let document = format!(r#"{{"names": {{"agent": "{agent_hex}"}}}}"#);
+        // Both authorities point at the discard port: any roster or identity
+        // call fails fast as a 502, so only a policy that goes straight to
+        // NIP-05 can resolve this non-finite.vip mailbox.
+        let state = test_state()
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                "http://127.0.0.1:9",
+                "core-token",
+                "http://127.0.0.1:9",
+                "identity-token",
+            );
+
+        let resolved = resolve_principal(
+            &state,
+            "agent@teams.example.com",
+            ResolutionPolicy::ManagedAgentMailbox,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.npub, agent_key.to_npub().unwrap());
+        assert_eq!(resolved.nip05.as_deref(), Some("agent@teams.example.com"));
+
+        // The same input under the admin policy asks the roster first and
+        // surfaces its failure: that ordering is what makes the two policies
+        // distinct.
+        let error = resolve_principal(
+            &state,
+            "agent@teams.example.com",
+            ResolutionPolicy::AdminTarget,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+
+        // An npub is final under either policy and needs no authority.
+        let npub_input = agent_key.to_npub().unwrap();
+        for policy in [
+            ResolutionPolicy::AdminTarget,
+            ResolutionPolicy::ManagedAgentMailbox,
+        ] {
+            let resolved = resolve_principal(&state, &npub_input, policy)
+                .await
+                .unwrap();
+            assert_eq!(resolved.npub, npub_input);
+        }
+    }
+
+    #[tokio::test]
     async fn identity_resolution_distinguishes_unregistered_names_from_authority_failure() {
         let actor_keys = Keys::generate();
         let identifier = Nip05Identifier::parse("missing@finite.vip").unwrap();
@@ -10387,9 +10525,10 @@ mod tests {
         });
         let state = test_state().with_identity_authority_url(format!("http://{address}"));
 
-        let resolved = resolve_identity_input(&state, "cheater@finite.vip")
-            .await
-            .unwrap();
+        let resolved =
+            resolve_principal(&state, "cheater@finite.vip", ResolutionPolicy::AdminTarget)
+                .await
+                .unwrap();
 
         assert_eq!(resolved.hex, "77".repeat(32));
         assert_eq!(resolved.nip05.as_deref(), Some("cheater@finite.vip"));
@@ -13641,6 +13780,54 @@ mod tests {
         assert_eq!(ledger[0].fact_revision, 1);
         assert_eq!(ledger[0].origin_kind.as_str(), "departure");
         drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn departure_fact_poll_resolves_agents_without_the_account_roster() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let agent_hex = NostrPublicKey::from_protocol(agent_keys.public_key()).to_hex();
+        // A non-finite.vip Managed Agent mailbox: the admin policy would ask
+        // the roster first, but the sequenced Core fake below answers only the
+        // departure-facts request and then closes, so a roster call surfaces
+        // as a failed poll. The departed-principal sequence is NIP-05, then
+        // Identity's agent binding, and never the roster.
+        let identifier = Nip05Identifier::parse("agent@teams.example.com").unwrap();
+        let document = serde_json::json!({ "names": { "agent": agent_hex } }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![(
+            "/api/v1/operator/brain/agent-resolution",
+            serde_json::json!({
+                "agentNpub": agent_npub,
+                "managedAgentEmail": "agent@teams.example.com",
+            }),
+        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/departure-facts",
+            departure_page(
+                serde_json::json!([departure_fact_json(
+                    1,
+                    "user_workos_owner",
+                    "agent",
+                    "agent@teams.example.com"
+                )]),
+                1,
+            ),
+        )]);
+        let state = departure_test_state_with_member(&agent_keys, Some("agent@teams.example.com"))
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let applied = poll_departure_facts_once(&state).await.unwrap();
+
+        assert_eq!(applied, 1);
+        assert_member_gone(&state, &agent_npub);
         identity_server.join().unwrap();
         core_server.join().unwrap();
     }
