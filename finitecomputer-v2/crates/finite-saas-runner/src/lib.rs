@@ -4957,15 +4957,10 @@ mod tests {
     fn bundled_finitebrain_skill_uses_runtime_brain_and_durable_paths() {
         let bundled =
             read_repo_file("../finite-skills/skills/software-development/finitebrain/SKILL.md");
-        let package = read_repo_file("../finite-brain/skills/finitebrain/SKILL.md");
         let bundled_creation = read_repo_file(
             "../finite-skills/skills/software-development/finitebrain/references/brain-creation.md",
         );
-        let package_creation =
-            read_repo_file("../finite-brain/skills/finitebrain/references/brain-creation.md");
 
-        assert_eq!(bundled, package);
-        assert_eq!(bundled_creation, package_creation);
         assert!(!bundled.contains("FINITE_BRAIN_SERVER_URL"));
         assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
         assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));

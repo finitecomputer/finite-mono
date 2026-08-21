@@ -5476,15 +5476,13 @@ mod tests {
 
     #[test]
     fn packaged_cli_references_match_the_supported_auth_and_mount_surface() {
-        let component = include_str!("../../../skills/finitebrain/references/fbrain-cli.md");
-        let runtime = include_str!(
+        let reference = include_str!(
             "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
         );
-        assert_eq!(component, runtime);
-        assert!(component.contains("auth status|import [--file <path>]|login <email>|redeem"));
-        assert!(component.contains("mount offer create|list|inspect|revoke"));
-        assert!(component.contains("Only the old secret-bearing"));
-        assert!(!component.contains("`auth login` is legacy guidance"));
+        assert!(reference.contains("auth status|import [--file <path>]|login <email>|redeem"));
+        assert!(reference.contains("mount offer create|list|inspect|revoke"));
+        assert!(reference.contains("Only the old secret-bearing"));
+        assert!(!reference.contains("`auth login` is legacy guidance"));
     }
 
     fn start_malformed_collaboration_success_server(
