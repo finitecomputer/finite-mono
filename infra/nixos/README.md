@@ -92,7 +92,10 @@ The routine deploy path is:
    `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
    prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
    the exact `SYSTEM` path in a transient systemd unit, and verifies
-   `/run/current-system` equals that path.
+   `/run/current-system` equals that path. For revisions that include LAT
+   journald shipping, the deploy script first runs the values-redacting
+   `infra/nixos/scripts/check-lat-monitoring-secrets` preflight on lat1 so a
+   missing `/etc/finite/logs-write.env` blocks before activation.
 
 Do not build production closures on the Mac, clawland, lat1, or lat2. There is
 no lat2 fallback deploy path. Rollback remains
@@ -142,6 +145,19 @@ record and an isolated restore/authentication drill. Do not add values,
 fingerprints, or password-derived hashes to the public contract.
 The complete custody and operator-copy gate is
 [`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
+
+The current monitoring MVP still uses host-local env files rather than SOPS.
+Before any manual LAT activation that includes Alloy log shipping, run the
+narrow monitoring preflight against the target host:
+
+```sh
+ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+```
+
+The helper checks only `/etc/finite/metrics-remote-write.env` and
+`/etc/finite/logs-write.env` metadata plus required variable names. It discards
+values and prints none.
 
 Finite Brain reads `/etc/finite/identity-operator.env`,
 `/etc/finite/brain-authority.env`, and the send-only Resend credential from

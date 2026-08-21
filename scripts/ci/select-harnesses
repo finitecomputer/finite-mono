@@ -35,7 +35,6 @@ GLOBAL_EXACT_PATHS = {
     "flake.lock",
     "flake.nix",
     "justfile",
-    "scripts/ci/select-harnesses",
     "scripts/tests/test_ci_select_harnesses.py",
 }
 
@@ -100,6 +99,8 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_lat1_healthcheck_contract.py",
     "scripts/check_finite_private_deepseek_candidate.py",
     "scripts/check_lat1_secret_bootstrap.py",
+    "scripts/ci/select-harnesses",
+    "scripts/deploy-lat1-closure-cache",
     "scripts/tests/test_check_deepseek_v4_0731_quality.py",
     "scripts/tests/test_finite_private_deepseek_candidate.py",
     "scripts/tests/test_finite_private_ops.py",

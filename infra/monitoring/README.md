@@ -44,6 +44,18 @@ The logs file must contain `FINITE_LOGS_WRITE_USERNAME` and
 credential. It is intentionally separate from the Prometheus remote-write
 credential.
 
+Before activating a LAT host closure that includes journald log shipping,
+validate the host-local files without printing values:
+
+```sh
+ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+```
+
+`scripts/deploy-lat1-closure-cache` runs this preflight automatically for lat1
+when the target revision contains the log-shipping Alloy config. Lat3 currently
+needs the explicit preflight before its activation path.
+
 Deploy from a clean checkout after the change is on `origin/main`:
 
 ```sh
