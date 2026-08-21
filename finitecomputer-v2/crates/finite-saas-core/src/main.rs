@@ -999,10 +999,7 @@ async fn wait_for_runtime_artifact_upgrade<S: RuntimeArtifactRolloutStore>(
     let mut last = request;
     loop {
         last = store.rollout_runtime_control_request(&last.id).await?;
-        if matches!(
-            last.status,
-            RuntimeControlRequestStatus::Succeeded | RuntimeControlRequestStatus::Failed
-        ) {
+        if last.status.is_terminal() {
             return Ok(RuntimeArtifactRolloutWaitResult::Terminal(last));
         }
         let now = Instant::now();
@@ -1279,10 +1276,7 @@ async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result
     let mut current = request;
     loop {
         current = store.runtime_control_request(&current.id).await?;
-        if matches!(
-            current.status,
-            RuntimeControlRequestStatus::Succeeded | RuntimeControlRequestStatus::Failed
-        ) {
+        if current.status.is_terminal() {
             break;
         }
         let now = Instant::now();
@@ -1293,7 +1287,9 @@ async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result
         sleep(Duration::from_secs(2).min(deadline.saturating_duration_since(now))).await;
     }
     print_json(&current)?;
-    if current.status != RuntimeControlRequestStatus::Succeeded {
+    // A retired runtime confirms into the Stopped terminal; Succeeded is
+    // reserved for runtimes that proved ready.
+    if current.status != RuntimeControlRequestStatus::Stopped {
         bail!("runtime retirement failed; the same request remains retryable");
     }
     Ok(())
@@ -2243,6 +2239,8 @@ mod tests {
                 kind: RuntimeControlKind::Upgrade,
                 target_runtime_artifact_id: Some("artifact-v2".to_string()),
                 status,
+                failure_stage: (status == RuntimeControlRequestStatus::Failed)
+                    .then_some(finite_saas_core::RuntimeLifecycleStage::Unknown),
                 runner_id: None,
                 lease_token: None,
                 lease_expires_at: None,
@@ -2250,11 +2248,9 @@ mod tests {
                     .then(|| "synthetic runner failure".to_string()),
                 created_at: "2026-07-15T01:00:00Z".to_string(),
                 updated_at: "2026-07-15T01:00:00Z".to_string(),
-                completed_at: matches!(
-                    status,
-                    RuntimeControlRequestStatus::Succeeded | RuntimeControlRequestStatus::Failed
-                )
-                .then(|| "2026-07-15T01:00:01Z".to_string()),
+                completed_at: status
+                    .is_terminal()
+                    .then(|| "2026-07-15T01:00:01Z".to_string()),
             })
         }
     }
@@ -2484,7 +2480,7 @@ mod tests {
             initial,
             BTreeMap::from([(
                 "project-a".to_string(),
-                RuntimeControlRequestStatus::Running,
+                RuntimeControlRequestStatus::Launching,
             )]),
         );
         let mut input = rollout_input(
