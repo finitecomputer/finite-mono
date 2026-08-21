@@ -98,4 +98,5 @@ and the workflow files themselves.
   open, sync, and search that content before assuming it is missing. Typical
   read flow: `fbrain doctor`, `fbrain brain list`, `fbrain open ...`,
   `fbrain sync now --summary`, `fbrain conflicts --json`. For non-read-only
-  Brain work, follow `finite-brain/skills/finitebrain/SKILL.md`.
+  Brain work, follow
+  `finite-skills/skills/software-development/finitebrain/SKILL.md`.

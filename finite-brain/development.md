@@ -239,4 +239,5 @@ UI is the production client.
 - `docs/specs/finitebrain-portability-spec.md`: Portable v1 contract.
 - `docs/adr/`: decisions and alternatives.
 - `docs/runbooks/`: operational smoke and local parity runbooks.
-- `skills/finitebrain/SKILL.md`: packaged FiniteBrain agent skill.
+- `../finite-skills/skills/software-development/finitebrain/SKILL.md`: the
+  FiniteBrain agent skill (single source, monorepo root).
