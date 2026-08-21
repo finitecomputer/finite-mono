@@ -4550,6 +4550,28 @@ impl Store {
         Ok(found.is_some())
     }
 
+    /// A verified Email Link from this mailbox to the native Principal that
+    /// owns `pubkey`. This is the local answer to "does this key satisfy the
+    /// email grant": no cross-service call, just the link table.
+    pub fn has_active_email_link_for_pubkey(
+        &self,
+        email: &str,
+        pubkey: &str,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM principal_email_links pel
+                 JOIN principals p ON p.id = pel.principal_id
+                 WHERE pel.email = ?1 AND p.pubkey = ?2 AND pel.revoked_at IS NULL",
+                params![email, pubkey],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     // ---- magic-link tokens -------------------------------------------------
 
     pub fn create_login_token(

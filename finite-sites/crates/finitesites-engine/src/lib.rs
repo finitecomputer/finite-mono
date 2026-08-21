@@ -1297,16 +1297,16 @@ impl Engine {
         })
     }
 
-    pub fn redeem_email_login(
+    /// Consume one daemon-local email proof: a 15-minute, single-use,
+    /// hash-stored token issued by `request_email_login` and delivered by the
+    /// local mailer. Returns the verified normalized email. This is the only
+    /// mailbox proof Sites authorization consults; no other service is asked.
+    pub fn consume_email_proof(
         &mut self,
-        actor_pubkey: &str,
         email: &str,
         token: &str,
         now: u64,
-    ) -> Result<EmailRedeemOutcome, EngineError> {
-        if !hex::is_hex32(actor_pubkey) {
-            return Err(EngineError::NotAuthorized);
-        }
+    ) -> Result<String, EngineError> {
         if !hex::is_hex32(token) {
             return Err(EngineError::Validation("malformed token"));
         }
@@ -1325,6 +1325,20 @@ impl Engine {
         if token_email != normalized {
             return Err(EngineError::Validation("email token does not match email"));
         }
+        Ok(normalized)
+    }
+
+    pub fn redeem_email_login(
+        &mut self,
+        actor_pubkey: &str,
+        email: &str,
+        token: &str,
+        now: u64,
+    ) -> Result<EmailRedeemOutcome, EngineError> {
+        if !hex::is_hex32(actor_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
+        let normalized = self.consume_email_proof(email, token, now)?;
         let already_present = self.store.has_email_key(&normalized, actor_pubkey)?;
         if !already_present && self.store.count_email_keys(&normalized)? >= MAX_EMAIL_KEYS_PER_EMAIL
         {
@@ -1343,6 +1357,19 @@ impl Engine {
             email: normalized,
             linked_to_native_principal,
         })
+    }
+
+    /// Local grant satisfaction for git-auth: the mailbox is linked to the
+    /// actor's native Principal by an active, verified Email Link row.
+    pub fn actor_has_linked_email(
+        &self,
+        actor_pubkey: &str,
+        actor_email: &str,
+    ) -> Result<bool, EngineError> {
+        let email = validate_email(actor_email)?;
+        self.store
+            .has_active_email_link_for_pubkey(&email, actor_pubkey)
+            .map_err(EngineError::from)
     }
 
     pub fn register_sites_authorized_key(
