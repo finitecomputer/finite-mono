@@ -153,6 +153,8 @@ where
         "admin" => admin(&args[1..], &env, json, output),
         "collaborator" => collaborators(&args[1..], &env, json, output),
         "invite" => invite(&args[1..], &env, json, output),
+        "invite-token" => invite_token(&args[1..], &env, json, output),
+        "invite-accept" => invite_accept(&args[1..], &env, json, output),
         "approvals" => approvals(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
     }
@@ -161,7 +163,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -4160,6 +4162,223 @@ fn brain_invites<W: Write>(
     }
 }
 
+/// Capability Invite Tokens (auth kernel): a single-use, unguessable,
+/// revocable token that redeems to Brain Membership for whatever npub
+/// presents it. Email, when given, is delivery only — the link is the auth.
+fn invite_token<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let brain_id = command_brain_id(args, env)?;
+            let role = option_value(args, "--role").unwrap_or_else(|| "member".to_owned());
+            if !matches!(role.as_str(), "member" | "admin") {
+                return Err(CliError::InvalidInput(format!(
+                    "unknown invite token role {role}"
+                )));
+            }
+            let email = option_value(args, "--email")
+                .map(|email| canonical_invite_email(&email))
+                .transpose()?;
+            let expires_at = invitation_expires_at(env, args)?;
+            let mut body = serde_json::json!({ "role": role, "expiresAt": expires_at });
+            if let Some(email) = email {
+                body["email"] = serde_json::Value::String(email);
+            }
+            let route = format!("/v1/brains/{brain_id}/invite-tokens");
+            let response = signed_json_request(env, args, "POST", &route, Some(body))?;
+            write_invite_token_create(output, json, &response)
+        }
+        Some("list") => {
+            let brain_id = command_brain_id(args, env)?;
+            let route = format!("/v1/brains/{brain_id}/invite-tokens");
+            let response = signed_json_request(env, args, "GET", &route, None)?;
+            write_invite_token_list(output, json, &response)
+        }
+        Some("revoke") => {
+            let brain_id = command_brain_id(args, env)?;
+            let token_id = required_option_or_positional(args, "--token-id", 1, "token-id")?;
+            let route = format!("/v1/brains/{brain_id}/invite-tokens/revoke");
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                &route,
+                Some(serde_json::json!({ "tokenId": token_id })),
+            )?;
+            write_command_response(output, json, &response)
+        }
+        Some(other) => Err(CliError::InvalidCommand(format!("invite-token {other}"))),
+        None => Err(CliError::MissingArgument("invite-token command")),
+    }
+}
+
+fn write_invite_token_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let url = field("url");
+    writeln!(
+        output,
+        "invite token created for brain {} (role {}, expires {})",
+        field("brainId"),
+        field("role"),
+        field("expiresAt")
+    )?;
+    writeln!(output, "token: {} (shown once)", field("token"))?;
+    writeln!(output, "url: {url}")?;
+    writeln!(output, "redeem: fbrain invite-accept {url}")?;
+    writeln!(output, "delivery: {}", field("deliveryStatus"))?;
+    Ok(())
+}
+
+fn write_invite_token_list<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let tokens = value
+        .get("inviteTokens")
+        .and_then(serde_json::Value::as_array);
+    match tokens {
+        Some(tokens) if !tokens.is_empty() => {
+            for token in tokens {
+                let field = |name: &str| {
+                    token
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                writeln!(
+                    output,
+                    "invite-token {} role={} status={} inviter={} expires={}",
+                    field("tokenId"),
+                    field("role"),
+                    field("status"),
+                    field("inviterNpub"),
+                    field("expiresAt")
+                )?;
+                if !field("redeemedByNpub").is_empty() {
+                    writeln!(output, "  redeemed by {}", field("redeemedByNpub"))?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no invite tokens")?;
+            Ok(())
+        }
+    }
+}
+
+/// Accept a capability Invite Token from a URL (`<server>/v1/invite-tokens/
+/// redeem#<token>`) or a bare token (then `--server` or the saved server
+/// applies). The current Finite Home key redeems the token via NIP-98.
+fn invite_accept<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let input = positional_values(args)
+        .first()
+        .cloned()
+        .ok_or(CliError::MissingArgument("invite-url-or-token"))?;
+    let target = parse_invite_accept_input(&input)?;
+    let server_url = match target.server_url {
+        Some(server_url) => server_url,
+        None => server_url_for_command(env, args)?,
+    };
+    let response = signed_json_request_to_server(
+        env,
+        &server_url,
+        "POST",
+        "/v1/invite-tokens/redeem",
+        Some(serde_json::json!({ "token": target.token })),
+    )?;
+    if json {
+        return write_command_response(output, true, &response);
+    }
+    let field = |name: &str| {
+        response
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let duplicate = response
+        .get("duplicateRedeem")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if duplicate {
+        writeln!(
+            output,
+            "already a member of brain {} ({}); this key already redeemed the token",
+            field("brainDisplayName"),
+            field("brainId")
+        )?;
+    } else {
+        writeln!(
+            output,
+            "joined brain {} ({}) with role {}; open it with `fbrain open {}`",
+            field("brainDisplayName"),
+            field("brainId"),
+            field("role"),
+            field("brainId")
+        )?;
+    }
+    Ok(())
+}
+
+struct InviteAcceptTarget {
+    server_url: Option<String>,
+    token: String,
+}
+
+fn parse_invite_accept_input(input: &str) -> Result<InviteAcceptTarget, CliError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(CliError::MissingArgument("invite-url-or-token"));
+    }
+    let (server_url, token) = if input.starts_with("http://") || input.starts_with("https://") {
+        let Some((base, fragment)) = input.split_once('#') else {
+            return Err(CliError::InvalidInput(
+                "invite link has no token fragment; expected <server>/v1/invite-tokens/redeem#<token>"
+                    .to_owned(),
+            ));
+        };
+        let origin_end = base.find("://").map(|scheme_end| {
+            let rest = &base[scheme_end + 3..];
+            scheme_end + 3 + rest.find('/').unwrap_or(rest.len())
+        });
+        let server_url = origin_end.map(|end| base[..end].to_owned());
+        (server_url, fragment.trim().to_owned())
+    } else {
+        (None, input.to_owned())
+    };
+    if !token.starts_with("fbit-") {
+        return Err(CliError::InvalidInput(format!(
+            "{token} is not an invite token; invite tokens start with fbit-"
+        )));
+    }
+    Ok(InviteAcceptTarget { server_url, token })
+}
+
 fn write_my_invitations<W: Write>(
     output: &mut W,
     json: bool,
@@ -5277,6 +5496,43 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn invite_accept_input_parses_url_fragment_and_bare_token() {
+        let target = parse_invite_accept_input(
+            "https://brain.finite.computer/v1/invite-tokens/redeem#fbit-abc123_-def456",
+        )
+        .unwrap();
+        assert_eq!(
+            target.server_url.as_deref(),
+            Some("https://brain.finite.computer")
+        );
+        assert_eq!(target.token, "fbit-abc123_-def456");
+
+        let bare = parse_invite_accept_input("fbit-abc123").unwrap();
+        assert_eq!(bare.server_url, None);
+        assert_eq!(bare.token, "fbit-abc123");
+
+        let loopback =
+            parse_invite_accept_input("http://127.0.0.1:3015/v1/invite-tokens/redeem#fbit-abc123")
+                .unwrap();
+        assert_eq!(
+            loopback.server_url.as_deref(),
+            Some("http://127.0.0.1:3015")
+        );
+    }
+
+    #[test]
+    fn invite_accept_input_rejects_missing_fragment_and_non_tokens() {
+        assert!(
+            parse_invite_accept_input("https://brain.finite.computer/v1/invite-tokens/redeem")
+                .is_err()
+        );
+        assert!(parse_invite_accept_input("invite-0123456789abcdef").is_err());
+        assert!(parse_invite_accept_input("invitation-0123456789").is_err());
+        assert!(parse_invite_accept_input("").is_err());
+        assert!(parse_invite_accept_input("  ").is_err());
+    }
 
     #[test]
     fn filesystem_hints_discover_new_working_trees_without_syncing_internal_churn() {

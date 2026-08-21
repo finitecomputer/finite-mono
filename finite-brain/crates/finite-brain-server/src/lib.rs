@@ -26,17 +26,18 @@ use finite_brain_core::{
     FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, RevisionValidation,
     SafeRelativePath, TombstoneValidation, UserId, bootstrap_organization_brain,
     bootstrap_organization_brain_with_requester, bootstrap_personal_brain, decode_sync_payload,
-    derive_email_invite_scope, validate_admin_access_change_event, validate_folder_rotation_fanout,
-    validate_revision_event, validate_tombstone_event,
+    derive_email_invite_scope, generate_capability_token, sha256_hex,
+    validate_admin_access_change_event, validate_folder_rotation_fanout, validate_revision_event,
+    validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, DepartureFactApplication,
-    DeparturePrincipalKind, EmailInviteBootstrapScopeFolder, EncryptedBrainExport,
-    FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
-    GrantFolderAccessOutcome, IdentityAlias, LinkStatus, MountedFolderProjection,
-    MountedFolderState, PendingGrantWrap, PersonalAgentFolderRotation,
+    BrainInvitationTargetKind, BrainInviteTokenRole, BrainStore, ControlSyncRecord,
+    DepartureFactApplication, DeparturePrincipalKind, EmailInviteBootstrapScopeFolder,
+    EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
+    FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
+    MountedFolderProjection, MountedFolderState, PendingGrantWrap, PersonalAgentFolderRotation,
     SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
-    StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
+    StoredBrainInvitation, StoredBrainInviteToken, StoredShareLink, StoredSharedFolderConnection,
     StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
     VisibleBrainRole, timestamp_expired,
 };
@@ -663,6 +664,18 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/invitations/commit",
             post(commit_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invite-tokens",
+            get(list_brain_invite_tokens_handler).post(create_brain_invite_token_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invite-tokens/revoke",
+            post(revoke_brain_invite_token_handler),
+        )
+        .route(
+            "/invite-tokens/redeem",
+            post(redeem_brain_invite_token_handler),
         )
         .route(
             "/brains/{brain_id}/approval-requests",
@@ -8894,6 +8907,366 @@ mod tests {
         let listed: BrainInvitationListResponse = read_json(list_after_revoke).await;
         assert_eq!(listed.invitations.len(), 1);
         assert_eq!(listed.invitations[0].status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn invite_token_routes_create_redeem_and_grant_membership() {
+        let admin_keys = Keys::generate();
+        let redeemer_keys = Keys::generate();
+        let wrong_keys = Keys::generate();
+        let redeemer_npub = npub(&redeemer_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let create_body = serde_json::json!({ "role": "member" }).to_string();
+        let create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(create_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        let created: CreateBrainInviteTokenResponse = read_json(create).await;
+        assert!(created.token.starts_with("fbit-"));
+        assert_eq!(created.token.len(), 5 + 43);
+        assert_eq!(created.role, "member");
+        assert_eq!(created.delivery_status, "manual");
+        assert_eq!(
+            created.url,
+            format!("{TEST_BASE_URL}/v1/invite-tokens/redeem#{}", created.token)
+        );
+        assert_eq!(created.token_id, sha256_hex(&created.token));
+        // Default expiry is seven days out.
+        assert!(created.expires_at > created.created_at);
+
+        let list = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/invite-tokens",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let listed: BrainInviteTokenListResponse = read_json(list).await;
+        assert_eq!(listed.invite_tokens.len(), 1);
+        assert_eq!(listed.invite_tokens[0].status, "pending");
+        assert_eq!(listed.invite_tokens[0].token_id, created.token_id);
+
+        let non_admin_create = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(serde_json::json!({ "role": "member" }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(
+            non_admin_create,
+            StatusCode::FORBIDDEN,
+            "brain admin access required",
+        )
+        .await;
+
+        let redeem_body = serde_json::json!({ "token": created.token }).to_string();
+        let redeem = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(redeem_body.clone()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(redeem.status(), StatusCode::OK);
+        let redeemed: RedeemBrainInviteTokenResponse = read_json(redeem).await;
+        assert_eq!(redeemed.brain_id, "acme");
+        assert_eq!(redeemed.role, "member");
+        assert_eq!(redeemed.redeemed_by_npub, redeemer_npub);
+        assert!(!redeemed.duplicate_redeem);
+
+        // The new member can read the Brain.
+        let metadata = get_metadata(router.clone(), &redeemer_keys, "acme", TEST_NOW + 4).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(metadata.members.contains(&redeemer_npub));
+
+        // Same-npub re-present is idempotent, not an error.
+        let retry = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(redeem_body.clone()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry: RedeemBrainInviteTokenResponse = read_json(retry).await;
+        assert!(retry.duplicate_redeem);
+
+        // A different npub cannot consume the spent token.
+        let wrong = authed_request(
+            router.clone(),
+            &wrong_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(redeem_body),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_error(
+            wrong,
+            StatusCode::NOT_FOUND,
+            "brain invite token unavailable",
+        )
+        .await;
+
+        let list_after = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/invite-tokens",
+            None,
+            TEST_NOW + 7,
+        )
+        .await;
+        let listed: BrainInviteTokenListResponse = read_json(list_after).await;
+        assert_eq!(listed.invite_tokens[0].status, "redeemed");
+        assert_eq!(
+            listed.invite_tokens[0].redeemed_by_npub.as_deref(),
+            Some(redeemer_npub.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_token_revoke_and_malformed_tokens_fail_closed() {
+        let admin_keys = Keys::generate();
+        let redeemer_keys = Keys::generate();
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(serde_json::json!({ "role": "member" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        let created: CreateBrainInviteTokenResponse = read_json(create).await;
+
+        let non_admin_revoke = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens/revoke",
+            Some(serde_json::json!({ "tokenId": created.token_id }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            non_admin_revoke,
+            StatusCode::FORBIDDEN,
+            "brain admin access required",
+        )
+        .await;
+
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens/revoke",
+            Some(serde_json::json!({ "tokenId": created.token_id }).to_string()),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+        let revoked: BrainInviteTokenResponse = read_json(revoke).await;
+        assert_eq!(revoked.status, "revoked");
+
+        let redeem_revoked = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({ "token": created.token }).to_string()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_error(
+            redeem_revoked,
+            StatusCode::NOT_FOUND,
+            "brain invite token unavailable",
+        )
+        .await;
+
+        let unknown = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(
+                serde_json::json!({ "token": "fbit-0000000000000000000000000000000000000000000" })
+                    .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_error(
+            unknown,
+            StatusCode::NOT_FOUND,
+            "brain invite token unavailable",
+        )
+        .await;
+
+        for bad in [
+            "not-a-token",
+            "fbit-short",
+            "fbit-has space space space space space",
+        ] {
+            let malformed = authed_request(
+                router.clone(),
+                &redeemer_keys,
+                "POST",
+                "/v1/invite-tokens/redeem",
+                Some(serde_json::json!({ "token": bad }).to_string()),
+                TEST_NOW + 5,
+            )
+            .await;
+            assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_token_expired_redeem_fails_closed() {
+        let redeemer_keys = Keys::generate();
+        let token = "fbit-expired0000000000000000000000000000000000";
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
+        let brain_id = output.brain.id.clone();
+        let grants = grants_for_required(&output.required_key_grants, &brain_id, "npub-admin");
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &sha256_hex(token),
+                BrainInviteTokenRole::Member,
+                &UserId::new("npub-admin").unwrap(),
+                "2026-05-08T00:00:00Z",
+                "2026-05-01T00:00:00Z",
+            )
+            .unwrap();
+        let router =
+            router_with_state(ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60));
+
+        let redeem = authed_request(
+            router,
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({ "token": token }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            redeem,
+            StatusCode::NOT_FOUND,
+            "brain invite token unavailable",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invite_token_admin_role_redeems_to_admin_standing() {
+        let admin_keys = Keys::generate();
+        let redeemer_keys = Keys::generate();
+        let redeemer_npub = npub(&redeemer_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(serde_json::json!({ "role": "admin" }).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        let created: CreateBrainInviteTokenResponse = read_json(create).await;
+        assert_eq!(created.role, "admin");
+
+        let redeem = authed_request(
+            router.clone(),
+            &redeemer_keys,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({ "token": created.token }).to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(redeem.status(), StatusCode::OK);
+
+        let metadata = get_metadata(router.clone(), &redeemer_keys, "acme", TEST_NOW + 2).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(metadata.admins.contains(&redeemer_npub));
+    }
+
+    #[tokio::test]
+    async fn invite_token_email_serves_human_and_agent_readers() {
+        let admin_keys = Keys::generate();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let state = test_state().with_invite_mailer(move |email| {
+            captured.lock().unwrap().push(email.clone());
+            Ok(())
+        });
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+
+        let create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(
+                serde_json::json!({ "role": "member", "email": "Friend@Example.com" }).to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        let created: CreateBrainInviteTokenResponse = read_json(create).await;
+        assert_eq!(created.delivery_status, "sent");
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let email = &sent[0];
+        assert_eq!(email.to, "friend@example.com");
+        assert!(email.subject.contains("Acme"));
+        // One short human paragraph plus one explicit agent instruction line.
+        assert!(email.text.contains("invited you to the Finite brain"));
+        assert!(email.text.contains(&format!(
+            "Agent instruction: fbrain invite-accept {}",
+            created.url
+        )));
+        assert!(email.text.contains("single-use capability"));
     }
 
     async fn unauthed_get(router: Router, path: &str) -> axum::response::Response {

@@ -23,6 +23,7 @@ mod brains;
 mod departure;
 mod folder_access;
 mod folder_deletion;
+mod invite_tokens;
 mod links;
 mod loading;
 mod pending_wraps;
@@ -987,6 +988,64 @@ pub struct StoredBrainInvitation {
     pub roster_revision: Option<i64>,
     /// True when accept returned an already-consumed result for the same target.
     pub duplicate_accept: bool,
+}
+
+/// Invite Token role: the access a redeemed capability token grants.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BrainInviteTokenRole {
+    /// Brain Membership (and All-Members Folder wrap markers).
+    Member,
+    /// Brain Membership plus Organization Brain Admin standing.
+    Admin,
+}
+
+impl BrainInviteTokenRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+impl TryFrom<&str> for BrainInviteTokenRole {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "member" => Ok(Self::Member),
+            "admin" => Ok(Self::Admin),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown brain invite token role {value}"),
+            }),
+        }
+    }
+}
+
+/// Stored capability Invite Token. Only the SHA-256 hash of the raw token is
+/// persisted; the hash doubles as the public token id for list and revoke.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredBrainInviteToken {
+    /// SHA-256 hex of the raw token; primary key and public handle.
+    pub token_hash: String,
+    /// Brain id.
+    pub brain_id: BrainId,
+    /// Access the token redeems to.
+    pub role: BrainInviteTokenRole,
+    /// Admin who created the token.
+    pub inviter_npub: UserId,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Expiry timestamp.
+    pub expires_at: String,
+    /// npub that redeemed the token, when consumed.
+    pub redeemed_by_npub: Option<UserId>,
+    /// Redemption timestamp when consumed.
+    pub redeemed_at: Option<String>,
+    /// Revocation timestamp when an admin killed the pending token.
+    pub revoked_at: Option<String>,
+    /// True when redeem returned an already-consumed result for the same npub.
+    pub duplicate_redeem: bool,
 }
 
 /// One agent resolved into an Invitation Plan.
@@ -5044,6 +5103,309 @@ mod tests {
         assert_eq!(
             provenance,
             MemberProvenance::invitation(admin, "invitation-plain".to_owned())
+        );
+    }
+
+    fn invite_token_hash(label: &str) -> String {
+        let mut hash = label
+            .chars()
+            .map(|c| {
+                if c.is_ascii_digit() || ('a'..='f').contains(&c) {
+                    c
+                } else {
+                    'f'
+                }
+            })
+            .collect::<String>();
+        while hash.len() < 64 {
+            hash.push('a');
+        }
+        hash.truncate(64);
+        hash
+    }
+
+    #[test]
+    fn invite_token_lifecycle_is_single_use_revocable_and_idempotent() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let redeemer = UserId::new("npub-redeemer").unwrap();
+        let wrong = UserId::new("npub-wrong").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+        let hash = invite_token_hash("1ifecycle");
+
+        let token = store
+            .create_brain_invite_token(
+                &brain_id,
+                &hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        assert_eq!(token.role, BrainInviteTokenRole::Member);
+        assert_eq!(token.redeemed_by_npub, None);
+        assert_eq!(token.revoked_at, None);
+
+        let listed = store.list_brain_invite_tokens(&brain_id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].token_hash, hash);
+
+        let redeemed = store
+            .redeem_brain_invite_token(&hash, &redeemer, now)
+            .unwrap();
+        assert_eq!(redeemed.redeemed_by_npub, Some(redeemer.clone()));
+        assert_eq!(redeemed.redeemed_at.as_deref(), Some(now));
+        assert!(!redeemed.duplicate_redeem);
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == redeemer)
+        );
+        let provenance = store
+            .member_provenance(&brain_id, &redeemer)
+            .unwrap()
+            .expect("member provenance is recorded");
+        assert_eq!(
+            provenance,
+            MemberProvenance::invitation(admin.clone(), format!("invite-token:{hash}"))
+        );
+
+        // Same npub re-presenting the consumed token is idempotent.
+        let retry = store
+            .redeem_brain_invite_token(&hash, &redeemer, now)
+            .unwrap();
+        assert!(retry.duplicate_redeem);
+
+        // A different npub can no longer consume it, and it cannot be revoked.
+        assert_eq!(
+            store
+                .redeem_brain_invite_token(&hash, &wrong, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invite token"
+            }
+        );
+        assert_eq!(
+            store
+                .revoke_brain_invite_token(&brain_id, &hash, &admin, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invite token"
+            }
+        );
+    }
+
+    #[test]
+    fn invite_token_redeem_marks_all_members_folder_wraps_only() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let redeemer = UserId::new("npub-redeemer").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+        let hash = invite_token_hash("0wraps");
+
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        store
+            .redeem_brain_invite_token(&hash, &redeemer, now)
+            .unwrap();
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert!(wraps.iter().any(
+            |wrap| wrap.folder_id == FolderId::new("team-notes").unwrap()
+                && wrap.recipient_npub == redeemer
+        ));
+        // Restricted Folders never follow from a member-role token.
+        assert!(
+            !wraps
+                .iter()
+                .any(|wrap| wrap.folder_id == FolderId::new("private-project").unwrap())
+        );
+    }
+
+    #[test]
+    fn invite_token_admin_role_grants_admin_standing() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let redeemer = UserId::new("npub-redeemer").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+        let hash = invite_token_hash("0admin01e");
+
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &hash,
+                BrainInviteTokenRole::Admin,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        store
+            .redeem_brain_invite_token(&hash, &redeemer, now)
+            .unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.brain.admins.contains(&redeemer));
+        // Admin-role tokens mark every Folder for key-holding clients.
+        let wraps = store.pending_grant_wraps(&brain_id).unwrap();
+        assert!(wraps.iter().any(|wrap| wrap.folder_id
+            == FolderId::new("private-project").unwrap()
+            && wrap.recipient_npub == redeemer));
+    }
+
+    #[test]
+    fn invite_token_expired_revoked_and_unknown_fail_closed() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let redeemer = UserId::new("npub-redeemer").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+
+        let expired_hash = invite_token_hash("0expired");
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &expired_hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .redeem_brain_invite_token(&expired_hash, &redeemer, "2026-08-29T00:00:00.000Z")
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invite token"
+            }
+        );
+
+        let revoked_hash = invite_token_hash("0re01ed");
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &revoked_hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        let revoked = store
+            .revoke_brain_invite_token(&brain_id, &revoked_hash, &admin, now)
+            .unwrap();
+        assert_eq!(revoked.revoked_at.as_deref(), Some(now));
+        assert_eq!(
+            store
+                .redeem_brain_invite_token(&revoked_hash, &redeemer, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invite token"
+            }
+        );
+
+        assert_eq!(
+            store
+                .redeem_brain_invite_token(&invite_token_hash("0unknown"), &redeemer, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invite token"
+            }
+        );
+    }
+
+    #[test]
+    fn invite_token_creation_requires_operational_authority_and_bounded_expiry() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let outsider = UserId::new("npub-outsider").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+
+        assert!(
+            store
+                .create_brain_invite_token(
+                    &brain_id,
+                    &invite_token_hash("0auth0ity"),
+                    BrainInviteTokenRole::Member,
+                    &outsider,
+                    expires,
+                    now,
+                )
+                .is_err()
+        );
+        let admin = UserId::new("npub-admin").unwrap();
+        assert!(
+            store
+                .create_brain_invite_token(
+                    &brain_id,
+                    &invite_token_hash("0expi1y"),
+                    BrainInviteTokenRole::Member,
+                    &admin,
+                    "2026-09-30T00:00:00.000Z",
+                    now,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .create_brain_invite_token(
+                    &brain_id,
+                    "not-a-hash",
+                    BrainInviteTokenRole::Member,
+                    &admin,
+                    expires,
+                    now,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn invite_token_revoke_requires_operational_authority() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let outsider = UserId::new("npub-outsider").unwrap();
+        let now = "2026-08-21T00:00:00.000Z";
+        let expires = "2026-08-28T00:00:00.000Z";
+        let hash = invite_token_hash("0re00ke");
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                expires,
+                now,
+            )
+            .unwrap();
+        assert!(
+            store
+                .revoke_brain_invite_token(&brain_id, &hash, &outsider, now)
+                .is_err()
+        );
+        assert_eq!(
+            store.load_brain_invite_token(&hash).unwrap().revoked_at,
+            None
         );
     }
 

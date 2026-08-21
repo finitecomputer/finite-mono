@@ -98,6 +98,16 @@ impl BrainStore {
                 params![28, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V29 is additive only (one new capability-token table), same
+        // ordinary path.
+        if !migration_applied(&tx, 29)? {
+            tx.execute_batch(SCHEMA_V29)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![29, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -345,6 +355,31 @@ ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
 
 const SCHEMA_V27: &str = r#"
 ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
+"#;
+
+const SCHEMA_V29: &str = r#"
+-- Auth-kernel capability-token invitations: a single-use, unguessable,
+-- revocable token that redeems to Brain Membership (and Brain Admin standing
+-- for role = 'admin') for any npub. Only the SHA-256 hash of the raw token is
+-- stored; the raw token is shown once at creation and delivered out of band
+-- (email is delivery, never identity). redeemed_by_npub/redeemed_at stamp the
+-- single use; revoked_at is the admin kill switch; expiry is evaluated at
+-- read time so a lapsed pending token keeps its audit row.
+CREATE TABLE brain_invite_tokens (
+    token_hash TEXT PRIMARY KEY NOT NULL,
+    brain_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('member', 'admin')),
+    inviter_npub TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    redeemed_by_npub TEXT,
+    redeemed_at TEXT,
+    revoked_at TEXT,
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX brain_invite_tokens_by_brain
+    ON brain_invite_tokens(brain_id, created_at);
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2546,6 +2581,70 @@ mod tests {
     }
 
     #[test]
+    fn migration_v29_adds_invite_tokens_table() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'brain_invite_tokens'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing V29 table brain_invite_tokens");
+
+        store
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                VALUES ('tokens-check', 'organization', 'Tokens Check', NULL, '2026-08-21T00:00:00Z');
+                INSERT INTO brain_invite_tokens (
+                    token_hash, brain_id, role, inviter_npub, created_at, expires_at
+                ) VALUES (
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'tokens-check', 'member', 'npub-admin',
+                    '2026-08-21T00:00:00Z', '2026-08-28T00:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_invite_tokens (
+                        token_hash, brain_id, role, inviter_npub, created_at, expires_at
+                     ) VALUES (
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'tokens-check', 'owner', 'npub-admin',
+                        '2026-08-21T00:00:00Z', '2026-08-28T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the role CHECK must reject unknown roles"
+        );
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_invite_tokens (
+                        token_hash, brain_id, role, inviter_npub, created_at, expires_at
+                     ) VALUES (
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'tokens-check', 'member', 'npub-admin',
+                        '2026-08-21T00:00:00Z', '2026-08-28T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "the token_hash primary key must reject duplicates"
+        );
+    }
+
+    #[test]
     fn migration_removes_legacy_pending_email_invitation_index() {
         let mut store = BrainStore::open_in_memory().unwrap();
         store
@@ -2688,7 +2787,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 28);
+        assert_eq!(latest_version, 29);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(

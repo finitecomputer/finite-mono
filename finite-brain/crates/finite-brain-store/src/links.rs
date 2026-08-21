@@ -1037,7 +1037,7 @@ fn invitation_grant_provenance(invitation: &StoredBrainInvitation) -> GrantProve
 /// Folders an invited Principal becomes entitled to read on accept: every
 /// All-Members Folder through Membership, plus the invited Restricted
 /// Folders. Owner and Admin-Only Folders never follow from an invitation.
-fn invitation_pending_wrap_folders<'a>(
+pub(crate) fn invitation_pending_wrap_folders<'a>(
     brain: &'a Brain,
     initial_folder_access: &[FolderId],
 ) -> Vec<&'a Folder> {

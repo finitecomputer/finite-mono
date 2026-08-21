@@ -977,6 +977,92 @@ pub struct BrainInvitationListResponse {
     pub invitations: Vec<BrainInvitationResponse>,
 }
 
+/// Create Invite Token request. `email` is delivery only: it never binds the
+/// token, which redeems to whatever npub presents it.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBrainInviteTokenRequest {
+    /// Access the token redeems to: "member" or "admin".
+    pub role: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Optional explicit expiry; defaults to seven days from creation.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Create Invite Token response: the only response that ever carries the raw
+/// token. `tokenId` is the SHA-256 hash of the raw token and the public
+/// handle for list and revoke.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBrainInviteTokenResponse {
+    pub token_id: String,
+    pub token: String,
+    pub url: String,
+    pub brain_id: String,
+    pub role: String,
+    pub expires_at: String,
+    pub created_at: String,
+    /// "sent", "not_configured", or "failed" when an email was requested;
+    /// "manual" otherwise.
+    pub delivery_status: String,
+}
+
+/// Stored Invite Token record. Never carries raw token material.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainInviteTokenResponse {
+    pub token_id: String,
+    pub brain_id: String,
+    pub role: String,
+    pub inviter_npub: String,
+    /// "pending", "redeemed", "revoked", or "expired" (computed at read time).
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub redeemed_by_npub: Option<String>,
+    pub redeemed_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// Invite Token list response.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainInviteTokenListResponse {
+    pub invite_tokens: Vec<BrainInviteTokenResponse>,
+}
+
+/// Revoke Invite Token request.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeBrainInviteTokenRequest {
+    pub token_id: String,
+}
+
+/// Redeem Invite Token request: the raw capability token.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemBrainInviteTokenRequest {
+    pub token: String,
+}
+
+/// Redeem Invite Token response. `duplicateRedeem` is true when the same npub
+/// re-presented an already-consumed token (idempotent retry).
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemBrainInviteTokenResponse {
+    pub token_id: String,
+    pub brain_id: String,
+    pub brain_display_name: String,
+    pub role: String,
+    pub inviter_npub: String,
+    pub redeemed_by_npub: String,
+    pub redeemed_at: Option<String>,
+    #[serde(default)]
+    pub duplicate_redeem: bool,
+}
+
 /// Invitee-scoped Brain Invitation summary: the pending npub-targeted
 /// invitations addressed to the authenticated caller. Expired invitations
 /// remain visible with `expired: true` so the invitee can ask for a re-invite
