@@ -17,7 +17,7 @@ audit metadata only. It never stores a user or Agent's secret Nostr key.
 | Data directory | `/var/lib/finite-identity` (`StateDirectory`, mode `0700`) |
 | SQLite database | `/var/lib/finite-identity/identity.db` |
 | Operator credential | `/etc/finite/identity-operator.env`, `root:root`, mode `0600` |
-| Sites notification credential | `/etc/finite/identity-sites-notification.env`, `root:root`, mode `0600` |
+| Sites notification credential (legacy) | `/etc/finite/identity-sites-notification.env`, `root:root`, mode `0600` |
 | Mail provider credential | `RESEND_API_KEY` in `/etc/finite-saas/sites.env` |
 | Mail sender | `Finite Identity <identity@finite.chat>` |
 | Trusted same-host product URL | `http://127.0.0.1:8790` |
@@ -29,23 +29,28 @@ the Runtime secret environment, an Agent Runtime, a command argument, logs, or
 this repository.
 
 The Sites notification environment contains exactly
-`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`. Only Identity and Sites read it.
-It authorizes the narrow first-publication and site-access-request mail route;
-it is not valid for operator actions and must not be supplied to a browser,
-dashboard process, Hosted Device, Runner, or Agent Runtime.
+`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`. The directory shrink retired the
+Identity side of that relay: the Directory no longer reads the credential.
+Only Sites still requires it at boot, until the stacked Sites auth-kernel PR
+moves first-publication and access-request mail to the Sites-local mailer;
+remove the credential and its NixOS wiring with that PR. It is not valid for
+operator actions and must not be supplied to a browser, dashboard process,
+Hosted Device, Runner, or Agent Runtime.
 
 ## Public and private routes
 
-Caddy exposes only:
+The Directory's public surface, proxied verbatim by Caddy, is exactly:
 
 - `GET /health`
 - `GET /.well-known/nostr.json`
 - `POST /api/v1/email-challenges`
 - `POST /api/v1/vip-email-bindings/redeem`
-- `POST /api/v1/email-only-principals/redeem`
+- `POST /api/v1/nip05-resolution`
 
-Operator endpoints and unauthenticated Principal Resolution remain
-loopback-only. A public request to either must return `404`.
+Operator endpoints remain loopback-only, and the directory shrink deleted
+Principal Resolution, Mailbox Proofs, Email-Only Principals, WorkOS account
+bindings, brain resolution, and the sites-notification relay. A public request
+to any of those must return `404`.
 
 `identity.finite.vip` currently belongs to the legacy `*.finite.vip` DNS
 shape. Before public acceptance, replace only its exact A record with
@@ -124,8 +129,8 @@ listener, which the Caddy edge proxies verbatim:
 curl --fail --silent http://127.0.0.1:8791/health
 ```
 
-Verify that private routes are not exposed, and that the public resolution
-route now authenticates callers (unsigned requests get 401, never 404):
+Verify that operator routes are not exposed and that the retired routes stay
+gone (every one must return 404):
 
 ```sh
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -135,11 +140,12 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   https://identity.finite.vip/api/v1/mailbox-proofs/consume)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   -X POST -H 'Content-Type: application/json' -d '{}' \
-  https://identity.finite.vip/api/v1/principal-resolution/satisfies-grant)" = 401
+  https://identity.finite.vip/api/v1/principal-resolution/satisfies-grant)" = 404
 ```
 
-The full edge contract — every Identity Authority route the fsite CLI calls
-must answer non-404 — is checked by `just identity-edge-contract` (static) and
+The full edge contract — the public surface is exactly the checked-in
+manifest, and every manifest route must answer non-404 — is checked by
+`just identity-edge-contract` (static) and
 `finite-identity/scripts/identity-edge-contract-gate.py` (live probe against production or a
 `--target` override).
 

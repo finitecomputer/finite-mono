@@ -109,7 +109,7 @@ otherwise a fresh identity is minted at first run.
 
 ## Owner
 
-This contract and the `finite-identity` crate own the shared Finite key and
-Principal Resolution boundary. Future key kinds, backup, and rotation require
-new Finite Identity contract versions; they do not depend on the retired
-`finite-auth` experiment or imply a shared human-agent signer.
+This contract and the `finite-identity` crate own the shared Finite key file
+and the NIP-05 name Directory boundary. Future key kinds, backup, and
+rotation require new Finite Identity contract versions; they do not depend on
+the retired `finite-auth` experiment or imply a shared human-agent signer.
