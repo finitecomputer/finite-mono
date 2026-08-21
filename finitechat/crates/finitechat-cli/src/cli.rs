@@ -769,6 +769,10 @@ pub(crate) enum HermesCommand {
     /// Ack delivered events (HermesAckRequestV1).
     Ack,
 
+    /// Release a leased-but-unprocessed event back to the inbox for
+    /// redelivery (HermesAckRequestV1 shape: room_id, seq, message_id).
+    Release,
+
     /// Send a Hermes message (HermesSendRequestV1).
     Send,
 
