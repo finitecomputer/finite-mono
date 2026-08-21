@@ -9,16 +9,16 @@ use crate::{
     AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
     AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, AgentRuntime,
-    BillingOverview, BillingSubscriptionStatus, BrainAccountAgentRoster, BrainAccountRosterLookup,
-    BrainAgentAccount, BrainAgentDepartureFactsPage, CancelAgentCreationRequestInput,
+    BillingOverview, BrainAccountAgentRoster, BrainAccountRosterLookup, BrainAgentAccount,
+    BrainAgentDepartureFactsPage, CancelAgentCreationRequestInput,
     CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
     CustomerBillingAccount, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
     FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
     FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
     FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
     IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    LinkStripeCustomerInput, LinkStripeCustomerRequest, LinkVerifiedUserInput, Project,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
@@ -28,8 +28,8 @@ use crate::{
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, normalize_owner_email,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest, UpsertRuntimeArtifactInput,
+    normalize_owner_email, normalize_runtime_contact_endpoint, normalize_source_host_id,
 };
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -97,28 +97,6 @@ pub struct IssueLaunchCodeBatchRequest {
     pub expires_in_hours: Option<i64>,
     #[serde(default)]
     pub hosting_tier: Option<crate::HostingTier>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkStripeCustomerRequest {
-    pub stripe_customer_id: String,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncStripeSubscriptionRequest {
-    pub customer_org_id: Option<String>,
-    pub stripe_customer_id: String,
-    pub stripe_subscription_id: String,
-    pub stripe_price_id: Option<String>,
-    pub subscription_status: BillingSubscriptionStatus,
-    pub current_period_end: Option<String>,
-    pub cancel_at_period_end: bool,
-    pub stripe_event_id: Option<String>,
-    pub stripe_event_created: Option<i64>,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

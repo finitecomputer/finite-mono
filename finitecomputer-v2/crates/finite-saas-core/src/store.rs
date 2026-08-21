@@ -1,3 +1,4 @@
+use crate::billing;
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, IssuedLaunchCodeBatch, LaunchCodeBatch, LaunchCodeBatchDetails,
     LaunchCodeRecord, LaunchCodeStatus, RevokeLaunchCodeBatchInput, hash_launch_code,
@@ -12,33 +13,32 @@ use crate::{
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
     AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BrainAccountAgentRoster,
-    BrainAccountAgentRosterEntry, BrainAccountRosterLookup, BrainAgentAccount,
-    BrainAgentDepartureFact, BrainAgentDepartureFactsPage, BrainDeparturePrincipalKind,
-    BrainDepartureReason, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
-    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
-    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
-    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
-    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
-    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectMembershipRole, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
-    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
-    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
-    RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
-    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
+    BillingOverview, BrainAccountAgentRoster, BrainAccountAgentRosterEntry,
+    BrainAccountRosterLookup, BrainAgentAccount, BrainAgentDepartureFact,
+    BrainAgentDepartureFactsPage, BrainDeparturePrincipalKind, BrainDepartureReason,
+    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
+    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
+    FailRuntimeControlRequestInput, FinitePrivateAdminAccount, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminProject, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
+    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, RecordProviderOperationTransitionInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
     RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
     RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
@@ -51,21 +51,20 @@ use crate::{
     new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
     normalize_id_part, normalize_idempotency_key, normalize_owner_email,
     normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
-    parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
-    parse_finite_private_api_key_status, parse_finite_private_grant_status,
-    parse_finite_private_reservation_status, parse_hosting_tier, parse_runner_class,
-    parse_runtime_artifact_kind, parse_runtime_control_kind, parse_runtime_control_request_status,
-    parse_runtime_resource_class, parse_runtime_summary_status, parse_time, parse_user_link_status,
+    parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
+    parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
+    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
+    parse_runtime_control_request_status, parse_runtime_resource_class,
+    parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
     runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
     runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
-    should_replace_stripe_subscription, source_import_key, trim_to_option, valid_agent_npub,
-    valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
-    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
-    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
-    validate_runtime_spec_environment,
+    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
+    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
+    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
+    validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
@@ -481,7 +480,7 @@ impl CoreStore {
     ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let account = postgres_link_stripe_customer(&*tx, input).await?;
+        let account = billing::link_stripe_customer(&*tx, input).await?;
         self.finish(tx).await?;
         Ok(account)
     }
@@ -492,7 +491,7 @@ impl CoreStore {
     ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let account = postgres_sync_stripe_subscription(&*tx, input).await?;
+        let account = billing::sync_stripe_subscription(&*tx, input).await?;
         self.finish(tx).await?;
         Ok(account)
     }
@@ -1105,7 +1104,7 @@ where
         }
         Some(locked)
     } else if !match existing_org_id.as_deref() {
-        Some(org_id) => postgres_customer_org_has_active_billing(client, org_id).await?,
+        Some(org_id) => billing::customer_org_has_active_billing(client, org_id).await?,
         None => false,
     } {
         return Err(CoreError::BillingRequired);
@@ -1118,7 +1117,7 @@ where
         let org_id = existing_org_id
             .as_deref()
             .ok_or(CoreError::MissingHostingTier)?;
-        select_customer_billing_account(client, org_id, false)
+        billing::select_customer_billing_account(client, org_id, false)
             .await?
             .and_then(|account| account.hosting_tier)
             .ok_or(CoreError::MissingHostingTier)?
@@ -1260,76 +1259,6 @@ where
     })
 }
 
-async fn postgres_customer_org_has_active_billing<C>(
-    client: &C,
-    customer_org_id: &str,
-) -> CoreResult<bool>
-where
-    C: GenericClient + Sync,
-{
-    let Some(row) = client
-        .query_opt(
-            "SELECT subscription_status FROM customer_billing_accounts
-             WHERE customer_org_id = $1",
-            &[&customer_org_id],
-        )
-        .await
-        .map_err(store_error)?
-    else {
-        return Ok(false);
-    };
-    let Some(status) = row.get::<_, Option<String>>("subscription_status") else {
-        return Ok(false);
-    };
-    let status = parse_billing_subscription_status(&status)
-        .ok_or(CoreError::InvalidBillingSubscriptionStatus)?;
-    Ok(BillingSubscriptionStatus::can_create_agent(status))
-}
-
-async fn select_customer_billing_account<C>(
-    client: &C,
-    customer_org_id: &str,
-    for_update: bool,
-) -> CoreResult<Option<CustomerBillingAccount>>
-where
-    C: GenericClient + Sync,
-{
-    let sql = format!(
-        "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
-                last_stripe_event_id, last_stripe_event_created, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
-         FROM customer_billing_accounts WHERE customer_org_id = $1{}",
-        if for_update { " FOR UPDATE" } else { "" }
-    );
-    client
-        .query_opt(&sql, &[&customer_org_id])
-        .await
-        .map_err(store_error)?
-        .map(|row| customer_billing_account_from_row(&row))
-        .transpose()
-}
-
-async fn select_customer_billing_account_by_stripe_customer<C>(
-    client: &C,
-    stripe_customer_id: &str,
-) -> CoreResult<Option<CustomerBillingAccount>>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .query_opt(
-            "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                    subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
-                    last_stripe_event_id, last_stripe_event_created, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
-             FROM customer_billing_accounts WHERE stripe_customer_id = $1",
-            &[&stripe_customer_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| customer_billing_account_from_row(&row))
-        .transpose()
-}
-
 async fn select_agent_creation_entitlement_by_org<C>(
     client: &C,
     customer_org_id: &str,
@@ -1417,10 +1346,10 @@ where
         },
     };
 
-    let billing_account = select_customer_billing_account(client, &org.id, false).await?;
+    let billing_account = billing::select_customer_billing_account(client, &org.id, false).await?;
     let agent_creation_entitlement =
         select_agent_creation_entitlement_by_org(client, &org.id).await?;
-    let has_active_billing = postgres_customer_org_has_active_billing(client, &org.id).await?;
+    let has_active_billing = billing::customer_org_has_active_billing(client, &org.id).await?;
     let active_count = postgres_active_agent_creation_entitlement_count(client, &org.id).await?;
 
     let can_create_agent = agent_creation_entitlement
@@ -1442,263 +1371,7 @@ where
     })
 }
 
-/// Guard `link_stripe_customer_to_org`'s conflict rules: a Stripe customer id may
-/// belong to exactly one org, and an org's existing customer id cannot change.
-async fn ensure_no_stripe_customer_conflict<C>(
-    client: &C,
-    customer_org_id: &str,
-    stripe_customer_id: &str,
-    existing: Option<&CustomerBillingAccount>,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    if let Some(existing_customer_id) =
-        existing.and_then(|account| account.stripe_customer_id.as_deref())
-        && existing_customer_id != stripe_customer_id
-    {
-        return Err(CoreError::StripeCustomerConflict);
-    }
-    if client
-        .query_opt(
-            "SELECT customer_org_id FROM customer_billing_accounts
-             WHERE stripe_customer_id = $1 AND customer_org_id <> $2",
-            &[&stripe_customer_id, &customer_org_id],
-        )
-        .await
-        .map_err(store_error)?
-        .is_some()
-    {
-        return Err(CoreError::StripeCustomerConflict);
-    }
-    Ok(())
-}
-
-/// Row-scoped equivalent of `link_stripe_customer_to_org`: upsert only the
-/// `customer_billing_accounts` row for this org, setting the Stripe customer id
-/// while preserving any existing subscription fields.
-async fn postgres_link_stripe_customer_to_org<C>(
-    client: &C,
-    customer_org_id: &str,
-    stripe_customer_id: &str,
-    now: &str,
-) -> CoreResult<CustomerBillingAccount>
-where
-    C: GenericClient + Sync,
-{
-    let existing = select_customer_billing_account(client, customer_org_id, true).await?;
-    ensure_no_stripe_customer_conflict(
-        client,
-        customer_org_id,
-        stripe_customer_id,
-        existing.as_ref(),
-    )
-    .await?;
-    let row = client
-        .query_one(
-            "INSERT INTO customer_billing_accounts
-               (customer_org_id, hosting_tier, stripe_customer_id, cancel_at_period_end, created_at, updated_at)
-             VALUES ($1, 'standard', $2, FALSE, $3::text::timestamptz, $3::text::timestamptz)
-             ON CONFLICT (customer_org_id) DO UPDATE SET
-               stripe_customer_id = EXCLUDED.stripe_customer_id,
-               updated_at = EXCLUDED.updated_at
-             RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       hosting_tier, subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
-                       last_stripe_event_id, last_stripe_event_created,
-                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
-            &[&customer_org_id, &stripe_customer_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
-    customer_billing_account_from_row(&row)
-}
-
-async fn postgres_link_stripe_customer<C>(
-    client: &C,
-    input: LinkStripeCustomerInput,
-) -> CoreResult<CustomerBillingAccount>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let verified_email = normalize_owner_email(Some(&input.verified_email))
-        .ok_or(CoreError::MissingVerifiedEmail)?;
-    let workos_user_id = input.workos_user_id.trim().to_string();
-    if workos_user_id.is_empty() {
-        return Err(CoreError::MissingWorkosUserId);
-    }
-    let stripe_customer_id = trim_to_option(Some(&input.stripe_customer_id))
-        .ok_or(CoreError::MissingStripeCustomerId)?;
-
-    // Same WorkOS-conflict guard the in-memory `ensure_linked_user_with_billing_class`
-    // enforces: a workos id may not move to a different email.
-    if client
-        .query_opt(
-            "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
-            &[&workos_user_id, &verified_email],
-        )
-        .await
-        .map_err(store_error)?
-        .is_some()
-    {
-        return Err(CoreError::WorkosUserConflict);
-    }
-
-    let user = upsert_linked_user(client, &verified_email, &workos_user_id, &now).await?;
-    let org = ensure_personal_org_row(client, &user, BillingClass::Standard, &now).await?;
-    postgres_link_stripe_customer_to_org(client, &org.id, &stripe_customer_id, &now).await
-}
-
-async fn postgres_sync_stripe_subscription<C>(
-    client: &C,
-    input: SyncStripeSubscriptionInput,
-) -> CoreResult<CustomerBillingAccount>
-where
-    C: GenericClient + Sync,
-{
-    let now = input.now.unwrap_or(current_time_iso()?);
-    let stripe_customer_id = trim_to_option(Some(&input.stripe_customer_id))
-        .ok_or(CoreError::MissingStripeCustomerId)?;
-    let stripe_subscription_id = trim_to_option(Some(&input.stripe_subscription_id))
-        .ok_or(CoreError::MissingStripeSubscriptionId)?;
-    let stripe_price_id = trim_to_option(input.stripe_price_id.as_deref());
-
-    // Resolve the org: explicit id, else the account that already owns this
-    // Stripe customer (natural key), else there is nothing to sync.
-    let customer_org_id = match trim_to_option(input.customer_org_id.as_deref()) {
-        Some(org_id) => org_id,
-        None => select_customer_billing_account_by_stripe_customer(client, &stripe_customer_id)
-            .await?
-            .map(|account| account.customer_org_id)
-            .ok_or(CoreError::BillingAccountNotFound)?,
-    };
-    if !customer_org_exists(client, &customer_org_id).await? {
-        return Err(CoreError::BillingAccountNotFound);
-    }
-
-    // Lock this org's billing row for the transaction (row-scoped concurrency).
-    let existing = select_customer_billing_account(client, &customer_org_id, true).await?;
-
-    // Event-ordering guard: for the SAME subscription, drop a webhook whose
-    // Stripe `event.created` predates the last applied one.
-    if let Some(account) = existing.as_ref()
-        && account.stripe_subscription_id.as_deref() == Some(stripe_subscription_id.as_str())
-        && let (Some(last_created), Some(incoming_created)) = (
-            account.last_stripe_event_created,
-            input.stripe_event_created,
-        )
-        && incoming_created < last_created
-    {
-        return Ok(account.clone());
-    }
-
-    // Subscription-replacement guard: don't let a new subscription id clobber an
-    // active one unless the status transition warrants it.
-    if let Some(account) = existing.as_ref()
-        && let Some(existing_subscription_id) = account.stripe_subscription_id.as_deref()
-        && existing_subscription_id != stripe_subscription_id
-        && !should_replace_stripe_subscription(
-            account.subscription_status,
-            input.subscription_status,
-        )
-    {
-        return Ok(account.clone());
-    }
-
-    ensure_no_stripe_customer_conflict(
-        client,
-        &customer_org_id,
-        &stripe_customer_id,
-        existing.as_ref(),
-    )
-    .await?;
-
-    if input.subscription_status.can_create_agent() {
-        let expected_price_id = trim_to_option(input.expected_stripe_price_id.as_deref())
-            .ok_or(CoreError::MissingStripeStandardPriceId)?;
-        if stripe_price_id.as_deref() != Some(expected_price_id.as_str()) {
-            return Err(CoreError::StripeSubscriptionPriceMismatch);
-        }
-    }
-
-    let subscription_status = input.subscription_status.as_str();
-    let last_stripe_event_id = trim_to_option(input.stripe_event_id.as_deref());
-    let last_stripe_event_created = input
-        .stripe_event_created
-        .or_else(|| existing.as_ref().and_then(|a| a.last_stripe_event_created));
-    let created_at = existing
-        .as_ref()
-        .map(|account| account.created_at.clone())
-        .unwrap_or_else(|| now.clone());
-
-    let row = client
-        .query_one(
-            "INSERT INTO customer_billing_accounts (
-                customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                subscription_status, current_period_end, cancel_at_period_end,
-                last_stripe_event_id, last_stripe_event_created, created_at, updated_at
-             )
-             VALUES ($1, 'standard', $2, $3, $4, $5, $6::text::timestamptz, $7, $8, $9, $10::text::timestamptz, $11::text::timestamptz)
-             ON CONFLICT (customer_org_id) DO UPDATE SET
-               stripe_customer_id = EXCLUDED.stripe_customer_id,
-               stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-               stripe_price_id = EXCLUDED.stripe_price_id,
-               subscription_status = EXCLUDED.subscription_status,
-               current_period_end = EXCLUDED.current_period_end,
-               cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-               last_stripe_event_id = EXCLUDED.last_stripe_event_id,
-               last_stripe_event_created = EXCLUDED.last_stripe_event_created,
-               updated_at = EXCLUDED.updated_at
-             RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       hosting_tier, subscription_status, core_rfc3339(current_period_end) AS current_period_end, cancel_at_period_end,
-                       last_stripe_event_id, last_stripe_event_created,
-                       core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
-            &[
-                &customer_org_id,
-                &stripe_customer_id,
-                &stripe_subscription_id,
-                &stripe_price_id,
-                &subscription_status,
-                &input.current_period_end,
-                &input.cancel_at_period_end,
-                &last_stripe_event_id,
-                &last_stripe_event_created,
-                &created_at,
-                &now,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    let account = customer_billing_account_from_row(&row)?;
-
-    // Grant on active/trialing; zero the standard (non-launch-code) grant otherwise.
-    if input.subscription_status.can_create_agent() {
-        ensure_standard_agent_creation_entitlement_row(client, &customer_org_id, &now).await?;
-        client
-            .execute(
-                "UPDATE customer_orgs
-                 SET billing_class = 'standard', updated_at = $2::text::timestamptz
-                 WHERE id = $1",
-                &[&customer_org_id, &now],
-            )
-            .await
-            .map_err(store_error)?;
-    } else {
-        client
-            .execute(
-                "UPDATE agent_creation_entitlements
-                 SET allowed_new_agent_runtimes = 0, updated_at = $2::text::timestamptz
-                 WHERE customer_org_id = $1 AND launch_code IS NULL",
-                &[&customer_org_id, &now],
-            )
-            .await
-            .map_err(store_error)?;
-    }
-
-    Ok(account)
-}
-
-async fn customer_org_exists<C>(client: &C, org_id: &str) -> CoreResult<bool>
+pub(crate) async fn customer_org_exists<C>(client: &C, org_id: &str) -> CoreResult<bool>
 where
     C: GenericClient + Sync,
 {
@@ -2895,7 +2568,10 @@ fn customer_org_from_row(row: &Row) -> CoreResult<CustomerOrganization> {
     })
 }
 
-fn optional_hosting_tier_column(row: &Row, name: &str) -> CoreResult<Option<HostingTier>> {
+pub(crate) fn optional_hosting_tier_column(
+    row: &Row,
+    name: &str,
+) -> CoreResult<Option<HostingTier>> {
     let value: Option<String> = row.get(name);
     value
         .map(|value| {
@@ -2925,31 +2601,6 @@ fn optional_runtime_placement_columns(
             "incomplete persisted runtime placement".to_string(),
         )),
     }
-}
-
-fn customer_billing_account_from_row(row: &Row) -> CoreResult<CustomerBillingAccount> {
-    let status: Option<String> = row.get("subscription_status");
-    Ok(CustomerBillingAccount {
-        customer_org_id: row.get("customer_org_id"),
-        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
-        stripe_customer_id: row.get("stripe_customer_id"),
-        stripe_subscription_id: row.get("stripe_subscription_id"),
-        stripe_price_id: row.get("stripe_price_id"),
-        subscription_status: status
-            .as_deref()
-            .map(|value| {
-                parse_billing_subscription_status(value).ok_or_else(|| {
-                    CoreError::Store(format!("invalid billing subscription status {value}"))
-                })
-            })
-            .transpose()?,
-        current_period_end: row.get("current_period_end"),
-        cancel_at_period_end: row.get("cancel_at_period_end"),
-        last_stripe_event_id: row.get("last_stripe_event_id"),
-        last_stripe_event_created: row.get("last_stripe_event_created"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
 }
 
 fn agent_creation_entitlement_from_row(row: &Row) -> CoreResult<AgentCreationEntitlement> {
@@ -3507,7 +3158,7 @@ where
 /// `normalized_email` (UNIQUE), so an existing row keeps its already-minted
 /// surrogate id and we only relink workos/status; a brand-new email gets a
 /// fresh `new_user_id()`. The primary key is NEVER derived from the email.
-async fn upsert_linked_user<C>(
+pub(crate) async fn upsert_linked_user<C>(
     client: &C,
     email: &str,
     workos_user_id: &str,
@@ -3534,7 +3185,7 @@ where
     core_user_from_row(&row)
 }
 
-async fn ensure_personal_org_row<C>(
+pub(crate) async fn ensure_personal_org_row<C>(
     client: &C,
     user: &CoreUser,
     billing_class: BillingClass,
@@ -3595,7 +3246,7 @@ where
     agent_creation_entitlement_from_row(&row)
 }
 
-async fn ensure_standard_agent_creation_entitlement_row<C>(
+pub(crate) async fn ensure_standard_agent_creation_entitlement_row<C>(
     client: &C,
     customer_org_id: &str,
     now: &str,
@@ -8399,7 +8050,7 @@ fn pool_config_error(context: &str, error: impl std::fmt::Display) -> CoreError 
 /// the `as_db_error()` fields (SQLSTATE code, constraint, table, column, DETAIL)
 /// that `error.to_string()` used to flatten into the useless string "db error".
 /// The detail is log-only; the user-facing message stays generic.
-fn store_error(error: tokio_postgres::Error) -> CoreError {
+pub(crate) fn store_error(error: tokio_postgres::Error) -> CoreError {
     if let Some(db) = error.as_db_error() {
         CoreError::Database(Box::new(StoreErrorDetail {
             message: db.message().to_string(),
@@ -8653,7 +8304,7 @@ impl CoreStore {
         org_id: &str,
     ) -> Option<CustomerBillingAccount> {
         let client = self.connection().await.unwrap();
-        select_customer_billing_account(&**client, org_id, false)
+        billing::select_customer_billing_account(&**client, org_id, false)
             .await
             .unwrap()
     }
@@ -8715,6 +8366,8 @@ impl CoreStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::BillingSubscriptionStatus;
+
     use super::*;
     use crate::test_support::with_isolated_postgres;
     use crate::{

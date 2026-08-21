@@ -1,9 +1,19 @@
 pub mod api;
 pub mod auth;
+pub mod billing;
 pub mod launch_codes;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
+
+// Re-exported so the crate's public surface is unchanged: Stripe billing
+// concepts are now defined in (and owned by) `billing` alone, but existing
+// `crate::...` imports in store/api/tests keep resolving.
+pub use billing::{
+    BillingSubscriptionStatus, CustomerBillingAccount, LinkStripeCustomerInput,
+    LinkStripeCustomerRequest, SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest,
+    parse_billing_subscription_status,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -110,19 +120,9 @@ wire_enum! {
     parse: parse_billing_class
 }
 
-wire_enum! {
-    BillingSubscriptionStatus {
-    Incomplete => "incomplete",
-    IncompleteExpired => "incomplete_expired",
-    Trialing => "trialing",
-    Active => "active",
-    PastDue => "past_due",
-    Canceled => "canceled",
-    Unpaid => "unpaid",
-    Paused => "paused",
-    }
-    parse: parse_billing_subscription_status
-}
+// Path-accessible so `billing` (declared above the textual macro definition)
+// can reuse the same single-source-of-truth enum declaration.
+pub(crate) use wire_enum;
 
 wire_enum! {
     UserLinkStatus {
@@ -690,26 +690,6 @@ pub struct CustomerOrganization {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CustomerBillingAccount {
-    pub customer_org_id: String,
-    #[serde(default)]
-    pub hosting_tier: Option<HostingTier>,
-    pub stripe_customer_id: Option<String>,
-    pub stripe_subscription_id: Option<String>,
-    pub stripe_price_id: Option<String>,
-    pub subscription_status: Option<BillingSubscriptionStatus>,
-    pub current_period_end: Option<String>,
-    pub cancel_at_period_end: bool,
-    pub last_stripe_event_id: Option<String>,
-    /// Unix timestamp (`event.created`) of the most recently APPLIED Stripe
-    /// webhook for this account. The event-ordering guard compares against it so
-    /// a stale event delivered out of order can't resurrect a canceled sub.
-    pub last_stripe_event_created: Option<i64>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BillingOverview {
     pub customer_org: CustomerOrganization,
     pub billing_account: Option<CustomerBillingAccount>,
@@ -959,34 +939,6 @@ pub struct AgentCreationEntitlement {
     pub launch_code: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkStripeCustomerInput {
-    pub verified_email: String,
-    pub workos_user_id: String,
-    pub stripe_customer_id: String,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncStripeSubscriptionInput {
-    pub customer_org_id: Option<String>,
-    pub stripe_customer_id: String,
-    pub stripe_subscription_id: String,
-    pub stripe_price_id: Option<String>,
-    pub expected_stripe_price_id: Option<String>,
-    pub subscription_status: BillingSubscriptionStatus,
-    pub current_period_end: Option<String>,
-    pub cancel_at_period_end: bool,
-    pub stripe_event_id: Option<String>,
-    /// Unix timestamp of the Stripe `event.created` for this delivery. Threaded
-    /// from the dashboard webhook so Core can order webhooks monotonically and
-    /// ignore stale ones (see `sync_stripe_subscription`).
-    pub stripe_event_created: Option<i64>,
-    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2088,25 +2040,6 @@ pub struct FailAgentCreationRequestInput {
 pub struct CancelAgentCreationRequestInput {
     pub request_id: String,
     pub now: Option<String>,
-}
-
-impl BillingSubscriptionStatus {
-    pub fn can_create_agent(self) -> bool {
-        matches!(self, Self::Active | Self::Trialing)
-    }
-}
-
-fn should_replace_stripe_subscription(
-    current: Option<BillingSubscriptionStatus>,
-    incoming: BillingSubscriptionStatus,
-) -> bool {
-    match current {
-        None => true,
-        Some(
-            BillingSubscriptionStatus::Canceled | BillingSubscriptionStatus::IncompleteExpired,
-        ) => incoming.can_create_agent(),
-        Some(_) => false,
-    }
 }
 
 impl std::str::FromStr for RuntimeArtifactKind {
