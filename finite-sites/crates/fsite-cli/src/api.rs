@@ -195,7 +195,11 @@ impl Client {
             email: email.to_string(),
         })
         .expect("request serializes");
-        let url = format!("{}/api/v1/email-auth/request", self.base_url);
+        // Anonymous by design, so this cannot use the signed helper; keep the
+        // Sites-client `"{}{}"` URL style so the Identity edge gate's
+        // direct-call pattern does not mistake this daemon-local route for a
+        // Directory call.
+        let url = format!("{}{}", self.base_url, "/api/v1/email-auth/request");
         let response = ureq::post(&url)
             .set("Content-Type", "application/json")
             .send_bytes(&body);

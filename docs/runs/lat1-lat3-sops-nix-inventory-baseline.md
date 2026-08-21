@@ -37,12 +37,12 @@ remains the required proof before switching any consumer to SOPS.
 | metrics-remote-write | `/etc/finite/metrics-remote-write.env` | env | `FINITE_METRICS_REMOTE_WRITE_USERNAME`, `FINITE_METRICS_REMOTE_WRITE_PASSWORD` | `alloy.service` | Used on both lat1 and lat3. Good SOPS pilot, but inherently two-host unless deliberately scoped. |
 | runner-env | `/etc/finite/runner.env` | env | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY`, plus drain/incident overrides | `finite-saas-runner.service`; Phala installer reads specialization key | Mixed credential plus operational-control file. Keep legacy until a split or migration policy is chosen. |
 | phala-runner-env | `/etc/finite/phala-runner.env` | env | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` | `finite-saas-runner-phala.service` | Current installer creates this and updates Core metadata. |
-| identity-operator | `/etc/finite/identity-operator.env` | env | `FINITE_IDENTITY_OPERATOR_TOKEN` | `finite-identity.service`, `finite-saas-runner.service`, `finite-saas-runner-phala.service`, `finite-brain-app.service`, `finitechat-hosted-device.service` | Also needed on lat3 for the remote Runner. |
-| identity-sites-notification | `/etc/finite/identity-sites-notification.env` | env | `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN` | `finite-identity.service`, `finite-saas-sites.service` | Narrow Identity-to-Sites mail credential. |
+| identity-operator | `/etc/finite/identity-operator.env` | env | `FINITE_IDENTITY_OPERATOR_TOKEN` | `finite-identity.service`, `finite-saas-runner.service`, `finite-saas-runner-phala.service` | Also needed on lat3 for the remote Runner. Brain and Hosted Device stopped reading it in the auth-kernel cut. |
+| ~~identity-sites-notification~~ | ~~`/etc/finite/identity-sites-notification.env`~~ | retired | — | none | Retired by the auth-kernel stack: the Directory relay and the Sites reader are both gone; no SOPS entry needed. |
 | runtime-secrets | `/etc/finite/runtime-secrets.env` | env | `FAL_KEY`, `FRED_API_KEY`, `GOOGLE_PLACES_API_KEY`, `XAI_API_KEY`, `X_API_BEARER_TOKEN`, `ELEVENLABS_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY` | Kata Runner via `FC_RUNNER_RUNTIME_SECRET_ENV_FILE`; Phala Runner via `LoadCredential` | Also needed on lat3. Core records names only. |
 | dashboard-env | `/etc/finite/dashboard.env` | env | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FC_WORKOS_OPERATOR_ORG_ID`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` | `podman-finite-saas-dashboard.service` container env files | Dashboard also reads hosted-device and sites-viewer-session env files. |
 | hosted-web-device-env | `/etc/finite/hosted-web-device.env` | env | `FINITECHAT_HOSTED_API_TOKEN` | `finitechat-hosted-device.service`, dashboard container | Server-only internal boundary shared with dashboard. |
-| brain-authority-env | `/etc/finite/brain-authority.env` | env | `FC_CORE_API_TOKEN` | `finite-brain-app.service` | Brain's trusted Core resolution credential. |
+| ~~brain-authority-env~~ | ~~`/etc/finite/brain-authority.env`~~ | retired | — | none | Retired by the auth-kernel stack: Brain no longer calls Core; no SOPS entry needed. |
 | sites-viewer-session-env | `/etc/finite/sites-viewer-session.env` | env | `FINITE_SITES_VIEWER_SESSION_TOKEN` | `finite-saas-sites.service`, dashboard container | Must remain exactly 64 lowercase hex chars. |
 | sites-env | `/etc/finite-saas/sites.env` | env | `RESEND_API_KEY` | `finite-saas-sites.service`, `finite-identity.service`, `finite-brain-app.service` | Existing send-only mail credential. |
 | searxng-env | `/etc/finite/searxng.env` | env | `SEARXNG_SECRET` plus optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER` | `podman-searxng.service` | Search-only, lower blast radius. |
@@ -75,11 +75,12 @@ remains the required proof before switching any consumer to SOPS.
   non-NixOS surfaces. They are useful source notes, not current lat1/lat3
   production consumers unless a current NixOS module or active runbook still
   points at the same path.
-- `scripts/install-identity-authority-credentials`,
-  `scripts/install-identity-sites-notification-credential`, and
+- `scripts/install-identity-authority-credentials` and
   `scripts/install-phala-canary-credentials` still create or mutate live
   `/etc/finite` files. They should remain valid only for legacy-backed entries
   or be replaced by SOPS-aware workflows later.
+  (`scripts/install-identity-sites-notification-credential` was deleted with
+  the retired credential.)
 - `scripts/finite_status.py`, `scripts/rollout-lat1-runtime-artifact`, and
   several runbooks still read `/etc/finite/core.env` or
   `/etc/finite/runner.env` directly. They do not block the foundation, but they

@@ -209,15 +209,13 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/logs-write.env` | `FINITE_LOGS_WRITE_USERNAME`, `FINITE_LOGS_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-1 and finite-lat-3 before activating a closure with LAT journald shipping. The username must match the monitoring receiver's `LOGS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The Loki push URL is fixed in Nix to `https://metrics-ingest.finite.computer/loki/api/v1/push`. This is deliberately separate from the Prometheus remote-write credential. |
 | `/etc/finite/runner.env` | only credentials, the promoted Runtime artifact pin, and deliberate overrides: `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_RUNTIME_ARTIFACT_ID` (required; the shared env has no default), drain state (see `infra/hosts/lat1/systemd/runner.env.example`); the shared non-secret keys are Nix-rendered to `/etc/finite/runner-shared.env` by `modules/kata-runner-host.nix` | provision the route-scoped Runner credential. Leftover `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` is unread; leave it in live files and rotate that token when the clawland worker is torn down |
 | `/etc/finite/phala-runner.env` | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY` | Installed with `scripts/install-phala-canary-credentials` for the ACTIVE one-canary run. The script creates a distinct Core keyring credential named `finite-phala-runner-1`, bound to class `phala` and source host `finite-lat-1-phala-control-1`, and accepts the host-only Phala key through a hidden prompt. Never reuse the Kata token or put either credential in Runtime environment. Non-secret workspace/artifact/runtime facts are pinned in the Nix unit; shared runtime secrets enter through a systemd credential copy. |
-| `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, Phala Runner, Brain, and Hosted Device; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
-| `/etc/finite/identity-sites-notification.env` | `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-sites-notification-credential`. Only `finite-identityd` and `finitesitesd` read this narrow same-host credential. It authorizes Sites publication/access-request mail delivery only; it is not the Identity operator credential and must never enter the dashboard, Hosted Device, Runner, or Agent Runtime. Install it before switching to a system closure that requires the file. |
+| `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, and Phala Runner; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
 | `/etc/finite/runtime-secrets.env` | the shared tool-provider names selected by Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` and listed in `infra/hosts/lat1/systemd/runtime-secrets.env.example` | legacy `../finitecomputer/secrets/shared-provider-keys.env`; values remain host-only, and OpenRouter is not selected for the new platform |
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FC_WORKOS_OPERATOR_ORG_ID`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` | Existing names come from the k8s Secret on old lat1; provision the same missing operator-org predicate used by Core before rollout |
 | `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
-| `/etc/finite/brain-authority.env` | `FC_CORE_API_TOKEN` | provision Brain's trusted service credential for the narrow Core account/Agent resolution routes; never expose it to the Product Client |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
-| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
+| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-1-litestream` bucket at Latitude.sh object storage (chi region — nearest to lat1); store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
@@ -254,10 +252,11 @@ The helper checks only `/etc/finite/metrics-remote-write.env` and
 `/etc/finite/logs-write.env` metadata plus required variable names. It discards
 values and prints none.
 
-Finite Brain reads `/etc/finite/identity-operator.env`,
-`/etc/finite/brain-authority.env`, and the send-only Resend credential from
-`/etc/finite-saas/sites.env`; the Product Client and Agent Runtime never
-receive any of those credentials.
+Finite Brain reads the send-only Resend credential from
+`/etc/finite-saas/sites.env` for its own invitation mailer; the retired
+`identity-operator.env` and `brain-authority.env` loads are gone (the server
+no longer calls the Directory or Core). The Product Client and Agent Runtime
+never receive any service credential.
 
 ## Google Workspace OAuth production setup
 
@@ -315,7 +314,9 @@ that final operation read-only unless the tester explicitly intends a write.
 | 3015 | 127.0.0.1 | finite-brain | smoke (previously public-bound there) |
 | 4200 | 127.0.0.1 | finite-saas-core (nix-built binary) | was lat1 k3s ClusterIP |
 | 5432 | 127.0.0.1 | postgres 16 native (`finite_core`) | was lat1 k3s StatefulSet |
-| 8790 | 127.0.0.1 | Finite Identity Authority | new |
+| 8080 | 127.0.0.1 | searxng (podman) | lat2 |
+| 8790 | 127.0.0.1 | Finite Identity Directory (full router; operator routes are loopback-only) | new |
+| 8791 | 127.0.0.1 | Finite Identity Directory public router (Caddy proxies this verbatim) | new |
 | 8787 | 127.0.0.1 | finitesitesd | lat2 |
 | **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
 | 38918 | 127.0.0.1 | Finite Chat Hosted Web Device (dashboard-internal) | new |
@@ -329,7 +330,7 @@ Caddy vhost → backend: `finite.computer` → 4200 for
 `/internal/finite-private/*` and the exact API-key usage/reset paths under
 `/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
 `*.docs.finite.chat` → 8787 (Cloudflare Origin CA);
-`identity.finite.vip` public identity routes → 8790. Brain has no independent
+`identity.finite.vip` public identity routes → 8791. Brain has no independent
 edge: authenticated `/client` and `/_admin/*` requests go through the dashboard
 to loopback :3015, then Brain applies its Nostr authorization.
 
