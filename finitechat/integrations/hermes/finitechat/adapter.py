@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -1604,11 +1604,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
+            error = _service_error(stderr_text or stdout_text)
             return _FiniteChatResult(
                 False,
                 {},
-                stderr_text or stdout_text or f"finitechat exited {proc.returncode}",
-                _is_retryable_cli_error(stderr_text or stdout_text),
+                error.message or f"finitechat exited {proc.returncode}",
+                error.retryable,
+                error_kind=error.kind,
             )
         if not stdout_text:
             return _FiniteChatResult(True, {}, None, False)
@@ -1743,12 +1745,15 @@ class _FiniteChatResult:
         error: str | None,
         retryable: bool,
         transport_error: bool = False,
+        *,
+        error_kind: str | None = None,
     ):
         self.ok = ok
         self.data = data
         self.error = error
         self.retryable = retryable
         self.transport_error = transport_error
+        self.error_kind = error_kind
 
 
 def _resolve_finitechat_command(configured: str) -> list[str]:
@@ -1781,13 +1786,14 @@ def _finitechat_service_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace").strip()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
+        error = _service_error(exc.read().decode("utf-8", errors="replace").strip())
         return _FiniteChatResult(
             False,
             {},
-            _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
-            _is_retryable_cli_error(body),
+            error.message or f"finitechat service returned HTTP {exc.code}",
+            error.retryable,
             False,
+            error_kind=error.kind,
         )
     except TimeoutError as exc:
         return _FiniteChatResult(False, {}, str(exc), True, False)
@@ -1881,16 +1887,17 @@ def _finitechat_service_stream_worker(
                     _FiniteChatResult(True, {"records": [record]}, None, False, False),
                 )
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
+        error = _service_error(exc.read().decode("utf-8", errors="replace").strip())
         _put_stream_result(
             loop,
             queue,
             _FiniteChatResult(
                 False,
                 {},
-                _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
-                _is_retryable_cli_error(body),
+                error.message or f"finitechat service returned HTTP {exc.code}",
+                error.retryable,
                 False,
+                error_kind=error.kind,
             ),
         )
     except TimeoutError as exc:
@@ -1908,16 +1915,47 @@ def _put_stream_result(
         loop.call_soon_threadsafe(queue.put_nowait, result)
 
 
-def _service_error_body(body: str) -> str | None:
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return body or None
-    if isinstance(data, dict):
-        error = data.get("error")
-        if error:
-            return str(error)
-    return body or None
+class _ServiceError(NamedTuple):
+    """The sidecar's structured error, as read from an HTTP error body or
+    the ``--json`` CLI stderr line: ``{"error", "error_kind", "retryable"}``.
+
+    ``retryable`` is taken from the sidecar verbatim; Python never infers it
+    from the message text. A body that is not that shape (a crash, a signal,
+    an HTML or empty response) did not come from the sidecar's error path,
+    so it is reported verbatim with ``retryable=False``: the transport-level
+    failures that are genuinely transient (timeouts, refused connections) are
+    classified by exception type before any body is parsed, and retrying a
+    request whose outcome is unknown risks duplicating a delivery.
+    """
+
+    message: str | None
+    kind: str | None
+    retryable: bool
+
+
+def _service_error(body: str) -> _ServiceError:
+    data = _parse_service_error_json(body)
+    if data is None:
+        return _ServiceError(body or None, None, False)
+    error = data.get("error")
+    kind = data.get("error_kind")
+    return _ServiceError(
+        str(error) if error else (body or None),
+        str(kind) if isinstance(kind, str) and kind else None,
+        data.get("retryable") is True,
+    )
+
+
+def _parse_service_error_json(body: str) -> dict[str, Any] | None:
+    """The whole body, else its last line (the CLI may log above the JSON line)."""
+    for candidate in (body, body.rsplit("\n", 1)[-1].strip()):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _finitechat_service_health(service_url: str, timeout: int) -> bool:
@@ -2230,11 +2268,6 @@ def _stream_reconnect_delay(attempt: int) -> float:
         STREAM_RECONNECT_BACKOFF_SECS * (2**exponent),
         STREAM_RECONNECT_MAX_BACKOFF_SECS,
     )
-
-
-def _is_retryable_cli_error(message: str) -> bool:
-    lowered = message.lower()
-    return any(token in lowered for token in ("timed out", "connection", "temporarily", "busy"))
 
 
 def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | None:

@@ -81,6 +81,67 @@ impl CliError {
             | Self::Runtime(_) => 1,
         }
     }
+
+    /// Stable machine-readable class of this error. Shared by the Hermes
+    /// service error body and the `--json` CLI stderr line so both transports
+    /// report the same classification.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Usage(_) => "usage",
+            Self::Serialize(_) => "serialize",
+            Self::Json(_) => "json",
+            Self::Http(_) => "http",
+            Self::Server { .. } => "server",
+            Self::Output(_) => "output",
+            Self::Hermes(_) => "hermes",
+            Self::Identity(_) => "identity",
+            Self::Runtime(_) => "runtime",
+        }
+    }
+
+    /// Whether a caller may retry the same request unchanged. Decided by the
+    /// error class, never by the human-readable message.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Http(_) => true,
+            Self::Server { status, .. } => {
+                status.is_server_error()
+                    || *status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            }
+            Self::Usage(_)
+            | Self::Serialize(_)
+            | Self::Json(_)
+            | Self::Output(_)
+            | Self::Hermes(_)
+            | Self::Identity(_)
+            | Self::Runtime(_) => false,
+        }
+    }
+
+    /// One-line JSON form printed to stderr when `--json` was requested, so a
+    /// machine caller of the CLI sees the same `error_kind` / `retryable`
+    /// fields the resident service returns in its HTTP error body.
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "error_kind": self.kind(),
+            "retryable": self.retryable(),
+            "error": self.to_string(),
+        })
+    }
+}
+
+/// `--json` is a global flag on the subcommands that support it; an error
+/// raised before or during parsing still honours it, so the check is on the
+/// raw arguments rather than the parsed command.
+pub fn json_errors_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--json")
 }
 
 pub fn run<I, S, W>(args: I, output: &mut W) -> Result<(), CliError>
