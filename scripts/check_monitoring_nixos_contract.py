@@ -140,11 +140,13 @@ def nix_eval() -> dict[str, Any]:
             config = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
             envFiles = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-1.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
           finite-lat-3 = {
             config = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
             envFiles = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-3.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }
@@ -334,6 +336,11 @@ def main() -> int:
             "adm" in alloy["supplementaryGroups"]
             and "systemd-journal" in alloy["supplementaryGroups"],
             f"{host_name} Alloy must be able to read journald",
+        )
+        require_contains(
+            alloy["activation"],
+            "check-lat-monitoring-secrets",
+            f"{host_name} monitoring secret activation preflight",
         )
 
         for metric_name in HOST_METRIC_NAMES:
