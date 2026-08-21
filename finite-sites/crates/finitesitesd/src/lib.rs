@@ -45,7 +45,6 @@ const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
 const CORE_API_BASE_URL_ENV: &str = "FC_CORE_API_BASE_URL";
 const CORE_API_TOKEN_ENV: &str = "FC_CORE_API_TOKEN";
 const VIEWER_SESSION_SERVICE_TOKEN_ENV: &str = "FINITE_SITES_VIEWER_SESSION_TOKEN";
-const IDENTITY_SITES_NOTIFICATION_TOKEN_ENV: &str = "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN";
 
 pub struct ServeOptions {
     pub data_dir: PathBuf,
@@ -54,11 +53,9 @@ pub struct ServeOptions {
     pub document_base_domain: String,
     pub api_url: String,
     pub git_base_url: String,
-    pub identity_authority_url: Option<String>,
     /// Dedicated account-boundary credential for the internal viewer-session
     /// exchange. It comes from the environment, never argv.
     pub viewer_session_service_token: Option<String>,
-    pub identity_sites_notification_token: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
@@ -124,7 +121,6 @@ fn usage() -> String {
      [--base-domain sites.localhost] [--api-url http://127.0.0.1:8787] \
      [--document-base-domain docs.sites.localhost] \
      [--git-url http://git.sites.localhost:8787] \
-     [--identity-authority-url http://127.0.0.1:8790] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
      --mailer dev|resend [--mail-from ADDR] \
@@ -258,24 +254,11 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
             format!("{site_url_scheme}://git.{base_domain}{port_part}")
         }
     };
-    let identity_authority_env = std::env::var(IDENTITY_AUTHORITY_ENV).ok();
-    let identity_authority_url = parse_identity_authority_url(
-        flag_value(&flags, "identity-authority-url"),
-        identity_authority_env.as_deref(),
-    )?;
     let viewer_session_service_token = std::env::var(VIEWER_SESSION_SERVICE_TOKEN_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let identity_sites_notification_token = std::env::var(IDENTITY_SITES_NOTIFICATION_TOKEN_ENV)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
     validate_viewer_session_service_token(viewer_session_service_token.as_deref())?;
-    validate_identity_sites_notification_token(
-        identity_authority_url.as_deref(),
-        identity_sites_notification_token.as_deref(),
-    )?;
     let git_hook_helper_path = match flag_value(&flags, "git-hook-helper") {
         Some(raw) => PathBuf::from(raw),
         None => std::env::current_exe()
@@ -318,9 +301,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         document_base_domain,
         api_url,
         git_base_url,
-        identity_authority_url,
         viewer_session_service_token,
-        identity_sites_notification_token,
         git_hook_helper_path,
         git_auto_reconcile,
         site_url_scheme,
@@ -360,22 +341,8 @@ pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Resu
     Ok(())
 }
 
-pub(crate) fn validate_identity_sites_notification_token(
-    identity_authority_url: Option<&str>,
-    token: Option<&str>,
-) -> Result<(), String> {
-    match (identity_authority_url, token) {
-        (None, None) => Ok(()),
-        (Some(_), Some(value)) if hex::is_hex32(value) => Ok(()),
-        (Some(_), None) => Err(format!(
-            "{IDENTITY_SITES_NOTIFICATION_TOKEN_ENV} is required when the Identity Authority is configured"
-        )),
-        (_, Some(_)) => Err(format!(
-            "{IDENTITY_SITES_NOTIFICATION_TOKEN_ENV} must be exactly 64 lowercase hex characters"
-        )),
-    }
-}
-
+/// NIP-05 Directory base URL for the operator-only `reconcile-identity`
+/// command. The serve path never talks to the Directory.
 fn parse_identity_authority_url(
     flag_value: Option<&str>,
     env_value: Option<&str>,
@@ -1007,25 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_notification_credential_fails_fast_when_required() {
-        let token = "ab".repeat(32);
-        assert!(validate_identity_sites_notification_token(None, None).is_ok());
-        assert!(
-            validate_identity_sites_notification_token(Some("http://127.0.0.1:8790"), Some(&token))
-                .is_ok()
-        );
-        assert_eq!(
-            validate_identity_sites_notification_token(Some("http://127.0.0.1:8790"), None)
-                .unwrap_err(),
-            "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN is required when the Identity Authority is configured"
-        );
-        assert_eq!(
-            validate_identity_sites_notification_token(None, Some("short")).unwrap_err(),
-            "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN must be exactly 64 lowercase hex characters"
-        );
-    }
-
-    #[test]
     fn serve_requires_explicit_mailer() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().display().to_string();
@@ -1053,18 +1001,7 @@ mod tests {
             "resend without --mail-from should name the flag, got {resend_without_from}"
         );
 
-        // Identity defaults to a configured Authority, which requires the
-        // notification token. Isolate from ambient process env so this parse
-        // only proves the mailer mapping.
-        let token = "ab".repeat(32);
         let hook = dir.path().join("git-hook-helper").display().to_string();
-        // SAFETY: this unit test is the only parse_serve_options caller in the
-        // crate binary; it pins the identity notification token and clears a
-        // viewer token that would otherwise fail closed.
-        unsafe {
-            std::env::set_var(IDENTITY_SITES_NOTIFICATION_TOKEN_ENV, &token);
-            std::env::remove_var(VIEWER_SESSION_SERVICE_TOKEN_ENV);
-        }
         let options = match parse_serve_options(&[
             "--data".to_string(),
             data,
@@ -1072,8 +1009,6 @@ mod tests {
             "dev".to_string(),
             "--git-hook-helper".to_string(),
             hook,
-            "--identity-authority-url".to_string(),
-            "http://127.0.0.1:8790".to_string(),
         ]) {
             Ok(options) => options,
             Err(error) => panic!("--mailer dev should select DevMailer, got {error}"),

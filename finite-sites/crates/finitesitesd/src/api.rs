@@ -638,20 +638,13 @@ async fn register_sites_authorized_key(
 ) -> Result<Json<SitesAuthorizedKeyResponse>, ApiError> {
     let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: SitesAuthorizedKeyRegisterRequest = parse_json_body(&body)?;
-    let identity = state.identity_authority.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_authority_unavailable",
-            "Sites key registration requires the Identity Authority",
-        )
-    })?;
-    let email = identity
-        .consume_mailbox_proof(&request.mailbox_proof, &actor)
-        .map_err(|error| {
-            eprintln!("finitesitesd mailbox proof error: {error}");
-            ApiError::unauthorized("mailbox proof was invalid, expired, or already used")
-        })?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let email = engine
+        .consume_email_proof(&request.email, &request.token, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::unauthorized("email proof was invalid, expired, or already used")
+        })?;
     engine
         .register_sites_authorized_key(&actor, &email, now_unix())
         .map(Json)
@@ -664,22 +657,17 @@ async fn revoke_sites_authorized_key(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<SitesAuthorizedKeyResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    // Any holder of a fresh mailbox proof may revoke a key from that
+    // mailbox's keyset; the NIP-98 signature only proves a live operator.
+    let _actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: SitesAuthorizedKeyRevokeRequest = parse_json_body(&body)?;
-    let identity = state.identity_authority.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_authority_unavailable",
-            "Sites key revocation requires the Identity Authority",
-        )
-    })?;
-    let email = identity
-        .consume_mailbox_proof(&request.mailbox_proof, &actor)
-        .map_err(|error| {
-            eprintln!("finitesitesd mailbox proof error: {error}");
-            ApiError::unauthorized("mailbox proof was invalid, expired, or already used")
-        })?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let email = engine
+        .consume_email_proof(&request.email, &request.token, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::unauthorized("email proof was invalid, expired, or already used")
+        })?;
     engine
         .revoke_sites_authorized_key(&email, &request.target_npub, now_unix())
         .map(Json)
@@ -829,49 +817,31 @@ async fn auth_git(
     let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: GitAuthRequest = parse_json_body(&body)?;
     let git_remote_url = git_remote_url(&state, &slug);
-    let (locally_authorized, sites_key_record_exists) = match request.email.as_deref() {
-        Some(email) => {
-            let engine = state.engine.lock().expect("engine mutex never poisoned");
-            (
-                engine
-                    .actor_has_sites_email_key(&actor, email)
-                    .map_err(ApiError::from)?,
-                engine
-                    .actor_has_sites_email_key_record(&actor, email)
-                    .map_err(ApiError::from)?,
-            )
-        }
-        None => (false, false),
-    };
-    let identity_authorized = if let (Some(email), Some(identity_authority)) = (
-        request
-            .email
-            .as_deref()
-            .filter(|_| !locally_authorized && !sites_key_record_exists),
-        state.identity_authority.as_ref(),
-    ) {
-        let satisfied = identity_authority
-            .satisfies_grant(email, &actor)
-            .map_err(|error| {
-                eprintln!("finitesitesd identity authority error: {error}");
-                internal_error("identity authority failure")
-            })?;
-        if !satisfied {
-            return Err(ApiError::unauthorized(
-                "identity authority did not resolve actor for email grant",
-            ));
-        }
-        true
-    } else {
-        false
-    };
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = if let Some(email) = request
+    let (locally_authorized, sites_key_record_exists, email_linked) = match request.email.as_deref()
+    {
+        Some(email) => (
+            engine
+                .actor_has_sites_email_key(&actor, email)
+                .map_err(ApiError::from)?,
+            engine
+                .actor_has_sites_email_key_record(&actor, email)
+                .map_err(ApiError::from)?,
+            engine
+                .actor_has_linked_email(&actor, email)
+                .map_err(ApiError::from)?,
+        ),
+        None => (false, false, false),
+    };
+    // Grant satisfaction is a local lookup only: a verified Email Link between
+    // the mailbox and the signer's native Principal. A revoked Sites key
+    // record stays a tombstone and fails closed in `mint_git_credential`.
+    let verified_email = request
         .email
         .as_deref()
-        .filter(|_| identity_authorized && !locally_authorized)
-    {
-        engine
+        .filter(|_| email_linked && !locally_authorized && !sites_key_record_exists);
+    let response = match verified_email {
+        Some(email) => engine
             .mint_git_credential_for_verified_email(
                 &actor,
                 &slug,
@@ -882,9 +852,8 @@ async fn auth_git(
             .map_err(|error| {
                 log_if_internal(&error);
                 ApiError::from(error)
-            })?
-    } else {
-        engine
+            })?,
+        None => engine
             .mint_git_credential(
                 &actor,
                 &slug,
@@ -895,7 +864,7 @@ async fn auth_git(
             .map_err(|error| {
                 log_if_internal(&error);
                 ApiError::from(error)
-            })?
+            })?,
     };
     Ok(Json(response))
 }

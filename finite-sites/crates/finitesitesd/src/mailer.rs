@@ -47,6 +47,12 @@ pub trait Mailer: Send + Sync {
         &self,
         request: &SiteAccessRequestEmail<'_>,
     ) -> Result<(), MailerError>;
+    fn send_first_publication(
+        &self,
+        email: &str,
+        site_name: &str,
+        site_url: &str,
+    ) -> Result<(), MailerError>;
 }
 
 pub struct ViewerInvite<'a> {
@@ -72,83 +78,6 @@ pub struct SiteAccessRequestEmail<'a> {
     pub site_name: &'a str,
     pub site_url: &'a str,
     pub approval_url: &'a str,
-}
-
-pub struct IdentityNotifier {
-    base_url: String,
-    token: String,
-    agent: ureq::Agent,
-}
-
-impl IdentityNotifier {
-    pub fn new(base_url: &str, token: String) -> Self {
-        Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            token,
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(10))
-                .build(),
-        }
-    }
-
-    pub fn send_site_access_request(
-        &self,
-        idempotency_key: &str,
-        request: &SiteAccessRequestEmail<'_>,
-    ) -> Result<(), MailerError> {
-        self.send(serde_json::json!({
-            "idempotency_key": idempotency_key,
-            "kind": "site_access_request",
-            "email": request.owner_email,
-            "site_name": request.site_name,
-            "site_url": request.site_url,
-            "requester_email": request.requester_email,
-            "approval_url": request.approval_url,
-        }))
-    }
-
-    pub fn send_first_publication(
-        &self,
-        idempotency_key: &str,
-        email: &str,
-        site_name: &str,
-        site_url: &str,
-    ) -> Result<(), MailerError> {
-        self.send(serde_json::json!({
-            "idempotency_key": idempotency_key,
-            "kind": "first_publication",
-            "email": email,
-            "site_name": site_name,
-            "site_url": site_url,
-        }))
-    }
-
-    fn send(&self, payload: serde_json::Value) -> Result<(), MailerError> {
-        match self
-            .agent
-            .post(&format!(
-                "{}/internal/v1/sites-notifications",
-                self.base_url
-            ))
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .set("Accept", "application/json")
-            .send_json(payload)
-        {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(code, response)) => {
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "unreadable body".to_owned());
-                Err(MailerError::Send(format!(
-                    "identity notification returned {code}: {}",
-                    body.chars().take(500).collect::<String>()
-                )))
-            }
-            Err(error) => Err(MailerError::Send(format!(
-                "identity notification transport failed: {error}"
-            ))),
-        }
-    }
 }
 
 /// Message text is shared by every mailer so dev output matches what real
@@ -263,6 +192,17 @@ fn site_access_request_text(request: &SiteAccessRequestEmail<'_>) -> String {
     )
 }
 
+fn first_publication_subject(site_name: &str) -> String {
+    format!("{site_name} is live")
+}
+
+fn first_publication_text(site_url: &str) -> String {
+    format!(
+        "Your Finite Site is published.\n\n{site_url}\n\n\
+         This email is your record of its first publication.\n"
+    )
+}
+
 fn output_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
@@ -363,6 +303,23 @@ impl Mailer for DevMailer {
         )?;
         Ok(())
     }
+
+    fn send_first_publication(
+        &self,
+        email: &str,
+        site_name: &str,
+        site_url: &str,
+    ) -> Result<(), MailerError> {
+        self.outbox.write(
+            &TextEmail {
+                to: email,
+                subject: &first_publication_subject(site_name),
+                text: &first_publication_text(site_url),
+            },
+            "first-publication",
+        )?;
+        Ok(())
+    }
 }
 
 // ---- http mailer (Resend via finite-mail) ------------------------------------
@@ -423,6 +380,19 @@ impl Mailer for HttpMailer {
             to: request.owner_email,
             subject: &site_access_request_subject(request.site_name),
             text: &site_access_request_text(request),
+        })
+    }
+
+    fn send_first_publication(
+        &self,
+        email: &str,
+        site_name: &str,
+        site_url: &str,
+    ) -> Result<(), MailerError> {
+        self.resend.send_text_email(&TextEmail {
+            to: email,
+            subject: &first_publication_subject(site_name),
+            text: &first_publication_text(site_url),
         })
     }
 }
