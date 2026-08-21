@@ -56,10 +56,11 @@ pub enum HermesBridgeError {
         source_chat_id: RoomId,
     },
     #[error(
-        "poll event source thread_id {source_thread_id:?} does not match conversation_id {conversation_id:?}"
+        "poll event source thread_id {source_thread_id:?} does not match segment_id {segment_id:?} or conversation_id {conversation_id:?}"
     )]
     SourceThreadMismatch {
         conversation_id: Option<ConversationId>,
+        segment_id: Option<ConversationSegmentId>,
         source_thread_id: Option<ConversationId>,
     },
     #[error(transparent)]
@@ -441,9 +442,11 @@ impl HermesPollEventV1 {
                 source_chat_id: self.source.chat_id.clone(),
             });
         }
-        if self.source.thread_id != self.conversation_id {
+        let expected_thread_id = self.segment_id.as_ref().or(self.conversation_id.as_ref());
+        if self.source.thread_id.as_ref() != expected_thread_id {
             return Err(HermesBridgeError::SourceThreadMismatch {
                 conversation_id: self.conversation_id.clone(),
+                segment_id: self.segment_id.clone(),
                 source_thread_id: self.source.thread_id.clone(),
             });
         }
@@ -1023,6 +1026,23 @@ mod tests {
         assert!(matches!(
             error,
             HermesBridgeError::SourceRoomMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn poll_event_segment_is_the_source_thread_identity() {
+        let mut event = sample_poll_event();
+        event.segment_id = Some("chat-build-1".to_string());
+        event.source.thread_id = event.segment_id.clone();
+
+        event
+            .validate_limits()
+            .expect("a segmented event uses its segment as the source thread");
+
+        event.source.thread_id = event.conversation_id.clone();
+        assert!(matches!(
+            event.validate_limits(),
+            Err(HermesBridgeError::SourceThreadMismatch { .. })
         ));
     }
 
