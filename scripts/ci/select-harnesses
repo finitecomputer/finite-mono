@@ -75,10 +75,8 @@ RUNTIME_IMAGE_CONTRACT_PREFIX = "finitecomputer-v2/deploy/finite-computer/images
 IDENTITY_EDGE_CONTRACT_PREFIX = "finite-identity/scripts/"
 MOVED_NIX_CHECK_PATHS = {
     "scripts/check_runtime_image_contract.py",
-    "scripts/identity-edge-contract-gate.py",
     "scripts/check_stripe_price_contract.py",
     "scripts/tests/test_runtime_image_contract.py",
-    "scripts/tests/test_identity_edge_contract_gate.py",
 }
 STRIPE_PRICE_CONTRACT_PATHS = {
     "finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py",

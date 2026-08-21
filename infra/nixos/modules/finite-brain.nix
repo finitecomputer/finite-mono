@@ -10,15 +10,11 @@ in
   systemd.services.finite-brain-app = {
     description = "FiniteBrain Rust application server";
     wants = [ "network-online.target" ];
-    after = [
-      "network-online.target"
-      "finite-identity.service"
-      "finite-saas-core.service"
-    ];
-    requires = [
-      "finite-identity.service"
-      "finite-saas-core.service"
-    ];
+    # Brain no longer calls the Identity Directory or SaaS Core at request
+    # time (auth-kernel cut): invitations are capability tokens and finite.vip
+    # NIP-05 resolves through public internet fetch. No service requires are
+    # left; boot ordering follows network-online only.
+    after = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
 
     environment = {
@@ -27,8 +23,6 @@ in
       FINITE_BRAIN_DB = "/var/lib/finitebrain/finite-brain.sqlite3";
       FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
-      FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
-      FC_CORE_API_BASE_URL = "http://127.0.0.1:4200";
       FINITE_BRAIN_INVITE_MAILER = "resend";
       FINITE_BRAIN_INVITE_MAIL_FROM = "Finite Brain <brain@finite.chat>";
     };
@@ -41,10 +35,11 @@ in
       LimitNOFILE = 65536;
       ExecStart = "${finitePackages.finite-brain}/bin/finite-brain";
       EnvironmentFile = [
-        "/etc/finite/identity-operator.env"
-        "/etc/finite/brain-authority.env"
         # Existing send-only Resend credential shared with Sites and Identity.
-        # Brain still owns its invitation content and access policy.
+        # Brain still owns its invitation content and access policy. The
+        # retired identity-operator.env and brain-authority.env loads are gone:
+        # the server no longer reads FINITE_IDENTITY_OPERATOR_TOKEN or
+        # FC_CORE_API_TOKEN.
         mailEnvironmentFile
       ];
       DynamicUser = true;

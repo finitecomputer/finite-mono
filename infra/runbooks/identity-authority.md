@@ -11,13 +11,13 @@ audit metadata only. It never stores a user or Agent's secret Nostr key.
 |---|---|
 | Service unit | `finite-identity.service` |
 | Binary | Nix-built `finite-identityd` from the deployed mono revision |
-| Listener | `127.0.0.1:8790` |
+| Listener | `127.0.0.1:8790` (full router: public surface + loopback-only operator routes) |
+| Public listener | `127.0.0.1:8791` (`public_router` only; the Caddy edge proxies this verbatim) |
 | Public/signing origin | `https://identity.finite.vip` |
 | Finite VIP Domain | `finite.vip` |
 | Data directory | `/var/lib/finite-identity` (`StateDirectory`, mode `0700`) |
 | SQLite database | `/var/lib/finite-identity/identity.db` |
 | Operator credential | `/etc/finite/identity-operator.env`, `root:root`, mode `0600` |
-| Sites notification credential (legacy) | `/etc/finite/identity-sites-notification.env`, `root:root`, mode `0600` |
 | Mail provider credential | `RESEND_API_KEY` in `/etc/finite-saas/sites.env` |
 | Mail sender | `Finite Identity <identity@finite.chat>` |
 | Trusted same-host product URL | `http://127.0.0.1:8790` |
@@ -28,14 +28,13 @@ trusted Runner processes. It must never enter `FC_RUNNER_RUNTIME_ENV_JSON`,
 the Runtime secret environment, an Agent Runtime, a command argument, logs, or
 this repository.
 
-The Sites notification environment contains exactly
-`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`. The directory shrink retired the
-Identity side of that relay: the Directory no longer reads the credential.
-Only Sites still requires it at boot, until the stacked Sites auth-kernel PR
-moves first-publication and access-request mail to the Sites-local mailer;
-remove the credential and its NixOS wiring with that PR. It is not valid for
-operator actions and must not be supplied to a browser, dashboard process,
-Hosted Device, Runner, or Agent Runtime.
+The legacy Sites notification credential
+(`/etc/finite/identity-sites-notification.env`,
+`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`) is retired: the directory shrink
+removed the Identity side of that relay, and the auth-kernel Sites work moved
+first-publication and access-request mail to the Sites-local mailer, so no
+unit reads the file anymore. A leftover file on an existing host is inert;
+delete it at operator convenience.
 
 ## Public and private routes
 
@@ -71,16 +70,14 @@ From an exact reviewed checkout:
 
 ```sh
 scripts/install-identity-authority-credentials root@64.34.82.77
-scripts/install-identity-sites-notification-credential root@64.34.82.77
 ```
 
-The installers validate their existing files, create independent random
-32-byte credentials on lat1 if absent, and never display either value.
-Existing valid files are preserved. The operator token is replaceable
+The installer validates its existing file, creates an independent random
+32-byte credential on lat1 if absent, and never displays the value.
+An existing valid file is preserved. The operator token is replaceable
 configuration, not identity data: after a host loss, generate a new value and
-install the same new value for the Authority and trusted products before
-starting either. The Sites notification credential must exist before switching
-to a closure whose Identity and Sites units require it.
+install the same new value for the Authority and trusted Runner processes
+before starting either.
 
 After the DNS record and credential exist, deploy only an exact reviewed commit
 on `origin/main` through the closure-artifact path in

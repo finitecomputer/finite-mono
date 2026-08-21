@@ -35,9 +35,11 @@ calls another service at request time:
   (`IdentityNotifier`, `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`) is
   removed; the `site_notification_outbox` drain is unchanged.
 - The only remaining finite-identity call anywhere in Sites is NIP-05 name
-  resolution (the directory), plus the operator-only `reconcile-identity`
-  command. `finitesitesd serve` no longer reads `FINITE_IDENTITY_AUTHORITY`
-  or `--identity-authority-url`.
+  resolution (the directory). `finitesitesd serve` no longer reads
+  `FINITE_IDENTITY_AUTHORITY` or `--identity-authority-url`. The operator-only
+  `reconcile-identity` command named here as the one exception was a completed
+  one-shot migration and has since been removed (technical-debt ledger item
+  13); its Core cross-check endpoint no longer exists.
 
 ## Consequences
 

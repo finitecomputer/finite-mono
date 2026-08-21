@@ -151,3 +151,22 @@ startup. Tests cover real `git clone`/`git push`, ignored non-deploy refs,
 missing output failure, restart reconciliation after a ref update before
 deploy, and idempotent replay after Version creation before event
 acknowledgement.
+
+## 13. RETIRED — `reconcile-identity` one-shot migration command
+
+- **Source**: the mailbox-grant → native-Principal reconciliation was a
+  completed one-shot migration. Its optional Core cross-check called
+  `/api/core/v1/brain/agent-account`, which the auth-kernel stack deleted
+  (its only consumers are gone).
+- **Risk**: none from removal — the migration already ran; durable grants
+  were rewritten additively and the command was never part of startup.
+  The store-layer reconciliation helpers stay because the engine and store
+  test fixtures still exercise their local invariants (e.g. automated
+  evidence never resurrects a revoked key).
+- **Proof**: `finitesitesd reconcile-identity`, its Directory/Core clients
+  (`crates/finitesitesd/src/identity.rs`), and the devfinity smoke
+  operator-boundary check are deleted; the daemon no longer reads
+  `FINITE_IDENTITY_AUTHORITY` / `FC_CORE_API_*` anywhere.
+- **Delete condition**: this entry is the permanent record; remove the
+  store-layer helpers only with a dedicated store cleanup that rewrites the
+  fixtures that use them.

@@ -19,7 +19,6 @@ pub mod apps;
 pub mod content_type;
 pub mod documents;
 pub mod git;
-pub mod identity;
 pub mod limiter;
 pub mod llms;
 pub mod mailer;
@@ -40,10 +39,6 @@ use finitesites_store::{
     Store,
 };
 
-const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
-const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
-const CORE_API_BASE_URL_ENV: &str = "FC_CORE_API_BASE_URL";
-const CORE_API_TOKEN_ENV: &str = "FC_CORE_API_TOKEN";
 const VIEWER_SESSION_SERVICE_TOKEN_ENV: &str = "FINITE_SITES_VIEWER_SESSION_TOKEN";
 
 pub struct ServeOptions {
@@ -105,7 +100,6 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "disable-site" => site_status_mutate(&args[1..], SiteStatus::Disabled, "site_disabled"),
         "delete-site" => delete_site(&args[1..]),
         "pre-user-reset" => pre_user_reset(&args[1..]),
-        "reconcile-identity" => reconcile_identity(&args[1..]),
         "git-post-receive" => git_post_receive(),
         "--version" | "-V" | "version" => version(&args[1..]),
         "--help" | "help" => {
@@ -134,9 +128,6 @@ fn usage() -> String {
      finitesitesd disable-site --data DIR SITE_NAME\n  \
      finitesitesd delete-site --data DIR SITE_NAME --confirm-delete-site yes\n  \
      finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes\n  \
-     finitesitesd reconcile-identity --data DIR [--apply yes] \
-       [--identity-authority-url https://identity.finite.vip] \
-       [--core-api-url URL]\n  \
      finitesitesd git-post-receive"
         .to_string()
 }
@@ -341,25 +332,6 @@ pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Resu
     Ok(())
 }
 
-/// NIP-05 Directory base URL for the operator-only `reconcile-identity`
-/// command. The serve path never talks to the Directory.
-fn parse_identity_authority_url(
-    flag_value: Option<&str>,
-    env_value: Option<&str>,
-) -> Result<Option<String>, String> {
-    let (raw, source) = match flag_value {
-        Some(raw) => (raw.trim(), "--identity-authority-url"),
-        None => match env_value.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(raw) => (raw, IDENTITY_AUTHORITY_ENV),
-            None => return Ok(Some(DEFAULT_IDENTITY_AUTHORITY_URL.to_string())),
-        },
-    };
-    if raw.ends_with('/') {
-        return Err(format!("{source} must not end with /"));
-    }
-    Ok(Some(raw.to_string()))
-}
-
 fn git_post_receive() -> Result<(), String> {
     crate::git::run_post_receive_hook_from_env()
 }
@@ -474,126 +446,6 @@ fn allowlist_mutate(args: &[String], allow: bool) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn reconcile_identity(args: &[String]) -> Result<(), String> {
-    let (flags, positionals) = parse_flags(args)?;
-    if !positionals.is_empty() {
-        return Err("reconcile-identity accepts flags only".to_string());
-    }
-    let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
-    let apply = reconciliation_apply_requested(&flags)?;
-    let authority_url = parse_identity_authority_url(
-        flag_value(&flags, "identity-authority-url"),
-        std::env::var(IDENTITY_AUTHORITY_ENV).ok().as_deref(),
-    )?
-    .expect("Identity Authority has a compiled production default");
-    let authority = identity::IdentityAuthority::new(authority_url);
-    let core_url = flag_value(&flags, "core-api-url")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            std::env::var(CORE_API_BASE_URL_ENV)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
-    let core_token = std::env::var(CORE_API_TOKEN_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let core_authority = match (core_url, core_token) {
-        (Some(url), Some(token)) => Some(identity::CoreAccountAuthority::new(url, token)),
-        (None, None) => None,
-        _ => {
-            return Err(format!(
-                "{CORE_API_BASE_URL_ENV}/--core-api-url and {CORE_API_TOKEN_ENV} must be configured together"
-            ));
-        }
-    };
-    let mut store = if apply {
-        open_store(Path::new(data_dir))?
-    } else {
-        Store::open_reconciliation_preview(&Path::new(data_dir).join("registry.db"))
-            .map_err(|error| format!("cannot open read-only reconciliation preview: {error}"))?
-    };
-    let mut report = store
-        .reconcile_sites_identity()
-        .map_err(|error| format!("identity reconciliation failed: {error}"))?;
-    let candidates = store
-        .legacy_email_grant_candidates()
-        .map_err(|error| format!("identity reconciliation failed: {error}"))?;
-    for candidate in candidates {
-        let resolution = authority
-            .resolve_nip05(&candidate.email)
-            .map_err(|error| format!("identity reconciliation lookup failed: {error}"))?;
-        let Some(resolution) = resolution else {
-            continue;
-        };
-        if resolution.kind != "managed_agent" {
-            continue;
-        }
-        if !hex::is_hex32(&resolution.pubkey) {
-            return Err("Identity Authority returned an invalid Managed Agent pubkey".to_string());
-        }
-        if let Some(core) = core_authority.as_ref() {
-            let account = core
-                .managed_agent_account(&candidate.email)
-                .map_err(|error| format!("Core account reconciliation lookup failed: {error}"))?;
-            if let Some(account) = account {
-                if store
-                    .reconcile_verified_core_agent_key(
-                        &account.verified_email,
-                        &resolution.pubkey,
-                        server::now_unix(),
-                    )
-                    .map_err(|error| format!("identity reconciliation failed: {error}"))?
-                {
-                    report.migrated += 1;
-                } else {
-                    report.unchanged += 1;
-                }
-            }
-        }
-        let changed = store
-            .add_native_grants_for_legacy_email(
-                &candidate.email,
-                &resolution.pubkey,
-                server::now_unix(),
-            )
-            .map_err(|error| format!("identity reconciliation failed: {error}"))?;
-        if changed == 0 {
-            report.unchanged += 1;
-        } else {
-            report.migrated += changed;
-        }
-    }
-    let final_report = store
-        .reconcile_sites_identity()
-        .map_err(|error| format!("identity reconciliation failed: {error}"))?;
-    report.conflicts = final_report.conflicts;
-    report.needs_proof = final_report.needs_proof;
-    println!(
-        "{}",
-        serde_json::json!({
-            "mode": if apply { "apply" } else { "preview" },
-            "applied": apply,
-            "migrated": report.migrated,
-            "unchanged": report.unchanged,
-            "conflict": report.conflicts,
-            "needs_proof": report.needs_proof,
-        })
-    );
-    Ok(())
-}
-
-fn reconciliation_apply_requested(flags: &[(String, String)]) -> Result<bool, String> {
-    match flag_value(flags, "apply") {
-        None => Ok(false),
-        Some("yes") => Ok(true),
-        Some(_) => Err("reconcile-identity mutates durable authorization; pass --apply yes only after reviewing a preview and approving the backup/rollback boundary".to_string()),
-    }
 }
 
 fn allowlist_list(args: &[String]) -> Result<(), String> {
@@ -898,51 +750,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cookie-secret")).unwrap(),
             "secret"
-        );
-    }
-
-    #[test]
-    fn identity_authority_url_prefers_flag_and_ignores_empty_env() {
-        assert_eq!(
-            parse_identity_authority_url(None, None).unwrap(),
-            Some(DEFAULT_IDENTITY_AUTHORITY_URL.to_string())
-        );
-        assert_eq!(
-            parse_identity_authority_url(None, Some("  ")).unwrap(),
-            Some(DEFAULT_IDENTITY_AUTHORITY_URL.to_string())
-        );
-        assert_eq!(
-            parse_identity_authority_url(None, Some(" https://identity.example ")).unwrap(),
-            Some("https://identity.example".to_string())
-        );
-        assert_eq!(
-            parse_identity_authority_url(
-                Some("https://identity.flag.example"),
-                Some("https://identity.env.example")
-            )
-            .unwrap(),
-            Some("https://identity.flag.example".to_string())
-        );
-        assert_eq!(
-            parse_identity_authority_url(Some("https://identity.flag.example/"), None).unwrap_err(),
-            "--identity-authority-url must not end with /"
-        );
-        assert_eq!(
-            parse_identity_authority_url(None, Some("https://identity.env.example/")).unwrap_err(),
-            "FINITE_IDENTITY_AUTHORITY must not end with /"
-        );
-    }
-
-    #[test]
-    fn identity_reconciliation_requires_explicit_apply_confirmation() {
-        assert!(!reconciliation_apply_requested(&[]).unwrap());
-        assert!(
-            reconciliation_apply_requested(&[("apply".to_string(), "yes".to_string())]).unwrap()
-        );
-        assert_eq!(
-            reconciliation_apply_requested(&[("apply".to_string(), "true".to_string())])
-                .unwrap_err(),
-            "reconcile-identity mutates durable authorization; pass --apply yes only after reviewing a preview and approving the backup/rollback boundary"
         );
     }
 

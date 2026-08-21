@@ -113,35 +113,11 @@ can remain active for one mailbox; revoking one does not change Chat NIP-05
 resolution, Brain encryption recipients, other keys, or the underlying mailbox
 grants.
 
-The additive operator reconciliation is a deliberate one-off action. Preview
-against a transactionally consistent in-memory copy first; this is the default
-and does not initialize or mutate the source registry:
-
-```sh
-FC_CORE_API_TOKEN=... \
-finitesitesd reconcile-identity --data DATA_DIR \
-  --identity-authority-url https://identity.finite.vip \
-  --core-api-url https://core.example
-```
-
-After reviewing the preview, naming the backup and rollback boundary, and
-receiving separate production-mutation approval, apply the same reconciliation
-explicitly:
-
-```sh
-FC_CORE_API_TOKEN=... \
-finitesitesd reconcile-identity --data DATA_DIR --apply yes \
-  --identity-authority-url https://identity.finite.vip \
-  --core-api-url https://core.example
-```
-
-The Core URL and server-only `FC_CORE_API_TOKEN` are optional as a pair.
-Without them, reconciliation still preserves legacy access and converts
-Managed Agent NIP-05 grants to native grants. With them, a verified active Core
-account-to-Agent association may create the missing mailbox-to-npub Sites key.
-Automated evidence never reactivates a revoked key; only a new mailbox
-challenge can do that. Normal Sites startup creates the compatible schema but
-never runs this data reconciliation.
+The operator-only `reconcile-identity` one-shot was a completed migration tool
+and has been removed (see `docs/technical-debt-ledger.md` item 13): the legacy
+mailbox-grant reconciliation it applied is done, and the SaaS Core
+account-lookup endpoint it could consult no longer exists. Normal Sites
+startup never ran it; durable authorization state is unaffected.
 
 ### Migrating an existing key
 

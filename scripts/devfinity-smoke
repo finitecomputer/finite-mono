@@ -154,64 +154,6 @@ console.log(`dashboard->core ok: request ${request.id} created project ${request
 JS
 }
 
-check_identity_reconciliation_operator_boundary() {
-  local smoke_root
-  local source_db
-  local synthetic_db
-  local preview_json
-  local apply_json
-  local authorized_before
-  local authorized_after_preview
-  local authorized_after_apply
-  local smoke_email="reconcile-smoke@finite.invalid"
-  local smoke_pubkey="2222222222222222222222222222222222222222222222222222222222222222"
-
-  smoke_root="${DEVFINITY_STATE_DIR:?}/sites-reconciliation-smoke"
-  source_db="${DEVFINITY_STATE_DIR:?}/finitesites/registry.db"
-  synthetic_db="$smoke_root/registry.db"
-  preview_json="$smoke_root/preview.json"
-  apply_json="$smoke_root/apply.json"
-  track_sensitive_dir "$smoke_root"
-  mkdir -p "$smoke_root"
-
-  sqlite3 "$source_db" ".backup '$synthetic_db'"
-  sqlite3 "$synthetic_db" \
-    "INSERT INTO email_keys (email, pubkey, verified_at, revoked_at) VALUES ('$smoke_email', '$smoke_pubkey', 1, NULL);"
-  authorized_before="$(sqlite3 "$synthetic_db" \
-    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
-
-  finitesitesd reconcile-identity --data "$smoke_root" >"$preview_json"
-  node - "$preview_json" <<'JS'
-const fs = require("node:fs");
-const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (report.mode !== "preview" || report.applied !== false || report.migrated < 1) {
-  throw new Error(`unexpected reconciliation preview: ${JSON.stringify(report)}`);
-}
-JS
-  authorized_after_preview="$(sqlite3 "$synthetic_db" \
-    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
-  if [[ "$authorized_before" != "0" || "$authorized_after_preview" != "$authorized_before" ]]; then
-    echo "Sites reconciliation preview mutated its synthetic source database" >&2
-    return 1
-  fi
-
-  finitesitesd reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
-  node - "$apply_json" <<'JS'
-const fs = require("node:fs");
-const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (report.mode !== "apply" || report.applied !== true || report.migrated < 1) {
-  throw new Error(`unexpected reconciliation apply: ${JSON.stringify(report)}`);
-}
-JS
-  authorized_after_apply="$(sqlite3 "$synthetic_db" \
-    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
-  if [[ "$authorized_after_apply" != "1" ]]; then
-    echo "Sites reconciliation apply did not add exactly one synthetic mailbox key" >&2
-    return 1
-  fi
-  echo "Sites reconciliation preview/apply operator boundary ok"
-}
-
 check_native_requesting_user_site() {
   local run_id
   local slug
@@ -469,13 +411,13 @@ JS
   local notification_count
   started="$(date +%s)"
   while true; do
-    notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finite-identity/identity.db" \
-      "SELECT count(*) FROM notification_deliveries WHERE idempotency_key = '$notification_key';")"
+    notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finitesites/registry.db" \
+      "SELECT count(*) FROM site_notification_outbox WHERE idempotency_key = '$notification_key' AND delivered_at IS NOT NULL;")"
     if [[ "$notification_count" == "1" ]]; then
       break
     fi
     if (( "$(date +%s)" - started >= 30 )); then
-      echo "Sites first-publication notification was not delivered through Identity within 30s" >&2
+      echo "Sites first-publication notification was not delivered through the Sites outbox within 30s" >&2
       return 1
     fi
     sleep 1
@@ -501,13 +443,13 @@ JS
     fi
     sleep 1
   done
-  notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finite-identity/identity.db" \
-    "SELECT count(*) FROM notification_deliveries WHERE idempotency_key = '$notification_key';")"
+  notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finitesites/registry.db" \
+    "SELECT count(*) FROM site_notification_outbox WHERE idempotency_key = '$notification_key' AND delivered_at IS NOT NULL;")"
   if [[ "$notification_count" != "1" ]]; then
     echo "Sites first-publication notification was not exactly-once after a second publish" >&2
     return 1
   fi
-  echo "Sites first-publication Identity notification delivered exactly once"
+  echo "Sites first-publication outbox notification delivered exactly once"
 
   node - "$output_url" >"$proof_request_json" <<'JS'
 const { randomUUID } = require("node:crypto");
@@ -622,7 +564,6 @@ check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
 check_http "finitesites" "$sites_url/api/v1/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
-check_identity_reconciliation_operator_boundary
 check_native_requesting_user_site
 check_dashboard_agent_creation
 cargo test -p finitechat-client --locked --lib \
