@@ -256,9 +256,11 @@ regenerate them with the current writer:
 
 - [`finitechat-client test fixtures`](finitechat/crates/finitechat-client/tests/fixtures/README.md)
 
-The repository also maintains a manual compatibility matrix:
-
-- [`compat/matrix.toml`](compat/matrix.toml)
+The hand-maintained `compat/matrix.toml` was retired on 2026-08-21 (ownership
+audit O7): nothing read it, and it drifted from the pins that actually run.
+Fielded versions are read from release tags, Core's runtime-artifact table, and
+the NixOS closure; non-derivable release narrative lives in
+[`infra/deployment-changelog.md`](infra/deployment-changelog.md).
 
 Tasks:
 

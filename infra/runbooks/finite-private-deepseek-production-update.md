@@ -61,8 +61,8 @@ all other serving arguments remain unchanged.
 ## FIXED SATELLITE RELEASE
 
 The candidate release was published and its immutable evidence was merged into
-`compat/matrix.toml`. Do not create another satellite commit, tag, or release
-for this rollout. Tonight's operation only verifies and relaunches the fixed
+this runbook and `infra/deployment-changelog.md`. Do not create another
+satellite commit, tag, or release for this rollout. Tonight's operation only verifies and relaunches the fixed
 candidate above. The preparation commands below remain as a provenance record,
 not as steps to repeat during the maintenance window.
 
@@ -266,8 +266,8 @@ the separately approved relaunch window.
 6. Diff the decoded candidate against the rollback deployment. Any checkpoint,
    MPK, runtime image, limiter image, secret, route, parser, context, numerical
    format, or parallelism change is a stop condition.
-7. Confirm the merged `compat/matrix.toml` entry records satellite commit
-   `0ef8c6c07dfd56e11d936aba416e24a51e06399a`, release tag
+7. Confirm the merged `infra/deployment-changelog.md` entry records satellite
+   commit `0ef8c6c07dfd56e11d936aba416e24a51e06399a`, release tag
    `v2026-08-13-deepseek-v4-flash-0731-128-2048-1`, deployment asset SHA-256
    `83d4d2eb23b052fafecd8a9ec2875ad0aa577842a6ffdd64812914de576463e4`,
    Tinfoil hash SHA-256

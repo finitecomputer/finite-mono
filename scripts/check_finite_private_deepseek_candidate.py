@@ -152,7 +152,7 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         "one active eight-H200 cluster",
         "b6018f87da91d19d0ab4cf979885689b469cdd41",
         "mixed-version-canary",
-        "compat/matrix.toml",
+        "infra/deployment-changelog.md",
         "pre-existing non-causal exception",
         "Any new or worsened red or unknown",
         "all reservations created during this rollout settle",
