@@ -11,6 +11,7 @@ use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use finite_nostr::{
     GiftWrapValidation, NostrPublicKey, build_rumor, open_gift_wrap, validate_gift_wrap,
     verify_event_integrity, wrap_rumor,
@@ -1298,6 +1299,16 @@ pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
 /// Hash the exact serialized encrypted envelope string.
 pub fn ciphertext_hash(envelope_json: &str) -> String {
     sha256_hex(envelope_json.as_bytes())
+}
+
+/// Generate one url-safe capability token body carrying 256 bits of OS
+/// randomness (43 base64url characters, no padding). Capability tokens are
+/// bearer secrets: callers store only `sha256_hex` of the full token and
+/// present the raw value exactly once.
+pub fn generate_capability_token() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Folder Object revision operation.
@@ -3000,6 +3011,24 @@ mod tests {
     #[test]
     fn exposes_core_crate_name() {
         assert_eq!(crate_name(), "finite-brain-core");
+    }
+
+    #[test]
+    fn capability_tokens_are_url_safe_unique_and_hash_to_lowercase_hex() {
+        let token = generate_capability_token();
+        assert_eq!(token.len(), 43);
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert_ne!(token, generate_capability_token());
+        let hash = sha256_hex(&token);
+        assert_eq!(hash.len(), 64);
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

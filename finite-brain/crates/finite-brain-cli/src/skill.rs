@@ -102,11 +102,25 @@ Finite Home can open; re-run it from a current key holder when a Folder
 reports `needsKeyHolder`. Lower-level primitives: `admin member add`,
 `admin role grant admin`, `admin folder-access grant --folder <id>`.
 
+Capability Invite Tokens are the kernel-simple alternative: one single-use,
+unguessable, revocable link that redeems to membership for whatever npub
+presents it (email is delivery only, never identity):
+
+```sh
+fbrain invite-token create --brain <brain-id> [--role member|admin] [--email <addr>]
+fbrain invite-token list --brain <brain-id>
+fbrain invite-token revoke --brain <brain-id> --token-id <token-id>
+```
+
+The raw `fbit-...` token is shown once; share the printed URL. The invitee's
+agent redeems it with `fbrain invite-accept <url-or-token>`.
+
 ## Sharing: being invited (invitee)
 
 ```sh
 fbrain invite brain list                 # your pending invitations (expired ones are marked)
 fbrain invite brain accept --id <invitation-id>
+fbrain invite-accept <url-or-token>      # redeem a capability Invite Token link
 fbrain open <brain-id>                   # then sync as usual
 ```
 
