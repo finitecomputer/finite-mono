@@ -1,8 +1,10 @@
 set shell := ["../scripts/dev-shell", "-cu"]
 
+mod secrets 'secret/justfile'
+
 # Lists infra commands
 default:
-    just --list
+    just --list-submodules --list
 
 # Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
 finite-status-contract:

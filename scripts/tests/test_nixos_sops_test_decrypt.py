@@ -109,8 +109,8 @@ class NixosSopsTestDecryptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.startswith("false\n"))
         self.assertIn("cannot decrypt existing NixOS SOPS secrets", result.stdout)
-        self.assertIn("just nixos-sops-operator-key", result.stdout)
-        self.assertIn("just nixos-sops-updatekeys", result.stdout)
+        self.assertIn("just infra secrets operator-key", result.stdout)
+        self.assertIn("just infra secrets updatekeys", result.stdout)
         combined = result.stdout + result.stderr
         self.assertNotIn("synthetic-secret-value", combined)
         self.assertNotIn("synthetic-decrypted-value", combined)
