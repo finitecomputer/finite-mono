@@ -1,6 +1,12 @@
-//! Identity Authority contract tests. These exercise the public HTTP seam
+//! Identity Directory contract tests. These exercise the public HTTP seam
 //! against temporary SQLite storage so product integrations can depend on the
 //! behavior rather than the implementation layout.
+//!
+//! The Directory is the shrunken Identity Authority: NIP-05 name serving,
+//! name claiming (Email Challenge + NIP-98), managed-agent name registration,
+//! and operator inspect/disable. Grant resolution, mailbox proofs, email-only
+//! principals, WorkOS account bindings, and the sites-notification relay were
+//! deleted; the retired-route tests pin their absence.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,20 +47,6 @@ impl RecordingMailer {
             .find_map(|(delivered_email, token)| (delivered_email == email).then(|| token.clone()))
             .expect("token delivered")
     }
-
-    fn delivery_count(&self) -> usize {
-        self.deliveries.lock().unwrap().len()
-    }
-
-    fn last_delivery_for(&self, email: &str) -> String {
-        self.deliveries
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find_map(|(delivered_email, body)| (delivered_email == email).then(|| body.clone()))
-            .expect("mail delivered")
-    }
 }
 
 impl Mailer for RecordingMailer {
@@ -63,20 +55,6 @@ impl Mailer for RecordingMailer {
             .lock()
             .unwrap()
             .push((email.to_owned(), token.to_owned()));
-        Ok(())
-    }
-
-    fn send_transactional_email(
-        &self,
-        _idempotency_key: &str,
-        email: &str,
-        _subject: &str,
-        text: &str,
-    ) -> Result<(), String> {
-        self.deliveries
-            .lock()
-            .unwrap()
-            .push((email.to_owned(), text.to_owned()));
         Ok(())
     }
 }
@@ -99,7 +77,6 @@ fn fixture() -> (
             finite_vip_domain: "finite.vip".to_owned(),
             email_challenge_ttl_seconds: 600,
             operator_token: Some(OPERATOR_TOKEN.to_owned()),
-            sites_notification_token: Some("sites-notification-test-token".to_owned()),
         },
     );
     (router(state), store, mailer, clock)
@@ -124,53 +101,6 @@ async fn health_reports_identity_authority_ready() {
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
         serde_json::json!({ "service": "finite-identity", "status": "ok" })
     );
-}
-
-#[tokio::test]
-async fn sites_notifications_require_the_narrow_token_and_deduplicate_delivery() {
-    let (app, _, mailer, _) = fixture();
-    let body = serde_json::json!({
-        "idempotency_key": "sites:first-publication:site-1",
-        "kind": "first_publication",
-        "email": "alice@example.com",
-        "site_name": "Alice's notes",
-        "site_url": "https://alice-notes.finite.site/"
-    });
-
-    let (status, error) = json_request(
-        app.clone(),
-        "POST",
-        "/internal/v1/sites-notifications",
-        body.clone(),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(error["error"], "missing_sites_notification_token");
-
-    let auth = Some("Bearer sites-notification-test-token".to_owned());
-    let (status, delivered) = json_request(
-        app.clone(),
-        "POST",
-        "/internal/v1/sites-notifications",
-        body.clone(),
-        auth.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(delivered["status"], "delivered");
-    assert_eq!(mailer.delivery_count(), 1);
-    assert!(
-        mailer
-            .last_delivery_for("alice@example.com")
-            .contains("first publication")
-    );
-
-    let (status, replay) =
-        json_request(app, "POST", "/internal/v1/sites-notifications", body, auth).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(replay["status"], "already_delivered");
-    assert_eq!(mailer.delivery_count(), 1);
 }
 
 async fn json_request(
@@ -376,84 +306,6 @@ async fn nip05_resolution_distinguishes_mailboxes_from_managed_agent_names() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing["error"], "nip05_name_not_found");
-}
-
-#[tokio::test]
-async fn brain_resolves_account_bound_agent_and_user_principals_without_private_keys() {
-    let (app, _store, _mailer, _clock) = fixture();
-    let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
-    let user = LocalIdentityKey::from_secret(BOB_SECRET).unwrap();
-    let user_npub = npub::encode(&hex::decode32(user.pubkey()).unwrap());
-    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
-
-    let (status, _) = json_request_with_headers(
-        app.clone(),
-        "POST",
-        "/api/v1/operator/agent-email-bindings",
-        serde_json::json!({
-            "email": "cheater@finite.vip",
-            "agent_npub": agent_npub,
-        }),
-        &operator_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (status, bound) = json_request_with_headers(
-        app.clone(),
-        "POST",
-        "/api/v1/operator/account-principal-bindings",
-        serde_json::json!({
-            "workosUserId": "user_workos_owner",
-            "userNpub": user_npub,
-        }),
-        &operator_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(bound["workosUserId"], "user_workos_owner");
-    assert_eq!(bound["userNpub"], user_npub);
-    assert!(bound.get("privateKey").is_none());
-
-    let (status, agent) = json_request_with_headers(
-        app.clone(),
-        "POST",
-        "/api/v1/operator/brain/agent-resolution",
-        serde_json::json!({ "agentNpub": agent_npub }),
-        &operator_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(agent["agentNpub"], agent_npub);
-    assert_eq!(agent["managedAgentEmail"], "cheater@finite.vip");
-
-    let (status, owner) = json_request_with_headers(
-        app.clone(),
-        "POST",
-        "/api/v1/operator/brain/user-resolution",
-        serde_json::json!({ "workosUserId": "user_workos_owner" }),
-        &operator_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(owner["workosUserId"], "user_workos_owner");
-    assert_eq!(owner["userNpub"], user_npub);
-
-    let other = LocalIdentityKey::from_secret([5_u8; 32]).unwrap();
-    let other_npub = npub::encode(&hex::decode32(other.pubkey()).unwrap());
-    let (status, conflict) = json_request_with_headers(
-        app,
-        "POST",
-        "/api/v1/operator/account-principal-bindings",
-        serde_json::json!({
-            "workosUserId": "user_workos_owner",
-            "userNpub": other_npub,
-        }),
-        &operator_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(conflict["error"], "workos_account_already_bound");
 }
 
 #[tokio::test]
@@ -700,62 +552,7 @@ async fn disabled_vip_binding_is_not_served_as_nip05() {
 }
 
 #[tokio::test]
-async fn product_grants_resolve_against_native_and_vip_principals() {
-    let (app, store, _mailer, _clock) = fixture();
-    store
-        .bind_vip_email(ALICE_EMAIL, ALICE_PUBKEY, NOW)
-        .expect("persist binding");
-    let alice_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
-
-    let (status, by_email) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(by_email["satisfied"], true);
-    assert_eq!(by_email["principal"]["kind"], "native");
-
-    let (status, by_npub) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": alice_npub, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(by_npub["satisfied"], true);
-
-    let (status, third_party) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": "alice@example.com", "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(third_party["satisfied"], false);
-
-    store.disable_vip_email(ALICE_EMAIL, NOW + 1).unwrap();
-    let (status, disabled) = json_request(
-        app,
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(disabled["satisfied"], false);
-}
-
-#[tokio::test]
-async fn one_managed_agent_identity_is_consistent_across_product_resolution_surfaces() {
+async fn managed_agent_directory_responses_never_expose_key_material() {
     let (app, _store, _mailer, _clock) = fixture();
     let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
     let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
@@ -783,257 +580,43 @@ async fn one_managed_agent_identity_is_consistent_across_product_resolution_surf
     assert_eq!(status, StatusCode::OK);
     assert_eq!(nip05["names"][ALICE_LOCALPART], ALICE_PUBKEY);
 
-    let (status, product_resolution) = json_request(
+    let (status, resolution) = json_request(
         app.clone(),
         "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({
-            "grant": ALICE_EMAIL,
-            "actor_pubkey": ALICE_PUBKEY,
-        }),
+        "/api/v1/nip05-resolution",
+        serde_json::json!({ "name": ALICE_EMAIL }),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(product_resolution["satisfied"], true);
-    assert_eq!(product_resolution["principal"]["kind"], "native");
-    assert_eq!(product_resolution["principal"]["pubkey"], ALICE_PUBKEY);
+    assert_eq!(resolution["pubkey"], ALICE_PUBKEY);
+    assert_eq!(resolution["kind"], "managed_agent");
 
-    let (status, brain_resolution) = json_request_with_headers(
-        app.clone(),
+    let (status, inspected) = json_request_with_headers(
+        app,
         "POST",
-        "/api/v1/operator/brain/agent-resolution",
-        serde_json::json!({ "agentNpub": agent_npub }),
+        "/api/v1/operator/inspect",
+        serde_json::json!({ "identifier": ALICE_EMAIL }),
         &operator_headers,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(brain_resolution["agentNpub"], agent_npub);
-    assert_eq!(brain_resolution["managedAgentEmail"], ALICE_EMAIL);
+    assert_eq!(inspected["kind"], "vip_email");
+    assert_eq!(inspected["pubkey"], ALICE_PUBKEY);
 
-    let (status, unrelated_grant) = json_request(
-        app,
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({
-            "grant": "unrelated@example.com",
-            "actor_pubkey": ALICE_PUBKEY,
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(unrelated_grant["satisfied"], false);
-
-    for response in [binding, nip05, product_resolution, brain_resolution] {
+    for response in [binding, nip05, resolution, inspected] {
         let serialized = response.to_string().to_ascii_lowercase();
         for forbidden in ["operator_token", "private_key", "secret", "nsec"] {
             assert!(
                 !serialized.contains(forbidden),
-                "identity response exposed forbidden key material marker {forbidden}"
+                "directory response exposed forbidden key material marker {forbidden}"
             );
         }
     }
 }
 
 #[tokio::test]
-async fn email_only_principal_can_redeem_external_invited_email_and_resolve_grant() {
-    let (app, _store, mailer, _clock) = fixture();
-    let external_email = "Editor+Docs@Example.COM";
-    let normalized_email = "editor+docs@example.com";
-    let bob_pubkey = nip98::pubkey_for_secret(&BOB_SECRET).unwrap();
-
-    let (status, challenge) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/email-challenges",
-        serde_json::json!({ "email": external_email }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(challenge["email"], normalized_email);
-    let token = mailer.last_token_for(normalized_email);
-
-    let body = serde_json::json!({ "email": external_email, "token": token });
-    let body_bytes = serde_json::to_vec(&body).unwrap();
-    let auth = nip98::build_auth_header(
-        &BOB_SECRET,
-        &format!("{BASE_URL}/api/v1/email-only-principals/redeem"),
-        "POST",
-        Some(&body_bytes),
-        NOW,
-    )
-    .unwrap();
-    let (status, redeemed) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/email-only-principals/redeem",
-        body,
-        Some(auth),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(redeemed["email"], normalized_email);
-    assert_eq!(redeemed["pubkey"], bob_pubkey);
-    assert_eq!(redeemed["principal"]["kind"], "email_only");
-    assert!(redeemed.get("nip05").is_none());
-
-    let (status, by_email) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": normalized_email, "actor_pubkey": bob_pubkey }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(by_email["satisfied"], true);
-    assert_eq!(by_email["principal"]["kind"], "email_only");
-
-    let (status, wrong_actor) = json_request(
-        app,
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": normalized_email, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(wrong_actor["satisfied"], false);
-}
-
-#[tokio::test]
-async fn mailbox_proof_is_bound_to_exact_npub_without_creating_global_identity_link() {
-    let (app, _store, mailer, _clock) = fixture();
-    let email = "paul@example.com";
-    let bob_pubkey = nip98::pubkey_for_secret(&BOB_SECRET).unwrap();
-    let (status, _) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/email-challenges",
-        serde_json::json!({ "email": email }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let token = mailer.last_token_for(email);
-    let body = serde_json::json!({ "email": email, "token": token });
-    let body_bytes = serde_json::to_vec(&body).unwrap();
-    let auth = nip98::build_auth_header(
-        &BOB_SECRET,
-        &format!("{BASE_URL}/api/v1/mailbox-proofs/redeem"),
-        "POST",
-        Some(&body_bytes),
-        NOW,
-    )
-    .unwrap();
-    let (status, proof) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/mailbox-proofs/redeem",
-        body,
-        Some(auth),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(proof["email"], email);
-    assert_eq!(proof["pubkey"], bob_pubkey);
-
-    let (status, resolution) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": email, "actor_pubkey": bob_pubkey }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(resolution["satisfied"], false);
-
-    let proof_token = proof["proof"].as_str().unwrap();
-    let (status, mismatch) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/mailbox-proofs/consume",
-        serde_json::json!({ "proof": proof_token, "pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(mismatch["error"], "mailbox_proof_pubkey_mismatch");
-
-    let consume_body = serde_json::json!({ "proof": proof_token, "pubkey": bob_pubkey });
-    let (status, consumed) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/mailbox-proofs/consume",
-        consume_body.clone(),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(consumed["verified"], true);
-    assert_eq!(consumed["email"], email);
-
-    let (status, replay) = json_request(
-        app,
-        "POST",
-        "/api/v1/mailbox-proofs/consume",
-        consume_body,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(replay["error"], "unknown_or_expired_mailbox_proof");
-}
-
-#[tokio::test]
-async fn finite_vip_email_only_principal_later_links_to_native_principal() {
-    let (app, _store, mailer, _clock) = fixture();
-    let bob_pubkey = nip98::pubkey_for_secret(&BOB_SECRET).unwrap();
-
-    request_and_redeem_email_only(app.clone(), &mailer, ALICE_EMAIL, &BOB_SECRET).await;
-    let (status, before_native) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": bob_pubkey }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(before_native["satisfied"], true);
-    assert_eq!(before_native["principal"]["kind"], "email_only");
-
-    request_and_redeem(app.clone(), &mailer, ALICE_EMAIL, &ALICE_SECRET).await;
-
-    let (status, native) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(native["satisfied"], true);
-    assert_eq!(native["principal"]["kind"], "native");
-
-    let (status, old_email_only) = json_request(
-        app,
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": bob_pubkey }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(old_email_only["satisfied"], false);
-}
-
-#[tokio::test]
-async fn product_cli_client_helpers_sign_vip_and_email_only_flows() {
+async fn product_cli_client_helpers_sign_the_vip_binding_flow() {
     let (app, _store, mailer, _clock) = fixture();
     let dir = tempfile::tempdir().unwrap();
     let paths = IdentityPaths::with_finite_home(dir.path());
@@ -1062,24 +645,14 @@ async fn product_cli_client_helpers_sign_vip_and_email_only_flows() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(redeemed["pubkey"], ALICE_PUBKEY);
 
-    let external_email = "invitee@example.com";
-    let (status, challenge) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/email-challenges",
-        client.email_challenge_body(external_email).unwrap(),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(challenge["email"], external_email);
-    let token = mailer.last_token_for(external_email);
+    // The shared client library still carries helpers for retired routes; the
+    // Directory must not serve them. Stacked product PRs remove the callers
+    // and then the helpers.
     let signed = client
-        .email_only_redeem(&key, external_email, &token, NOW)
+        .email_only_redeem(&key, "invitee@example.com", "any-token", NOW)
         .unwrap();
-    let (status, redeemed) = signed_json_request(app, signed).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(redeemed["principal"]["kind"], "email_only");
+    let (status, _) = signed_json_request(app, signed).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let conflict =
         IdentityClient::classify_authority_error(409, "vip_email_already_bound").unwrap();
@@ -1126,9 +699,7 @@ async fn operator_can_inspect_and_disable_vip_binding_without_reassignment() {
     assert_eq!(inspected["pubkey"], ALICE_PUBKEY);
     assert_eq!(inspected["disabled"], false);
     assert_eq!(inspected["nip05"], ALICE_EMAIL);
-    assert_eq!(inspected["principal_link"]["email"], ALICE_EMAIL);
-    assert_eq!(inspected["principal_link"]["pubkey"], ALICE_PUBKEY);
-    assert_eq!(inspected["principal_link"]["verified_at"], NOW);
+    assert!(inspected.get("principal_link").is_none());
     assert_eq!(inspected["email_challenges"][0]["email"], ALICE_EMAIL);
     assert_eq!(inspected["email_challenges"][0]["created_at"], NOW);
     assert_eq!(inspected["email_challenges"][0]["expires_at"], NOW + 600);
@@ -1153,17 +724,6 @@ async fn operator_can_inspect_and_disable_vip_binding_without_reassignment() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(nip05, serde_json::json!({ "names": {} }));
 
-    let (status, resolved) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(resolved["satisfied"], false);
-
     let bob_pubkey = nip98::pubkey_for_secret(&BOB_SECRET).unwrap();
     assert!(matches!(
         store.bind_vip_email(ALICE_EMAIL, &bob_pubkey, NOW + 2),
@@ -1185,8 +745,8 @@ async fn operator_can_inspect_and_disable_vip_binding_without_reassignment() {
     assert_eq!(inspected["pubkey"], ALICE_PUBKEY);
     assert_eq!(inspected["vip_emails"][0]["email"], ALICE_EMAIL);
     assert_eq!(inspected["vip_emails"][0]["disabled"], true);
-    assert_eq!(inspected["principal_links"][0]["email"], ALICE_EMAIL);
-    assert_eq!(inspected["principal_links"][0]["pubkey"], ALICE_PUBKEY);
+    assert!(inspected.get("principal_links").is_none());
+    assert!(inspected.get("email_only_emails").is_none());
 }
 
 #[tokio::test]
@@ -1206,6 +766,32 @@ async fn operator_actions_reject_missing_token() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "missing_operator_token");
+}
+
+#[tokio::test]
+async fn retired_endpoints_are_gone_from_the_loopback_router() {
+    let (app, _store, _mailer, _clock) = fixture();
+
+    // Grant resolution, mailbox proofs, email-only principals, WorkOS account
+    // bindings, brain resolution, and the sites-notification relay were
+    // deleted with the directory shrink; the full router must 404 them.
+    for path in [
+        "/api/v1/principal-resolution/satisfies-grant",
+        "/api/v1/mailbox-proofs/redeem",
+        "/api/v1/mailbox-proofs/consume",
+        "/api/v1/email-only-principals/redeem",
+        "/internal/v1/sites-notifications",
+        "/api/v1/operator/account-principal-bindings",
+        "/api/v1/operator/brain/agent-resolution",
+        "/api/v1/operator/brain/user-resolution",
+    ] {
+        let status = post_status(app.clone(), path).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} was deleted with the directory shrink"
+        );
+    }
 }
 
 async fn request_and_redeem(
@@ -1245,43 +831,6 @@ async fn request_and_redeem(
     assert_eq!(status, StatusCode::OK);
 }
 
-async fn request_and_redeem_email_only(
-    app: axum::Router,
-    mailer: &RecordingMailer,
-    email: &str,
-    secret: &[u8; 32],
-) {
-    let (status, _challenge) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/email-challenges",
-        serde_json::json!({ "email": email }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let token = mailer.last_token_for(email);
-    let body = serde_json::json!({ "email": email, "token": token });
-    let body_bytes = serde_json::to_vec(&body).unwrap();
-    let auth = nip98::build_auth_header(
-        secret,
-        &format!("{BASE_URL}/api/v1/email-only-principals/redeem"),
-        "POST",
-        Some(&body_bytes),
-        NOW,
-    )
-    .unwrap();
-    let (status, _redeemed) = json_request(
-        app,
-        "POST",
-        "/api/v1/email-only-principals/redeem",
-        body,
-        Some(auth),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-}
-
 fn public_fixture() -> (
     axum::Router,
     IdentityStore,
@@ -1300,7 +849,6 @@ fn public_fixture() -> (
             finite_vip_domain: "finite.vip".to_owned(),
             email_challenge_ttl_seconds: 600,
             operator_token: Some(OPERATOR_TOKEN.to_owned()),
-            sites_notification_token: Some("sites-notification-test-token".to_owned()),
         },
     );
     (public_router(state), store, mailer, clock)
@@ -1336,16 +884,27 @@ async fn public_router_serves_the_complete_public_surface() {
     for path in [
         "/api/v1/email-challenges",
         "/api/v1/vip-email-bindings/redeem",
-        "/api/v1/email-only-principals/redeem",
-        "/api/v1/mailbox-proofs/redeem",
         "/api/v1/nip05-resolution",
-        "/api/v1/principal-resolution/satisfies-grant",
     ] {
         let status = post_status(app.clone(), path).await;
         assert_ne!(
             status,
             StatusCode::NOT_FOUND,
             "{path} must be served publicly"
+        );
+    }
+
+    // Retired public routes must stay gone.
+    for path in [
+        "/api/v1/principal-resolution/satisfies-grant",
+        "/api/v1/email-only-principals/redeem",
+        "/api/v1/mailbox-proofs/redeem",
+    ] {
+        let status = post_status(app.clone(), path).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} was deleted with the directory shrink"
         );
     }
 }
@@ -1355,14 +914,15 @@ async fn public_router_never_serves_private_routes() {
     let (app, _store, _mailer, _clock) = public_fixture();
 
     for path in [
-        "/api/v1/mailbox-proofs/consume",
-        "/internal/v1/sites-notifications",
         "/api/v1/operator/inspect",
         "/api/v1/operator/agent-email-bindings",
+        "/api/v1/operator/disable-binding",
+        // Retired loopback routes also stay off the public surface.
+        "/api/v1/mailbox-proofs/consume",
+        "/internal/v1/sites-notifications",
         "/api/v1/operator/account-principal-bindings",
         "/api/v1/operator/brain/agent-resolution",
         "/api/v1/operator/brain/user-resolution",
-        "/api/v1/operator/disable-binding",
     ] {
         let status = post_status(app.clone(), path).await;
         assert_eq!(
@@ -1371,44 +931,6 @@ async fn public_router_never_serves_private_routes() {
             "{path} must stay loopback-only"
         );
     }
-}
-
-#[tokio::test]
-async fn public_satisfies_grant_requires_the_actor_signature() {
-    let (app, store, _mailer, _clock) = public_fixture();
-    store
-        .bind_vip_email(ALICE_EMAIL, ALICE_PUBKEY, NOW)
-        .expect("persist binding");
-    let client = IdentityClient::new(BASE_URL);
-
-    // Unsigned requests are rejected.
-    let (status, _) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/principal-resolution/satisfies-grant",
-        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    // A valid signature from a different key than actor_pubkey is rejected.
-    let bob = LocalIdentityKey::from_secret(BOB_SECRET).expect("bob key");
-    let request = client
-        .satisfies_grant(&bob, ALICE_EMAIL, ALICE_PUBKEY, NOW)
-        .expect("signed request");
-    let (status, _) = signed_json_request(app.clone(), request).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The actor's own signature resolves the grant.
-    let alice = LocalIdentityKey::from_secret(ALICE_SECRET).expect("alice key");
-    let request = client
-        .satisfies_grant(&alice, ALICE_EMAIL, ALICE_PUBKEY, NOW)
-        .expect("signed request");
-    let (status, body) = signed_json_request(app, request).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["satisfied"], true);
-    assert_eq!(body["principal"]["kind"], "native");
 }
 
 #[tokio::test]
