@@ -1,0 +1,245 @@
+name: Production Deploy
+
+on:
+  push:
+    branches:
+      - production
+  workflow_dispatch:
+
+concurrency:
+  group: production-lat1
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+jobs:
+  prepare:
+    name: Prepare production deploy
+    runs-on: depot-ubuntu-24.04
+    outputs:
+      mutation_enabled: ${{ steps.manifest.outputs.mutation_enabled }}
+      source_sha: ${{ steps.plan-inputs.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'production' || github.sha }}
+          fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Resolve plan inputs
+        id: plan-inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$EVENT_NAME" == "push" && "$PUSH_BEFORE" =~ ^[0-9a-f]{40}$ && "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base_sha="$PUSH_BEFORE"
+          else
+            base_sha="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build deployment plan
+        run: |
+          set -euo pipefail
+          mkdir -p target/production-deploy
+          python3 scripts/production_deploy.py plan \
+            --base "${{ steps.plan-inputs.outputs.base_sha }}" \
+            --head "${{ steps.plan-inputs.outputs.source_sha }}" \
+            --output target/production-deploy/deployment-plan.json \
+            --summary target/production-deploy/deployment-plan.md
+
+      - name: Read mutation flag
+        id: manifest
+        run: |
+          set -euo pipefail
+          mutation_enabled="$(python3 -c 'import json; print(str(json.load(open("target/production-deploy/deployment-plan.json"))["mutation_enabled"]).lower())')"
+          echo "mutation_enabled=$mutation_enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CI gate for source SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.plan-inputs.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          conclusion="$(
+            gh run list \
+              --workflow ci.yml \
+              --commit "$SOURCE_SHA" \
+              --json conclusion,status \
+              --jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length'
+          )"
+          if [[ "$conclusion" == "0" ]]; then
+            echo "CI gate has not completed successfully for $SOURCE_SHA" >&2
+            exit 1
+          fi
+
+      - name: Build lat1 closure artifact
+        env:
+          SOURCE_SHA: ${{ steps.plan-inputs.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          scripts/build-lat1-nixos-closure-artifact \
+            "$SOURCE_SHA" \
+            target/lat1-nixos-closure
+
+      - name: Upload deployment plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-plan
+          path: |
+            target/production-deploy/deployment-plan.json
+            target/production-deploy/deployment-plan.md
+          if-no-files-found: error
+
+      - name: Upload lat1 closure artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lat1-nixos-closure-${{ steps.plan-inputs.outputs.source_sha }}
+          path: |
+            target/lat1-nixos-closure/manifest.json
+            target/lat1-nixos-closure/nix-cache
+            target/lat1-nixos-closure/store-paths.txt
+            target/lat1-nixos-closure/closure-size.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write dry-run deployment record
+        if: steps.manifest.outputs.mutation_enabled == 'false'
+        run: |
+          set -euo pipefail
+          python3 scripts/production_deploy.py record \
+            --plan target/production-deploy/deployment-plan.json \
+            --output target/production-deploy/deployment-record.json \
+            --outcome dry_run_blocked_before_mutation
+
+      - name: Upload dry-run deployment record
+        if: steps.manifest.outputs.mutation_enabled == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-record
+          path: target/production-deploy/deployment-record.json
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy production
+    needs: prepare
+    if: needs.prepare.outputs.mutation_enabled == 'true'
+    runs-on: depot-ubuntu-24.04
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Configure production SSH
+        env:
+          FINITE_PRODUCTION_SSH_KEY: ${{ secrets.FINITE_PRODUCTION_SSH_KEY }}
+          FINITE_PRODUCTION_KNOWN_HOSTS: ${{ secrets.FINITE_PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$FINITE_PRODUCTION_SSH_KEY"
+          test -n "$FINITE_PRODUCTION_KNOWN_HOSTS"
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$FINITE_PRODUCTION_SSH_KEY" > ~/.ssh/finite-production
+          chmod 0600 ~/.ssh/finite-production
+          printf '%s\n' "$FINITE_PRODUCTION_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<'EOF'
+          Host finite-production-lat1
+            HostName 64.34.82.77
+            User root
+            IdentityFile ~/.ssh/finite-production
+            IdentitiesOnly yes
+            BatchMode yes
+          EOF
+
+      - name: Capture finite-status before
+        run: |
+          set -euo pipefail
+          mkdir -p target/production-deploy
+          ssh -T finite-production-lat1 finite-status --json \
+            > target/production-deploy/finite-status-before.json
+
+      - name: Build lat1 closure artifact
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          scripts/build-lat1-nixos-closure-artifact \
+            "$SOURCE_SHA" \
+            target/lat1-nixos-closure
+
+      - name: Cross Mutation Boundary and deploy lat1
+        run: |
+          set -euo pipefail
+          mkdir -p target/production-deploy
+          date -u '+%Y-%m-%dT%H:%M:%SZ' \
+            > target/production-deploy/mutation-boundary-crossed
+          FINITE_LAT1_TARGET=finite-production-lat1 \
+            scripts/deploy-lat1-closure-cache target/lat1-nixos-closure
+
+      - name: Capture finite-status after
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/production-deploy
+          ssh -T finite-production-lat1 finite-status --json \
+            > target/production-deploy/finite-status-after.json
+
+      - name: Write deployment record
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/production-deploy
+          python3 scripts/production_deploy.py plan \
+            --base "$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)" \
+            --head "${{ needs.prepare.outputs.source_sha }}" \
+            --output target/production-deploy/deployment-plan.json
+          record_args=()
+          if [[ -f target/production-deploy/mutation-boundary-crossed ]]; then
+            record_args+=(--mutation-boundary-crossed)
+          fi
+          if [[ -f target/lat1-nixos-closure/manifest.json ]]; then
+            system_path="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json"))["system"])')"
+            record_args+=(--system-path "$system_path")
+          fi
+          python3 scripts/production_deploy.py record \
+            --plan target/production-deploy/deployment-plan.json \
+            --output target/production-deploy/deployment-record.json \
+            --outcome "${{ job.status }}" \
+            "${record_args[@]}"
+
+      - name: Upload finite-status before
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-status-before
+          path: target/production-deploy/finite-status-before.json
+          if-no-files-found: ignore
+
+      - name: Upload finite-status after
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-status-after
+          path: target/production-deploy/finite-status-after.json
+          if-no-files-found: ignore
+
+      - name: Upload deployment record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-record
+          path: target/production-deploy/deployment-record.json
+          if-no-files-found: error

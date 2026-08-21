@@ -20,15 +20,16 @@ and extraction.
 
 ### Issue tracker
 
-Issues and PRDs are tracked in GitHub Issues after the repo is published. See
-`docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked in GitHub Issues for `finitecomputer/finite-mono`.
+See the root `../docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
 Use the default five-role triage label vocabulary. See
-`docs/agents/triage-labels.md`.
+the root `../docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-This is a single-context repo: read root `CONTEXT.md` and relevant ADRs in
-`docs/adr/`. See `docs/agents/domain.md`.
+This component is part of the multi-context monorepo: read root
+`../CONTEXT-MAP.md`, this component's `CONTEXT.md`, and relevant root or
+component ADRs. See the root `../docs/agents/domain.md`.

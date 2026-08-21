@@ -40,8 +40,9 @@ use finitechat_client::{
     StoredAppMessage, StoredAppRoom, StoredAppRoomState,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, ChatMediaKind,
-    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
+    AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions,
+    OutboundAttachment,
 };
 use finitechat_hermes::{
     HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
@@ -90,6 +91,27 @@ const RESIDENT_BRIDGE_SYNC_INTERVAL_MILLIS: u64 = 10_000;
 const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
+/// How long a leased inbox entry stays owned by its consumer before the
+/// sidecar returns it to `Pending` and re-delivers it. Generous on purpose:
+/// a lease only expires when a consumer took an entry and neither acked nor
+/// released it (a crash mid-turn), so the ceiling need only be larger than a
+/// normal turn. Override with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
+const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 15 * 60 * 1000;
+const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
+/// Policy for a `thread_id` that resolves to no conversation or segment in the
+/// agent store. Default is a typed error (the safe choice per HARDENING.md,
+/// which requires a visible adapter failure rather than a silent Home
+/// fallback). Set to `home`/`default` to instead route unknown threads to
+/// Core's Home default, logged as an explicit routing decision.
+const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
+/// Bounded ring of recently-acked entry keys. It makes a post-restart
+/// duplicate ack a no-op and blocks a redelivery of an already-acked entry
+/// from durable recovery even if its seq is re-observed, so the sidecar is
+/// idempotent without the Python dedup set that used to shadow it.
+const MAX_HERMES_INBOX_ACKED_KEYS: usize = 4_096;
+/// Monotonic source of lease ids within this process. Combined with the lease
+/// timestamp it identifies exactly which delivery leased an entry.
+static HERMES_LEASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const HERMES_SERVICE_HEARTBEAT_MILLIS: u64 = 250;
 const HERMES_ATTACHMENT_CONNECT_TIMEOUT_SECS: u64 = 5;
 const HERMES_ATTACHMENT_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
@@ -133,6 +155,9 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         }),
         HermesCommand::Ack => with_backup_activity(&home_dir, "ack", || {
             cmd_ack(&home_dir, read_request(request_json)?, output)
+        }),
+        HermesCommand::Release => with_backup_activity(&home_dir, "release", || {
+            cmd_release(&home_dir, read_request(request_json)?, output)
         }),
         HermesCommand::Send => with_backup_activity(&home_dir, "send", || {
             cmd_send(&home_dir, read_request(request_json)?, output)
@@ -796,18 +821,32 @@ fn handle_hermes_service_action(
             }
             result
         }
+        "release" => {
+            let result = {
+                let _guard = lock_service_mutex(&state.inbox_lock)?;
+                output_json_value(|output| cmd_release(&state.agent_home, payload, output))
+            };
+            // A released entry is Pending again; wake the stream so it is
+            // redelivered promptly instead of waiting out the poll interval.
+            if result.is_ok() {
+                signal_bridge_update(state);
+            }
+            result
+        }
         "send" => {
-            let request: HermesSendRequestV1 =
+            let mut request: HermesSendRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
+            resolve_hermes_send_route(&state.runtime, &mut request)?;
             let sent = send_hermes_request_with_runtime(&state.runtime, &request)?;
             update_running_after_send(&state.agent_home, &request, &sent.message_id)?;
             Ok(sent_message_value(&sent))
         }
         "edit" => {
-            let request: HermesEditRequestV1 =
+            let mut request: HermesEditRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
+            resolve_hermes_edit_route(&state.agent_home, &state.runtime, &mut request)?;
             let sent = edit_hermes_request_with_runtime(&state.runtime, &request)?;
             update_running_after_edit(&state.agent_home, &request)?;
             Ok(sent_message_value(&sent))
@@ -881,6 +920,7 @@ fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, Cl
             room_id: message.room_id.clone(),
             conversation_id: message.conversation_id.clone(),
             segment_id: message.segment_id.clone(),
+            thread_id: None,
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
             kind: message.kind,
@@ -901,8 +941,9 @@ fn handle_hermes_service_activity(
     state: &HermesServiceState,
     payload: Value,
 ) -> Result<Value, CliError> {
-    let request: HermesActivityRequestV1 =
+    let mut request: HermesActivityRequestV1 =
         serde_json::from_value(payload).map_err(CliError::Json)?;
+    resolve_hermes_activity_route(&state.runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
     let accepted = state
         .runtime
@@ -1006,7 +1047,12 @@ fn collect_hermes_service_inbound_payload(
         &mut inbox,
         recent_events,
     )?;
-    let events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
+    let events = lease_pending_hermes_inbox_events(
+        &state.agent_home,
+        &mut inbox,
+        request.room_id.as_deref(),
+        limit,
+    )?;
     Ok(json!({ "events": events, "joined": joined }))
 }
 
@@ -1607,6 +1653,34 @@ struct HermesInboxState {
     events: Vec<HermesInboxEvent>,
     #[serde(default)]
     cursors: BTreeMap<String, u64>,
+    /// Bounded, oldest-first ring of recently-acked entry keys. It survives in
+    /// `hermes-inbox.json`, so a duplicate ack after a restart is a no-op and
+    /// an already-acked entry can never be re-enqueued from durable recovery.
+    #[serde(default)]
+    acked: Vec<HermesInboxAckedKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesInboxAckedKey {
+    key: String,
+    acked_at_ms: u64,
+}
+
+/// In-flight ownership of one inbox entry. The stream / `poll` / `inbound`
+/// deliver only `Pending` entries and flip them to `Leased`; `ack` settles a
+/// leased (or pending) entry, `release` returns it to `Pending`, and a lease
+/// older than the TTL is swept back to `Pending` for redelivery. Serialized
+/// with `#[serde(default)]` so an entry written before leases existed loads as
+/// `Pending` — existing `hermes-inbox.json` files are unchanged on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum HermesInboxLease {
+    #[default]
+    Pending,
+    Leased {
+        lease_id: String,
+        leased_at_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1617,6 +1691,8 @@ struct HermesInboxEvent {
     message_id: String,
     created_at_ms: u64,
     event: HermesPollEventV1,
+    #[serde(default)]
+    lease: HermesInboxLease,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1651,7 +1727,8 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let own_account = home.config.account_id.clone();
     let mut inbox = load_hermes_inbox(home_dir)?;
     initialize_hermes_inbox_cursors(home_dir, &home, &mut inbox)?;
-    let mut events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
+    let mut events =
+        lease_pending_hermes_inbox_events(home_dir, &mut inbox, request.room_id.as_deref(), limit)?;
     let mut joined: Vec<String> = Vec::new();
 
     while events.is_empty() {
@@ -1695,7 +1772,12 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
             request.room_id.as_deref(),
             &mut inbox,
         )?;
-        events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
+        events = lease_pending_hermes_inbox_events(
+            home_dir,
+            &mut inbox,
+            request.room_id.as_deref(),
+            limit,
+        )?;
 
         if !events.is_empty() || !joined.is_empty() || started.elapsed() >= timeout {
             break;
@@ -1717,12 +1799,32 @@ fn cmd_ack<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<
     let key = hermes_inbox_key(&request.room_id, request.seq, &request.message_id);
     let before = inbox.events.len();
     inbox.events.retain(|event| event.key != key);
-    if inbox.events.len() != before {
+    let removed = inbox.events.len() != before;
+    // Idempotent: a duplicate ack (e.g. after a restart) for an entry already
+    // settled finds it in the recently-acked ring and is still reported acked,
+    // without a second inbox write.
+    let previously_acked = inbox_key_recently_acked(&inbox, &key);
+    if removed {
+        record_hermes_inbox_acked(&mut inbox, &key, now_ms());
         save_hermes_inbox(home_dir, &inbox)?;
     }
     crate::write_pretty_json(
         output,
-        &json!({ "acked": inbox.events.len() != before, "room_id": request.room_id, "seq": request.seq, "message_id": request.message_id }),
+        &json!({ "acked": removed || previously_acked, "room_id": request.room_id, "seq": request.seq, "message_id": request.message_id }),
+    )
+}
+
+fn cmd_release<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
+    let request: HermesAckRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
+    request
+        .validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let mut inbox = load_hermes_inbox(home_dir)?;
+    let key = hermes_inbox_key(&request.room_id, request.seq, &request.message_id);
+    let released = release_hermes_inbox_entry(home_dir, &mut inbox, &key)?;
+    crate::write_pretty_json(
+        output,
+        &json!({ "released": released, "room_id": request.room_id, "seq": request.seq, "message_id": request.message_id }),
     )
 }
 
@@ -1879,6 +1981,14 @@ fn enqueue_hermes_inbox_event(
     if event.seq <= hermes_inbox_cursor(inbox, &event.room_id) {
         return Ok(());
     }
+    if inbox_key_recently_acked(inbox, &key) {
+        // An already-acked entry must never be re-enqueued from durable
+        // recovery, even if its seq is re-observed before the cursor caught up.
+        if advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq) {
+            save_hermes_inbox(home_dir, inbox)?;
+        }
+        return Ok(());
+    }
     advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
     inbox.events.push(HermesInboxEvent {
         key,
@@ -1887,6 +1997,7 @@ fn enqueue_hermes_inbox_event(
         message_id: event.message_id.clone(),
         created_at_ms: now_ms(),
         event,
+        lease: HermesInboxLease::Pending,
     });
     save_hermes_inbox(home_dir, inbox)
 }
@@ -2042,11 +2153,19 @@ fn advance_hermes_inbox_cursor(inbox: &mut HermesInboxState, room_id: &str, seq:
     true
 }
 
+/// Non-mutating peek at the entries a delivery would hand out right now:
+/// `Pending` entries plus any whose lease has already expired. Delivery itself
+/// goes through `lease_pending_hermes_inbox_events`, which flips them to
+/// `Leased` and persists; this peek only decides whether there is anything to
+/// deliver (poll/stream idle checks) and backs the inbox unit tests.
+#[cfg(test)]
 fn pending_hermes_inbox_events(
     inbox: &HermesInboxState,
     room_filter: Option<&str>,
     limit: usize,
 ) -> Vec<HermesPollEventV1> {
+    let now = now_ms();
+    let ttl = hermes_inbox_lease_ttl_ms();
     inbox
         .events
         .iter()
@@ -2054,9 +2173,120 @@ fn pending_hermes_inbox_events(
             Some(room_id) => room_id == entry.room_id,
             None => true,
         })
+        .filter(|entry| entry.lease.is_deliverable(now, ttl))
         .take(limit)
         .map(|entry| entry.event.clone())
         .collect()
+}
+
+/// Deliver up to `limit` deliverable entries, flipping each to `Leased` and
+/// persisting the change so the next tick does not re-emit them. A leased
+/// entry only comes back through `release`, `ack` (settles it), or the lease
+/// TTL sweeping it back to `Pending`.
+fn lease_pending_hermes_inbox_events(
+    home_dir: &Path,
+    inbox: &mut HermesInboxState,
+    room_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<HermesPollEventV1>, CliError> {
+    let now = now_ms();
+    let ttl = hermes_inbox_lease_ttl_ms();
+    let mut leased = Vec::new();
+    let mut changed = false;
+    for entry in inbox.events.iter_mut() {
+        if leased.len() >= limit {
+            break;
+        }
+        if let Some(room_id) = room_filter
+            && room_id != entry.room_id
+        {
+            continue;
+        }
+        if !entry.lease.is_deliverable(now, ttl) {
+            continue;
+        }
+        entry.lease = HermesInboxLease::Leased {
+            lease_id: next_hermes_lease_id(now),
+            leased_at_ms: now,
+        };
+        changed = true;
+        leased.push(entry.event.clone());
+    }
+    if changed {
+        save_hermes_inbox(home_dir, inbox)?;
+    }
+    Ok(leased)
+}
+
+impl HermesInboxLease {
+    /// A `Pending` entry is deliverable; a `Leased` one becomes deliverable
+    /// again only once its lease is at least `ttl_ms` old (a consumer that took
+    /// it and neither acked nor released it, e.g. crashed mid-turn).
+    fn is_deliverable(&self, now_ms: u64, ttl_ms: u64) -> bool {
+        match self {
+            HermesInboxLease::Pending => true,
+            HermesInboxLease::Leased { leased_at_ms, .. } => {
+                now_ms.saturating_sub(*leased_at_ms) >= ttl_ms
+            }
+        }
+    }
+}
+
+fn hermes_inbox_lease_ttl_ms() -> u64 {
+    std::env::var(HERMES_INBOX_LEASE_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS)
+}
+
+fn next_hermes_lease_id(now_ms: u64) -> String {
+    let sequence = HERMES_LEASE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{now_ms}-{sequence}")
+}
+
+/// Return a leased entry to `Pending` so it is redelivered on the next tick.
+/// A pending entry is left as-is; an unknown entry is a no-op. Returns whether
+/// an entry was actually released.
+fn release_hermes_inbox_entry(
+    home_dir: &Path,
+    inbox: &mut HermesInboxState,
+    key: &str,
+) -> Result<bool, CliError> {
+    let mut released = false;
+    for entry in inbox.events.iter_mut() {
+        if entry.key == key && matches!(entry.lease, HermesInboxLease::Leased { .. }) {
+            entry.lease = HermesInboxLease::Pending;
+            released = true;
+        }
+    }
+    if released {
+        save_hermes_inbox(home_dir, inbox)?;
+    }
+    Ok(released)
+}
+
+fn inbox_key_recently_acked(inbox: &HermesInboxState, key: &str) -> bool {
+    inbox.acked.iter().any(|acked| acked.key == key)
+}
+
+/// Record an acked entry key in the bounded, oldest-first ring so a duplicate
+/// ack or a durable redelivery of the same entry is idempotent.
+fn record_hermes_inbox_acked(inbox: &mut HermesInboxState, key: &str, now_ms: u64) {
+    if inbox_key_recently_acked(inbox, key) {
+        return;
+    }
+    inbox.acked.push(HermesInboxAckedKey {
+        key: key.to_owned(),
+        acked_at_ms: now_ms,
+    });
+    let overflow = inbox
+        .acked
+        .len()
+        .saturating_sub(MAX_HERMES_INBOX_ACKED_KEYS);
+    if overflow > 0 {
+        inbox.acked.drain(0..overflow);
+    }
 }
 
 fn hermes_inbox_key(room_id: &str, seq: u64, message_id: &str) -> String {
@@ -2563,24 +2793,28 @@ fn encode_application_event(
 }
 
 fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesSendRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
+    let mut request: HermesSendRequestV1 =
+        serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_send_route(&runtime, &mut request)?;
     let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
     write_sent_message(output, &sent)
 }
 
 fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesEditRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
+    let mut request: HermesEditRequestV1 =
+        serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_edit_route(home_dir, &runtime, &mut request)?;
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
     write_sent_message(output, &sent)
@@ -2594,6 +2828,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
             room_id: message.room_id.clone(),
             conversation_id: message.conversation_id.clone(),
             segment_id: message.segment_id.clone(),
+            thread_id: None,
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
             kind: message.kind,
@@ -2627,6 +2862,194 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         save_hermes_running(home_dir, &HermesRunningState::default())?;
     }
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
+}
+
+enum UnknownThreadRoutePolicy {
+    Error,
+    HomeDefault,
+}
+
+fn unknown_thread_route_policy() -> UnknownThreadRoutePolicy {
+    match std::env::var(HERMES_UNKNOWN_THREAD_ROUTE_ENV)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("home") | Some("default") => UnknownThreadRoutePolicy::HomeDefault,
+        _ => UnknownThreadRoutePolicy::Error,
+    }
+}
+
+/// Resolve a Hermes `thread_id` against the agent store: it is either a
+/// conversation (topic) id, or a segment (chat) id inside one of the room's
+/// topics. Returns `(conversation_id, segment_id)`. `hermes.rs`'s inbound path
+/// mints `thread_id = segment_id.or(conversation_id)`, so this is the inverse
+/// the Python adapter used to persist in its own route table.
+fn resolve_thread_id_route(
+    topics: &[AppTopicSummary],
+    room_id: &str,
+    thread_id: &str,
+) -> Option<(String, Option<String>)> {
+    if topics
+        .iter()
+        .any(|topic| topic.room_id == room_id && topic.topic_id == thread_id && !topic.archived)
+    {
+        return Some((thread_id.to_owned(), None));
+    }
+    for topic in topics
+        .iter()
+        .filter(|topic| topic.room_id == room_id && !topic.archived)
+    {
+        if topic.chats.iter().any(|chat| chat.chat_id == thread_id) {
+            return Some((topic.topic_id.clone(), Some(thread_id.to_owned())));
+        }
+    }
+    None
+}
+
+/// Turn the request's optional `thread_id` into concrete route fields. An
+/// explicit `conversation_id`/`segment_id` always wins (thread_id is only a
+/// resolver); with neither route nor thread_id the send is an intentional Home
+/// message (Core applies its default). An unknown thread_id is a typed error
+/// unless the Home-default policy is opted into.
+fn resolve_route_fields(
+    runtime: &FiniteChatRuntime,
+    room_id: &str,
+    conversation_id: Option<String>,
+    segment_id: Option<String>,
+    thread_id: Option<&str>,
+    context: &str,
+) -> Result<(Option<String>, Option<String>), CliError> {
+    if conversation_id.is_some() || segment_id.is_some() {
+        return Ok((conversation_id, segment_id));
+    }
+    let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok((None, None));
+    };
+    let state = runtime.state().map_err(map_core_hermes_error)?;
+    if let Some((conversation_id, segment_id)) =
+        resolve_thread_id_route(&state.topics, room_id, thread_id)
+    {
+        return Ok((Some(conversation_id), segment_id));
+    }
+    match unknown_thread_route_policy() {
+        UnknownThreadRoutePolicy::Error => Err(CliError::Hermes(format!(
+            "unknown thread_id {thread_id:?} for room {room_id} ({context}): \
+             no matching conversation or segment in the agent store"
+        ))),
+        UnknownThreadRoutePolicy::HomeDefault => {
+            eprintln!(
+                "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room \
+                 {room_id}; routing to the Home default ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=home)"
+            );
+            Ok((None, None))
+        }
+    }
+}
+
+fn resolve_hermes_send_route(
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesSendRequestV1,
+) -> Result<(), CliError> {
+    let (conversation_id, segment_id) = resolve_route_fields(
+        runtime,
+        &request.room_id,
+        request.conversation_id.take(),
+        request.segment_id.take(),
+        request.thread_id.as_deref(),
+        "send",
+    )?;
+    request.conversation_id = conversation_id;
+    request.segment_id = segment_id;
+    Ok(())
+}
+
+fn resolve_hermes_activity_route(
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesActivityRequestV1,
+) -> Result<(), CliError> {
+    let (conversation_id, segment_id) = resolve_route_fields(
+        runtime,
+        &request.room_id,
+        request.conversation_id.take(),
+        request.segment_id.take(),
+        request.thread_id.as_deref(),
+        "activity",
+    )?;
+    request.conversation_id = conversation_id;
+    request.segment_id = segment_id;
+    Ok(())
+}
+
+fn lookup_running_message(
+    home_dir: &Path,
+    room_id: &str,
+    message_id: &str,
+) -> Result<Option<HermesRunningMessage>, CliError> {
+    let running = load_hermes_running(home_dir)?;
+    Ok(running
+        .messages
+        .into_iter()
+        .find(|message| message.room_id == room_id && message.message_id == message_id))
+}
+
+/// Resolve an edit's route. An explicit route wins; otherwise a `thread_id` is
+/// resolved against the store; otherwise the original message's route is looked
+/// up by `(room_id, message_id)` from the running-turn file, so the adapter no
+/// longer needs to remember outbound message routes.
+fn resolve_hermes_edit_route(
+    home_dir: &Path,
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesEditRequestV1,
+) -> Result<(), CliError> {
+    if request.conversation_id.is_some() || request.segment_id.is_some() {
+        // A route override must name a real conversation, so a wrong override
+        // is a typed error rather than a silent misroute to a phantom topic.
+        if let Some(conversation_id) = request.conversation_id.as_deref() {
+            let state = runtime.state().map_err(map_core_hermes_error)?;
+            let exists = state.topics.iter().any(|topic| {
+                topic.room_id == request.room_id
+                    && topic.topic_id == conversation_id
+                    && !topic.archived
+            });
+            if !exists {
+                return Err(CliError::Hermes(format!(
+                    "edit conversation_id {conversation_id:?} override does not name a \
+                     conversation in room {}",
+                    request.room_id
+                )));
+            }
+        }
+        return Ok(());
+    }
+    if request
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        let (conversation_id, segment_id) = resolve_route_fields(
+            runtime,
+            &request.room_id,
+            None,
+            None,
+            request.thread_id.as_deref(),
+            "edit",
+        )?;
+        request.conversation_id = conversation_id;
+        request.segment_id = segment_id;
+        return Ok(());
+    }
+    if let Some(message) = lookup_running_message(home_dir, &request.room_id, &request.message_id)?
+    {
+        // The running-turn file is authoritative for an in-flight edit's route
+        // and kind, so the adapter no longer remembers outbound message routes
+        // or kinds (ownership audit O2).
+        request.conversation_id = message.conversation_id;
+        request.segment_id = message.segment_id;
+        request.kind = message.kind;
+    }
+    Ok(())
 }
 
 fn send_hermes_request_with_runtime(
@@ -2939,14 +3362,15 @@ fn remove_hermes_running_message(
 }
 
 fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesActivityRequestV1 =
+    let mut request: HermesActivityRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let input = app_bridge_activity_input(request)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_activity_route(&runtime, &mut request)?;
+    let input = app_bridge_activity_input(request)?;
     let accepted = runtime
         .append_ephemeral_activity_and_wait(input)
         .map_err(map_core_hermes_error)?;
@@ -4475,6 +4899,7 @@ mod tests {
             room_id: "room-main".to_owned(),
             conversation_id: Some("topic-build".to_owned()),
             segment_id: Some("segment-7".to_owned()),
+            thread_id: None,
             activity_kind: finitechat_proto::FINITECHAT_ACTIVITY_KIND_WORKING.to_owned(),
             activity_id: None,
             action: EphemeralActivityActionV1::Set,
@@ -4592,6 +5017,263 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message_id, "msg-11");
         assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 11);
+    }
+
+    fn sample_inbox_event(seq: u64, message_id: &str) -> HermesPollEventV1 {
+        HermesPollEventV1::finite_chat_text("room-a", seq, message_id, "account-a", "phone", "hi")
+            .unwrap()
+    }
+
+    #[test]
+    fn lease_is_deliverable_respects_pending_and_ttl() {
+        assert!(HermesInboxLease::Pending.is_deliverable(100, 50));
+        let leased = HermesInboxLease::Leased {
+            lease_id: "l".to_owned(),
+            leased_at_ms: 100,
+        };
+        // Fresh lease: not redeliverable.
+        assert!(!leased.is_deliverable(120, 50));
+        // Lease older than the TTL: redeliverable.
+        assert!(leased.is_deliverable(200, 50));
+    }
+
+    #[test]
+    fn leased_entry_is_not_redelivered_on_the_next_tick() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, sample_inbox_event(5, "msg-5"))
+            .unwrap();
+
+        let first = lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].message_id, "msg-5");
+
+        // The entry is now leased; the next tick delivers nothing.
+        let second = lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+        assert!(second.is_empty());
+
+        // The lease survives a restart (it is persisted in hermes-inbox.json).
+        let reloaded = load_hermes_inbox(home.path()).unwrap();
+        assert!(matches!(
+            reloaded.events[0].lease,
+            HermesInboxLease::Leased { .. }
+        ));
+        assert!(pending_hermes_inbox_events(&reloaded, None, 10).is_empty());
+    }
+
+    #[test]
+    fn release_returns_a_leased_entry_to_pending_for_redelivery() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, sample_inbox_event(5, "msg-5"))
+            .unwrap();
+        lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+
+        let mut output = Vec::new();
+        cmd_release(
+            home.path(),
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-a".to_owned(),
+                seq: 5,
+                message_id: "msg-5".to_owned(),
+            })
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap();
+        let released: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(released["released"], true);
+
+        // Released entries are redelivered on the next tick.
+        let inbox = load_hermes_inbox(home.path()).unwrap();
+        assert!(matches!(inbox.events[0].lease, HermesInboxLease::Pending));
+        let mut inbox = inbox;
+        let again = lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].message_id, "msg-5");
+    }
+
+    #[test]
+    fn stale_lease_is_swept_back_to_pending_and_redelivered() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, sample_inbox_event(5, "msg-5"))
+            .unwrap();
+        lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+
+        // Simulate a lease older than any TTL (a consumer crashed mid-turn).
+        inbox.events[0].lease = HermesInboxLease::Leased {
+            lease_id: "stale".to_owned(),
+            leased_at_ms: 0,
+        };
+        let swept = lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].message_id, "msg-5");
+    }
+
+    #[test]
+    fn duplicate_ack_after_restart_is_an_idempotent_no_op() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, sample_inbox_event(5, "msg-5"))
+            .unwrap();
+        lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+
+        let ack_request = || {
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-a".to_owned(),
+                seq: 5,
+                message_id: "msg-5".to_owned(),
+            })
+            .unwrap()
+        };
+
+        let mut first = Vec::new();
+        cmd_ack(home.path(), ack_request(), &mut first).unwrap();
+        let first: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first["acked"], true);
+
+        // Reload as if the sidecar restarted; the entry is gone and its key is
+        // in the recently-acked ring.
+        let reloaded = load_hermes_inbox(home.path()).unwrap();
+        assert!(reloaded.events.is_empty());
+        let key = hermes_inbox_key("room-a", 5, "msg-5");
+        assert!(inbox_key_recently_acked(&reloaded, &key));
+
+        // A duplicate ack for the same entry is still reported acked.
+        let mut second = Vec::new();
+        cmd_ack(home.path(), ack_request(), &mut second).unwrap();
+        let second: Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(second["acked"], true);
+    }
+
+    #[test]
+    fn acked_key_blocks_redelivery_even_when_the_cursor_is_behind() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        let event = sample_inbox_event(5, "msg-5");
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, event.clone()).unwrap();
+        lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+
+        let mut output = Vec::new();
+        cmd_ack(
+            home.path(),
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-a".to_owned(),
+                seq: 5,
+                message_id: "msg-5".to_owned(),
+            })
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap();
+
+        // Force the ring (not the cursor) to be the thing that blocks a
+        // redelivery: rewind the cursor as if durable recovery re-observed the
+        // acked seq before the cursor caught up. A crash between the ack write
+        // and any downstream dedup must not resurrect the entry.
+        let mut reloaded = load_hermes_inbox(home.path()).unwrap();
+        reloaded.cursors.insert("room-a".to_owned(), 0);
+        enqueue_hermes_inbox_event(home.path(), &mut reloaded, event).unwrap();
+        assert!(
+            pending_hermes_inbox_events(&reloaded, None, 10).is_empty(),
+            "an acked entry must not be re-enqueued even when the cursor is behind"
+        );
+    }
+
+    fn topic_with_chats(room_id: &str, topic_id: &str, chat_ids: &[&str]) -> AppTopicSummary {
+        use finitechat_core::AppChatSummary;
+        AppTopicSummary {
+            room_id: room_id.to_owned(),
+            topic_id: topic_id.to_owned(),
+            title: topic_id.to_owned(),
+            description: None,
+            last_message_preview: String::new(),
+            unread_count: 0,
+            message_count: 0,
+            created_seq: 0,
+            updated_seq: 0,
+            archived: false,
+            active_chat_id: chat_ids.first().map(|id| (*id).to_owned()),
+            chats: chat_ids
+                .iter()
+                .map(|id| AppChatSummary {
+                    chat_id: (*id).to_owned(),
+                    title: (*id).to_owned(),
+                    last_message_preview: String::new(),
+                    unread_count: 0,
+                    message_count: 0,
+                    started_seq: 0,
+                    updated_seq: 0,
+                    active: false,
+                    archived: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_thread_id_route_matches_segment_then_conversation() {
+        let topics = vec![topic_with_chats(
+            "room-a",
+            "topic-build",
+            &["chat-build-1", "chat-build-2"],
+        )];
+        // A segment (chat) id resolves to its parent topic plus itself.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "chat-build-1"),
+            Some(("topic-build".to_owned(), Some("chat-build-1".to_owned())))
+        );
+        // A conversation (topic) id resolves to itself with no segment.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "topic-build"),
+            Some(("topic-build".to_owned(), None))
+        );
+        // An unknown thread id resolves to nothing (the caller then applies the
+        // configured unknown-thread policy).
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "chat-unknown"),
+            None
+        );
+        // A chat id in another room does not leak across rooms.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-b", "chat-build-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_thread_id_route_ignores_archived_topics() {
+        let mut topics = vec![topic_with_chats("room-a", "topic-old", &["chat-old"])];
+        topics[0].archived = true;
+        assert_eq!(resolve_thread_id_route(&topics, "room-a", "chat-old"), None);
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "topic-old"),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_thread_route_policy_defaults_to_typed_error() {
+        // The env var is process-global; this test owns it and restores it.
+        // SAFETY: single-threaded mutation of a test-only environment variable.
+        unsafe {
+            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+        }
+        assert!(matches!(
+            unknown_thread_route_policy(),
+            UnknownThreadRoutePolicy::Error
+        ));
+        unsafe {
+            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home");
+        }
+        assert!(matches!(
+            unknown_thread_route_policy(),
+            UnknownThreadRoutePolicy::HomeDefault
+        ));
+        unsafe {
+            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+        }
     }
 
     #[test]
