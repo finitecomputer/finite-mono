@@ -442,18 +442,19 @@ test handler.
 - Understanding: differences between local CLI, Docker, and future Tinfoil must
   be explicit in the runbook.
 
-Current Docker smoke:
+Historical Docker smoke (`scripts/hermes-sidecar-docker-smoke.sh`,
+`scripts/hermes-sidecar-docker-s3-emulator-smoke.sh`): deleted in ownership
+audit O12 together with the `containers/agent/Dockerfile` test fixture it
+built, because that image was never shipped and the invite/PIN admission it
+drove no longer exists. The canonical-image Docker proof is
+`scripts/hermes-durable-home-docker-smoke.py`; the restic entrypoint contract
+is unit-tested in `tests/container/test_agent_entrypoint.py`. The rest of
+this section records what the deleted smoke proved.
 
-```bash
-scripts/hermes-restic-preflight.py --report target/hermes-docker-smoke/restic-preflight.json
-scripts/hermes-sidecar-docker-smoke.sh
-scripts/hermes-sidecar-docker-s3-emulator-smoke.sh
-```
-
-It builds `containers/agent/Dockerfile` with the flake-pinned Nix Hermes
-runtime, starts the real Hermes gateway in Docker, drives `finitechat` CLI users through invite/PIN
-admission before and after restore, and writes
-`target/hermes-docker-smoke/report.json`. This proves the packaged Linux image
+It built the fixture Dockerfile with the flake-pinned Nix Hermes runtime,
+started the real Hermes gateway in Docker, drove `finitechat` CLI users
+through invite/PIN admission before and after restore, and wrote
+`target/hermes-docker-smoke/report.json`. This proved the packaged Linux image
 has the plugin files, binary, Hermes runtime dependency, real gateway command,
 invite/PIN admission flow, restic encrypted repository init, entrypoint-owned
 encrypted recovery-root backup on controlled shutdown, repository check, local

@@ -643,21 +643,6 @@ class RecoverChatBootTest(unittest.TestCase):
         self.assertFalse(any("init" in call for call in fixture.calls()))
         self.assertFalse(any("install" in call for call in fixture.calls()))
 
-    def test_canonical_and_standalone_images_package_recovery_boot(self) -> None:
-        dockerfiles = (
-            REPO_ROOT / "containers/agent/Dockerfile",
-            REPO_ROOT.parent / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile",
-        )
-        for dockerfile in dockerfiles:
-            with self.subTest(dockerfile=dockerfile):
-                contents = dockerfile.read_text(encoding="utf-8")
-                self.assertIn(
-                    "COPY finitechat/containers/agent/recover_chat_boot.py "
-                    "/opt/recover_chat_boot.py",
-                    contents,
-                )
-                self.assertGreaterEqual(contents.count("/opt/recover_chat_boot.py"), 2)
-
 
 if __name__ == "__main__":
     unittest.main()
