@@ -880,6 +880,77 @@ pub enum AppAction {
     RemovePushToken,
 }
 
+/// Read/write class of a command at the dispatch boundary, declared once per
+/// `AppAction` variant below. `Writer` commands mutate the client store or
+/// durable runtime state and may only run on a runtime that holds the store's
+/// single-writer lease; `ReadOnly` commands may run on a read-only open
+/// alongside the resident writer. The smoke-mystery incident class (2026-08-20
+/// audit synthesis, H2) was a nominally-read one-shot dispatching a writer
+/// action against the resident bridge's store; the class makes that a
+/// type-level property instead of a convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandClass {
+    ReadOnly,
+    Writer,
+}
+
+impl AppAction {
+    /// The declared read/write class of every action, exhaustively: adding a
+    /// variant without naming its class is a compile error, and a read-only
+    /// runtime rejects `Writer` actions with
+    /// [`FiniteChatCoreError::ReadOnly`]. Every action today mutates the
+    /// store or durable runtime state (navigation persists selection,
+    /// `StartRuntime` publishes KeyPackages and activates pending Welcomes),
+    /// so every variant is `Writer`; a future genuinely read-only action
+    /// declares `ReadOnly` here.
+    pub fn command_class(&self) -> CommandClass {
+        match self {
+            AppAction::StartRuntime => CommandClass::Writer,
+            AppAction::StopRuntime => CommandClass::Writer,
+            AppAction::OpenRoom { .. } => CommandClass::Writer,
+            AppAction::OpenTopic { .. } => CommandClass::Writer,
+            AppAction::OpenChat { .. } => CommandClass::Writer,
+            AppAction::PairAgent { .. } => CommandClass::Writer,
+            AppAction::StartHomeChat { .. } => CommandClass::Writer,
+            AppAction::RenameChat { .. } => CommandClass::Writer,
+            AppAction::SetChatArchived { .. } => CommandClass::Writer,
+            AppAction::CreateRoom { .. } => CommandClass::Writer,
+            AppAction::CreateTopic { .. } => CommandClass::Writer,
+            AppAction::StartTopicChat { .. } => CommandClass::Writer,
+            AppAction::SaveProfile { .. } => CommandClass::Writer,
+            AppAction::UploadImage { .. } => CommandClass::Writer,
+            AppAction::SaveRoomMetadata { .. } => CommandClass::Writer,
+            AppAction::StartProfileChat { .. } => CommandClass::Writer,
+            AppAction::StartGroupChat { .. } => CommandClass::Writer,
+            AppAction::AddRoomMembers { .. } => CommandClass::Writer,
+            AppAction::ScanTarget { .. } => CommandClass::Writer,
+            AppAction::SendMessage { .. } => CommandClass::Writer,
+            AppAction::SendTopicMessage { .. } => CommandClass::Writer,
+            AppAction::SendChatMessage { .. } => CommandClass::Writer,
+            AppAction::SendReply { .. } => CommandClass::Writer,
+            AppAction::SendChatReply { .. } => CommandClass::Writer,
+            AppAction::SendAttachment { .. } => CommandClass::Writer,
+            AppAction::SendAttachments { .. } => CommandClass::Writer,
+            AppAction::SendChatAttachment { .. } => CommandClass::Writer,
+            AppAction::SendChatAttachments { .. } => CommandClass::Writer,
+            AppAction::SendPoll { .. } => CommandClass::Writer,
+            AppAction::SendChatPoll { .. } => CommandClass::Writer,
+            AppAction::VotePoll { .. } => CommandClass::Writer,
+            AppAction::DownloadAttachment { .. } => CommandClass::Writer,
+            AppAction::BeginDownloadAttachment { .. } => CommandClass::Writer,
+            AppAction::LoadOlderMessages { .. } => CommandClass::Writer,
+            AppAction::ReactToMessage { .. } => CommandClass::Writer,
+            AppAction::MarkRoomRead { .. } => CommandClass::Writer,
+            AppAction::RetryMessage { .. } => CommandClass::Writer,
+            AppAction::SetTyping { .. } => CommandClass::Writer,
+            AppAction::RefreshDevices => CommandClass::Writer,
+            AppAction::RevokeDevice { .. } => CommandClass::Writer,
+            AppAction::SetPushToken { .. } => CommandClass::Writer,
+            AppAction::RemovePushToken => CommandClass::Writer,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum AppUpdate {
     FullState(AppState),
@@ -1310,6 +1381,20 @@ impl FiniteChatRuntime {
 }
 
 impl FiniteChatRuntime {
+    /// Open the runtime in the mode a command's declared [`CommandClass`]
+    /// requires: only `Writer` commands acquire the store's single-writer
+    /// lease (`open`); `ReadOnly` commands never take it (`open_read_only`)
+    /// and reject writer actions with [`FiniteChatCoreError::ReadOnly`].
+    pub fn open_for_class(
+        options: OpenOptions,
+        class: CommandClass,
+    ) -> Result<Arc<Self>, FiniteChatCoreError> {
+        match class {
+            CommandClass::ReadOnly => Self::open_read_only(options),
+            CommandClass::Writer => Self::open(options),
+        }
+    }
+
     fn open_with_mode(
         options: OpenOptions,
         read_only: bool,
@@ -2530,7 +2615,7 @@ impl AppRuntimeState {
         action: AppAction,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        if self.core.read_only {
+        if self.core.read_only && action.command_class() == CommandClass::Writer {
             return Err(FiniteChatCoreError::ReadOnly);
         }
         self.app.toast = None;
@@ -22047,6 +22132,267 @@ mod tests {
             .dispatch_and_wait(AppAction::StartRuntime)
             .expect_err("read-only runtime rejects actions");
         assert!(matches!(error, FiniteChatCoreError::ReadOnly));
+    }
+
+    /// Pin the declared read/write class of every `AppAction` variant. The
+    /// expected-class match below is exhaustive on purpose: a new variant
+    /// fails to compile here (and in `AppAction::command_class`) until its
+    /// class is declared, and reclassifying a variant fails the assertion.
+    #[test]
+    fn app_action_command_class_is_pinned_for_every_variant() {
+        let profile = AppProfileSummary {
+            npub: "npub1test".to_owned(),
+            account_id: "account-id".to_owned(),
+            display_name: "Display".to_owned(),
+            about: None,
+            picture: None,
+            stale: false,
+            is_agent: false,
+        };
+        let attachment = OutboundAttachment {
+            filename: "file.bin".to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            kind: ChatMediaKind::File,
+            bytes: vec![1],
+        };
+        let text = || "text".to_owned();
+        let id = || "id".to_owned();
+        let actions = [
+            AppAction::StartRuntime,
+            AppAction::StopRuntime,
+            AppAction::OpenRoom { room_id: id() },
+            AppAction::OpenTopic {
+                room_id: id(),
+                topic_id: id(),
+            },
+            AppAction::OpenChat {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+            },
+            AppAction::PairAgent { room_id: id() },
+            AppAction::StartHomeChat {
+                text: Some(text()),
+                intent_key: id(),
+            },
+            AppAction::RenameChat {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                title: text(),
+            },
+            AppAction::SetChatArchived {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                archived: true,
+            },
+            AppAction::CreateRoom {
+                display_name: text(),
+            },
+            AppAction::CreateTopic {
+                room_id: id(),
+                title: text(),
+            },
+            AppAction::StartTopicChat {
+                room_id: id(),
+                topic_id: id(),
+                reason: None,
+            },
+            AppAction::SaveProfile {
+                display_name: text(),
+                about: text(),
+                picture: None,
+            },
+            AppAction::UploadImage {
+                bytes: vec![1],
+                content_type: "image/png".to_owned(),
+            },
+            AppAction::SaveRoomMetadata {
+                room_id: id(),
+                display_name: text(),
+                picture: None,
+            },
+            AppAction::StartProfileChat {
+                profile: profile.clone(),
+                display_name: text(),
+            },
+            AppAction::StartGroupChat {
+                profiles: vec![profile.clone()],
+                display_name: text(),
+            },
+            AppAction::AddRoomMembers {
+                room_id: id(),
+                profiles: vec![profile],
+            },
+            AppAction::ScanTarget { value: text() },
+            AppAction::SendMessage {
+                room_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendTopicMessage {
+                room_id: id(),
+                topic_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendChatMessage {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendReply {
+                room_id: id(),
+                text: text(),
+                reply_to_message_id: id(),
+                metadata_json: None,
+            },
+            AppAction::SendChatReply {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                text: text(),
+                reply_to_message_id: id(),
+                metadata_json: None,
+            },
+            AppAction::SendAttachment {
+                room_id: id(),
+                filename: "file.bin".to_owned(),
+                mime_type: "application/octet-stream".to_owned(),
+                kind: ChatMediaKind::File,
+                bytes: vec![1],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendAttachments {
+                room_id: id(),
+                attachments: vec![attachment.clone()],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendChatAttachment {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                filename: "file.bin".to_owned(),
+                mime_type: "application/octet-stream".to_owned(),
+                kind: ChatMediaKind::File,
+                bytes: vec![1],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendChatAttachments {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                attachments: vec![attachment],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendPoll {
+                room_id: id(),
+                question: text(),
+                options: vec![text()],
+            },
+            AppAction::SendChatPoll {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                question: text(),
+                options: vec![text()],
+            },
+            AppAction::VotePoll {
+                room_id: id(),
+                message_id: id(),
+                option_id: id(),
+            },
+            AppAction::DownloadAttachment {
+                room_id: id(),
+                message_id: id(),
+                attachment_id: id(),
+            },
+            AppAction::BeginDownloadAttachment {
+                room_id: id(),
+                message_id: id(),
+                attachment_id: id(),
+            },
+            AppAction::LoadOlderMessages {
+                room_id: id(),
+                before_message_id: id(),
+                limit: 10,
+            },
+            AppAction::ReactToMessage {
+                room_id: id(),
+                message_id: id(),
+                emoji: "+".to_owned(),
+            },
+            AppAction::MarkRoomRead { room_id: id() },
+            AppAction::RetryMessage {
+                room_id: id(),
+                message_id: id(),
+            },
+            AppAction::SetTyping {
+                room_id: id(),
+                is_typing: true,
+            },
+            AppAction::RefreshDevices,
+            AppAction::RevokeDevice {
+                account_id: id(),
+                device_id: id(),
+            },
+            AppAction::SetPushToken { token: text() },
+            AppAction::RemovePushToken,
+        ];
+        for action in &actions {
+            let expected = match action {
+                AppAction::StartRuntime => CommandClass::Writer,
+                AppAction::StopRuntime => CommandClass::Writer,
+                AppAction::OpenRoom { .. } => CommandClass::Writer,
+                AppAction::OpenTopic { .. } => CommandClass::Writer,
+                AppAction::OpenChat { .. } => CommandClass::Writer,
+                AppAction::PairAgent { .. } => CommandClass::Writer,
+                AppAction::StartHomeChat { .. } => CommandClass::Writer,
+                AppAction::RenameChat { .. } => CommandClass::Writer,
+                AppAction::SetChatArchived { .. } => CommandClass::Writer,
+                AppAction::CreateRoom { .. } => CommandClass::Writer,
+                AppAction::CreateTopic { .. } => CommandClass::Writer,
+                AppAction::StartTopicChat { .. } => CommandClass::Writer,
+                AppAction::SaveProfile { .. } => CommandClass::Writer,
+                AppAction::UploadImage { .. } => CommandClass::Writer,
+                AppAction::SaveRoomMetadata { .. } => CommandClass::Writer,
+                AppAction::StartProfileChat { .. } => CommandClass::Writer,
+                AppAction::StartGroupChat { .. } => CommandClass::Writer,
+                AppAction::AddRoomMembers { .. } => CommandClass::Writer,
+                AppAction::ScanTarget { .. } => CommandClass::Writer,
+                AppAction::SendMessage { .. } => CommandClass::Writer,
+                AppAction::SendTopicMessage { .. } => CommandClass::Writer,
+                AppAction::SendChatMessage { .. } => CommandClass::Writer,
+                AppAction::SendReply { .. } => CommandClass::Writer,
+                AppAction::SendChatReply { .. } => CommandClass::Writer,
+                AppAction::SendAttachment { .. } => CommandClass::Writer,
+                AppAction::SendAttachments { .. } => CommandClass::Writer,
+                AppAction::SendChatAttachment { .. } => CommandClass::Writer,
+                AppAction::SendChatAttachments { .. } => CommandClass::Writer,
+                AppAction::SendPoll { .. } => CommandClass::Writer,
+                AppAction::SendChatPoll { .. } => CommandClass::Writer,
+                AppAction::VotePoll { .. } => CommandClass::Writer,
+                AppAction::DownloadAttachment { .. } => CommandClass::Writer,
+                AppAction::BeginDownloadAttachment { .. } => CommandClass::Writer,
+                AppAction::LoadOlderMessages { .. } => CommandClass::Writer,
+                AppAction::ReactToMessage { .. } => CommandClass::Writer,
+                AppAction::MarkRoomRead { .. } => CommandClass::Writer,
+                AppAction::RetryMessage { .. } => CommandClass::Writer,
+                AppAction::SetTyping { .. } => CommandClass::Writer,
+                AppAction::RefreshDevices => CommandClass::Writer,
+                AppAction::RevokeDevice { .. } => CommandClass::Writer,
+                AppAction::SetPushToken { .. } => CommandClass::Writer,
+                AppAction::RemovePushToken => CommandClass::Writer,
+            };
+            assert_eq!(action.command_class(), expected, "{action:?}");
+        }
     }
 
     /// Snapshot a data dir's client store through the SQLite backup API
