@@ -66,6 +66,16 @@ BASE_REGRESSIONS: dict[str, list[str]] = {
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_reconnects_and_catches_up_without_poll_fallback",
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_strict_stream_service_failure_never_falls_back_to_cli",
     ],
+    "adapter state compatibility": [
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_unversioned_adapter_state_is_adopted_without_losing_data",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_new_adapter_state_initialization_is_atomic",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_future_adapter_state_is_preserved_and_rejected",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_unversioned_unknown_schema_object_is_not_adopted",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_malformed_adapter_state_preserves_explicit_sends",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_transient_state_failure_recovers_without_restart",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_failed_dedup_write_retries_without_redispatch",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_persisted_dedup_eviction_is_deterministic_when_timestamps_tie",
+    ],
 }
 
 DURABILITY_SCENARIOS: dict[str, dict[str, Any]] = {

@@ -2,11 +2,13 @@ import asyncio
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
 import types
 import unittest
+from contextlib import closing
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -268,7 +270,27 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             if configured_home
             else None
         )
-        return self.module.FiniteChatAdapter(PlatformConfig(extra=extra, home_channel=home_channel))
+        adapter = self.module.FiniteChatAdapter(
+            PlatformConfig(extra=extra, home_channel=home_channel)
+        )
+        if adapter._state_store is not None:
+            self.addCleanup(adapter._state_store.close)
+        return adapter
+
+    @staticmethod
+    def _create_unversioned_adapter_state(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE inbound_chat_routes ("
+            "room_id TEXT NOT NULL, "
+            "thread_id TEXT NOT NULL, "
+            "conversation_id TEXT, "
+            "segment_id TEXT, "
+            "updated_at REAL NOT NULL, "
+            "PRIMARY KEY (room_id, thread_id))"
+        )
+        connection.execute(
+            "CREATE TABLE delivered_events (event_key TEXT PRIMARY KEY, created_at REAL NOT NULL)"
+        )
 
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()
@@ -1355,6 +1377,291 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             restarted._inbound_chat_routes[("room-agent-1", "chat-build-1")],
             ("topic-build", "chat-build-1"),
         )
+
+    def test_unversioned_adapter_state_is_adopted_without_losing_data(self):
+        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
+        delivered_key = self.module._adapter_event_key("room-agent-1", 8, "msg-8")
+        with closing(sqlite3.connect(state_path)) as connection, connection:
+            self._create_unversioned_adapter_state(connection)
+            connection.execute(
+                "INSERT INTO inbound_chat_routes "
+                "(room_id, thread_id, conversation_id, segment_id, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("room-agent-1", "chat-build-1", "topic-build", "chat-build-1", 1.0),
+            )
+            connection.execute(
+                "INSERT INTO delivered_events (event_key, created_at) VALUES (?, ?)",
+                (delivered_key, 1.0),
+            )
+
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        result = asyncio.run(
+            adapter.send(
+                "room-agent-1",
+                "reply after upgrade",
+                metadata={"thread_id": "chat-build-1"},
+            )
+        )
+        asyncio.run(
+            adapter._handle_finitechat_event(
+                {
+                    "room_id": "room-agent-1",
+                    "seq": 8,
+                    "message_id": "msg-8",
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-build-1",
+                    "text": "already handled before upgrade",
+                }
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertEqual([call[0] for call in calls], ["send", "ack"])
+        cast(Any, adapter._state_store).close()
+        with closing(sqlite3.connect(state_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT conversation_id, segment_id FROM inbound_chat_routes "
+                    "WHERE room_id = ? AND thread_id = ?",
+                    ("room-agent-1", "chat-build-1"),
+                ).fetchone(),
+                ("topic-build", "chat-build-1"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT event_key FROM delivered_events WHERE event_key = ?",
+                    (delivered_key,),
+                ).fetchone(),
+                (delivered_key,),
+            )
+
+    def test_new_adapter_state_initialization_is_atomic(self):
+        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
+        real_connect = sqlite3.connect
+
+        def fail_second_table_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+
+            def deny_delivered_events_table(action, arg1, arg2, database, source):
+                del arg2, database, source
+                if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "delivered_events":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(deny_delivered_events_table)
+            return connection
+
+        with (
+            patch.object(self.module.sqlite3, "connect", fail_second_table_connect),
+            self.assertLogs(level="WARNING"),
+        ):
+            adapter = self.adapter()
+            with self.assertRaises(self.module._AdapterStateError):
+                cast(Any, adapter._state_store).is_delivered("probe")
+
+        with closing(sqlite3.connect(state_path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM sqlite_schema "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall(),
+                [],
+            )
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 0)
+
+        restarted = self.adapter()
+        self.assertFalse(cast(Any, restarted._state_store).is_delivered("probe"))
+        cast(Any, restarted._state_store).close()
+        with closing(sqlite3.connect(state_path)) as connection:
+            tables = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            self.assertEqual(
+                {row[0] for row in tables}, {"inbound_chat_routes", "delivered_events"}
+            )
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+
+    def test_future_adapter_state_is_preserved_and_rejected(self):
+        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
+        with closing(sqlite3.connect(state_path)) as connection, connection:
+            self._create_unversioned_adapter_state(connection)
+            connection.execute(
+                "CREATE TABLE future_adapter_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO future_adapter_metadata (key, value) VALUES ('shape', 'v2')"
+            )
+            connection.execute("PRAGMA user_version = 2")
+        state_before = state_path.read_bytes()
+
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        with self.assertLogs(level="WARNING") as captured:
+            result = asyncio.run(
+                adapter.send(
+                    "room-agent-1",
+                    "do not guess a future route",
+                    metadata={"thread_id": "chat-future"},
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.retryable)
+        self.assertEqual(calls, [])
+        self.assertTrue(any("unsupported_schema_version" in line for line in captured.output))
+        cast(Any, adapter._state_store).close()
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_unversioned_unknown_schema_object_is_not_adopted(self):
+        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
+        with closing(sqlite3.connect(state_path)) as connection, connection:
+            self._create_unversioned_adapter_state(connection)
+            connection.execute(
+                "CREATE TRIGGER future_route_trigger AFTER INSERT ON inbound_chat_routes "
+                "BEGIN DELETE FROM delivered_events; END"
+            )
+        state_before = state_path.read_bytes()
+
+        adapter = self.adapter()
+        with self.assertLogs(level="WARNING") as captured:
+            result = asyncio.run(
+                adapter.send(
+                    "room-agent-1",
+                    "do not execute an unknown trigger",
+                    metadata={"thread_id": "chat-build-1"},
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertTrue(any("incompatible_schema" in line for line in captured.output))
+        cast(Any, adapter._state_store).close()
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_malformed_adapter_state_preserves_explicit_sends(self):
+        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
+        state_path.write_bytes(b"not-a-sqlite-database\x00preserve-me")
+        state_before = state_path.read_bytes()
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        home_result = asyncio.run(adapter.send("room-agent-1", "Home remains available"))
+        exact_result = asyncio.run(
+            adapter.send(
+                "room-agent-1",
+                "exact route remains available",
+                metadata={"conversation_id": "topic-build", "segment_id": "chat-build-1"},
+            )
+        )
+        with self.assertLogs(level="WARNING") as captured:
+            cached_result = asyncio.run(
+                adapter.send(
+                    "room-agent-1",
+                    "cached route fails closed",
+                    metadata={"thread_id": "chat-build-1"},
+                )
+            )
+
+        self.assertTrue(home_result.success)
+        self.assertTrue(exact_result.success)
+        self.assertFalse(cached_result.success)
+        self.assertEqual([call[0] for call in calls], ["send", "send"])
+        self.assertTrue(any("corrupt_database" in line for line in captured.output))
+        cast(Any, adapter._state_store).close()
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_transient_state_failure_recovers_without_restart(self):
+        real_connect = sqlite3.connect
+        attempts = 0
+
+        def fail_once(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_connect(*args, **kwargs)
+
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        event = {
+            "room_id": "room-agent-1",
+            "seq": 7,
+            "message_id": "msg-7",
+            "conversation_id": "topic-build",
+            "segment_id": "chat-build-1",
+            "text": "retry after the cache lock clears",
+        }
+        with (
+            patch.object(self.module.sqlite3, "connect", fail_once),
+            self.assertLogs(level="WARNING"),
+        ):
+            with self.assertRaises(self.module._AdapterStateError) as failure:
+                asyncio.run(adapter._handle_finitechat_event(event))
+            self.assertTrue(failure.exception.retryable)
+            asyncio.run(adapter._handle_finitechat_event(event))
+
+        self.assertEqual(len(adapter.handled_messages), 1)
+        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
+        self.assertGreaterEqual(attempts, 2)
+
+    def test_failed_dedup_write_retries_without_redispatch(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        store = cast(Any, adapter._state_store)
+        real_remember_delivered = store.remember_delivered
+        attempts = 0
+
+        def fail_once(event_key):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise self.module._AdapterStateError(
+                    "temporarily_unavailable",
+                    Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE,
+                    "database is locked",
+                    retryable=True,
+                )
+            real_remember_delivered(event_key)
+
+        store.remember_delivered = fail_once
+        event = {
+            "room_id": "room-agent-1",
+            "seq": 12,
+            "message_id": "msg-12",
+            "conversation_id": "topic-build",
+            "segment_id": "chat-build-1",
+            "text": "process once",
+        }
+
+        with self.assertRaises(self.module._AdapterStateError):
+            asyncio.run(adapter._handle_finitechat_event(event))
+        asyncio.run(adapter._handle_finitechat_event(event))
+
+        self.assertEqual(len(adapter.handled_messages), 1)
+        self.assertEqual([call[0] for call in calls].count("ack"), 1)
+        self.assertEqual(adapter._pending_event_acks, {})
+        self.assertEqual(adapter._completed_event_acks, set())
+
+    def test_persisted_dedup_eviction_is_deterministic_when_timestamps_tie(self):
+        store = cast(Any, self.adapter()._state_store)
+        with (
+            patch.object(self.module, "MAX_PERSISTED_DELIVERED_EVENT_KEYS", 3),
+            patch.object(self.module.time, "time", return_value=1.0),
+        ):
+            for event_key in ["one", "two", "three", "four"]:
+                store.remember_delivered(event_key)
+
+        self.assertFalse(store.is_delivered("one"))
+        self.assertTrue(store.is_delivered("two"))
+        self.assertTrue(store.is_delivered("three"))
+        self.assertTrue(store.is_delivered("four"))
 
     def test_unscoped_fallback_logs_warning_with_route_key(self):
         adapter = self.adapter()

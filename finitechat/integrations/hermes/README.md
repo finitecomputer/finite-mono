@@ -120,6 +120,20 @@ only the ephemeral gate, so the inbox redelivers the message. Slash commands,
 pending approval responses, and pending clarification replies still reach the
 active turn immediately, and one busy session does not pause another.
 
+The Python adapter is the only writer and reader of
+`hermes-adapter-state.db`, which contains reply routes and processed event ids,
+but no message content. Schema version 1 adopts the exact unversioned tables
+created by the first durable-state release without rewriting their rows. A new
+database is initialized atomically; future, malformed, or otherwise unknown
+schemas are preserved and rejected instead of being guessed or overwritten.
+Transient SQLite failures are retried on the next operation. Home sends and
+sends with an explicit Topic/Chat remain independent of this optional route
+cache; sends that require an unreadable cached route fail closed.
+
+Older adapters ignore SQLite's `user_version` and continue to read the same two
+tables, while adapters predating this file ignore it entirely. This state does
+not change the Rust inbox format, CLI/service protocol, or deployment order.
+
 ## Pinned Hermes clarification and compaction boundary
 
 Pinned Hermes owns clarification state in `tools.clarify_gateway`. Its gateway

@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -47,6 +47,22 @@ DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
 BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
 ADAPTER_STATE_DB_FILE = "hermes-adapter-state.db"
+ADAPTER_STATE_SCHEMA_VERSION = 1
+ADAPTER_STATE_BUSY_TIMEOUT_SECS = 0.25
+ADAPTER_STATE_TABLE_SQL = {
+    "inbound_chat_routes": (
+        "CREATE TABLE inbound_chat_routes ("
+        "room_id TEXT NOT NULL, "
+        "thread_id TEXT NOT NULL, "
+        "conversation_id TEXT, "
+        "segment_id TEXT, "
+        "updated_at REAL NOT NULL, "
+        "PRIMARY KEY (room_id, thread_id))"
+    ),
+    "delivered_events": (
+        "CREATE TABLE delivered_events (event_key TEXT PRIMARY KEY, created_at REAL NOT NULL)"
+    ),
+}
 SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
 MAX_PERSISTED_DELIVERED_EVENT_KEYS = 4096
@@ -464,6 +480,22 @@ def check_requirements() -> bool:
     return bool(_resolve_finitechat_command(""))
 
 
+def _normalize_schema_sql(sql: str) -> str:
+    """Normalize formatting while preserving every schema token and object."""
+    return " ".join(sql.split()).lower()
+
+
+class _AdapterStateError(RuntimeError):
+    """A durable-state decision that the caller must handle explicitly."""
+
+    def __init__(self, code: str, path: Path, detail: str, *, retryable: bool) -> None:
+        self.code = code
+        self.path = path
+        self.detail = detail
+        self.retryable = retryable
+        super().__init__(f"adapter state unavailable ({code}): {detail}")
+
+
 class _AdapterStateStore:
     """Adapter-owned durable state, held in one small SQLite file.
 
@@ -472,45 +504,174 @@ class _AdapterStateStore:
     home next to the bridge status file and is owned solely by this
     adapter — the Rust sidecar's own state files are never touched.
 
-    Every operation degrades to a no-op on error: durable state must never
-    break message flow. Ids only — no message content is ever stored.
+    Missing rows are ordinary optional results. An unavailable, unsupported,
+    or corrupt store raises `_AdapterStateError` so callers cannot mistake an
+    unknown durability decision for a safe cache miss. Ids only — no message
+    content is ever stored.
     """
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._conn: sqlite3.Connection | None = None
-        self._connect_failed = False
+        self._permanent_error: _AdapterStateError | None = None
 
-    def _connect(self) -> sqlite3.Connection | None:
+    def _connect(self) -> sqlite3.Connection:
         if self._conn is not None:
             return self._conn
-        if self._connect_failed:
-            return None
+        if self._permanent_error is not None:
+            raise self._permanent_error
+        conn: sqlite3.Connection | None = None
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self._path, timeout=5)
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS inbound_chat_routes ("
-                "room_id TEXT NOT NULL, "
-                "thread_id TEXT NOT NULL, "
-                "conversation_id TEXT, "
-                "segment_id TEXT, "
-                "updated_at REAL NOT NULL, "
-                "PRIMARY KEY (room_id, thread_id))"
+            conn = sqlite3.connect(self._path, timeout=ADAPTER_STATE_BUSY_TIMEOUT_SECS)
+            schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if schema_version not in {0, ADAPTER_STATE_SCHEMA_VERSION}:
+                self._raise_connect_error(
+                    conn,
+                    code="unsupported_schema_version",
+                    detail=(
+                        f"expected 0 or {ADAPTER_STATE_SCHEMA_VERSION}, observed {schema_version}"
+                    ),
+                    retryable=False,
+                )
+            user_schema_objects = self._read_user_schema_objects(conn)
+            if not user_schema_objects and schema_version == 0:
+                conn.execute("BEGIN IMMEDIATE")
+                for table_sql in ADAPTER_STATE_TABLE_SQL.values():
+                    conn.execute(table_sql)
+                conn.execute(f"PRAGMA user_version = {ADAPTER_STATE_SCHEMA_VERSION}")
+                conn.commit()
+            elif self._schema_is_current(user_schema_objects):
+                if schema_version == 0:
+                    # PR #589 shipped these exact tables without an explicit
+                    # version. Adopt them without rewriting their durable rows.
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(f"PRAGMA user_version = {ADAPTER_STATE_SCHEMA_VERSION}")
+                    conn.commit()
+            else:
+                self._raise_connect_error(
+                    conn,
+                    code="incompatible_schema",
+                    detail=(
+                        f"schema objects do not match version {ADAPTER_STATE_SCHEMA_VERSION}; "
+                        f"observed version {schema_version}"
+                    ),
+                    retryable=False,
+                )
+            self._assert_current_schema(conn)
+        except sqlite3.OperationalError as exc:
+            self._raise_connect_error(
+                conn,
+                code="temporarily_unavailable",
+                detail=str(exc),
+                retryable=True,
             )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS delivered_events ("
-                "event_key TEXT PRIMARY KEY, "
-                "created_at REAL NOT NULL)"
+        except sqlite3.DatabaseError as exc:
+            self._raise_connect_error(
+                conn,
+                code="corrupt_database",
+                detail=str(exc),
+                retryable=False,
             )
-        except (OSError, sqlite3.Error) as exc:
-            self._connect_failed = True
-            logger.warning(
-                "[finitechat] adapter state store unavailable at %s: %s", self._path, exc
+        except OSError as exc:
+            self._raise_connect_error(
+                conn,
+                code="temporarily_unavailable",
+                detail=str(exc),
+                retryable=True,
             )
-            return None
+        assert conn is not None
         self._conn = conn
         return conn
+
+    def _raise_connect_error(
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        code: str,
+        detail: str,
+        retryable: bool,
+    ) -> NoReturn:
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+        error = _AdapterStateError(code, self._path, detail, retryable=retryable)
+        if not retryable:
+            self._permanent_error = error
+        logger.warning(
+            "[finitechat] adapter state store code=%s path=%s detail=%s",
+            code,
+            self._path,
+            detail,
+        )
+        raise error
+
+    @staticmethod
+    def _read_user_schema_objects(
+        conn: sqlite3.Connection,
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        return tuple(
+            (str(row[0]), str(row[1]), str(row[2]), str(row[3] or ""))
+            for row in conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+        )
+
+    @classmethod
+    def _assert_current_schema(cls, conn: sqlite3.Connection) -> None:
+        observed_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if observed_version != ADAPTER_STATE_SCHEMA_VERSION:
+            raise sqlite3.DatabaseError(
+                "adapter state schema commit verification failed: "
+                f"expected version {ADAPTER_STATE_SCHEMA_VERSION}, observed {observed_version}"
+            )
+        if not cls._schema_is_current(cls._read_user_schema_objects(conn)):
+            raise sqlite3.DatabaseError(
+                "adapter state schema commit verification failed: schema objects changed"
+            )
+
+    @staticmethod
+    def _schema_is_current(
+        user_schema_objects: tuple[tuple[str, str, str, str], ...],
+    ) -> bool:
+        expected = tuple(
+            sorted(
+                (
+                    "table",
+                    table_name,
+                    table_name,
+                    _normalize_schema_sql(table_sql),
+                )
+                for table_name, table_sql in ADAPTER_STATE_TABLE_SQL.items()
+            )
+        )
+        observed = tuple(
+            (object_type, name, table_name, _normalize_schema_sql(sql))
+            for object_type, name, table_name, sql in user_schema_objects
+        )
+        return observed == expected
+
+    def _raise_operation_error(self, operation: str, exc: sqlite3.Error) -> NoReturn:
+        self.close()
+        retryable = isinstance(exc, sqlite3.OperationalError)
+        code = "temporarily_unavailable" if retryable else "corrupt_database"
+        error = _AdapterStateError(
+            code,
+            self._path,
+            f"{operation}: {exc}",
+            retryable=retryable,
+        )
+        if not retryable:
+            self._permanent_error = error
+        logger.warning(
+            "[finitechat] adapter state store code=%s path=%s operation=%s detail=%s",
+            code,
+            self._path,
+            operation,
+            exc,
+        )
+        raise error from exc
 
     def remember_route(
         self,
@@ -520,8 +681,6 @@ class _AdapterStateStore:
         segment_id: str | None,
     ) -> None:
         conn = self._connect()
-        if conn is None:
-            return
         try:
             conn.execute(
                 "INSERT INTO inbound_chat_routes ("
@@ -535,12 +694,10 @@ class _AdapterStateStore:
             )
             conn.commit()
         except sqlite3.Error as exc:
-            logger.warning("[finitechat] could not persist chat route: %s", exc)
+            self._raise_operation_error("remember_route", exc)
 
     def lookup_route(self, room_id: str, thread_id: str) -> tuple[str | None, str | None] | None:
         conn = self._connect()
-        if conn is None:
-            return None
         try:
             row = conn.execute(
                 "SELECT conversation_id, segment_id FROM inbound_chat_routes "
@@ -548,16 +705,13 @@ class _AdapterStateStore:
                 (room_id, thread_id),
             ).fetchone()
         except sqlite3.Error as exc:
-            logger.warning("[finitechat] could not read persisted chat route: %s", exc)
-            return None
+            self._raise_operation_error("lookup_route", exc)
         if row is None:
             return None
         return str(row[0]) if row[0] else None, str(row[1]) if row[1] else None
 
     def remember_delivered(self, event_key: str) -> None:
         conn = self._connect()
-        if conn is None:
-            return
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO delivered_events (event_key, created_at) VALUES (?, ?)",
@@ -566,41 +720,23 @@ class _AdapterStateStore:
             conn.execute(
                 "DELETE FROM delivered_events WHERE event_key NOT IN ("
                 "SELECT event_key FROM delivered_events "
-                "ORDER BY created_at DESC LIMIT ?)",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?)",
                 (MAX_PERSISTED_DELIVERED_EVENT_KEYS,),
             )
             conn.commit()
         except sqlite3.Error as exc:
-            logger.warning("[finitechat] could not persist delivered event key: %s", exc)
+            self._raise_operation_error("remember_delivered", exc)
 
     def is_delivered(self, event_key: str) -> bool:
         conn = self._connect()
-        if conn is None:
-            return False
         try:
             row = conn.execute(
                 "SELECT 1 FROM delivered_events WHERE event_key = ?",
                 (event_key,),
             ).fetchone()
         except sqlite3.Error as exc:
-            logger.warning("[finitechat] could not read delivered event key: %s", exc)
-            return False
+            self._raise_operation_error("is_delivered", exc)
         return row is not None
-
-    def load_delivered_keys(self, limit: int) -> list[str]:
-        """Most-recent persisted delivered keys, oldest first."""
-        conn = self._connect()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT event_key FROM delivered_events ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        except sqlite3.Error as exc:
-            logger.warning("[finitechat] could not load delivered event keys: %s", exc)
-            return []
-        return [str(row[0]) for row in reversed(rows)]
 
     def close(self) -> None:
         conn, self._conn = self._conn, None
@@ -698,10 +834,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # processed; until then a redelivery is ignored without a second
         # dispatch and without an ack.
         self._pending_event_acks: dict[str, tuple[str, Any, str]] = {}
-        if self._state_store is not None:
-            for persisted_key in self._state_store.load_delivered_keys(MAX_DELIVERED_EVENT_KEYS):
-                self._delivered_event_keys.add(persisted_key)
-                self._delivered_event_order.append(persisted_key)
+        # If durable dedup is temporarily unavailable after a terminal turn,
+        # redelivery retries persistence and ACK without dispatching again in
+        # this process.
+        self._completed_event_acks: set[str] = set()
         # The Rust inbox is the durable queue. Keep at most its first blocked
         # ordinary text event per Hermes session in memory while the current
         # owner task finishes. Later events remain only in the inbox and are
@@ -824,7 +960,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
-        payload = self._send_payload(chat_id, content, reply_to, metadata)
+        try:
+            payload = self._send_payload(chat_id, content, reply_to, metadata)
+        except _AdapterStateError as exc:
+            return SendResult(success=False, error=str(exc), retryable=exc.retryable)
         drained = self._attach_brain_approval_metadata(payload)
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
@@ -856,7 +995,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """Project Hermes clarification onto one exact ordinary Chat route."""
         meta = self._message_metadata(metadata)
         room_id = self._room_id(chat_id)
-        conversation_id, segment_id = self._route_from_metadata(room_id, meta)
+        try:
+            conversation_id, segment_id = self._route_from_metadata(room_id, meta)
+        except _AdapterStateError as exc:
+            return SendResult(success=False, error=str(exc), retryable=exc.retryable)
         if conversation_id is None or segment_id is None:
             error = (
                 "Hermes clarification requires an exact Finite Chat topic and chat; "
@@ -1209,6 +1351,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.warning("[finitechat] ignored event without message_id")
             return
         event_key = _adapter_event_key(room_id, seq, message_id)
+        if event_key and event_key in self._completed_event_acks:
+            await self._finish_completed_event_ack(event_key)
+            return
         if event_key and self._is_delivered_event(event_key):
             await self._ack_finitechat_event(room_id, seq, message_id)
             return
@@ -1319,7 +1464,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         try:
             await self.handle_message(event)
         except Exception:
-            if event_key:
+            if event_key and event_key not in self._completed_event_acks:
                 self._pending_event_acks.pop(event_key, None)
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
@@ -1335,9 +1480,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # that fires the completion hook. Keep the dispatch-time ack for
             # exactly those; every other event is acked by the hook once its
             # turn completes.
-            self._pending_event_acks.pop(event_key, None)
-            self._remember_delivered_event(event_key)
-            await self._ack_finitechat_event(room_id, seq, message_id)
+            self._completed_event_acks.add(event_key)
+            await self._finish_completed_event_ack(event_key)
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -1538,11 +1682,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         seq = raw_message.get("seq")
         message_id = str(raw_message.get("message_id") or "")
         event_key = _adapter_event_key(room_id, seq, message_id) or ""
-        pending = self._pending_event_acks.pop(event_key, None) if event_key else None
+        pending = self._pending_event_acks.get(event_key) if event_key else None
         if pending is None:
             return
-        pending_room_id, pending_seq, pending_message_id = pending
+        pending_room_id, pending_seq, _pending_message_id = pending
         if outcome_name == "cancelled":
+            self._pending_event_acks.pop(event_key, None)
+            self._completed_event_acks.discard(event_key)
             logger.info(
                 "[finitechat] turn for %s/%s cancelled before completion; "
                 "leaving the inbox entry unacked for redelivery",
@@ -1554,7 +1700,18 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # was answered (reply or error notice), so the event was processed.
         # Persist the dedup key before acking — a crash between the two
         # redelivers, and the persisted key dedups that retry.
+        self._completed_event_acks.add(event_key)
+        await self._finish_completed_event_ack(event_key)
+
+    async def _finish_completed_event_ack(self, event_key: str) -> None:
+        pending = self._pending_event_acks.get(event_key)
+        if pending is None:
+            self._completed_event_acks.discard(event_key)
+            return
+        pending_room_id, pending_seq, pending_message_id = pending
         self._remember_delivered_event(event_key)
+        self._pending_event_acks.pop(event_key, None)
+        self._completed_event_acks.discard(event_key)
         await self._ack_finitechat_event(pending_room_id, pending_seq, pending_message_id)
 
     def _is_delivered_event(self, event_key: str) -> bool:
@@ -1563,20 +1720,25 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if self._state_store is not None and self._state_store.is_delivered(event_key):
             # Evicted from the bounded in-memory window but still persisted;
             # re-cache so the next redelivery stays memory-fast.
-            self._remember_delivered_event(event_key)
+            self._cache_delivered_event(event_key)
             return True
         return False
 
     def _remember_delivered_event(self, event_key: str) -> None:
         if event_key in self._delivered_event_keys:
             return
+        # Persist before caching. If storage is unavailable, the inbox remains
+        # unacked and redelivery retries without manufacturing durable success.
+        if self._state_store is not None:
+            self._state_store.remember_delivered(event_key)
+        self._cache_delivered_event(event_key)
+
+    def _cache_delivered_event(self, event_key: str) -> None:
         self._delivered_event_keys.add(event_key)
         self._delivered_event_order.append(event_key)
         while len(self._delivered_event_order) > MAX_DELIVERED_EVENT_KEYS:
             evicted = self._delivered_event_order.pop(0)
             self._delivered_event_keys.discard(evicted)
-        if self._state_store is not None:
-            self._state_store.remember_delivered(event_key)
 
     def _remember_inbound_chat_route(
         self,
@@ -1587,9 +1749,21 @@ class FiniteChatAdapter(BasePlatformAdapter):
     ) -> None:
         if not thread_id or (conversation_id is None and segment_id is None):
             return
-        self._inbound_chat_routes[(room_id, thread_id)] = (conversation_id, segment_id)
+        # Publish the route to memory only after its restart-surviving write.
         if self._state_store is not None:
             self._state_store.remember_route(room_id, thread_id, conversation_id, segment_id)
+        self._cache_inbound_chat_route(room_id, thread_id, conversation_id, segment_id)
+
+    def _cache_inbound_chat_route(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        conversation_id: str | None,
+        segment_id: str | None,
+    ) -> None:
+        if not thread_id or (conversation_id is None and segment_id is None):
+            return
+        self._inbound_chat_routes[(room_id, thread_id)] = (conversation_id, segment_id)
 
     def _lookup_inbound_chat_route(
         self,
@@ -1764,6 +1938,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         segment_id = _string_or_none(metadata.pop("segment_id", None)) or _string_or_none(
             metadata.pop("chat_id", None)
         )
+        if conversation_id is not None:
+            # Explicit Topic authority is independent of the optional route
+            # cache, so scoped sends remain available during cache repair.
+            if segment_id is None and thread_id is not None:
+                segment_id = thread_id
+            return conversation_id, segment_id
         route_key = segment_id or thread_id
         remembered_route = (
             self._lookup_inbound_chat_route(room_id, route_key) if route_key else None
@@ -1774,11 +1954,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 conversation_id = remembered_conversation_id
             if segment_id is None:
                 segment_id = remembered_segment_id
-        elif conversation_id is not None:
-            # An explicit Finite conversation makes a generic Hermes thread a
-            # valid segment hint. A thread on its own is not a Finite topic id.
-            if segment_id is None and thread_id is not None:
-                segment_id = thread_id
         else:
             # Unknown Hermes thread/chat identifiers stay unscoped so Core can
             # apply the canonical Home/Home-chat fallback. Promoting them into
