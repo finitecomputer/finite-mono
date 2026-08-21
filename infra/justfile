@@ -26,3 +26,7 @@ litestream-recovery-contract:
 # resolve against their in-repo authorities (migrations, nixos modules).
 runbook-facts-contract:
     cd .. && python3 scripts/check_runbook_facts_contract.py
+
+# Production deploy conductor manifest/classifier contract.
+production-deploy-contract:
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_production_deploy.py'

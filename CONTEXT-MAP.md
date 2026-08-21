@@ -15,6 +15,8 @@
   conversation surfaces
 - [Finite Computer](./finitecomputer-v2/CONTEXT.md) — accounts, agents,
   runtimes, and dashboard orchestration
+- [Finite Deployment](./infra/CONTEXT.md) — production delivery, artifact
+  promotion, and rollout language
 
 ## Relationships
 
@@ -27,3 +29,6 @@
   through its public CLI interface.
 - **Finite Computer → Finite Identity / FiniteBrain**: supplies authenticated
   account-agent associations and navigation context, never Brain authority.
+- **Finite Deployment → all product contexts**: records how product-owned
+  artifacts become production state without taking ownership of product
+  protocols, data, or runtime lifecycle authority.
