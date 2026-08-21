@@ -1125,12 +1125,7 @@ fn status_for_cli_error(error: &CliError) -> StatusCode {
 
 fn service_cli_error(error: CliError) -> (StatusCode, Json<Value>) {
     let status = status_for_cli_error(&error);
-    service_error(
-        status,
-        cli_error_kind(&error),
-        cli_error_retryable(&error),
-        error.to_string(),
-    )
+    service_error(status, error.kind(), error.retryable(), error.to_string())
 }
 
 fn service_internal_error(error: String) -> (StatusCode, Json<Value>) {
@@ -1156,38 +1151,6 @@ fn service_error(
             "error": error,
         })),
     )
-}
-
-fn cli_error_kind(error: &CliError) -> &'static str {
-    match error {
-        CliError::Usage(_) => "usage",
-        CliError::Serialize(_) => "serialize",
-        CliError::Json(_) => "json",
-        CliError::Http(_) => "http",
-        CliError::Server { .. } => "server",
-        CliError::Output(_) => "output",
-        CliError::Hermes(_) => "hermes",
-        CliError::Identity(_) => "identity",
-        CliError::Runtime(_) => "runtime",
-    }
-}
-
-fn cli_error_retryable(error: &CliError) -> bool {
-    match error {
-        CliError::Http(_) => true,
-        CliError::Server { status, .. } => {
-            status.is_server_error()
-                || *status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        }
-        CliError::Usage(_)
-        | CliError::Serialize(_)
-        | CliError::Json(_)
-        | CliError::Output(_)
-        | CliError::Hermes(_)
-        | CliError::Identity(_)
-        | CliError::Runtime(_) => false,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
