@@ -88,13 +88,7 @@ async fn request_access(State(state): State<Arc<AppState>>, headers: HeaderMap) 
                 site_url: &request.site_url,
                 approval_url: &request.approval_url,
             };
-            let delivery = match state.identity_notifier.as_ref() {
-                Some(notifier) => {
-                    notifier.send_site_access_request(&request.idempotency_key, &email)
-                }
-                None => state.mailer.send_site_access_request(&email),
-            };
-            if let Err(error) = delivery {
+            if let Err(error) = state.mailer.send_site_access_request(&email) {
                 eprintln!("finitesitesd access-request mail error: {error}");
                 return internal_page();
             }
