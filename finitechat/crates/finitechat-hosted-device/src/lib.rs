@@ -121,16 +121,9 @@ pub struct HostedDeviceConfig {
     pub api_token: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct HostedIdentityAuthorityConfig {
-    pub base_url: String,
-    pub operator_token: String,
-}
-
 #[derive(Clone)]
 struct HostedDeviceState {
     config: HostedDeviceConfig,
-    identity_authority: Option<HostedIdentityAuthorityConfig>,
     runtimes: Arc<Mutex<HashMap<String, Arc<FiniteChatRuntime>>>>,
     device_links: Arc<Mutex<()>>,
     device_link_lock_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -227,39 +220,9 @@ impl HostedDeviceState {
             account_secret_hex: Some(account_secret_hex),
             now_unix_seconds: None,
         })?;
-        if let Some(authority) = &self.identity_authority {
-            register_hosted_user_principal(authority, user_id, &identity.npub())?;
-        }
         runtimes.insert(user_id.to_owned(), Arc::clone(&runtime));
         Ok(runtime)
     }
-}
-
-fn register_hosted_user_principal(
-    authority: &HostedIdentityAuthorityConfig,
-    workos_user_id: &str,
-    user_npub: &str,
-) -> Result<(), HostedDeviceError> {
-    let base_url = authority.base_url.trim().trim_end_matches('/');
-    let operator_token = authority.operator_token.trim();
-    if base_url.is_empty() || operator_token.is_empty() {
-        return Err(HostedDeviceError::IdentityAuthority(
-            "identity authority configuration is incomplete".to_owned(),
-        ));
-    }
-    let body = serde_json::json!({
-        "workosUserId": workos_user_id,
-        "userNpub": user_npub,
-    })
-    .to_string();
-    ureq::post(&format!(
-        "{base_url}/api/v1/operator/account-principal-bindings"
-    ))
-    .set("X-Finite-Operator-Token", operator_token)
-    .set("Content-Type", "application/json")
-    .send_string(&body)
-    .map_err(|error| HostedDeviceError::IdentityAuthority(error.to_string()))?;
-    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -288,8 +251,6 @@ pub enum HostedDeviceError {
     DeviceLinkConflict(String),
     #[error("Finite Chat link service is unavailable: {0}")]
     DeviceLinkService(String),
-    #[error("Finite Identity account binding is unavailable: {0}")]
-    IdentityAuthority(String),
     #[error("hosted device runtime cache lock poisoned")]
     LockPoisoned,
     #[error("hosted chat state is incomplete; recovery is required")]
@@ -350,7 +311,7 @@ impl HostedDeviceError {
             }
             Self::DeviceLinkConflict(_) | Self::CanonicalChatConflict(_) => StatusCode::CONFLICT,
             Self::InvalidDeviceLink(_) => StatusCode::BAD_REQUEST,
-            Self::DeviceLinkService(_) | Self::IdentityAuthority(_) => StatusCode::BAD_GATEWAY,
+            Self::DeviceLinkService(_) => StatusCode::BAD_GATEWAY,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
             Self::IncompleteUserState | Self::AgentBindingInvalid(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -383,7 +344,6 @@ impl HostedDeviceError {
             Self::InvalidDeviceLink(_) => "invalid_device_link",
             Self::DeviceLinkConflict(_) => "device_link_conflict",
             Self::DeviceLinkService(_) => "device_link_service",
-            Self::IdentityAuthority(_) => "identity_authority",
             Self::LockPoisoned => "lock_poisoned",
             Self::IncompleteUserState => "incomplete_user_state",
             Self::AgentBindingNotFound => "agent_binding_not_found",
@@ -413,21 +373,14 @@ struct HealthResponse {
 }
 
 pub fn app(config: HostedDeviceConfig) -> Router {
-    app_with_test_options(config, None, None, None, 0, 0, 0)
-}
-
-pub fn app_with_identity_authority(
-    config: HostedDeviceConfig,
-    identity_authority: HostedIdentityAuthorityConfig,
-) -> Router {
-    app_with_test_options(config, Some(identity_authority), None, None, 0, 0, 0)
+    app_with_test_options(config, None, None, 0, 0, 0)
 }
 
 /// Test seam for exercising expiry and restart behavior without sleeping.
 /// Production always calls [`app`] and uses the system clock.
 #[doc(hidden)]
 pub fn app_with_fixed_device_link_now(config: HostedDeviceConfig, now_unix_seconds: u64) -> Router {
-    app_with_test_options(config, None, Some(now_unix_seconds), None, 0, 0, 0)
+    app_with_test_options(config, Some(now_unix_seconds), None, 0, 0, 0)
 }
 
 /// Test seam combining a deterministic clock with lock observation.
@@ -438,7 +391,7 @@ pub fn app_with_fixed_device_link_now_and_lock_hook(
     now_unix_seconds: u64,
     hook: Arc<dyn Fn() + Send + Sync>,
 ) -> Router {
-    app_with_test_options(config, None, Some(now_unix_seconds), Some(hook), 0, 0, 0)
+    app_with_test_options(config, Some(now_unix_seconds), Some(hook), 0, 0, 0)
 }
 
 /// Test seam for proving recovery when the final binding write fails after its
@@ -448,7 +401,7 @@ pub fn app_with_final_agent_binding_persist_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, None, None, failure_count, 0, 0)
+    app_with_test_options(config, None, None, failure_count, 0, 0)
 }
 
 /// Test seam for proving recovery after the server accepted the exact Room
@@ -458,7 +411,7 @@ pub fn app_with_profile_bootstrap_room_create_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, None, None, 0, failure_count, 0)
+    app_with_test_options(config, None, None, 0, failure_count, 0)
 }
 
 /// Test seam for proving recovery after pending MLS state is durable but the
@@ -468,12 +421,11 @@ pub fn app_with_profile_bootstrap_submit_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, None, None, 0, 0, failure_count)
+    app_with_test_options(config, None, None, 0, 0, failure_count)
 }
 
 fn app_with_test_options(
     config: HostedDeviceConfig,
-    identity_authority: Option<HostedIdentityAuthorityConfig>,
     fixed_device_link_now_unix_seconds: Option<u64>,
     device_link_lock_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     fail_final_agent_binding_persists: usize,
@@ -482,7 +434,6 @@ fn app_with_test_options(
 ) -> Router {
     let state = HostedDeviceState {
         config,
-        identity_authority,
         runtimes: Arc::new(Mutex::new(HashMap::new())),
         device_links: Arc::new(Mutex::new(())),
         device_link_lock_hook,
