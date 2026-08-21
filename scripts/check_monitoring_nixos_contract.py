@@ -131,7 +131,10 @@ def nix_eval() -> dict[str, Any]:
         };
         caddy = {
           enable = cfg.services.caddy.enable;
+          globalConfig = cfg.services.caddy.globalConfig;
           envFiles = cfg.systemd.services.caddy.serviceConfig.EnvironmentFile;
+          runtimeDirectory = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectory;
+          runtimeDirectoryMode = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectoryMode;
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
@@ -314,6 +317,9 @@ def main() -> int:
         caddy["envFiles"] == ["/etc/finite/monitoring/caddy.env"],
         "Caddy must load the monitoring credential hash env file",
     )
+    require_contains(caddy["globalConfig"], "admin unix//run/caddy/admin.sock", "Caddy global config")
+    require(caddy["runtimeDirectory"] == "caddy", "Caddy must own /run/caddy for the Unix admin socket")
+    require(caddy["runtimeDirectoryMode"] == "0750", "Caddy runtime directory mode drifted")
     require_contains(caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost")
     require_contains(caddy["ingestVhost"], "path /api/v1/write", "ingest vhost")
     require_contains(caddy["ingestVhost"], "path /loki/api/v1/push", "ingest vhost")
