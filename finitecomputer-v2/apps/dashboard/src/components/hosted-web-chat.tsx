@@ -1315,9 +1315,9 @@ export function HostedWebChat({
 
 function LiveActivity({ label }: { label: string }) {
   return (
-    <div className="finite-chat__live-activity" aria-live="polite">
-      <span className="finite-chat__live-dots" aria-hidden><i /><i /><i /></span>
-      <span>{label}</span>
+    <div className="finite-chat__live-activity beautiful-chat__thinking" aria-live="polite">
+      <span className="beautiful-chat__spark" aria-hidden />
+      <span className="beautiful-chat__shimmer">{label}</span>
     </div>
   );
 }
@@ -1350,18 +1350,30 @@ function ToolRollup({
   return (
     <details
       ref={disclosureRef}
-      className="finite-chat__tool-rollup"
+      className={`finite-chat__tool-rollup beautiful-chat__thinking-card ${running ? "is-running" : ""}`}
       onToggle={() => {
         disclosureInitializedRef.current = true;
       }}
     >
       <summary>
-        {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <WrenchIcon className="size-4" />}
-        <span>{label}</span>
+        <span className="beautiful-chat__tool-glyph" aria-hidden>
+          {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <WrenchIcon className="size-4" />}
+        </span>
+        <span>
+          <strong>{waitingForUser ? "Input needed" : running ? "Thinking" : "Trace"}</strong>
+          <small>{label}</small>
+        </span>
         <ChevronRightIcon className="size-4" />
       </summary>
       <div className="finite-chat__tool-rollup-body">
-        {messages.map((message) => <pre key={message.message_id}>{messageContent(message) || "Done"}</pre>)}
+        {messages.map((message, index) => (
+          <div className="beautiful-chat__tool-step" key={message.message_id}>
+            <span className={message.status === "running" ? "is-running" : ""} aria-hidden>
+              {index + 1}
+            </span>
+            <pre>{messageContent(message) || "Done"}</pre>
+          </div>
+        ))}
       </div>
     </details>
   );
@@ -1519,11 +1531,23 @@ function EmptyChat({ body, title }: { body: string; title: string }) {
 }
 
 function ChatLoading({ detail, label }: { detail?: string | null; label: string }) {
+  const [startedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, []);
+  const elapsedSeconds = ((now - startedAt) / 1_000).toFixed(1);
   return (
-    <div className="finite-chat__notice">
-      <Loader2Icon className="finite-chat__spin" />
-      {detail ? <strong>{label}</strong> : <span>{label}</span>}
-      {detail ? <span>{detail}</span> : null}
+    <div className="finite-chat__notice beautiful-chat__loading" role="status">
+      <span className="beautiful-chat__pixel-loader" aria-hidden>
+        {Array.from({ length: 9 }, (_, index) => <i key={index} />)}
+      </span>
+      <span className="beautiful-chat__loading-copy">
+        <span className="beautiful-chat__shimmer">{label}</span>
+        <span className="beautiful-chat__elapsed">{elapsedSeconds}s</span>
+      </span>
+      {detail ? <span className="beautiful-chat__loading-detail">{detail}</span> : null}
     </div>
   );
 }
