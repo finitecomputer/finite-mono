@@ -1,10 +1,17 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Emits the electron-updater macOS channel file (latest-mac.yml) for the
+// generic provider. The feed URL baked into the packaged app points at the
+// rolling `finitechat-latest` alias release, while every artifact the file
+// references is pinned to the immutable versioned `finitechat/vX.Y.Z` release
+// so an attacker who could rewrite the alias still cannot redirect downloads
+// to a mutable artifact URL.
 const electronAssetName = "finitechat-electron-macos-aarch64.zip";
 
-export function buildMacosUpdateManifest({ version, assetUrl, publishedAt }) {
+export function buildMacosUpdateManifest({ version, assetUrl, assetFile, publishedAt }) {
   if (!/^\d+\.\d+\.\d+$/u.test(version)) {
     throw new Error("Finite Chat update version must be numeric MAJOR.MINOR.PATCH");
   }
@@ -24,21 +31,32 @@ export function buildMacosUpdateManifest({ version, assetUrl, publishedAt }) {
     throw new Error("Finite Chat update publication date is invalid");
   }
 
+  const assetBytes = fs.readFileSync(path.resolve(assetFile));
+  const sha512 = crypto.createHash("sha512").update(assetBytes).digest("base64");
   return {
-    currentRelease: version,
-    releases: [
+    version,
+    releaseDate: publishedDate.toISOString(),
+    files: [
       {
-        version,
-        updateTo: {
-          version,
-          url: parsedAssetUrl.toString(),
-          name: `Finite Chat ${version}`,
-          notes: `https://github.com/finitecomputer/finite-mono/releases/tag/finitechat/v${version}`,
-          pub_date: publishedDate.toISOString(),
-        },
+        url: parsedAssetUrl.toString(),
+        sha512,
+        size: assetBytes.length,
       },
     ],
   };
+}
+
+function renderYaml(manifest) {
+  const file = manifest.files[0];
+  const lines = [
+    `version: ${manifest.version}`,
+    `releaseDate: ${JSON.stringify(manifest.releaseDate)}`,
+    "files:",
+    `  - url: ${file.url}`,
+    `    sha512: ${file.sha512}`,
+    `    size: ${file.size}`,
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 function parseArguments(argv) {
@@ -47,11 +65,11 @@ function parseArguments(argv) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!name?.startsWith("--") || value === undefined) {
-      throw new Error("Expected --version, --asset-url, --published-at, and --output");
+      throw new Error("Expected --version, --asset-url, --asset-file, --published-at, and --output");
     }
     values[name.slice(2)] = value;
   }
-  for (const name of ["version", "asset-url", "published-at", "output"]) {
+  for (const name of ["version", "asset-url", "asset-file", "published-at", "output"]) {
     if (!values[name]) {
       throw new Error(`Missing --${name}`);
     }
@@ -64,11 +82,12 @@ function main(argv) {
   const manifest = buildMacosUpdateManifest({
     version: values.version,
     assetUrl: values["asset-url"],
+    assetFile: values["asset-file"],
     publishedAt: values["published-at"],
   });
   const outputPath = path.resolve(values.output);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(outputPath, renderYaml(manifest));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -9,19 +9,13 @@ const {
   AppUpdater,
   boundedErrorMessage,
   packagedAutoUpdateEnabled,
-  updateFeedUrl,
 } = require("./app-updater.cjs");
 
 class FakeAutoUpdater extends EventEmitter {
   constructor() {
     super();
-    this.feedOptions = null;
     this.checkCount = 0;
     this.checkResult = Promise.resolve();
-  }
-
-  setFeedURL(options) {
-    this.feedOptions = options;
   }
 
   checkForUpdates() {
@@ -80,23 +74,18 @@ test("release updater stays disabled outside a marked arm64 macOS package", () =
     { platform: "linux" },
     { arch: "x64" },
   ]) {
-    const { updater, autoUpdater, timeouts, intervals } = updaterHarness(config);
+    const { updater, timeouts, intervals } = updaterHarness(config);
     assert.equal(updater.start(), false);
-    assert.equal(autoUpdater.feedOptions, null);
+    assert.equal(updater.started, false);
     assert.equal(timeouts.length, 0);
     assert.equal(intervals.length, 0);
   }
 });
 
-test("release updater configures the static feed without checking synchronously", () => {
+test("release updater schedules checks without checking synchronously", () => {
   const { updater, autoUpdater, timeouts, intervals } = updaterHarness();
 
   assert.equal(updater.start(), true);
-  assert.deepEqual(autoUpdater.feedOptions, {
-    url: updateFeedUrl,
-    serverType: "json",
-    headers: { "Cache-Control": "no-cache" },
-  });
   assert.equal(autoUpdater.checkCount, 0);
   assert.equal(timeouts.length, 1);
   assert.equal(intervals.length, 1);
@@ -133,12 +122,12 @@ test("a downloaded update prevents redundant checks until relaunch", async () =>
 
   timeouts[0].callback();
   await Promise.resolve();
-  autoUpdater.emit("update-downloaded", {}, "", "Finite Chat 0.1.9");
+  autoUpdater.emit("update-downloaded", { version: "0.1.9", downloadedFile: "/tmp/x.zip" });
   intervals[0].callback();
   await Promise.resolve();
 
   assert.equal(autoUpdater.checkCount, 1);
-  assert.match(logs.at(-1), /will be applied when the app exits/u);
+  assert.match(logs.at(-1), /0\.1\.9 .*will be applied when the app exits/u);
 });
 
 test("rejected update checks clear the in-flight guard and stay bounded", async () => {

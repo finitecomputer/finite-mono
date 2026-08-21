@@ -1,8 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const updateFeedUrl =
-  "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/finitechat-electron-macos-aarch64-releases.json";
+// The update feed is configured declaratively in `app-update.yml` (written
+// into Contents/Resources by scripts/package-macos-alpha.mjs) and consumed by
+// electron-updater; this module only schedules checks and forwards lifecycle
+// events, mirroring the semantics of the previous custom updater.
 const initialUpdateCheckDelayMs = 10 * 1000;
 const updateCheckIntervalMs = 6 * 60 * 60 * 1000;
 
@@ -27,7 +29,6 @@ class AppUpdater {
     enabled,
     platform = process.platform,
     arch = process.arch,
-    feedUrl = updateFeedUrl,
     initialDelayMs = initialUpdateCheckDelayMs,
     checkIntervalMs = updateCheckIntervalMs,
     logger = console,
@@ -41,7 +42,6 @@ class AppUpdater {
     this.enabled = enabled;
     this.platform = platform;
     this.arch = arch;
-    this.feedUrl = feedUrl;
     this.initialDelayMs = initialDelayMs;
     this.checkIntervalMs = checkIntervalMs;
     this.logger = logger;
@@ -71,36 +71,24 @@ class AppUpdater {
       return false;
     }
 
-    try {
-      this.autoUpdater.setFeedURL({
-        url: this.feedUrl,
-        serverType: "json",
-        headers: { "Cache-Control": "no-cache" },
-      });
-    } catch (error) {
-      this.logger.error(
-        `[finitechat-electron] failed to configure app updates: ${boundedErrorMessage(error)}`
-      );
-      return false;
-    }
-
     this.started = true;
     this.addListener("checking-for-update", () => {
       this.logger.info("[finitechat-electron] checking for an app update");
     });
-    this.addListener("update-available", () => {
-      this.logger.info("[finitechat-electron] app update available; downloading");
+    this.addListener("update-available", (updateInfo) => {
+      this.logger.info(
+        `[finitechat-electron] app update ${boundedVersion(updateInfo)} available; downloading`
+      );
     });
     this.addListener("update-not-available", () => {
       this.checkInFlight = false;
       this.logger.info("[finitechat-electron] app is up to date");
     });
-    this.addListener("update-downloaded", (_event, _releaseNotes, releaseName) => {
+    this.addListener("update-downloaded", (event) => {
       this.checkInFlight = false;
       this.updateDownloaded = true;
-      const suffix = releaseName ? ` (${String(releaseName).slice(0, 200)})` : "";
       this.logger.info(
-        `[finitechat-electron] app update downloaded${suffix}; it will be applied when the app exits`
+        `[finitechat-electron] app update ${boundedVersion(event)} downloaded; it will be applied when the app exits`
       );
     });
     this.addListener("error", (error) => {
@@ -161,6 +149,11 @@ class AppUpdater {
   }
 }
 
+function boundedVersion(updateInfo) {
+  const version = updateInfo?.version === undefined ? "" : String(updateInfo.version);
+  return version ? ` ${version.slice(0, 200)}` : "";
+}
+
 function createAppUpdater({ app, autoUpdater, ...options }) {
   return new AppUpdater({
     app,
@@ -175,5 +168,4 @@ module.exports = {
   boundedErrorMessage,
   createAppUpdater,
   packagedAutoUpdateEnabled,
-  updateFeedUrl,
 };

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as esbuild from "esbuild";
 import { sign } from "@electron/osx-sign";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,6 +20,12 @@ const resources = path.join(contents, "Resources");
 const packagedApp = path.join(resources, "app");
 const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8"));
 const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
+// electron-updater (generic provider) feed: the rolling alias release hosts
+// latest-mac.yml, whose entries pin artifact URLs to the immutable
+// finitechat/vX.Y.Z release. Keep in sync with
+// .github/workflows/release-finitechat.yml and
+// scripts/generate-macos-update-manifest.mjs.
+const updateFeedUrl = "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/";
 
 requireDirectory(electronApp, "Electron runtime");
 requireExecutable(daemonBinary, "finitechatd release binary");
@@ -49,6 +56,38 @@ fs.cpSync(path.join(appRoot, "electron"), path.join(packagedApp, "electron"), {
 fs.copyFileSync(
   path.join(repoRoot, "finitecomputer-v2", "apps", "dashboard", "public", "finite-logo.svg"),
   path.join(packagedApp, "electron", "finite-logo.svg")
+);
+
+// The packaged app ships no node_modules, so electron-updater is compiled to a
+// single CommonJS bundle that electron/updater-provider.cjs falls back to.
+const updaterVendorDirectory = path.join(packagedApp, "electron", "vendor");
+await esbuild.build({
+  bundle: true,
+  stdin: {
+    contents: "module.exports = require('electron-updater');",
+    loader: "js",
+    resolveDir: appRoot,
+    sourcefile: "updater-vendor-entry.cjs",
+  },
+  external: ["electron"],
+  format: "cjs",
+  outfile: path.join(updaterVendorDirectory, "electron-updater.cjs"),
+  platform: "node",
+  target: "node20",
+  logLevel: "warning",
+});
+
+// electron-updater reads its publish configuration from
+// Contents/Resources/app-update.yml (process.resourcesPath in the packaged
+// app); updates only run when package.json opts in via finitechatAutoUpdate.
+fs.writeFileSync(
+  path.join(resources, "app-update.yml"),
+  [
+    "provider: generic",
+    `url: ${updateFeedUrl}`,
+    "updaterCacheDirName: finitechat-electron-updater",
+    "",
+  ].join("\n")
 );
 fs.writeFileSync(
   path.join(packagedApp, "package.json"),
