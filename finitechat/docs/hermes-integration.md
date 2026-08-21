@@ -69,6 +69,14 @@ finitechat hermes activity --json
 Requests are JSON on stdin. Responses are one JSON object on stdout. The Rust
 contract lives in `crates/finitechat-hermes`.
 
+Errors are structured on both transports: the service returns them as the
+HTTP error body, and the CLI prints one JSON line on stderr whenever `--json`
+is on the command line. Both carry `error` (human text), `error_kind` (the
+`CliError` class, e.g. `hermes`, `identity`, `http`), and `retryable`. The
+plugin takes `retryable` verbatim and never infers it from the message; a
+failure without that shape (a crash, a signal, a non-JSON body) is reported
+verbatim and treated as not retryable.
+
 `poll`
 
 - Input: `HermesPollOptionsV1`.
