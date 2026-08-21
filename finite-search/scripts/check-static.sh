@@ -8,9 +8,6 @@ required_files=(
   README.md
   CONTEXT.md
   AGENTS.md
-  docs/agents/issue-tracker.md
-  docs/agents/triage-labels.md
-  docs/agents/domain.md
   docs/adr/0001-self-host-search-extract-boundary.md
   docs/adr/0002-latitude-plain-docker-first.md
   docs/adr/0003-keep-search-and-extract-independent.md
