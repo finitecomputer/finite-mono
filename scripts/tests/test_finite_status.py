@@ -59,7 +59,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,restart,launching",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
@@ -67,6 +67,8 @@ class FiniteStatusTests(unittest.TestCase):
             result = finite_status.psql_query_sets({})
         self.assertEqual(len(result["runtimes"]), 1)
         self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
+        # The canonical lifecycle state arrives with the row, unmodified.
+        self.assertEqual(result["runtimes"][0]["control_status"], "launching")
         call = run.call_args
         sql = call.kwargs["input_text"]
         self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
@@ -74,6 +76,30 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIn(finite_status.DISTRIBUTION_QUERY, sql)
         self.assertIn(finite_status.RUNTIME_DETAILS_QUERY, sql)
         self.assertEqual(call.args[0].count("psql"), 1)
+
+    def test_human_output_projects_active_control_state(self) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for group in raw["core"]["runtime_groups"]:
+            group["count"] = 0
+        raw["core"]["runtime_groups"].append(
+            {
+                "source_host_id": "finite-lat-1",
+                "id_prefix": "ctl-agent",
+                "project_prefix": "ctl-project",
+                "name_prefix": "Control Agent",
+                "version_label": "2026-07-22.1",
+                "link_state": "active",
+                "count": 1,
+                "control_kind": "restart",
+                "control_status": "compute_up",
+            }
+        )
+        expanded = finite_status.expand_fixture(raw)
+        now = finite_status.parse_time(expanded["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(expanded, now)
+        output = finite_status.render_human(report)
+        self.assertIn("CONTROL Control Agent 01 [ctl-agent-01]: restart compute_up", output)
 
     def test_human_output_names_every_straggler(self) -> None:
         output = finite_status.render_human(self.fixture_report())
