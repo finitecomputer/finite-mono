@@ -1,10 +1,27 @@
 # Principal Grants with Provenance, Chat Approval Cards, and Optional Core Enrichment
 
-Status: accepted
+Status: accepted — **partly superseded 2026-08 by the auth-kernel cut (see below)**
 
 Supersedes the stored-cohort account-access design proposed in the account
 agent cohort issues (#441–459) and its two implementation PRs (#465, #467),
 which are closed unmerged.
+
+> **Superseded parts (auth kernel cut, 2026-08).** The "optional enrichment
+> layer" this ADR allowed is removed: invitation plans (preflight/commit with
+> roster re-verification), invite-commit Approval Cards, the Core
+> account-agent roster and Permanent Departure Fact consumers, the
+> satisfies-grant email proof, and the WorkOS account↔npub resolutions are
+> all deleted. What remains is the kernel of this ADR: signed per-principal
+> Grants with Provenance, npub-targeted invitations, share links, capability
+> Invite Tokens, and Approval Cards whose validation is purely local
+> (signature + expiry + nonce replay + signer standing in
+> `brain_members`/`brain_admins`) — only the `delegation-grant` action
+> survives. Departure is no longer consumed from Core: revocation is an
+> explicit per-product admin call, with org offboarding as an external
+> workflow. The `brain_invitation_plans`, `brain_departure_*`, and
+> email-bootstrap columns/tables remain in the schema as dead, historical
+> state (no drops, no migration). The rest of this document is unchanged for
+> history.
 
 ## Decision
 

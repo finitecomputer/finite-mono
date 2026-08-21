@@ -1,6 +1,10 @@
 # ADR-0046 Hands-On Test: Hosted-Signed Invite + CLI Accept, Both Directions
 
-Status: active runbook for the ADR-0046 principal-grants slice.
+Status: **retired 2026-08 (auth kernel cut).** The invitation-plan flow this
+runbook exercises is deleted, and its drivers (`scripts/devfinity-adr46-slice`,
+`scripts/devfinity-adr46-slice-up`) are removed. Retained for history; the
+surviving invite flows are npub-targeted invitations and capability Invite
+Tokens.
 
 Two roles, one Mac:
 

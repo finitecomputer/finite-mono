@@ -68,27 +68,22 @@ metadata-only Folders.
 
 ## Sharing: inviting someone (admin)
 
-The smooth path is the invitation plan flow (ADR-0046), which resolves an
-email into the human plus their grant-ready account agents:
+Grants name npubs or capability tokens, never emails (auth kernel). The
+direct path is the npub-targeted invitation; the target may also be any
+identifier that resolves through public NIP-05 (for example
+`name@finite.vip`):
 
 ```sh
-fbrain invite brain create --brain <brain-id> --target <email|npub>
+fbrain invite brain create --brain <brain-id> --target <npub|nip05>
 ```
 
-For account-backed emails the plan flow is: preflight resolves the immutable
-participant set, commit writes one npub-bound invitation per participant.
-Re-inviting after an expiry supersedes the old invitation automatically.
-Invitees accept via the public instructions URL or `fbrain invite brain
-accept`; acceptance grants Brain Membership.
+Invitees accept with `fbrain invite brain accept --id <invitation-id>`;
+acceptance grants Brain Membership. An email that does not resolve is
+rejected — use a capability Invite Token instead (below).
 
-Delivery is explicit in every receipt's `deliveryStatus`: `sent` means a
-courtesy email carrying the public instructions URL reached the human
-account mailbox; `in_app` means the npub-bound invitee (managed agents, or
-humans when no mailer is configured) gets the invitation in their
-authenticated client instead of email; `not_configured` means the server has
-no invite mailer; `failed` means the courtesy email errored after the
-invitations were already committed — they remain valid and visible in-app,
-so report it, do not treat the invite as lost.
+Delivery is explicit in every receipt's `deliveryStatus`: `in_app` means the
+npub-bound invitee gets the invitation in their authenticated client;
+`not_configured` means the server has no invite mailer.
 
 Repair a half-onboarded member (accepted but missing Folder Keys, or
 membership lost) with one idempotent command:
@@ -102,9 +97,9 @@ Finite Home can open; re-run it from a current key holder when a Folder
 reports `needsKeyHolder`. Lower-level primitives: `admin member add`,
 `admin role grant admin`, `admin folder-access grant --folder <id>`.
 
-Capability Invite Tokens are the kernel-simple alternative: one single-use,
-unguessable, revocable link that redeems to membership for whatever npub
-presents it (email is delivery only, never identity):
+Capability Invite Tokens cover everyone else: one single-use, unguessable,
+revocable link that redeems to membership for whatever npub presents it
+(email is delivery only, never identity):
 
 ```sh
 fbrain invite-token create --brain <brain-id> [--role member|admin] [--email <addr>]
@@ -147,11 +142,10 @@ prepares rotation material automatically; never hand-build rotation bodies.
 
 ## Provenance
 
-Memberships and grants record where they came from: an invitation, an
-invitation plan commit, a signed approval artifact, or a direct admin action,
-with the roster revision when account agents were involved. When reporting
-who has access, read `fbrain brain metadata --json` and `fbrain access list`
-rather than inferring from local files.
+Memberships and grants record where they came from: an invitation, a signed
+approval artifact, or a direct admin action. When reporting who has access,
+read `fbrain brain metadata --json` and `fbrain access list` rather than
+inferring from local files.
 
 ## Error glossary
 
@@ -159,14 +153,10 @@ rather than inferring from local files.
 - `email auth ...` or identity resolution failures: check connectivity to the
   identity authority; override with `FINITE_IDENTITY_AUTHORITY` only for
   development.
-- `invitation plan has expired; run preflight again`: plans live 15 minutes;
-  re-run the invite command.
-- `plan hash does not match the resolved set` / roster drift conflict: the
-  account roster changed; commit the fresh preflight the server returned.
+- `does not resolve to an npub through public NIP-05` on invite: the email
+  is not a usable grant target; use `fbrain invite-token create --email`.
 - `approval nonce was already applied`: the signed approval was already
   executed; do not retry the same artifact.
-- `already a brain member` on commit: that participant was skipped, not
-  failed; remaining invitations still committed.
 - `deliveryStatus: in_app` on an invitation: in-band delivery by design —
   the invitee sees it in `fbrain invite brain list` or the Product Client.
   It does not mean email delivery is broken.

@@ -105,21 +105,17 @@ rm "$FBRAIN_CONFIG_DIR/auth.json"
 `fbrain auth redeem EMAIL TOKEN` proves that email with the shared Finite
 identity against the public finite-identity Authority
 (`https://identity.finite.vip`, overridable with
-`FINITE_IDENTITY_AUTHORITY`). For `@finite.vip` emails, redemption binds the
-email to the current
-Local Identity Key in finite-identity and returns the NIP-05 identifier for
-that email. Run this binding flow only when the email and current key identify
-the same Principal. An agent must not redeem a human's email to inherit the
-human identity. Brain instead records exactly one distinct Personal Agent for
-a Personal Brain and automatically grants it every current and future Folder
-Key. The owner can atomically replace or remove it; ownership always stays
-with the human User Nostr Identity.
+`FINITE_IDENTITY_AUTHORITY`). Only `@finite.vip` emails can be redeemed:
+redemption binds the name to the current Local Identity Key in the Directory
+(the shrunken finite-identity) and returns the NIP-05 identifier for that
+name. Run this binding flow only when the email and current key identify the
+same Principal. An agent must not redeem a human's email to inherit the
+human identity.
 
-User-first creation resolves the Managed Agent Email before creating the empty
-Personal Brain. Agent-first creation uses the signed
-`POST /v1/personal-brain-bootstrap` route; Brain derives the owning account
-through Core and the human public identity through Finite Identity. Chat does
-not issue a Brain setup ticket or grant.
+Personal Agent registration through Core/Finite Identity account resolution
+was removed in the auth-kernel cut (2026-08); the account-bound agent
+bootstrap story is re-homed to Finite Core. Existing Personal Agent
+relationships keep working, and owners manage access by npub.
 
 Hosted `/client` uses `finite-brain-identity-provider-v1` through the
 WorkOS-bound dashboard bridge. The dashboard injects a signed, expiring
@@ -131,10 +127,9 @@ Device User Key and never returns it or performs arbitrary NIP-44 operations;
 without prior Chat setup, Brain shows setup-required and does not mint a
 replacement identity.
 
-External email redemption is recorded as email-only identity proof in
-finite-identity, but FiniteBrain folder sharing still requires an npub target
-for encrypted Folder Key Grants. Email-address folder grants are intentionally
-left for a future crypto-aware slice.
+Brain invitations and Folder share grants name npubs (or identifiers that
+resolve through public NIP-05); for everyone else, single-use capability
+Invite Tokens carry the grant, with email as delivery only.
 
 ## Open A Brain Working Tree
 

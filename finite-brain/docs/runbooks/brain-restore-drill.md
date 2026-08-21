@@ -6,15 +6,17 @@ ciphertext plus access facts, clients hold the keys, so disaster recovery is
 restore-the-file and prove-the-facts. The automated proof is
 `built_fbrain_process_brain_restore_drill`
 (`finite-brain/crates/finite-brain-cli/tests/fbrain_process_acceptance.rs`);
-the departure leg of the same story is Act 15 of `scripts/devfinity-adr46-slice`.
+the automatic Core-departure leg of the same story was removed with the
+auth-kernel cut (the `scripts/devfinity-adr46-slice` driver is deleted);
+revocation is now an explicit admin call, which the drill covers.
 
 ## What survives a restore, by construction
 
 - Memberships and admins with full provenance (`delegated_by_npub`,
-  `origin_kind`, `origin_ref`, roster revisions).
-- Pending and accepted invitations, approval requests (pending ones stay
-  actionable — approvable or deniable — after the restore).
-- Departures: a principal removed before the backup stays removed.
+  `origin_kind`, `origin_ref`, roster revisions on pre-cut rows).
+- Pending and accepted npub invitations (a pending one stays acceptable after
+  the restore) and any historical approval requests.
+- Revocations: a principal removed before the backup stays removed.
 - Folder key grants and pending-wrap markers: key-holding clients converge
   on their next sync.
 - Nothing plaintext: the backup file is the same ciphertext-bearing SQLite

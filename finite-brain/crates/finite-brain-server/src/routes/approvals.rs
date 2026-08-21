@@ -116,57 +116,16 @@ fn ensure_approval_signer_standing(
     }
 }
 
-/// Validate the requested action shape and, for invite-commit, that the plan
-/// exists and is still committable. Returns the normalized target npubs.
+/// Validate the requested action shape. Returns the normalized target npubs.
+/// Validation is purely local (auth kernel): no authority calls, no account
+/// bindings — just the stored Brain shape.
 fn validate_approval_request_action(
-    state: &ServerState,
-    store: &BrainStore,
-    brain_id: &BrainId,
     stored: &StoredBrain,
     action: &str,
     plan_id: Option<&str>,
     target_npubs: &[String],
 ) -> Result<Vec<String>, ApiError> {
     match action {
-        finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT => {
-            let plan_id = plan_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "invite-commit approval requests require a plan id",
-                    )
-                })?;
-            if !target_npubs.is_empty() {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invite-commit approval requests cannot name target Principals",
-                ));
-            }
-            let plan = store
-                .load_brain_invitation_plan(plan_id)?
-                .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "invitation plan not found"))?;
-            if plan.brain_id != *brain_id {
-                return Err(ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "invitation plan not found",
-                ));
-            }
-            if plan.committed {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "invitation plan is already committed",
-                ));
-            }
-            if plan.expires_at <= server_timestamp(state) {
-                return Err(ApiError::new(
-                    StatusCode::GONE,
-                    "invitation plan has expired; run preflight again",
-                ));
-            }
-            Ok(Vec::new())
-        }
         finite_brain_core::BRAIN_APPROVAL_ACTION_DELEGATION_GRANT => {
             if plan_id.is_some() {
                 return Err(ApiError::new(
@@ -236,68 +195,15 @@ pub(crate) async fn create_approval_request_handler(
     body: Bytes,
 ) -> Result<Json<ApprovalRequestResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let mut request: ApprovalRequestCreateRequest = serde_json::from_slice(&body)
+    let request: ApprovalRequestCreateRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let actor_user_id = UserId::new(actor)?;
-    // Invite-commit shorthand: a requester without admin standing names the
-    // account email instead of an admin-preflighted plan; resolve and persist
-    // the plan here so the human's later signature commits exactly this plan.
-    if request.action == finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT {
-        let target = request
-            .target
-            .take()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        match (request.plan_id.as_deref(), target) {
-            (None, Some(email)) => {
-                let email = canonical_email(&email)?;
-                let resolution =
-                    crate::routes::invitation_plans::resolve_invitation_plan(&state, &email)
-                        .await?;
-                // Identical requests filed within the same second derive the
-                // same deterministic plan id; retry with a salt instead of
-                // surfacing the unique constraint as a 409.
-                let mut plan_error = None;
-                for attempt in 0..3_u8 {
-                    let salt = (attempt > 0).then(|| format!("approval-filing-{attempt}"));
-                    match crate::routes::invitation_plans::persist_invitation_plan_with_salt(
-                        &state,
-                        &brain_id,
-                        &actor_user_id,
-                        resolution.clone(),
-                        None,
-                        salt.as_deref(),
-                    ) {
-                        Ok(plan) => {
-                            request.plan_id = Some(plan.id.to_string());
-                            plan_error = None;
-                            break;
-                        }
-                        Err(error) => plan_error = Some(error),
-                    }
-                }
-                if let Some(error) = plan_error {
-                    return Err(error);
-                }
-            }
-            (Some(_), Some(_)) => {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invite-commit approval requests name a plan id or a target email, not both",
-                ));
-            }
-            _ => {}
-        }
-    }
     let target_npubs = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_approval_requester(&stored, actor_user_id.as_str())?;
         validate_approval_request_action(
-            &state,
-            &store,
-            &brain_id,
             &stored,
             &request.action,
             request.plan_id.as_deref(),
@@ -546,91 +452,6 @@ pub(crate) async fn submit_approval_handler(
     }
 
     match payload.action.as_str() {
-        finite_brain_core::BRAIN_APPROVAL_ACTION_INVITE_COMMIT => {
-            let plan_id = payload.plan_id.as_deref().ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invite-commit approval artifact requires a plan id",
-                )
-            })?;
-            let plan = {
-                let store = state.store.lock().map_err(lock_error)?;
-                store.load_brain_invitation_plan(plan_id)?.ok_or_else(|| {
-                    ApiError::new(StatusCode::NOT_FOUND, "invitation plan not found")
-                })?
-            };
-            if plan.brain_id != brain_id {
-                return Err(ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "invitation plan not found",
-                ));
-            }
-            if plan.committed {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "invitation plan is already committed",
-                ));
-            }
-            if plan.expires_at <= server_timestamp(&state) {
-                return Err(ApiError::new(
-                    StatusCode::GONE,
-                    "invitation plan has expired; run preflight again",
-                ));
-            }
-            let execution = ApprovalExecutionContext {
-                nonce: payload.nonce.clone(),
-                approval_event_id: approval_event_id.clone(),
-                signer_npub: signer_user_id,
-                request_id: approval_request.as_ref().map(|request| request.id.clone()),
-            };
-            match execute_invitation_plan_commit(
-                &state,
-                &brain_id,
-                &execution.signer_npub.clone(),
-                &plan,
-                None,
-                PlanCommitOrigin::Approval {
-                    approval_event_id: approval_event_id.clone(),
-                },
-                Some(execution),
-            )
-            .await?
-            {
-                PlanCommitResult::Committed(commit) => {
-                    if let Some(request) = approval_request.as_ref() {
-                        let invitation_ids: Vec<String> = commit
-                            .invitations
-                            .iter()
-                            .map(|principal| principal.invitation.id.clone())
-                            .collect();
-                        let mut store = state.store.lock().map_err(lock_error)?;
-                        store.record_brain_approval_result_invitations(
-                            &request.id,
-                            &invitation_ids,
-                            &server_timestamp(&state),
-                        )?;
-                    }
-                    Ok(Json(ApprovalSubmissionResponse {
-                        status: "applied".to_owned(),
-                        action: payload.action.clone(),
-                        approval_event_id,
-                        request_id: approval_request.map(|request| request.id),
-                        result: serde_json::to_value(commit).map_err(|_| {
-                            ApiError::new(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "internal server error",
-                            )
-                        })?,
-                    })
-                    .into_response())
-                }
-                // Roster drift: the fresh preflight is persisted; the human
-                // must request and sign a new approval for it.
-                PlanCommitResult::Drifted(preflight) => {
-                    Ok((StatusCode::CONFLICT, Json(preflight)).into_response())
-                }
-            }
-        }
         finite_brain_core::BRAIN_APPROVAL_ACTION_DELEGATION_GRANT => {
             let applied_at = server_timestamp(&state);
             let targets = payload.target_npubs.clone();

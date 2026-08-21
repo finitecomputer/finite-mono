@@ -418,36 +418,6 @@ pub struct FolderKeyGrantRequest {
     pub created_at: Option<String>,
 }
 
-/// Agent-first request. All authority and identity facts are derived server-side.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapPersonalBrainForAgentRequest {}
-
-/// The converged user-owned Personal Brain and its Personal Agent relationship.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapPersonalBrainForAgentResponse {
-    pub brain: BrainMetadataResponse,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PersonalAgentFolderRotationRequest {
-    pub folder_id: String,
-    pub new_key_version: u32,
-    pub grants: Vec<FolderKeyGrantRequest>,
-    pub reencrypted_records: Vec<RotationObjectRequest>,
-    pub access_change_event: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReplacePersonalAgentRequest {
-    pub agent_email: Option<String>,
-    pub rotations: Vec<PersonalAgentFolderRotationRequest>,
-}
-
 /// Body for path-targeted admin mutations.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -717,14 +687,6 @@ pub struct CreateBrainInvitationRequest {
     #[serde(default)]
     pub initial_folder_access: Vec<String>,
     pub expires_at: String,
-    #[serde(default)]
-    pub invite_unwrap_npub: Option<String>,
-    #[serde(default)]
-    pub bootstrap_payload_hash: Option<String>,
-    #[serde(default)]
-    pub bootstrap_wrapped_event_json: Option<String>,
-    #[serde(default)]
-    pub bootstrap_authorization_event_json: Option<String>,
 }
 
 /// One Folder included in an Email Invite Bootstrap scope.
@@ -775,119 +737,23 @@ pub struct BrainInvitationResponse {
     pub narrowed: Option<NarrowedAcceptanceResponse>,
 }
 
-/// Claim an Email Invite Bootstrap into npub-bound Brain access.
+/// Historical acceptance note from the removed account-roster narrowing
+/// flow. Never populated anymore; the field survives so stored responses and
+/// old clients keep parsing.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClaimEmailBrainInvitationRequest {
-    pub email: String,
-    pub email_proof_created_at: String,
-    #[serde(default)]
-    pub invite_unwrap_proof_event_json: Option<String>,
-    #[serde(default)]
-    pub grants: Vec<CreateBrainFolderKeyGrantRequest>,
+pub struct NarrowedAcceptanceResponse {
+    pub roster_revision: Option<i64>,
+    pub exclusions: Vec<InvitationPlanExclusion>,
 }
 
-/// Invitation Preflight request: resolve one email target into an immutable plan.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationPreflightRequest {
-    pub target: String,
-}
-
-/// Resolved human Principal in an Invitation Plan.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationPlanHuman {
-    pub email: String,
-    pub npub: Option<String>,
-}
-
-/// Resolved, grant-ready agent Principal in an Invitation Plan.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationPlanAgent {
-    pub managed_agent_email: String,
-    pub agent_npub: Option<String>,
-    pub status: String,
-}
-
-/// Participant excluded from an Invitation Plan with an explicit reason.
+/// Historical plan exclusion entry, retained for `NarrowedAcceptanceResponse`.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvitationPlanExclusion {
     #[serde(rename = "ref")]
     pub ref_: String,
     pub reason: String,
-}
-
-/// Invitation Preflight response: the immutable plan commit must match.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationPreflightResponse {
-    pub plan_id: String,
-    pub plan_hash: String,
-    pub human: InvitationPlanHuman,
-    pub agents: Vec<InvitationPlanAgent>,
-    pub roster_revision: Option<i64>,
-    pub exclusions: Vec<InvitationPlanExclusion>,
-    pub expires_at: String,
-    /// Set when this plan replaces a stale plan at commit time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supersedes_plan_id: Option<String>,
-}
-
-/// Invitation Commit request.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationCommitRequest {
-    pub plan_id: String,
-    pub plan_hash: String,
-    /// Agent emails to exclude from the committed set (narrowing only).
-    #[serde(default)]
-    pub reduced_set: Option<Vec<String>>,
-}
-
-/// One per-principal Brain Invitation written by a commit.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommittedPrincipalInvitation {
-    #[serde(rename = "ref")]
-    pub ref_: String,
-    pub npub: String,
-    pub invitation: BrainInvitationResponse,
-}
-
-/// One plan participant skipped at commit with an explicit reason.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitSkippedPrincipal {
-    #[serde(rename = "ref")]
-    pub ref_: String,
-    pub reason: String,
-}
-
-/// Invitation Commit response.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitationCommitResponse {
-    pub status: String,
-    pub plan_id: String,
-    pub roster_revision: Option<i64>,
-    pub invitations: Vec<CommittedPrincipalInvitation>,
-    pub skipped: Vec<CommitSkippedPrincipal>,
-    /// Pending-but-expired invitations the commit revoked to supersede them
-    /// with a fresh invitation for the same (Brain, target).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub superseded_invitation_ids: Vec<String>,
-}
-
-/// Acceptance result note when the account roster narrowed the resolved set:
-/// permanently departed participants are excluded, never added or substituted.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NarrowedAcceptanceResponse {
-    pub roster_revision: Option<i64>,
-    pub exclusions: Vec<InvitationPlanExclusion>,
 }
 
 /// Approval Request creation (ADR-0046): an agent or the UI asks a human key
@@ -898,11 +764,6 @@ pub struct ApprovalRequestCreateRequest {
     pub action: String,
     #[serde(default)]
     pub plan_id: Option<String>,
-    /// Invite-commit shorthand for requesters without admin standing: the
-    /// server resolves this account email into a fresh invitation plan and
-    /// files the request against it. Mutually exclusive with `plan_id`.
-    #[serde(default)]
-    pub target: Option<String>,
     #[serde(default)]
     pub target_npubs: Vec<String>,
 }
@@ -924,9 +785,8 @@ pub struct ApprovalRequestResponse {
     pub resolved_by_npub: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    /// Invitation ids an approved invite-commit produced. Lets members —
-    /// whose agents cannot list org-brain invitations — observe their
-    /// filing's outcome through `approvals list --all`.
+    /// Historical: invitation ids an approved invite-commit produced before
+    /// that action was removed (auth kernel cut). Never populated anymore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resulting_invitations: Option<Vec<String>>,
 }
@@ -957,17 +817,9 @@ pub struct ApprovalSubmissionResponse {
     pub approval_event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// Action-specific result: an Invitation Commit response for
-    /// 'invite-commit', or `{"grantedNpubs": [...]}` for 'delegation-grant'.
+    /// Action-specific result: `{"grantedNpubs": [...]}` for
+    /// 'delegation-grant'.
     pub result: serde_json::Value,
-}
-
-/// Request authenticated, post-proof Invite Instructions for an Email Invite Bootstrap.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PostProofInviteInstructionsRequest {
-    pub email: String,
-    pub email_proof_created_at: String,
 }
 
 /// Brain Invitation list response.
@@ -1101,48 +953,6 @@ pub struct CreateFolderInvitationRequest {
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
     pub expires_at: String,
-}
-
-/// Folder-scoped invitation plan preview: the cohort resolution plus the
-/// Folder the commit will grant Guest access to.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderInvitationPreflightResponse {
-    #[serde(flatten)]
-    pub plan: InvitationPreflightResponse,
-    pub folder_id: String,
-    pub current_key_version: u32,
-}
-
-/// One per-principal Folder invitation inside a cohort Folder plan commit.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderInvitationPlanParticipant {
-    pub recipient_npub: String,
-    pub grant: FolderKeyGrantRequest,
-    pub access_change_event: serde_json::Value,
-}
-
-/// Cohort Folder plan commit: the committing key holder supplies one signed
-/// access-change event and one wrapped Folder Key Grant per included
-/// principal; the server fans the share links out atomically.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderInvitationPlanCommitRequest {
-    pub plan_id: String,
-    pub plan_hash: String,
-    pub expires_at: String,
-    pub participants: Vec<FolderInvitationPlanParticipant>,
-}
-
-/// Folder plan commit result: one share link per included principal.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderInvitationPlanCommitResponse {
-    pub status: String,
-    pub plan_id: String,
-    pub invitations: Vec<FolderInvitationResponse>,
-    pub duplicate_recipient_npubs: Vec<String>,
 }
 
 /// Folder Invitation response.
