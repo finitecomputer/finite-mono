@@ -20,13 +20,14 @@ use axum::{Json, Router};
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
-    CoreError, CryptoRecordError, DecodedSyncPayload, DisplayName, EmailInviteScopeError,
-    EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId, FolderObjectOperation,
-    FolderObjectRevisionPayload, FolderObjectTombstonePayload, FolderRotationFanout,
-    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, RevisionValidation,
-    SafeRelativePath, TombstoneValidation, UserId, bootstrap_organization_brain,
-    bootstrap_organization_brain_with_requester, bootstrap_personal_brain, decode_sync_payload,
-    derive_email_invite_scope, validate_admin_access_change_event, validate_folder_rotation_fanout,
+    CoreError, CryptoRecordError, DecodedSyncPayload, DisplayName, EmailInputError,
+    EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
+    FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
+    FolderRotationFanout, FolderRotationOperation, IdentityInput, IdentityInputError, ObjectId,
+    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
+    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
+    bootstrap_personal_brain, canonical_email, decode_sync_payload, derive_email_invite_scope,
+    finite_vip_email, validate_admin_access_change_event, validate_folder_rotation_fanout,
     validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
@@ -90,7 +91,7 @@ fn normalized_smoke_email_proofs(value: impl AsRef<str>) -> Result<BTreeSet<Stri
         if raw.is_empty() {
             continue;
         }
-        emails.insert(canonical_email(raw).map_err(|error| error.message)?);
+        emails.insert(canonical_email(raw).map_err(|error| ApiError::from(error).message)?);
     }
     if emails.is_empty() {
         return Err("FINITE_BRAIN_SMOKE_EMAIL_PROOFS must include at least one email".to_owned());
@@ -399,7 +400,7 @@ impl ServerState {
         let allowed = Arc::new(normalized_smoke_email_proofs(emails)?);
         self.email_proof_verifier = Some(Arc::new(move |email, _actor| {
             let email = canonical_email(email)
-                .map_err(|error| EmailProofFailure::Rejected(error.message))?;
+                .map_err(|error| EmailProofFailure::Rejected(ApiError::from(error).message))?;
             if allowed.contains(&email) {
                 Ok(())
             } else {
@@ -537,6 +538,18 @@ impl From<CoreError> for ApiError {
 
 impl From<CryptoRecordError> for ApiError {
     fn from(value: CryptoRecordError) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, value.to_string())
+    }
+}
+
+impl From<EmailInputError> for ApiError {
+    fn from(value: EmailInputError) -> Self {
+        Self::from(IdentityInputError::from(value))
+    }
+}
+
+impl From<IdentityInputError> for ApiError {
+    fn from(value: IdentityInputError) -> Self {
         Self::new(StatusCode::BAD_REQUEST, value.to_string())
     }
 }
@@ -858,28 +871,23 @@ async fn resolve_identity_input(
     input: &str,
 ) -> Result<ResolvedIdentity, ApiError> {
     let input = input.trim();
-    if input.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "identity input is required",
-        ));
-    }
-
-    if let Ok(public_key) = NostrPublicKey::parse(input) {
-        return resolved_identity(public_key, None, Vec::new());
-    }
-
-    // An email-shaped target may bind to a Finite account whose npub only
-    // the account authorities know; resolve it exactly like the invitation
-    // plan flow before falling back to public NIP-05, which cannot answer
-    // for mailboxes on domains that serve no nostr.json document. finite.vip
-    // identifiers stay on the NIP-05 path: it is already routed to the
-    // identity authority and answers for managed agent mailboxes.
-    if email_like(input) && !finite_vip_email(input) {
-        let email = canonical_email(input)?;
-        if let Some(resolved) = resolve_account_email_identity(state, &email).await? {
-            return Ok(resolved);
+    match IdentityInput::parse(input)? {
+        IdentityInput::Npub(public_key) => {
+            return resolved_identity(public_key, None, Vec::new());
         }
+        // An account email may bind to a Finite account whose npub only the
+        // account authorities know; resolve it exactly like the invitation
+        // plan flow before falling back to public NIP-05, which cannot answer
+        // for mailboxes on domains that serve no nostr.json document.
+        // finite.vip identifiers stay on the NIP-05 path: it is already
+        // routed to the identity authority and answers for managed agent
+        // mailboxes.
+        IdentityInput::AccountEmail(email) => {
+            if let Some(resolved) = resolve_account_email_identity(state, &email).await? {
+                return Ok(resolved);
+            }
+        }
+        IdentityInput::FiniteVipEmail(_) | IdentityInput::Nip05(_) => {}
     }
 
     let identifier = Nip05Identifier::parse(input).map_err(nostr_identity_error)?;
@@ -1177,7 +1185,7 @@ async fn try_resolve_account_agent_principals(
                 "Finite Core account-agent association has no verified owner email",
             )
         })
-        .and_then(canonical_email)?;
+        .and_then(|email| canonical_email(email).map_err(ApiError::from))?;
 
     Ok(Some(AccountAgentPrincipals {
         owner_npub,
@@ -1461,41 +1469,6 @@ fn invitation_target_input(request: &CreateBrainInvitationRequest) -> Result<Str
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invitation target is required"))
-}
-
-fn email_like(value: &str) -> bool {
-    let value = value.trim();
-    let Some((local, domain)) = value.split_once('@') else {
-        return false;
-    };
-    !local.is_empty() && !domain.is_empty() && domain.contains('.')
-}
-
-fn finite_vip_email(value: &str) -> bool {
-    canonical_email(value)
-        .map(|email| email.ends_with("@finite.vip"))
-        .unwrap_or(false)
-}
-
-fn canonical_email(value: &str) -> Result<String, ApiError> {
-    let value = value.trim().to_ascii_lowercase();
-    let Some((local, domain)) = value.split_once('@') else {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "email target must be an email address",
-        ));
-    };
-    if local.is_empty()
-        || domain.is_empty()
-        || value.chars().any(|c| c == '\0' || c.is_control())
-        || value.len() > 320
-    {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "email target must be a printable email address",
-        ));
-    }
-    Ok(value)
 }
 
 fn public_invite_instructions_path(invite_code: &str) -> String {

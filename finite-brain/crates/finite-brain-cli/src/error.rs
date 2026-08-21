@@ -143,6 +143,21 @@ impl From<std::io::Error> for CliError {
     }
 }
 
+impl From<finite_brain_core::EmailInputError> for CliError {
+    fn from(error: finite_brain_core::EmailInputError) -> Self {
+        Self::InvalidInput(format!("email invite target {error}"))
+    }
+}
+
+impl From<finite_brain_core::IdentityInputError> for CliError {
+    fn from(error: finite_brain_core::IdentityInputError) -> Self {
+        match error {
+            finite_brain_core::IdentityInputError::Email(error) => Self::from(error),
+            other => Self::InvalidInput(other.to_string()),
+        }
+    }
+}
+
 impl From<serde_json::Error> for CliError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)

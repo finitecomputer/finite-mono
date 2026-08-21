@@ -159,7 +159,7 @@ impl BrainStore {
         validate_link_id("brain_invitation_id", id)?;
         validate_link_id("invite_code", invite_code)?;
         validate_bounded_offer_expiry(expires_at, created_at)?;
-        let invited_email = canonical_invited_email(invited_email)?;
+        let invited_email = canonical_email(invited_email)?;
         validate_required_text("bootstrapPayloadHash", bootstrap_payload_hash)?;
         validate_required_text("bootstrapWrappedEventJson", bootstrap_wrapped_event_json)?;
         validate_required_text(
@@ -670,7 +670,7 @@ impl BrainStore {
                 kind: "brain invitation",
             });
         }
-        let invited_email = canonical_invited_email(invited_email)?;
+        let invited_email = canonical_email(invited_email)?;
         if invitation.invited_email.as_deref() != Some(invited_email.as_str()) {
             return Err(StoreError::UnavailableLink {
                 kind: "brain invitation",

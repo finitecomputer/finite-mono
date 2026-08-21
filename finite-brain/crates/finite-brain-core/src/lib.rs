@@ -1,5 +1,6 @@
 //! FiniteBrain Portable v1 core domain and validation logic.
 
+pub mod identity_input;
 pub mod portability;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +21,11 @@ use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
+
+pub use identity_input::{
+    EmailInputError, FINITE_VIP_EMAIL_DOMAIN, IdentityInput, IdentityInputError, canonical_email,
+    email_like, finite_vip_email,
+};
 
 const RESERVED_TOP_LEVEL_NAMES: [&str; 3] = [".finitebrain", "_admin", ".git"];
 const FOLDER_OBJECT_VERSION: &str = "finite-folder-object-v1";

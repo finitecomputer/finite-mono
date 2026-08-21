@@ -815,16 +815,25 @@ pub(crate) async fn create_brain_invitation_handler(
     let created_at = server_timestamp(&state);
     let target_input = invitation_target_input(&request)?;
 
-    let npub_target = if let Ok(public_key) = NostrPublicKey::parse(&target_input) {
-        Some(public_key.to_npub().map_err(nostr_identity_error)?)
-    } else if finite_vip_email(&target_input) {
-        match resolve_and_record_identity(&state, &target_input).await {
-            Ok(identity) => Some(identity.npub),
-            Err(error) if error.status == StatusCode::NOT_FOUND => None,
-            Err(error) => return Err(error),
+    let (npub_target, invited_email) = match IdentityInput::parse(&target_input)? {
+        IdentityInput::Npub(public_key) => (
+            Some(public_key.to_npub().map_err(nostr_identity_error)?),
+            None,
+        ),
+        IdentityInput::FiniteVipEmail(email) => {
+            match resolve_and_record_identity(&state, &target_input).await {
+                Ok(identity) => (Some(identity.npub), None),
+                Err(error) if error.status == StatusCode::NOT_FOUND => (None, Some(email)),
+                Err(error) => return Err(error),
+            }
         }
-    } else {
-        None
+        IdentityInput::AccountEmail(email) => (None, Some(email)),
+        IdentityInput::Nip05(_) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invitation target must be npub, hex, active finite.vip NIP-05, or email",
+            ));
+        }
     };
 
     let invitation = if let Some(target_npub) = npub_target {
@@ -869,13 +878,7 @@ pub(crate) async fn create_brain_invitation_handler(
             &created_at,
         )?
     } else {
-        if !email_like(&target_input) {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invitation target must be npub, hex, active finite.vip NIP-05, or email",
-            ));
-        }
-        let invited_email = canonical_email(&target_input)?;
+        let invited_email = invited_email.expect("non-npub targets carry their canonical email");
         let invite_unwrap_npub = UserId::new(canonical_npub_from_public_key_input(
             request.invite_unwrap_npub.as_deref().ok_or_else(|| {
                 ApiError::new(

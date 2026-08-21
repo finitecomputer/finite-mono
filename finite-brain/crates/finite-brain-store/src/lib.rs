@@ -13,6 +13,7 @@ use finite_brain_core::{
     RequiredFolderKeyGrant, SafeRelativePath, UserId, derive_email_invite_scope,
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
+use finite_brain_core::{EmailInputError, canonical_email};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -127,6 +128,14 @@ impl Error for StoreError {}
 impl From<CoreError> for StoreError {
     fn from(value: CoreError) -> Self {
         Self::Core(value)
+    }
+}
+
+impl From<EmailInputError> for StoreError {
+    fn from(value: EmailInputError) -> Self {
+        Self::BrokenInvariant {
+            reason: format!("invited email {value}"),
+        }
     }
 }
 
@@ -2956,25 +2965,6 @@ fn validate_folder_key_grant_control_records(
         }
     }
     Ok(())
-}
-
-fn canonical_invited_email(value: &str) -> Result<String, StoreError> {
-    let value = value.trim().to_ascii_lowercase();
-    let Some((local, domain)) = value.split_once('@') else {
-        return Err(StoreError::BrokenInvariant {
-            reason: "invited email must be an email address".to_owned(),
-        });
-    };
-    if local.is_empty()
-        || domain.is_empty()
-        || value.chars().any(|c| c == '\0' || c.is_control())
-        || value.len() > 320
-    {
-        return Err(StoreError::BrokenInvariant {
-            reason: "invited email must be a printable email address".to_owned(),
-        });
-    }
-    Ok(value)
 }
 
 fn validate_required_text(field: &'static str, value: &str) -> Result<(), StoreError> {

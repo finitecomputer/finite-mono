@@ -61,10 +61,11 @@ use finite_brain_core::portability::{
 };
 use finite_brain_core::{
     AdminAccessAction, BrainApprovalPayload, BrainGrantIntent, BrainId, EmailInviteScopeError,
-    EmailInviteScopeFolder, FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
-    bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
-    brain_approval_event_template, derive_email_invite_scope, derive_safe_top_level_folder_path,
-    derive_stable_resource_id, open_folder_key_grant,
+    EmailInviteScopeFolder, FolderAccessMode, FolderId, FolderKey, IdentityInput,
+    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
+    bootstrap_personal_brain, brain_approval_event_template, canonical_email,
+    derive_email_invite_scope, derive_safe_top_level_folder_path, derive_stable_resource_id,
+    open_folder_key_grant,
 };
 use finite_nostr::{
     GiftWrapValidation, NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, open_gift_wrap,
@@ -4072,50 +4073,40 @@ fn brain_invites<W: Write>(
             let expires_at = invitation_expires_at(env, args)?;
             let folders = option_values(args, "--folder");
             let route = format!("/v1/brains/{brain_id}/invitations");
-            if let Ok(public_key) = NostrPublicKey::parse(&raw_target) {
-                let target = public_key
+            let target = match IdentityInput::parse(&raw_target)? {
+                IdentityInput::Npub(public_key) => public_key
                     .to_npub()
-                    .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-                write_npub_invite_create(
-                    output,
-                    json,
-                    env,
-                    args,
-                    &route,
-                    &target,
-                    &folders,
-                    &expires_at,
-                )
-            } else if invite_email_like(&raw_target) {
-                // The blessed email path: resolve the account into an
-                // invitation plan, then either commit it directly (the caller
-                // holds admin standing) or file an approval request for a
-                // human admin to sign. Emails without a Finite account fall
-                // back to the one-time email invitation.
-                write_plan_or_email_invite_create(
-                    output,
-                    json,
-                    env,
-                    args,
-                    &route,
-                    &brain_id,
-                    &raw_target,
-                    &folders,
-                    &expires_at,
-                )
-            } else {
-                let target = resolve_identity_npub(env, args, &raw_target)?;
-                write_npub_invite_create(
-                    output,
-                    json,
-                    env,
-                    args,
-                    &route,
-                    &target,
-                    &folders,
-                    &expires_at,
-                )
-            }
+                    .map_err(|error| CliError::InvalidSigner(error.to_string()))?,
+                IdentityInput::FiniteVipEmail(_) | IdentityInput::AccountEmail(_) => {
+                    // The blessed email path: resolve the account into an
+                    // invitation plan, then either commit it directly (the
+                    // caller holds admin standing) or file an approval request
+                    // for a human admin to sign. Emails without a Finite
+                    // account fall back to the one-time email invitation.
+                    return write_plan_or_email_invite_create(
+                        output,
+                        json,
+                        env,
+                        args,
+                        &route,
+                        &brain_id,
+                        &raw_target,
+                        &folders,
+                        &expires_at,
+                    );
+                }
+                IdentityInput::Nip05(_) => resolve_identity_npub(env, args, &raw_target)?,
+            };
+            write_npub_invite_create(
+                output,
+                json,
+                env,
+                args,
+                &route,
+                &target,
+                &folders,
+                &expires_at,
+            )
         }
         Some("list") => {
             let scoped_brain_id = match option_value(args, "--brain") {
@@ -4282,7 +4273,7 @@ fn claim_email_folder_invitation<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     let invite_code = required_option_or_positional(args, "--code", 1, "invite-code")?;
-    let email = canonical_invite_email(
+    let email = canonical_email(
         &option_value(args, "--email").ok_or(CliError::MissingArgument("--email"))?,
     )?;
     if option_value(args, "--invite-secret").is_some() {
@@ -4488,7 +4479,7 @@ fn write_plan_or_email_folder_invite_create<W: Write>(
             true,
         )
     };
-    let email = canonical_invite_email(raw_target)?;
+    let email = canonical_email(raw_target)?;
     let preflight_route =
         format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/preflight");
     let plan = match signed_json_request(
@@ -4612,7 +4603,8 @@ fn folder_invites<W: Write>(
                 .ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target")?;
             let expires_at = invitation_expires_at(env, args)?;
-            let resolved_target = if invite_finite_vip_email(&raw_target) {
+            let target_input = IdentityInput::parse(&raw_target)?;
+            let resolved_target = if matches!(target_input, IdentityInput::FiniteVipEmail(_)) {
                 match resolve_identity_npub(env, args, &raw_target) {
                     Ok(target) => Some(target),
                     Err(CliError::HttpStatus { status: 404, .. }) => None,
@@ -4621,7 +4613,11 @@ fn folder_invites<W: Write>(
             } else {
                 None
             };
-            if invite_email_like(&raw_target) && resolved_target.is_none() {
+            if matches!(
+                target_input,
+                IdentityInput::FiniteVipEmail(_) | IdentityInput::AccountEmail(_)
+            ) && resolved_target.is_none()
+            {
                 return write_plan_or_email_folder_invite_create(
                     output,
                     json,
@@ -4783,7 +4779,7 @@ fn write_plan_or_email_invite_create<W: Write>(
     folders: &[String],
     expires_at: &str,
 ) -> Result<(), CliError> {
-    let email = canonical_invite_email(raw_target)?;
+    let email = canonical_email(raw_target)?;
     let preflight_route = format!("/v1/brains/{brain_id}/invitations/preflight");
     match signed_json_request(
         env,
@@ -5011,39 +5007,6 @@ fn write_email_invite_create<W: Write>(
     }
 }
 
-fn invite_email_like(value: &str) -> bool {
-    let value = value.trim();
-    let Some((local, domain)) = value.split_once('@') else {
-        return false;
-    };
-    !local.is_empty() && !domain.is_empty() && domain.contains('.')
-}
-
-fn invite_finite_vip_email(value: &str) -> bool {
-    canonical_invite_email(value)
-        .map(|email| email.ends_with("@finite.vip"))
-        .unwrap_or(false)
-}
-
-fn canonical_invite_email(value: &str) -> Result<String, CliError> {
-    let value = value.trim().to_ascii_lowercase();
-    let Some((local, domain)) = value.split_once('@') else {
-        return Err(CliError::InvalidInput(
-            "email invite target must be an email address".to_owned(),
-        ));
-    };
-    if local.is_empty()
-        || domain.is_empty()
-        || value.len() > 320
-        || value.chars().any(|c| c == '\0' || c.is_control())
-    {
-        return Err(CliError::InvalidInput(
-            "email invite target must be a printable email address".to_owned(),
-        ));
-    }
-    Ok(value)
-}
-
 fn email_invite_scope(
     metadata: &BrainMetadataView,
     selected_folders: &[String],
@@ -5108,7 +5071,7 @@ fn email_invite_create_body(
     expires_at: &str,
     folder_only: bool,
 ) -> Result<(serde_json::Value, String), CliError> {
-    let invited_email = canonical_invite_email(target_email)?;
+    let invited_email = canonical_email(target_email)?;
     let metadata = fetch_brain_metadata(env, args, brain_id)?;
     let scope = email_invite_scope(&metadata, selected_folders, folder_only)?;
     let auth = load_signer(env)?;
