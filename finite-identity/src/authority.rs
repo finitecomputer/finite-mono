@@ -1,4 +1,9 @@
-//! Finite Identity Authority HTTP contract and SQLite store.
+//! Finite Identity Directory HTTP contract and SQLite store.
+//!
+//! The Directory is the shrunken Identity Authority: it answers "what npub is
+//! `name@finite.vip`?" and lets a human claim (or an operator disable) a name.
+//! The Email Challenge survives only as the proof-of-control for claiming a
+//! name; it proves nothing to any other product.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,7 +30,6 @@ pub struct AuthorityConfig {
     pub finite_vip_domain: String,
     pub email_challenge_ttl_seconds: u64,
     pub operator_token: Option<String>,
-    pub sites_notification_token: Option<String>,
 }
 
 impl AuthorityConfig {
@@ -36,13 +40,6 @@ impl AuthorityConfig {
 
 pub trait Mailer: Send + Sync + 'static {
     fn send_email_challenge(&self, email: &str, token: &str) -> Result<(), String>;
-    fn send_transactional_email(
-        &self,
-        idempotency_key: &str,
-        email: &str,
-        subject: &str,
-        text: &str,
-    ) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,19 +48,6 @@ pub struct DevMailer;
 impl Mailer for DevMailer {
     fn send_email_challenge(&self, email: &str, token: &str) -> Result<(), String> {
         eprintln!("finite-identityd dev email challenge for {email}: {token}");
-        Ok(())
-    }
-
-    fn send_transactional_email(
-        &self,
-        idempotency_key: &str,
-        email: &str,
-        subject: &str,
-        text: &str,
-    ) -> Result<(), String> {
-        eprintln!(
-            "finite-identityd dev transactional email {idempotency_key} to {email}: {subject}\n{text}"
-        );
         Ok(())
     }
 }
@@ -93,38 +77,6 @@ impl Mailer for HttpMailer {
             })
             .map_err(|error| error.to_string())
     }
-
-    fn send_transactional_email(
-        &self,
-        idempotency_key: &str,
-        email: &str,
-        subject: &str,
-        text: &str,
-    ) -> Result<(), String> {
-        self.resend
-            .send_text_email_with_idempotency_key(
-                idempotency_key,
-                &finite_mail::TextEmail {
-                    to: email,
-                    subject,
-                    text,
-                },
-            )
-            .map_err(|error| error.to_string())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SitesNotificationRequest {
-    idempotency_key: String,
-    kind: String,
-    email: String,
-    site_name: String,
-    site_url: String,
-    #[serde(default)]
-    requester_email: Option<String>,
-    #[serde(default)]
-    approval_url: Option<String>,
 }
 
 fn email_challenge_subject() -> &'static str {
@@ -184,7 +136,6 @@ pub struct AuthorityState {
     mailer: Arc<dyn Mailer>,
     clock: Arc<dyn Clock>,
     config: AuthorityConfig,
-    notification_sends: Arc<Mutex<()>>,
 }
 
 impl AuthorityState {
@@ -199,7 +150,6 @@ impl AuthorityState {
             mailer,
             clock: Arc::new(clock),
             config,
-            notification_sends: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -279,102 +229,6 @@ impl IdentityStore {
              ON CONFLICT(pubkey) DO NOTHING",
             params![pubkey, now],
         )?;
-        tx.execute(
-            "INSERT INTO principal_links (email, pubkey, verified_at, revoked_at)
-             VALUES (?1, ?2, ?3, NULL)
-             ON CONFLICT(email) DO UPDATE SET
-                pubkey = excluded.pubkey,
-                verified_at = excluded.verified_at,
-                revoked_at = NULL",
-            params![&parsed.email, pubkey, now],
-        )?;
-        tx.execute(
-            "UPDATE email_only_principals
-             SET revoked_at = COALESCE(revoked_at, ?2)
-             WHERE email = ?1",
-            params![&parsed.email, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn verify_email_only_principal(
-        &self,
-        email: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        if !hex::is_hex32(pubkey) {
-            return Err(StoreError::Validation("malformed pubkey"));
-        }
-        let parsed = parse_email(email).ok_or(StoreError::Validation("malformed email"))?;
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .execute(
-                "INSERT INTO email_only_principals (email, pubkey, verified_at, revoked_at)
-                 VALUES (?1, ?2, ?3, NULL)
-                 ON CONFLICT(email, pubkey) DO UPDATE SET
-                    verified_at = excluded.verified_at,
-                    revoked_at = NULL",
-                params![parsed.email, pubkey, now],
-            )?;
-        Ok(())
-    }
-
-    pub fn bind_workos_account_principal(
-        &self,
-        workos_user_id: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        if !valid_workos_user_id(workos_user_id) {
-            return Err(StoreError::Validation("invalid_workos_user_id"));
-        }
-        if !hex::is_hex32(pubkey) {
-            return Err(StoreError::Validation("invalid_user_npub"));
-        }
-        let mut conn = self.conn.lock().expect("store mutex never poisoned");
-        let tx = conn.transaction()?;
-        let existing_by_account: Option<String> = tx
-            .query_row(
-                "SELECT pubkey FROM workos_account_principals WHERE workos_user_id = ?1",
-                params![workos_user_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing_by_account
-            .as_deref()
-            .is_some_and(|existing| existing != pubkey)
-        {
-            return Err(StoreError::Conflict("workos_account_already_bound"));
-        }
-        let existing_by_principal: Option<String> = tx
-            .query_row(
-                "SELECT workos_user_id FROM workos_account_principals WHERE pubkey = ?1",
-                params![pubkey],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing_by_principal
-            .as_deref()
-            .is_some_and(|existing| existing != workos_user_id)
-        {
-            return Err(StoreError::Conflict("user_principal_already_bound"));
-        }
-        tx.execute(
-            "INSERT INTO workos_account_principals
-               (workos_user_id, pubkey, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(workos_user_id) DO UPDATE SET updated_at = excluded.updated_at",
-            params![workos_user_id, pubkey, now],
-        )?;
-        tx.execute(
-            "INSERT INTO native_principals (pubkey, created_at)
-             VALUES (?1, ?2)
-             ON CONFLICT(pubkey) DO NOTHING",
-            params![pubkey, now],
-        )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -393,6 +247,14 @@ impl IdentityStore {
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
+        // Plain exec schema: tables are created if missing and never altered.
+        // The directory shrink retired `principal_links`,
+        // `workos_account_principals`, `email_only_principals`,
+        // `mailbox_proofs`, and `notification_deliveries`. Databases created
+        // before the shrink keep those tables on disk, unread and unwritten:
+        // with no migration mechanism in this codebase there is nothing to
+        // drop them with, and the rows they hold are no longer load-bearing
+        // for any product.
         self.conn
             .lock()
             .expect("store mutex never poisoned")
@@ -413,40 +275,9 @@ impl IdentityStore {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS vip_email_bindings_name
               ON vip_email_bindings(localpart, domain);
-            CREATE TABLE IF NOT EXISTS principal_links (
-              email TEXT PRIMARY KEY,
-              pubkey TEXT NOT NULL,
-              verified_at INTEGER NOT NULL,
-              revoked_at INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS workos_account_principals (
-              workos_user_id TEXT PRIMARY KEY,
-              pubkey TEXT NOT NULL UNIQUE,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS email_only_principals (
-              email TEXT NOT NULL,
-              pubkey TEXT NOT NULL,
-              verified_at INTEGER NOT NULL,
-              revoked_at INTEGER,
-              PRIMARY KEY(email, pubkey)
-            );
-            CREATE INDEX IF NOT EXISTS email_only_principals_email
-              ON email_only_principals(email);
-            CREATE INDEX IF NOT EXISTS email_only_principals_pubkey
-              ON email_only_principals(pubkey);
             CREATE TABLE IF NOT EXISTS email_challenges (
               token_hash TEXT PRIMARY KEY,
               email TEXT NOT NULL,
-              expires_at INTEGER NOT NULL,
-              used_at INTEGER,
-              created_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS mailbox_proofs (
-              proof_hash TEXT PRIMARY KEY,
-              email TEXT NOT NULL,
-              pubkey TEXT NOT NULL,
               expires_at INTEGER NOT NULL,
               used_at INTEGER,
               created_at INTEGER NOT NULL
@@ -456,41 +287,7 @@ impl IdentityStore {
               pubkey TEXT NOT NULL,
               created_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS notification_deliveries (
-              idempotency_key TEXT PRIMARY KEY,
-              delivered_at INTEGER NOT NULL
-            );
             ",
-            )?;
-        Ok(())
-    }
-
-    fn notification_delivered(&self, idempotency_key: &str) -> Result<bool, StoreError> {
-        let delivered: Option<i64> = self
-            .conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT delivered_at FROM notification_deliveries WHERE idempotency_key = ?1",
-                params![idempotency_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(delivered.is_some())
-    }
-
-    fn mark_notification_delivered(
-        &self,
-        idempotency_key: &str,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .execute(
-                "INSERT OR IGNORE INTO notification_deliveries (idempotency_key, delivered_at)
-                 VALUES (?1, ?2)",
-                params![idempotency_key, now],
             )?;
         Ok(())
     }
@@ -538,58 +335,6 @@ impl IdentityStore {
         Ok(email)
     }
 
-    fn create_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        email: &str,
-        pubkey: &str,
-        expires_at: u64,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .execute(
-                "INSERT INTO mailbox_proofs
-                    (proof_hash, email, pubkey, expires_at, used_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-                params![proof_hash, email, pubkey, expires_at, now],
-            )?;
-        Ok(())
-    }
-
-    fn consume_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<String, StoreError> {
-        let mut conn = self.conn.lock().expect("store mutex never poisoned");
-        let tx = conn.transaction()?;
-        let row: Option<(String, String, u64, Option<u64>)> = tx
-            .query_row(
-                "SELECT email, pubkey, expires_at, used_at
-                 FROM mailbox_proofs WHERE proof_hash = ?1",
-                params![proof_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let (email, proof_pubkey, expires_at, used_at) =
-            row.ok_or(StoreError::Validation("unknown_or_expired_mailbox_proof"))?;
-        if proof_pubkey != pubkey {
-            return Err(StoreError::Validation("mailbox_proof_pubkey_mismatch"));
-        }
-        if used_at.is_some() || now > expires_at {
-            return Err(StoreError::Validation("unknown_or_expired_mailbox_proof"));
-        }
-        tx.execute(
-            "UPDATE mailbox_proofs SET used_at = ?1 WHERE proof_hash = ?2",
-            params![now, proof_hash],
-        )?;
-        tx.commit()?;
-        Ok(email)
-    }
-
     fn nip05_pubkey(&self, localpart: &str, domain: &str) -> Result<Option<String>, StoreError> {
         self.conn
             .lock()
@@ -598,20 +343,6 @@ impl IdentityStore {
                 "SELECT pubkey FROM vip_email_bindings
                  WHERE localpart = ?1 AND domain = ?2 AND disabled_at IS NULL",
                 params![localpart, domain],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    fn active_binding_pubkey(&self, email: &str) -> Result<Option<String>, StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT pubkey FROM vip_email_bindings
-                 WHERE email = ?1 AND disabled_at IS NULL",
-                params![email],
                 |row| row.get(0),
             )
             .optional()
@@ -669,21 +400,6 @@ impl IdentityStore {
         Ok(found.is_some())
     }
 
-    fn active_email_only_principal(&self, email: &str, pubkey: &str) -> Result<bool, StoreError> {
-        let found: Option<String> = self
-            .conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT pubkey FROM email_only_principals
-                 WHERE email = ?1 AND pubkey = ?2 AND revoked_at IS NULL",
-                params![email, pubkey],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    }
-
     fn vip_binding_by_email(
         &self,
         email: &str,
@@ -715,88 +431,6 @@ impl IdentityStore {
         )?;
         let records = statement
             .query_map(params![pubkey], VipEmailBindingRecord::from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(records)
-    }
-
-    fn workos_account_principal(&self, workos_user_id: &str) -> Result<Option<String>, StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT pubkey FROM workos_account_principals WHERE workos_user_id = ?1",
-                params![workos_user_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    fn email_only_principals_by_email(
-        &self,
-        email: &str,
-    ) -> Result<Vec<EmailOnlyPrincipalRecord>, StoreError> {
-        let conn = self.conn.lock().expect("store mutex never poisoned");
-        let mut statement = conn.prepare(
-            "SELECT email, pubkey, verified_at, revoked_at
-             FROM email_only_principals
-             WHERE email = ?1
-             ORDER BY pubkey",
-        )?;
-        let records = statement
-            .query_map(params![email], EmailOnlyPrincipalRecord::from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(records)
-    }
-
-    fn email_only_principals_by_pubkey(
-        &self,
-        pubkey: &str,
-    ) -> Result<Vec<EmailOnlyPrincipalRecord>, StoreError> {
-        let conn = self.conn.lock().expect("store mutex never poisoned");
-        let mut statement = conn.prepare(
-            "SELECT email, pubkey, verified_at, revoked_at
-             FROM email_only_principals
-             WHERE pubkey = ?1
-             ORDER BY email",
-        )?;
-        let records = statement
-            .query_map(params![pubkey], EmailOnlyPrincipalRecord::from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(records)
-    }
-
-    fn principal_link_by_email(
-        &self,
-        email: &str,
-    ) -> Result<Option<PrincipalLinkRecord>, StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT email, pubkey, verified_at, revoked_at
-                 FROM principal_links
-                 WHERE email = ?1",
-                params![email],
-                PrincipalLinkRecord::from_row,
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    fn principal_links_by_pubkey(
-        &self,
-        pubkey: &str,
-    ) -> Result<Vec<PrincipalLinkRecord>, StoreError> {
-        let conn = self.conn.lock().expect("store mutex never poisoned");
-        let mut statement = conn.prepare(
-            "SELECT email, pubkey, verified_at, revoked_at
-             FROM principal_links
-             WHERE pubkey = ?1
-             ORDER BY email",
-        )?;
-        let records = statement
-            .query_map(params![pubkey], PrincipalLinkRecord::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(records)
     }
@@ -848,44 +482,6 @@ impl VipEmailBindingRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct EmailOnlyPrincipalRecord {
-    email: String,
-    pubkey: String,
-    verified_at: u64,
-    revoked_at: Option<u64>,
-}
-
-impl EmailOnlyPrincipalRecord {
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            email: row.get(0)?,
-            pubkey: row.get(1)?,
-            verified_at: row.get(2)?,
-            revoked_at: row.get(3)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PrincipalLinkRecord {
-    email: String,
-    pubkey: String,
-    verified_at: u64,
-    revoked_at: Option<u64>,
-}
-
-impl PrincipalLinkRecord {
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            email: row.get(0)?,
-            pubkey: row.get(1)?,
-            verified_at: row.get(2)?,
-            revoked_at: row.get(3)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
 struct EmailChallengeAuditRecord {
     email: String,
     expires_at: u64,
@@ -918,9 +514,6 @@ pub enum StoreError {
 
 /// Routes every public caller may reach. Each either returns public data or
 /// authenticates its caller (Email Challenge token or NIP-98 signature).
-/// `satisfies-grant` is mounted separately by the two routers because the
-/// public listener must authenticate it while trusted loopback services keep
-/// the tokenless contract.
 fn public_routes() -> Router<AuthorityState> {
     Router::new()
         .route("/health", get(health))
@@ -930,11 +523,6 @@ fn public_routes() -> Router<AuthorityState> {
             "/api/v1/vip-email-bindings/redeem",
             post(redeem_vip_email_binding),
         )
-        .route(
-            "/api/v1/email-only-principals/redeem",
-            post(redeem_email_only_principal),
-        )
-        .route("/api/v1/mailbox-proofs/redeem", post(redeem_mailbox_proof))
         .route("/api/v1/nip05-resolution", post(resolve_nip05))
 }
 
@@ -942,155 +530,23 @@ fn public_routes() -> Router<AuthorityState> {
 /// verbatim and keeps no route list of its own; adding a route here is the
 /// only way to expose one publicly.
 pub fn public_router(state: AuthorityState) -> Router {
-    public_routes()
-        .route(
-            "/api/v1/principal-resolution/satisfies-grant",
-            post(satisfies_grant_authenticated),
-        )
-        .with_state(state)
+    public_routes().with_state(state)
 }
 
-/// The full loopback router: the public surface plus the server-to-server,
-/// operator, and internal routes trusted services reach by network position.
+/// The full loopback router: the public surface plus the operator routes
+/// trusted services reach by network position.
 pub fn router(state: AuthorityState) -> Router {
     public_routes()
-        .route(
-            "/api/v1/mailbox-proofs/consume",
-            post(consume_mailbox_proof),
-        )
-        .route(
-            "/api/v1/principal-resolution/satisfies-grant",
-            post(satisfies_grant),
-        )
-        .route(
-            "/internal/v1/sites-notifications",
-            post(send_sites_notification),
-        )
         .route("/api/v1/operator/inspect", post(operator_inspect))
         .route(
             "/api/v1/operator/agent-email-bindings",
             post(operator_bind_agent_email),
         )
         .route(
-            "/api/v1/operator/account-principal-bindings",
-            post(operator_bind_account_principal),
-        )
-        .route(
-            "/api/v1/operator/brain/agent-resolution",
-            post(operator_resolve_brain_agent),
-        )
-        .route(
-            "/api/v1/operator/brain/user-resolution",
-            post(operator_resolve_brain_user),
-        )
-        .route(
             "/api/v1/operator/disable-binding",
             post(operator_disable_binding),
         )
         .with_state(state)
-}
-
-async fn send_sites_notification(
-    State(state): State<AuthorityState>,
-    headers: HeaderMap,
-    Json(request): Json<SitesNotificationRequest>,
-) -> impl IntoResponse {
-    if let Err(error) = require_sites_notification_token(&state, &headers) {
-        return api_error(error.status, error.code);
-    }
-    if request.idempotency_key.is_empty()
-        || request.idempotency_key.len() > 200
-        || request
-            .idempotency_key
-            .chars()
-            .any(|character| character.is_control())
-        || request.site_name.is_empty()
-        || request.site_name.len() > 253
-        || request.site_url.len() > 2048
-        || !(request.site_url.starts_with("https://") || request.site_url.starts_with("http://"))
-    {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_notification");
-    }
-    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_notification_email");
-    };
-    // Serialize the check-send-record boundary so concurrent retries cannot
-    // deliver the same logical notification twice. Provider idempotency still
-    // protects the narrower crash window between delivery and the durable mark.
-    let _send_guard = match state.notification_sends.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "notification_lock_poisoned",
-            );
-        }
-    };
-    match state.store.notification_delivered(&request.idempotency_key) {
-        Ok(true) => {
-            return Json(serde_json::json!({ "status": "already_delivered" })).into_response();
-        }
-        Ok(false) => {}
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    }
-    let content = sites_notification_content(&request, &state.config.finite_vip_domain);
-    let Some((subject, text)) = content else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_notification");
-    };
-    if state
-        .mailer
-        .send_transactional_email(&request.idempotency_key, &email, &subject, &text)
-        .is_err()
-    {
-        return api_error(StatusCode::BAD_GATEWAY, "mail_delivery_failed");
-    }
-    if let Err(error) = state
-        .store
-        .mark_notification_delivered(&request.idempotency_key, state.clock.now())
-    {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-    }
-    Json(serde_json::json!({ "status": "delivered" })).into_response()
-}
-
-fn sites_notification_content(
-    request: &SitesNotificationRequest,
-    finite_vip_domain: &str,
-) -> Option<(String, String)> {
-    match request.kind.as_str() {
-        "first_publication"
-            if request.requester_email.is_none() && request.approval_url.is_none() =>
-        {
-            Some((
-                format!("{} is live", request.site_name),
-                format!(
-                    "Your Finite Site is published.\n\n{}\n\nThis email is your record of its first publication.\n",
-                    request.site_url
-                ),
-            ))
-        }
-        "site_access_request" => {
-            let requester = request.requester_email.as_deref()?;
-            let approval_url = request.approval_url.as_deref()?;
-            if normalize_invited_email(requester, finite_vip_domain).is_none()
-                || approval_url.len() > 2048
-                || !(approval_url.starts_with("https://") || approval_url.starts_with("http://"))
-            {
-                return None;
-            }
-            Some((
-                format!("Access requested for {}", request.site_name),
-                format!(
-                    "{requester} verified their email and requested access to {}.\n\nApprove access:\n\n{approval_url}\n\nSite:\n\n{}\n\nIgnore this email if you do not want to share the site.\n",
-                    request.site_name, request.site_url
-                ),
-            ))
-        }
-        _ => None,
-    }
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -1187,180 +643,6 @@ async fn redeem_vip_email_binding(
     }
 }
 
-async fn redeem_email_only_principal(
-    State(state): State<AuthorityState>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
-        Ok(actor) => actor,
-        Err(error) => return api_error(error.status, error.code),
-    };
-    let request: EmailOnlyRedeemRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
-    };
-    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_invited_email");
-    };
-    let now = state.clock.now();
-    let token_email = match state
-        .store
-        .redeem_email_challenge(&token_hash(&request.token), now)
-    {
-        Ok(token_email) => token_email,
-        Err(error) => return api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    };
-    if token_email != email {
-        return api_error(StatusCode::BAD_REQUEST, "email_challenge_mismatch");
-    }
-    match state.store.verify_email_only_principal(&email, &actor, now) {
-        Ok(()) => Json(EmailOnlyRedeemResponse {
-            email: email.clone(),
-            pubkey: actor.clone(),
-            principal: PrincipalResponse {
-                kind: "email_only",
-                pubkey: actor,
-                email: Some(email),
-            },
-        })
-        .into_response(),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
-    }
-}
-
-async fn redeem_mailbox_proof(
-    State(state): State<AuthorityState>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
-        Ok(actor) => actor,
-        Err(error) => return api_error(error.status, error.code),
-    };
-    let request: MailboxProofRedeemRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
-    };
-    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_invited_email");
-    };
-    let now = state.clock.now();
-    let token_email = match state
-        .store
-        .redeem_email_challenge(&token_hash(&request.token), now)
-    {
-        Ok(token_email) => token_email,
-        Err(error) => return api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    };
-    if token_email != email {
-        return api_error(StatusCode::BAD_REQUEST, "email_challenge_mismatch");
-    }
-    let proof = random_token();
-    let expires_at = now + 5 * 60;
-    if let Err(error) =
-        state
-            .store
-            .create_mailbox_proof(&token_hash(&proof), &email, &actor, expires_at, now)
-    {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-    }
-    Json(MailboxProofRedeemResponse {
-        proof,
-        email,
-        pubkey: actor,
-        expires_at,
-    })
-    .into_response()
-}
-
-async fn consume_mailbox_proof(
-    State(state): State<AuthorityState>,
-    Json(request): Json<MailboxProofConsumeRequest>,
-) -> impl IntoResponse {
-    if !hex::is_hex32(&request.pubkey) {
-        return api_error(StatusCode::BAD_REQUEST, "malformed_pubkey");
-    }
-    let now = state.clock.now();
-    match state
-        .store
-        .consume_mailbox_proof(&token_hash(&request.proof), &request.pubkey, now)
-    {
-        Ok(email) => Json(MailboxProofConsumeResponse {
-            email,
-            pubkey: request.pubkey,
-            verified: true,
-        })
-        .into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    }
-}
-
-async fn satisfies_grant(
-    State(state): State<AuthorityState>,
-    Json(request): Json<SatisfiesGrantRequest>,
-) -> impl IntoResponse {
-    satisfies_grant_response(&state, &request)
-}
-
-/// The public `satisfies-grant` contract: same resolution as the loopback
-/// route, but the caller must sign the request (NIP-98) with the key it asks
-/// about so the endpoint cannot be used as an unauthenticated grant oracle.
-async fn satisfies_grant_authenticated(
-    State(state): State<AuthorityState>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
-        Ok(actor) => actor,
-        Err(error) => return api_error(error.status, error.code),
-    };
-    let request: SatisfiesGrantRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
-    };
-    if actor != request.actor_pubkey {
-        return api_error(StatusCode::FORBIDDEN, "actor_pubkey_mismatch");
-    }
-    satisfies_grant_response(&state, &request)
-}
-
-fn satisfies_grant_response(
-    state: &AuthorityState,
-    request: &SatisfiesGrantRequest,
-) -> axum::response::Response {
-    if !hex::is_hex32(&request.actor_pubkey) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_actor_pubkey");
-    }
-    let resolved = resolve_grant(state, &request.grant, &request.actor_pubkey)
-        .ok()
-        .flatten();
-    let satisfied = resolved.is_some();
-    let principal = match resolved {
-        Some(ResolvedPrincipal::Native { pubkey }) => Some(PrincipalResponse {
-            kind: "native",
-            pubkey,
-            email: None,
-        }),
-        Some(ResolvedPrincipal::EmailOnly { email, pubkey }) => Some(PrincipalResponse {
-            kind: "email_only",
-            pubkey,
-            email: Some(email),
-        }),
-        None => None,
-    };
-    Json(SatisfiesGrantResponse {
-        satisfied,
-        principal,
-    })
-    .into_response()
-}
-
 async fn resolve_nip05(
     State(state): State<AuthorityState>,
     Json(request): Json<Nip05ResolutionRequest>,
@@ -1424,51 +706,30 @@ async fn operator_inspect(
                 return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
             }
         };
-        if let Some(binding) = match state.store.vip_binding_by_email(&normalized) {
+        let binding = match state.store.vip_binding_by_email(&normalized) {
             Ok(binding) => binding,
             Err(error) => {
                 return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
             }
-        } {
-            let nip05 = if binding.disabled() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(binding.email.clone())
-            };
-            let principal_link = match state.store.principal_link_by_email(&normalized) {
-                Ok(link) => link,
-                Err(error) => {
-                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-                }
-            };
-            return Json(serde_json::json!({
-                "kind": "vip_email",
-                "email": binding.email,
-                "localpart": binding.localpart,
-                "domain": binding.domain,
-                "pubkey": binding.pubkey,
-                "created_at": binding.created_at,
-                "disabled": binding.disabled(),
-                "disabled_at": binding.disabled_at,
-                "nip05": nip05,
-                "principal_link": principal_link,
-                "email_challenges": email_challenges,
-            }))
-            .into_response();
-        }
-        let email_only = match state.store.email_only_principals_by_email(&normalized) {
-            Ok(records) => records,
-            Err(error) => {
-                return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-            }
         };
-        if email_only.is_empty() {
+        let Some(binding) = binding else {
             return api_error(StatusCode::NOT_FOUND, "principal_not_found");
-        }
+        };
+        let nip05 = if binding.disabled() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(binding.email.clone())
+        };
         return Json(serde_json::json!({
-            "kind": "email_only",
-            "email": normalized,
-            "principals": email_only,
+            "kind": "vip_email",
+            "email": binding.email,
+            "localpart": binding.localpart,
+            "domain": binding.domain,
+            "pubkey": binding.pubkey,
+            "created_at": binding.created_at,
+            "disabled": binding.disabled(),
+            "disabled_at": binding.disabled_at,
+            "nip05": nip05,
             "email_challenges": email_challenges,
         }))
         .into_response();
@@ -1487,19 +748,7 @@ async fn operator_inspect(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
         }
     };
-    let email_only_emails = match state.store.email_only_principals_by_pubkey(&pubkey) {
-        Ok(records) => records,
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    let principal_links = match state.store.principal_links_by_pubkey(&pubkey) {
-        Ok(records) => records,
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    if vip_emails.is_empty() && email_only_emails.is_empty() {
+    if vip_emails.is_empty() {
         return api_error(StatusCode::NOT_FOUND, "principal_not_found");
     }
     Json(serde_json::json!({
@@ -1516,8 +765,6 @@ async fn operator_inspect(
                 "disabled_at": binding.disabled_at,
             }))
             .collect::<Vec<_>>(),
-        "email_only_emails": email_only_emails,
-        "principal_links": principal_links,
     }))
     .into_response()
 }
@@ -1562,100 +809,6 @@ async fn operator_bind_agent_email(
         Err(StoreError::Validation(code)) => api_error(StatusCode::BAD_REQUEST, code),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
     }
-}
-
-async fn operator_bind_account_principal(
-    State(state): State<AuthorityState>,
-    headers: HeaderMap,
-    Json(request): Json<OperatorBindAccountPrincipalRequest>,
-) -> impl IntoResponse {
-    if let Err(error) = require_operator(&state, &headers) {
-        return api_error(error.status, error.code);
-    }
-    let pubkey_bytes = match npub::decode(request.user_npub.trim()) {
-        Ok(pubkey) => pubkey,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_user_npub"),
-    };
-    let pubkey = hex::encode(&pubkey_bytes);
-    match state.store.bind_workos_account_principal(
-        request.workos_user_id.trim(),
-        &pubkey,
-        state.clock.now(),
-    ) {
-        Ok(()) => Json(serde_json::json!({
-            "workosUserId": request.workos_user_id.trim(),
-            "userNpub": npub::encode(&pubkey_bytes),
-        }))
-        .into_response(),
-        Err(StoreError::Conflict(code)) => api_error(StatusCode::CONFLICT, code),
-        Err(StoreError::Validation(code)) => api_error(StatusCode::BAD_REQUEST, code),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
-    }
-}
-
-async fn operator_resolve_brain_agent(
-    State(state): State<AuthorityState>,
-    headers: HeaderMap,
-    Json(request): Json<OperatorResolveBrainAgentRequest>,
-) -> impl IntoResponse {
-    if let Err(error) = require_operator(&state, &headers) {
-        return api_error(error.status, error.code);
-    }
-    let pubkey_bytes = match npub::decode(request.agent_npub.trim()) {
-        Ok(pubkey) => pubkey,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_agent_npub"),
-    };
-    let pubkey = hex::encode(&pubkey_bytes);
-    let active = match state.store.vip_bindings_by_pubkey(&pubkey) {
-        Ok(bindings) => bindings
-            .into_iter()
-            .filter(|binding| !binding.disabled())
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    if active.is_empty() {
-        return api_error(StatusCode::NOT_FOUND, "agent_principal_not_bound");
-    }
-    if active.len() != 1 {
-        return api_error(StatusCode::CONFLICT, "ambiguous_agent_principal_binding");
-    }
-    Json(serde_json::json!({
-        "agentNpub": npub::encode(&pubkey_bytes),
-        "managedAgentEmail": active[0].email,
-    }))
-    .into_response()
-}
-
-async fn operator_resolve_brain_user(
-    State(state): State<AuthorityState>,
-    headers: HeaderMap,
-    Json(request): Json<OperatorResolveBrainUserRequest>,
-) -> impl IntoResponse {
-    if let Err(error) = require_operator(&state, &headers) {
-        return api_error(error.status, error.code);
-    }
-    let workos_user_id = request.workos_user_id.trim();
-    if !valid_workos_user_id(workos_user_id) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_workos_user_id");
-    }
-    let pubkey = match state.store.workos_account_principal(workos_user_id) {
-        Ok(Some(pubkey)) => pubkey,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "user_principal_not_bound"),
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    let pubkey_bytes = match hex::decode32(&pubkey) {
-        Some(pubkey) => pubkey,
-        None => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey"),
-    };
-    Json(serde_json::json!({
-        "workosUserId": workos_user_id,
-        "userNpub": npub::encode(&pubkey_bytes),
-    }))
-    .into_response()
 }
 
 async fn operator_disable_binding(
@@ -1744,88 +897,6 @@ fn require_operator(state: &AuthorityState, headers: &HeaderMap) -> Result<(), A
         ));
     }
     Ok(())
-}
-
-fn require_sites_notification_token(
-    state: &AuthorityState,
-    headers: &HeaderMap,
-) -> Result<(), ApiFailure> {
-    let Some(expected) = state.config.sites_notification_token.as_deref() else {
-        return Err(ApiFailure::new(
-            StatusCode::UNAUTHORIZED,
-            "sites_notification_api_disabled",
-        ));
-    };
-    let Some(actual) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return Err(ApiFailure::new(
-            StatusCode::UNAUTHORIZED,
-            "missing_sites_notification_token",
-        ));
-    };
-    if actual != expected {
-        return Err(ApiFailure::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_sites_notification_token",
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_grant(
-    state: &AuthorityState,
-    grant: &str,
-    actor_pubkey: &str,
-) -> Result<Option<ResolvedPrincipal>, StoreError> {
-    let trimmed = grant.trim();
-    if let Ok(pubkey) = npub::decode(trimmed) {
-        if hex::encode(&pubkey) == actor_pubkey {
-            return Ok(Some(ResolvedPrincipal::Native {
-                pubkey: actor_pubkey.to_owned(),
-            }));
-        }
-        return Ok(None);
-    }
-    if hex::is_hex32(trimmed) {
-        if trimmed.eq_ignore_ascii_case(actor_pubkey) {
-            return Ok(Some(ResolvedPrincipal::Native {
-                pubkey: actor_pubkey.to_owned(),
-            }));
-        }
-        return Ok(None);
-    }
-    let Some(email) = parse_email(trimmed) else {
-        return Ok(None);
-    };
-    let active_binding = if email.domain == state.config.finite_vip_domain.to_ascii_lowercase() {
-        state.store.active_binding_pubkey(&email.email)?
-    } else {
-        None
-    };
-    if let Some(pubkey) = active_binding {
-        if pubkey == actor_pubkey {
-            return Ok(Some(ResolvedPrincipal::Native { pubkey }));
-        }
-        return Ok(None);
-    }
-    if state
-        .store
-        .active_email_only_principal(&email.email, actor_pubkey)?
-    {
-        return Ok(Some(ResolvedPrincipal::EmailOnly {
-            email: email.email,
-            pubkey: actor_pubkey.to_owned(),
-        }));
-    }
-    Ok(None)
-}
-
-enum ResolvedPrincipal {
-    Native { pubkey: String },
-    EmailOnly { email: String, pubkey: String },
 }
 
 fn api_error(status: StatusCode, code: &'static str) -> axum::response::Response {
@@ -1953,14 +1024,6 @@ fn valid_email_domain(domain: &str) -> bool {
         })
 }
 
-fn valid_workos_user_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-'))
-}
-
 #[derive(Debug, Deserialize)]
 struct EmailChallengeRequest {
     email: String,
@@ -1990,82 +1053,11 @@ struct OperatorBindAgentEmailResponse {
     nip05: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OperatorBindAccountPrincipalRequest {
-    workos_user_id: String,
-    user_npub: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OperatorResolveBrainAgentRequest {
-    agent_npub: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OperatorResolveBrainUserRequest {
-    workos_user_id: String,
-}
-
 #[derive(Debug, Serialize)]
 struct VipEmailRedeemResponse {
     email: String,
     pubkey: String,
     nip05: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmailOnlyRedeemRequest {
-    email: String,
-    token: String,
-}
-
-#[derive(Debug, Serialize)]
-struct EmailOnlyRedeemResponse {
-    email: String,
-    pubkey: String,
-    principal: PrincipalResponse,
-}
-
-#[derive(Debug, Deserialize)]
-struct MailboxProofRedeemRequest {
-    email: String,
-    token: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofRedeemResponse {
-    proof: String,
-    email: String,
-    pubkey: String,
-    expires_at: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct MailboxProofConsumeRequest {
-    proof: String,
-    pubkey: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofConsumeResponse {
-    email: String,
-    pubkey: String,
-    verified: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct SatisfiesGrantRequest {
-    grant: String,
-    actor_pubkey: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SatisfiesGrantResponse {
-    satisfied: bool,
-    principal: Option<PrincipalResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2079,14 +1071,6 @@ struct Nip05ResolutionResponse {
     pubkey: String,
     npub: String,
     kind: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct PrincipalResponse {
-    kind: &'static str,
-    pubkey: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2118,5 +1102,30 @@ mod tests {
         assert!(text.contains("token-123"));
         assert!(text.contains("paul@finite.vip"));
         assert!(text.contains("expires in 15 minutes"));
+    }
+
+    #[test]
+    fn migrate_creates_only_directory_tables() {
+        // The shrink retires tables without a drop migration: fresh databases
+        // must contain exactly the directory tables, and nothing else.
+        let store = IdentityStore::open_memory().expect("open memory store");
+        let conn = store.conn.lock().expect("store mutex never poisoned");
+        let mut statement = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .expect("prepare sqlite_master query");
+        let tables = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tables")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect tables");
+        assert_eq!(
+            tables,
+            [
+                "email_challenges",
+                "managed_agent_nip05_bindings",
+                "native_principals",
+                "vip_email_bindings",
+            ]
+        );
     }
 }

@@ -23,9 +23,9 @@ identity-conformance:
     cd .. && cargo test --locked -p devfinity generated_yaml_contains_core_services
     cd .. && nix eval --raw .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
-# Static contract: every Identity Authority route the fsite CLI calls is on
-# the service-owned public surface (public_router); the edge proxies, never
-# filters. Live probe: finite-identity/scripts/identity-edge-contract-gate.py [--target URL].
+# Static contract: the Directory's public surface (public_router) is exactly
+# the checked-in manifest, and the fsite CLI calls no retired route; the edge
+# proxies, never filters. Live probe: finite-identity/scripts/identity-edge-contract-gate.py [--target URL].
 identity-edge-contract:
     cd .. && python3 finite-identity/scripts/identity-edge-contract-gate.py --static
     cd .. && python3 -m unittest discover -s finite-identity/scripts/tests -p 'test_identity_edge_contract_gate.py'
