@@ -91,6 +91,36 @@ The first implementation must narrow it to outbound generic health and Product
 Release telemetry, arrange the bootstrap credential before launch, and avoid
 commands, results, chat ledgers, feature schemas, or product-specific status.
 
+## Lifecycle State Machine
+
+Core owns one canonical state machine for every Runtime control operation
+(2026-08 audit item H1; migration `0021_runtime_lifecycle.sql`):
+
+```text
+requested → launching → compute_up → ready → succeeded   (restart, recover, upgrade)
+requested → launching → stopped                          (stop, destroy)
+any non-terminal state → failed (always with a named failure_stage)
+```
+
+- `succeeded` is reachable only through `ready`; it never again means
+  "compute exists" (the 2026-08-18 Agent M outage shape). Stop and Destroy
+  confirm into `stopped`, so a stopped Runtime can never display as
+  ready/succeeded.
+- `failed` always names a `failure_stage`: `launch`, `compute`, `readiness`,
+  `retirement`, or `unknown` (legacy rows and N-1 writers only).
+- Transitions are typed in Core's `runtime_lifecycle` module; illegal
+  orderings are unrepresentable rather than guarded at runtime.
+- The flat completion wire is parsed once into a `RuntimeControlCompletion`
+  (plain / upgrade-with-facts / destroy-with-receipt), so the three
+  completion shapes cannot be confused inside Core.
+- The Runner reports completion only after its bounded readiness wait
+  (default 180s, aligned with agentd's Finite Chat bridge deadline), so Core
+  records the up-bound chain atomically today. Persisting `compute_up` and
+  `ready` as separately observable writes — with the ready signal carried
+  from agentd's readiness probe — is the tracked follow-up slice.
+- Dashboard and `scripts/finite-status` project these states directly; no
+  surface re-derives operation state locally.
+
 ## Runtime Operations
 
 These are Core-to-Runner lifecycle operations. They never arrive through the
@@ -99,8 +129,10 @@ Runtime Management Pipe.
 ### Restart
 
 `restart` is the normal emergency lever. It asks the provider to restart the
-same runtime with the same durable mount and then waits for a fresh heartbeat or
-provider readiness signal.
+same runtime with the same durable mount and then waits for the runtime's
+readiness signal inside the bounded readiness deadline (default 180s). A
+deadline expiry fails the request with the `readiness` stage; there is no
+auto-remediation.
 
 Restart must not rewrite Hermes config or user state. It is the first action
 when Finite Chat, Hermes, or health checks appear stuck.
@@ -131,7 +163,8 @@ image or data migration, not dashboard feature state.
 ### Stop
 
 `stop` asks the provider to stop compute while preserving durable mounted state.
-Core records the runtime as `offline` after the provider command succeeds.
+Core records the runtime as `offline` and the request confirms into the
+`stopped` terminal after the provider command succeeds.
 
 ### Operator-only Cold Relocation
 
