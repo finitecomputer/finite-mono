@@ -7,7 +7,7 @@ use finite_saas_core::{
     AdminArchiveUnrecoverableRuntimeInput, AdminOffboardRetiredRuntimeInput, AdminRuntimeOverview,
     AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
     ApproveFinitePrivateGrantInput, CoreResult, FinitePrivateApiKey, FinitePrivateGrant,
-    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, OffboardingPhase,
     ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
@@ -757,20 +757,22 @@ fn consider_runtime_for_rollout(
     planned: &mut Vec<RuntimeArtifactRolloutPlanEntry>,
     skipped: &mut Vec<RuntimeArtifactRolloutSkippedEntry>,
 ) {
-    let skip_reason = if overview.source_host_id != source_host_id {
-        Some("wrong_source_host")
-    } else if !overview.runtime_link_active {
-        Some("inactive_runtime_link")
-    } else if overview.runtime_artifact_id.as_deref() == Some(target_artifact_id) {
-        Some("already_on_target_artifact")
-    } else if !overview
-        .runtime_capabilities
-        .is_some_and(|capabilities| capabilities.runtime_upgrade)
-    {
-        Some("runtime_upgrade_not_supported")
-    } else {
-        None
-    };
+    let skip_reason = offboarding_rollout_skip_reason(overview.offboarding_phase).or_else(|| {
+        if overview.source_host_id != source_host_id {
+            Some("wrong_source_host")
+        } else if !overview.runtime_link_active {
+            Some("inactive_runtime_link")
+        } else if overview.runtime_artifact_id.as_deref() == Some(target_artifact_id) {
+            Some("already_on_target_artifact")
+        } else if !overview
+            .runtime_capabilities
+            .is_some_and(|capabilities| capabilities.runtime_upgrade)
+        {
+            Some("runtime_upgrade_not_supported")
+        } else {
+            None
+        }
+    });
     if let Some(reason) = skip_reason {
         skipped.push(RuntimeArtifactRolloutSkippedEntry::for_overview(
             overview, reason,
@@ -780,6 +782,20 @@ fn consider_runtime_for_rollout(
             overview,
             target_artifact_id,
         ));
+    }
+}
+
+/// The recorded offboarding phase classifies a Runtime out of every rollout:
+/// an in-progress offboarding is skipped with its exact phase (never planned,
+/// never manually listed), while a terminal `archived` Runtime falls through
+/// to the ordinary inactive-link classification below.
+fn offboarding_rollout_skip_reason(phase: Option<OffboardingPhase>) -> Option<&'static str> {
+    match phase {
+        Some(OffboardingPhase::RetirementRequested) => Some("offboarding_retirement_requested"),
+        Some(OffboardingPhase::ReceiptVerified) => Some("offboarding_receipt_verified"),
+        Some(OffboardingPhase::ComputeRemoved) => Some("offboarding_compute_removed"),
+        Some(OffboardingPhase::LinkDeactivated) => Some("offboarding_link_deactivated"),
+        Some(OffboardingPhase::Archived) | None => None,
     }
 }
 
@@ -1805,6 +1821,7 @@ mod tests {
                 stop: true,
                 runtime_retirement: false,
             }),
+            offboarding_phase: None,
         }
     }
 
@@ -1929,6 +1946,99 @@ mod tests {
                 .unwrap()
                 .contains("project-missing")
         );
+    }
+
+    /// A partially retired Runtime (verified receipt, link still active — the
+    /// Sites Canary 0715 ghost shape) is classified by its recorded
+    /// offboarding phase, never planned, and needs no manual exclusion list.
+    /// Every non-terminal phase is skipped with its exact phase; a terminal
+    /// archived Runtime keeps the ordinary inactive-link classification.
+    #[test]
+    fn rollout_planner_skips_in_progress_offboardings_by_phase() {
+        let mut ghost = rollout_overview(
+            "project-ghost",
+            "artifact-v1",
+            true,
+            true,
+            RuntimeSummaryStatus::Online,
+        );
+        ghost.offboarding_phase = Some(OffboardingPhase::ComputeRemoved);
+        let mut retiring = rollout_overview(
+            "project-retiring",
+            "artifact-v1",
+            true,
+            true,
+            RuntimeSummaryStatus::Online,
+        );
+        retiring.offboarding_phase = Some(OffboardingPhase::RetirementRequested);
+        let mut receipt_only = rollout_overview(
+            "project-receipt",
+            "artifact-v1",
+            true,
+            true,
+            RuntimeSummaryStatus::Offline,
+        );
+        receipt_only.offboarding_phase = Some(OffboardingPhase::ReceiptVerified);
+        let mut deactivating = rollout_overview(
+            "project-deactivating",
+            "artifact-v1",
+            false,
+            true,
+            RuntimeSummaryStatus::Offline,
+        );
+        deactivating.offboarding_phase = Some(OffboardingPhase::LinkDeactivated);
+        let mut archived = rollout_overview(
+            "project-archived",
+            "artifact-v1",
+            false,
+            true,
+            RuntimeSummaryStatus::Offline,
+        );
+        archived.offboarding_phase = Some(OffboardingPhase::Archived);
+        let overviews = vec![
+            rollout_overview(
+                "project-canary",
+                "artifact-v1",
+                true,
+                true,
+                RuntimeSummaryStatus::Online,
+            ),
+            ghost,
+            retiring,
+            receipt_only,
+            deactivating,
+            archived,
+        ];
+        let plan = plan_runtime_artifact_rollout(
+            overviews,
+            &RuntimeArtifactRolloutScope::All {
+                canary_project_id: "project-canary".to_string(),
+            },
+            "lat1",
+            "artifact-v2",
+        );
+
+        assert_eq!(
+            plan.planned
+                .iter()
+                .map(|entry| entry.project_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project-canary"]
+        );
+        assert_eq!(
+            plan.skipped
+                .iter()
+                .map(|entry| (entry.project_id.as_str(), entry.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("project-archived", "inactive_runtime_link"),
+                ("project-deactivating", "offboarding_link_deactivated"),
+                ("project-ghost", "offboarding_compute_removed"),
+                ("project-receipt", "offboarding_receipt_verified"),
+                ("project-retiring", "offboarding_retirement_requested"),
+            ]
+        );
+        assert!(plan.execution_blocked_reason.is_none());
     }
 
     #[test]
