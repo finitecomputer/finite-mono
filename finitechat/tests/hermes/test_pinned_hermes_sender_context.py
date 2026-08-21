@@ -242,8 +242,6 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
         ack_calls = [call for call in bridge_calls if call[0] == "ack"]
         self.assertEqual(len(ack_calls), 1)
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-61")
-        event_key = module._adapter_event_key("room-agent-1", 61, "msg-61")
-        self.assertIn(event_key, adapter._delivered_event_keys)
 
         await adapter.cancel_background_tasks()
 

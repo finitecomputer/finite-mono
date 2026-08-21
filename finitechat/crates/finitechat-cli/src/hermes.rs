@@ -3042,8 +3042,12 @@ fn resolve_hermes_edit_route(
     }
     if let Some(message) = lookup_running_message(home_dir, &request.room_id, &request.message_id)?
     {
+        // The running-turn file is authoritative for an in-flight edit's route
+        // and kind, so the adapter no longer remembers outbound message routes
+        // or kinds (ownership audit O2).
         request.conversation_id = message.conversation_id;
         request.segment_id = message.segment_id;
+        request.kind = message.kind;
     }
     Ok(())
 }

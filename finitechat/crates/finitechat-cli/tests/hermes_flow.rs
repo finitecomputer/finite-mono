@@ -357,6 +357,155 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     assert_eq!(status["paired"], true);
 }
 
+/// Ownership audit O1, end to end against `hermes poll`/`ack`/`release`: an
+/// inbound message is leased on delivery and not re-emitted on the next tick;
+/// `ack` settles it; a fresh message can be `release`d back to the inbox and is
+/// then redelivered. This is the sidecar owning in-flight state that the Python
+/// adapter used to shadow with its own SQLite dedup store.
+#[test]
+fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = test_now();
+    let now_arg = now.to_string();
+    let server_url = spawn_live_http_server(&dir.path().join("server.sqlite3"));
+    let agent_home = dir.path().join("agent").display().to_string();
+    let user_dir = dir.path().join("user").display().to_string();
+
+    cli_json(&[
+        "hermes",
+        "--home",
+        &agent_home,
+        "init",
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--skip-agent-profile",
+        "--json",
+    ]);
+    let created = cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "create-room",
+        "--display-name",
+        "Lease Room",
+    ]);
+    let room_id = created["selected_room_id"].as_str().unwrap().to_owned();
+
+    let user = FiniteChatRuntime::open(OpenOptions {
+        data_dir: user_dir,
+        server_url: server_url.clone(),
+        device_id: "ios-user".to_owned(),
+        account_secret_hex: Some(hex_lower(&USER_SECRET)),
+        now_unix_seconds: Some(now),
+    })
+    .expect("user runtime opens");
+    let user_account = user.state().unwrap().identity.account_id.clone();
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user publishes key packages");
+    cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "add-member",
+        "--room-id",
+        &room_id,
+        "--account-id",
+        &user_account,
+        "--display-name",
+        "iOS User",
+    ]);
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user claims Welcome");
+
+    let poll = |timeout_millis: u64| -> Vec<Value> {
+        cli_json(&[
+            "hermes",
+            "--home",
+            &agent_home,
+            "poll",
+            "--request-json",
+            &json!({ "timeout_millis": timeout_millis }).to_string(),
+        ])["events"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let settle = |action: &str, event: &Value| {
+        cli_json(&[
+            "hermes",
+            "--home",
+            &agent_home,
+            action,
+            "--request-json",
+            &json!({
+                "room_id": event["room_id"],
+                "seq": event["seq"],
+                "message_id": event["message_id"],
+            })
+            .to_string(),
+        ]);
+    };
+
+    // First message: delivered exactly once, then leased.
+    user.dispatch_and_wait(AppAction::SendMessage {
+        room_id: room_id.clone(),
+        text: "first".to_owned(),
+        metadata_json: None,
+    })
+    .expect("user sends first");
+    let leased = poll(2000);
+    assert_eq!(leased.len(), 1, "the first poll leases the pending entry");
+    assert_eq!(leased[0]["text"], "first");
+
+    // A leased entry is not re-emitted on the next tick.
+    assert!(
+        poll(0).is_empty(),
+        "a leased entry is not redelivered while its lease is held"
+    );
+
+    // Ack settles it; it stays gone.
+    settle("ack", &leased[0]);
+    assert!(poll(0).is_empty(), "an acked entry is not redelivered");
+
+    // Second message: lease it, then release it back to the inbox.
+    user.dispatch_and_wait(AppAction::SendMessage {
+        room_id: room_id.clone(),
+        text: "second".to_owned(),
+        metadata_json: None,
+    })
+    .expect("user sends second");
+    let second = poll(2000);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0]["text"], "second");
+    assert!(
+        poll(0).is_empty(),
+        "the second entry is leased after delivery"
+    );
+
+    settle("release", &second[0]);
+    let redelivered = poll(0);
+    assert_eq!(
+        redelivered.len(),
+        1,
+        "a released entry returns to Pending and is redelivered"
+    );
+    assert_eq!(redelivered[0]["text"], "second");
+}
+
 #[test]
 fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
     ensure_test_finite_home();
