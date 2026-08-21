@@ -105,6 +105,9 @@ nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
 runbook-facts-contract:
     just infra runbook-facts-contract
 
+production-deploy-contract:
+    just infra production-deploy-contract
+
 runner-host-contract:
     just nixos runner-host-contract
 
