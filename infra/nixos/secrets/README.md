@@ -6,7 +6,8 @@ password-derived evidence here.
 
 The operator workflow is documented in
 [`docs/runs/nixos-sops-operator-flow.md`](../../../docs/runs/nixos-sops-operator-flow.md).
-For the concise command reference, see [`OPERATIONS.md`](OPERATIONS.md).
+For the concise command reference, see
+[`infra/secret/OPERATIONS.md`](../../secret/OPERATIONS.md).
 
 The production host private age identities live only on the hosts:
 
@@ -26,14 +27,14 @@ Human and recovery private keys stay outside this repository under operator or
 break-glass custody. The initial `.sops.yaml` may contain only human/recovery
 recipients while encrypted sources are being staged, but those files are not
 deployable until the host public recipients are added and
-`just nixos nixos-sops-updatekeys` has refreshed every encrypted file.
+`just infra secrets updatekeys` has refreshed every encrypted file.
 
 ## Operator Key Setup
 
 Run:
 
 ```sh
-just nixos nixos-sops-operator-key
+just infra secrets operator-key
 ```
 
 The helper creates `~/.config/sops/age/keys.txt` if it is missing, or uses
@@ -47,7 +48,7 @@ share the private key file.
 Run:
 
 ```sh
-just nixos test-sops-decrypt
+just infra secrets test-decrypt
 ```
 
 The helper prints `true` when your current local age key can decrypt every
@@ -57,7 +58,7 @@ yet. It never prints plaintext secret values.
 
 ## Ingesting A Secret
 
-Use `just nixos nixos-sops-ingest` to encrypt plaintext from stdin into this
+Use `just infra secrets ingest` to encrypt plaintext from stdin into this
 directory. The helper refuses interactive input, refuses path traversal, refuses
 to overwrite by default, verifies local decrypt access, checks that the new
 file's recipients match existing files in the same scope, and prints only the
@@ -67,7 +68,7 @@ Example for the metrics pilot:
 
 ```sh
 ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
-  | just nixos nixos-sops-ingest \
+  | just infra secrets ingest \
       shared metrics-remote-write.env \
       --logical-name metrics-remote-write \
       --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME \
@@ -83,8 +84,8 @@ module in a separate commit.
 
 If the helper says the current operator cannot decrypt existing files, add the
 operator's public recipient to `.sops.yaml` and ask an existing operator to run
-`just nixos nixos-sops-updatekeys`. If it says recipient sets differ, review the
-`.sops.yaml` change and run `just nixos nixos-sops-updatekeys` before retrying.
+`just infra secrets updatekeys`. If it says recipient sets differ, review the
+`.sops.yaml` change and run `just infra secrets updatekeys` before retrying.
 
 ## Updating Recipients
 
@@ -92,7 +93,7 @@ After adding or removing public recipients in `.sops.yaml`, refresh existing
 encrypted files with:
 
 ```sh
-just nixos nixos-sops-updatekeys
+just infra secrets updatekeys
 ```
 
 The helper updates only SOPS JSON files under `infra/nixos/secrets`, skips
@@ -100,7 +101,7 @@ The helper updates only SOPS JSON files under `infra/nixos/secrets`, skips
 and prints only file paths. Use `--dry-run` to preview the file set:
 
 ```sh
-just nixos nixos-sops-updatekeys --dry-run
+just infra secrets updatekeys --dry-run
 ```
 
 Removing a recipient and updating keys prevents that recipient from decrypting

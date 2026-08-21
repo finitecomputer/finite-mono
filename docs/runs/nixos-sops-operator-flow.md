@@ -1,14 +1,16 @@
-# NixOS SOPS Operator Flow
+# Infrastructure SOPS Operator Flow
 
 Status: ACTIVE MIGRATION SUPPORT
 
-This document describes how Finite operators add encrypted NixOS secret source
-files and how new operators become SOPS recipients. It is values-free: do not
-paste plaintext secrets, derived hashes, fingerprints, or private keys into
-this document, commits, issues, chat, or logs.
+This document describes how Finite operators add encrypted infrastructure
+secret source files and how new operators become SOPS recipients. The current
+encrypted source tree is consumed by NixOS, but the operator commands live
+under the infra secret module. This document is values-free: do not paste
+plaintext secrets, derived hashes, fingerprints, or private keys into this
+document, commits, issues, chat, or logs.
 
 Concise command reference:
-[`infra/nixos/secrets/OPERATIONS.md`](../../infra/nixos/secrets/OPERATIONS.md).
+[`infra/secret/OPERATIONS.md`](../../infra/secret/OPERATIONS.md).
 
 ## Model
 
@@ -20,16 +22,16 @@ Concise command reference:
 - A SOPS file is decryptable by every recipient listed in that file metadata.
 - During bootstrap, files may be staged for human/recovery recipients before
   host recipients exist. They are not deployable until host recipients are added
-  and `just nixos nixos-sops-updatekeys` is run.
+  and `just infra secrets updatekeys` is run.
 - Updating `.sops.yaml` affects new files. Existing files must be rekeyed with
-  `just nixos nixos-sops-updatekeys`.
+  `just infra secrets updatekeys`.
 
 ## Become An Operator Recipient
 
 Run:
 
 ```sh
-just nixos nixos-sops-operator-key
+just infra secrets operator-key
 ```
 
 The helper creates the local private key if missing, fixes permissions, and
@@ -50,27 +52,27 @@ private key file.
 
 ## Add A New Operator
 
-1. The new operator runs `just nixos nixos-sops-operator-key`.
+1. The new operator runs `just infra secrets operator-key`.
 2. They add only their public `age1...` recipient to
    `infra/nixos/secrets/.sops.yaml`.
 3. An existing operator who can decrypt current files runs:
 
 ```sh
-just nixos nixos-sops-updatekeys
+just infra secrets updatekeys
 ```
 
 4. Commit `.sops.yaml` and the rekeyed SOPS files together.
 
 The new operator can decrypt existing files only after step 3. The person
-running `nixos-sops-updatekeys` must already be able to decrypt the existing
-files.
+running `just infra secrets updatekeys` must already be able to decrypt the
+existing files.
 
 ## Test Operator Access
 
 Run:
 
 ```sh
-just nixos test-sops-decrypt
+just infra secrets test-decrypt
 ```
 
 The helper prints `true` when the current local age key can decrypt every
@@ -92,7 +94,7 @@ pilot:
 
 ```sh
 ssh root@finite-lat-1 'sudo cat /etc/finite/metrics-remote-write.env' \
-  | just nixos nixos-sops-ingest \
+  | just infra secrets ingest \
       shared metrics-remote-write.env \
       --logical-name metrics-remote-write \
       --required-env-name FINITE_METRICS_REMOTE_WRITE_USERNAME \
@@ -117,9 +119,9 @@ The helper:
 
 If either decrypt verification fails, the operator is not a current usable
 recipient for the SOPS set. Add their public recipient to `.sops.yaml`, have an
-existing operator run `just nixos nixos-sops-updatekeys`, then retry. If the
+existing operator run `just infra secrets updatekeys`, then retry. If the
 recipient set check fails, `.sops.yaml` and the encrypted files disagree; run
-`just nixos nixos-sops-updatekeys` after reviewing the `.sops.yaml` change,
+`just infra secrets updatekeys` after reviewing the `.sops.yaml` change,
 then retry the ingest.
 
 ## Update Recipients
@@ -127,13 +129,13 @@ then retry the ingest.
 After changing `.sops.yaml`, preview affected files:
 
 ```sh
-just nixos nixos-sops-updatekeys --dry-run
+just infra secrets updatekeys --dry-run
 ```
 
 Then update metadata:
 
 ```sh
-just nixos nixos-sops-updatekeys
+just infra secrets updatekeys
 ```
 
 This changes SOPS recipient metadata. It does not change the secret values.
@@ -145,11 +147,12 @@ review:
 
 - They do not know who is allowed to be a Finite operator. Code review of
   `.sops.yaml` is the canonical membership approval.
-- `nixos-sops-ingest` proves that the current operator can decrypt existing
-  files and the newly encrypted file, and that the new file's recipient metadata
-  matches existing files in the same scope. It cannot prove every teammate has
-  their private key installed until they run a decrypt themselves.
-- `nixos-sops-updatekeys` can add or remove future decrypt access, but it
+- `just infra secrets ingest` proves that the current operator can decrypt
+  existing files and the newly encrypted file, and that the new file's
+  recipient metadata matches existing files in the same scope. It cannot prove
+  every teammate has their private key installed until they run a decrypt
+  themselves.
+- `just infra secrets updatekeys` can add or remove future decrypt access, but it
   cannot revoke plaintext someone already decrypted. Rotate underlying secrets
   when offboarding or trust boundaries require it.
 - Production rollout still requires the migration runbook gates:

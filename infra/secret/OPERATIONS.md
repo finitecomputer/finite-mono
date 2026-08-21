@@ -1,19 +1,23 @@
-# NixOS SOPS Secret Operations
+# Infrastructure Secret Operations
 
-This is the operator command reference for NixOS SOPS-managed secret source
-files. Do not paste plaintext secrets, decrypted values, hashes, fingerprints,
-or private keys into docs, commits, issues, chat, or logs.
+This is the operator command reference for encrypted infrastructure secret
+source files. Do not paste plaintext secrets, decrypted values, hashes,
+fingerprints, or private keys into docs, commits, issues, chat, or logs.
 
-Use the modular NixOS `just` recipes from the repository root. Keep SOPS
-commands under `just nixos ...` so NixOS-only recipe changes stay in the NixOS
-module instead of the root command router.
+Use the modular infra secret `just` recipes from the repository root. Keep
+secret operations under `just infra secrets ...` so secret-only recipe changes
+stay in the infra secret module instead of the root command router or the
+general NixOS module.
+
+The current encrypted sources are NixOS SOPS files under
+`infra/nixos/secrets/`.
 
 ## Generate An Operator Recipient
 
 Run:
 
 ```sh
-just nixos nixos-sops-operator-key
+just infra secrets operator-key
 ```
 
 Commit or send only the printed `age1...` public recipient. Never commit or
@@ -24,7 +28,7 @@ share `~/.config/sops/age/keys.txt` or any private key material.
 1. The new operator runs:
 
    ```sh
-   just nixos nixos-sops-operator-key
+   just infra secrets operator-key
    ```
 
 2. Add only their printed `age1...` public recipient to
@@ -33,8 +37,8 @@ share `~/.config/sops/age/keys.txt` or any private key material.
 3. An existing operator who can decrypt current files runs:
 
    ```sh
-   just nixos nixos-sops-updatekeys --dry-run
-   just nixos nixos-sops-updatekeys
+   just infra secrets updatekeys --dry-run
+   just infra secrets updatekeys
    ```
 
 4. Commit `.sops.yaml` and the rekeyed encrypted files together.
@@ -46,7 +50,7 @@ The new operator cannot decrypt existing files until step 3 is complete.
 Run:
 
 ```sh
-just nixos test-sops-decrypt
+just infra secrets test-decrypt
 ```
 
 Expected success starts with:
@@ -58,7 +62,7 @@ true
 The helper captures decrypted output and never prints plaintext. If it prints
 `false`, follow the next-step message: usually add the operator public recipient
 to `.sops.yaml`, then ask an existing operator to run
-`just nixos nixos-sops-updatekeys`.
+`just infra secrets updatekeys`.
 
 ## Add A New Secret Source
 
@@ -69,7 +73,7 @@ Example:
 
 ```sh
 some-command-that-prints-secret \
-  | just nixos nixos-sops-ingest \
+  | just infra secrets ingest \
       shared some-secret.env \
       --logical-name some-secret \
       --required-env-name SOME_ENV_NAME \
@@ -80,7 +84,7 @@ For host-specific secrets, use the host scope instead of `shared`:
 
 ```sh
 some-command-that-prints-secret \
-  | just nixos nixos-sops-ingest finite-lat-3 runner.env \
+  | just infra secrets ingest finite-lat-3 runner.env \
       --logical-name runner-env \
       --required-env-name FC_CORE_RUNNER_API_TOKEN \
       --consumer finite-saas-runner.service
@@ -95,8 +99,8 @@ contract sketch. It does not add the `finite.secrets.files` entry for you.
 After changing `.sops.yaml`, preview and apply recipient metadata updates:
 
 ```sh
-just nixos nixos-sops-updatekeys --dry-run
-just nixos nixos-sops-updatekeys
+just infra secrets updatekeys --dry-run
+just infra secrets updatekeys
 ```
 
 This changes who can decrypt future encrypted file revisions. It does not
@@ -108,7 +112,7 @@ Rotate underlying secrets when offboarding or changing trust boundaries.
 Prefer:
 
 ```sh
-just nixos test-sops-decrypt
+just infra secrets test-decrypt
 ```
 
 If you must test one file with raw SOPS, redirect output away from the terminal:
@@ -125,7 +129,7 @@ An encrypted source file is not used by NixOS until all of the following are
 true:
 
 - the relevant host public recipients are in `.sops.yaml`;
-- `just nixos nixos-sops-updatekeys` has refreshed the encrypted file metadata;
+- `just infra secrets updatekeys` has refreshed the encrypted file metadata;
 - a `finite.secrets.files.<name>` entry points at the encrypted file;
 - the affected host closure has been evaluated and rolled out.
 

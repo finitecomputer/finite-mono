@@ -162,7 +162,7 @@ class NixosSopsIngestTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         combined = result.stdout + result.stderr
         self.assertIn(b"cannot decrypt existing SOPS file", combined)
-        self.assertIn(b"just nixos nixos-sops-updatekeys", combined)
+        self.assertIn(b"just infra secrets updatekeys", combined)
         self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
         self.assertNotIn(b"synthetic-secret-value", combined)
 
@@ -176,7 +176,7 @@ class NixosSopsIngestTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         combined = result.stdout + result.stderr
         self.assertIn(b"recipient set differs", combined)
-        self.assertIn(b"just nixos nixos-sops-updatekeys", combined)
+        self.assertIn(b"just infra secrets updatekeys", combined)
         self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
         self.assertNotIn(b"synthetic-secret-value", combined)
 
