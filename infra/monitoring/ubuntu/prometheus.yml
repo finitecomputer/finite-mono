@@ -1,0 +1,69 @@
+global:
+  scrape_interval: 5m
+  scrape_timeout: 3s
+  evaluation_interval: 1m
+
+scrape_configs:
+  - job_name: finite.computer
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets: [https://finite.computer]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: &blackbox_relabel
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+    metric_relabel_configs: &probe_metrics
+      - source_labels: [__name__]
+        regex: probe_success|probe_duration_seconds|probe_http_status_code
+        action: keep
+
+  - job_name: chat.finite.computer
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets: [https://chat.finite.computer/health]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics
+
+  - job_name: brain.finite.computer
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets: [https://brain.finite.computer/health]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics
+
+  - job_name: finitechat-native-mockup.finite.chat
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets: [https://finitechat-native-mockup.finite.chat/]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics
+
+  - job_name: uptime-probe.docs.finite.chat
+    metrics_path: /probe
+    params:
+      module: [http_404]
+    static_configs:
+      - targets: [https://uptime-probe.docs.finite.chat/]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics

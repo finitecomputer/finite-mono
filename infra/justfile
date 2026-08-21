@@ -1,0 +1,28 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
+mod secrets 'secret/justfile'
+
+# Lists infra commands
+default:
+    just --list-submodules --list
+
+# Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
+finite-status-contract:
+    cd .. && python3 scripts/check_finite_status_contract.py
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
+    cd .. && python3 -m unittest discover -s infra/nixos/tests -p 'test_finite_runtime_metrics.py'
+
+# Synthetic empty-target proof for the complete hosted Recovery Set contract.
+hosted-recovery-contract:
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
+    cd .. && infra/scripts/test-hosted-web-chat-restore
+
+# Synthetic offline litestream replicate -> restore -> integrity proof.
+litestream-recovery-contract:
+    cd .. && bash -n infra/scripts/test-litestream-restore
+    cd .. && infra/scripts/test-litestream-restore
+
+# Runbook statements of table names, migration versions, and systemd units
+# resolve against their in-repo authorities (migrations, nixos modules).
+runbook-facts-contract:
+    cd .. && python3 scripts/check_runbook_facts_contract.py

@@ -4,6 +4,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc};
@@ -18,22 +19,111 @@ pub struct ProcessSpec {
     pub environment: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessState {
+    Starting,
+    Restarting,
+    Running { pid: u32 },
+    Unavailable { error: String },
+    Exited { exit: String },
+    Stopped,
+}
+
+impl ProcessState {
+    fn tag(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Restarting => "restarting",
+            Self::Running { .. } => "running",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Exited { .. } => "exited",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Running { pid } => Some(*pid),
+            _ => None,
+        }
+    }
+
+    fn last_exit(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable { error } => Some(error),
+            Self::Exited { exit } => Some(exit),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessStatus {
-    pub state: String,
-    pub pid: Option<u32>,
+    pub state: ProcessState,
     pub restart_count: u64,
-    pub last_exit: Option<String>,
     pub updated_at_ms: u64,
+}
+
+impl ProcessStatus {
+    pub fn pid(&self) -> Option<u32> {
+        self.state.pid()
+    }
+}
+
+// The serde impls are manual so the published wire shape stays byte-identical
+// to the historical flat struct: every state keeps its `pid` and `last_exit`
+// keys, serialized as null where the state carries no value. Deserialization
+// fails closed on unknown states and on pid/last_exit combinations the
+// supervisor never writes.
+impl Serialize for ProcessStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut status = serializer.serialize_struct("ProcessStatus", 5)?;
+        status.serialize_field("state", self.state.tag())?;
+        status.serialize_field("pid", &self.state.pid())?;
+        status.serialize_field("restart_count", &self.restart_count)?;
+        status.serialize_field("last_exit", &self.state.last_exit())?;
+        status.serialize_field("updated_at_ms", &self.updated_at_ms)?;
+        status.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ProcessStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct WireProcessStatus {
+            state: String,
+            pid: Option<u32>,
+            restart_count: u64,
+            last_exit: Option<String>,
+            updated_at_ms: u64,
+        }
+        let wire = WireProcessStatus::deserialize(deserializer)?;
+        let state = match (wire.state.as_str(), wire.pid, wire.last_exit) {
+            ("starting", None, None) => ProcessState::Starting,
+            ("restarting", None, None) => ProcessState::Restarting,
+            ("running", Some(pid), None) => ProcessState::Running { pid },
+            ("unavailable", None, Some(error)) => ProcessState::Unavailable { error },
+            ("exited", None, Some(exit)) => ProcessState::Exited { exit },
+            ("stopped", None, None) => ProcessState::Stopped,
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "process status state is unknown or inconsistent with pid/last_exit",
+                ));
+            }
+        };
+        Ok(Self {
+            state,
+            restart_count: wire.restart_count,
+            updated_at_ms: wire.updated_at_ms,
+        })
+    }
 }
 
 impl Default for ProcessStatus {
     fn default() -> Self {
         Self {
-            state: "starting".to_owned(),
-            pid: None,
+            state: ProcessState::Starting,
             restart_count: 0,
-            last_exit: None,
             updated_at_ms: now_ms(),
         }
     }
@@ -80,9 +170,8 @@ impl SupervisorHandle {
                     .processes
                     .get("hermes")
                     .is_some_and(|status| {
-                        status.state == "running"
+                        matches!(status.state, ProcessState::Running { .. })
                             && status.restart_count > previous_restart_count
-                            && status.pid.is_some()
                     });
                 if restarted {
                     return;
@@ -143,29 +232,27 @@ async fn supervise_process(
             spec.name,
             ProcessStatus {
                 state: if restart_count == 0 {
-                    "starting".to_owned()
+                    ProcessState::Starting
                 } else {
-                    "restarting".to_owned()
+                    ProcessState::Restarting
                 },
-                pid: None,
                 restart_count,
-                last_exit: None,
                 updated_at_ms: now_ms(),
             },
         )
         .await;
 
-        let mut child = match spawn_process(&spec) {
-            Ok(child) => child,
+        let (mut child, pid) = match spawn_process(&spec) {
+            Ok(spawned) => spawned,
             Err(error) => {
                 set_status(
                     &statuses,
                     spec.name,
                     ProcessStatus {
-                        state: "unavailable".to_owned(),
-                        pid: None,
+                        state: ProcessState::Unavailable {
+                            error: error.to_string(),
+                        },
                         restart_count,
-                        last_exit: Some(error.to_string()),
                         updated_at_ms: now_ms(),
                     },
                 )
@@ -176,15 +263,12 @@ async fn supervise_process(
                 continue;
             }
         };
-        let pid = child.id();
         set_status(
             &statuses,
             spec.name,
             ProcessStatus {
-                state: "running".to_owned(),
-                pid,
+                state: ProcessState::Running { pid },
                 restart_count,
-                last_exit: None,
                 updated_at_ms: now_ms(),
             },
         )
@@ -200,10 +284,8 @@ async fn supervise_process(
                     &statuses,
                     spec.name,
                     ProcessStatus {
-                        state: "exited".to_owned(),
-                        pid: None,
+                        state: ProcessState::Exited { exit },
                         restart_count,
-                        last_exit: Some(exit),
                         updated_at_ms: now_ms(),
                     },
                 ).await;
@@ -219,10 +301,8 @@ async fn supervise_process(
                             &statuses,
                             spec.name,
                             ProcessStatus {
-                                state: "stopped".to_owned(),
-                                pid: None,
+                                state: ProcessState::Stopped,
                                 restart_count,
-                                last_exit: None,
                                 updated_at_ms: now_ms(),
                             },
                         ).await;
@@ -236,7 +316,7 @@ async fn supervise_process(
     }
 }
 
-fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
+fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -245,7 +325,11 @@ fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
-    command.spawn().map_err(AgentdError::from)
+    let child = command.spawn().map_err(AgentdError::from)?;
+    let pid = child
+        .id()
+        .ok_or_else(|| AgentdError::Supervisor("spawned child has no pid".to_owned()))?;
+    Ok((child, pid))
 }
 
 async fn terminate_child(child: &mut Child) {
@@ -290,14 +374,14 @@ mod tests {
             sleeping_process("health"),
             sleeping_process("hermes"),
         );
-        let original_pid = wait_for_running(&handle, "hermes").await.pid.unwrap();
+        let original_pid = wait_for_running(&handle, "hermes").await.pid().unwrap();
 
         handle.restart_hermes().await.unwrap();
 
         let restarted = handle.status().await.processes["hermes"].clone();
-        assert_eq!(restarted.state, "running");
+        assert!(matches!(restarted.state, ProcessState::Running { .. }));
         assert_eq!(restarted.restart_count, 1);
-        assert_ne!(restarted.pid, Some(original_pid));
+        assert_ne!(restarted.pid(), Some(original_pid));
         handle.shutdown().await;
     }
 
@@ -314,7 +398,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(status) = handle.status().await.processes.get(name)
-                    && status.state == "running"
+                    && matches!(status.state, ProcessState::Running { .. })
                 {
                     return status.clone();
                 }
@@ -323,5 +407,112 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    // The serialized ProcessStatus shape is a cross-process contract: it ships
+    // in the published `finite.agent.status.v1` snapshot and in status.json,
+    // which `finite-agentd status --json` prints for external consumers. These
+    // tests pin the exact bytes per state.
+    fn assert_wire_shape(status: ProcessStatus, json: &str) {
+        assert_eq!(serde_json::to_string(&status).unwrap(), json);
+        assert_eq!(serde_json::from_str::<ProcessStatus>(json).unwrap(), status);
+    }
+
+    #[test]
+    fn starting_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Starting,
+                restart_count: 0,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn restarting_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Restarting,
+                restart_count: 1,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn running_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Running { pid: 4242 },
+                restart_count: 1,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn unavailable_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Unavailable {
+                    error: "program not found".to_owned(),
+                },
+                restart_count: 2,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn exited_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Exited {
+                    exit: "exit status: 1".to_owned(),
+                },
+                restart_count: 3,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn stopped_process_status_keeps_the_published_wire_shape() {
+        assert_wire_shape(
+            ProcessStatus {
+                state: ProcessState::Stopped,
+                restart_count: 4,
+                updated_at_ms: 1_700_000_000_000,
+            },
+            r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
+        );
+    }
+
+    #[test]
+    fn process_status_deserialization_fails_closed_on_inconsistent_states() {
+        assert!(
+            serde_json::from_str::<ProcessStatus>(
+                r#"{"state":"running","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":0}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ProcessStatus>(
+                r#"{"state":"stopped","pid":4242,"restart_count":0,"last_exit":null,"updated_at_ms":0}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ProcessStatus>(
+                r#"{"state":"runnign","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":0}"#
+            )
+            .is_err()
+        );
     }
 }

@@ -5,8 +5,8 @@ import { BrainIcon, CheckIcon, Loader2Icon, XIcon } from "lucide-react";
 
 import {
   approveResponseMetadata,
-  parseApproveQuestion,
   type BrainApproveChoice,
+  type BrainApproveEnvelope,
 } from "@/lib/brain-approval-metadata";
 import { cn } from "@/lib/utils";
 
@@ -79,12 +79,16 @@ export function useBrainApprovalDetails(requestIds: string[]) {
 
 export function BrainApprovalCards({
   message,
+  envelope,
   details,
   resolution,
   onSendChoice,
 }: {
-  /// The agent delivery carrying `metadata.approve` (the question).
-  message: { is_mine?: boolean; metadata_json?: string };
+  /// The agent delivery the cards anchor to (`is_mine` gates rendering).
+  message: { is_mine?: boolean };
+  /// Its decoded `metadata.approve` envelope — decoded once per message by
+  /// the caller's memo, never parsed again here.
+  envelope: BrainApproveEnvelope | null;
   /// Server-side request state by request id (from useBrainApprovalDetails).
   details: Map<string, BrainApprovalRequestDetail>;
   /// The user's recorded choice by request id, from their reply messages.
@@ -92,7 +96,7 @@ export function BrainApprovalCards({
   /// Sends the user's reply with the approve response metadata attached.
   onSendChoice?: (text: string, metadataJson: string) => Promise<void>;
 }) {
-  const question = useMemo(() => parseApproveQuestion(message), [message]);
+  const question = envelope?.question ?? null;
   if (!question || message.is_mine) return null;
   return (
     <section className="finite-brain-cards" aria-label="Brain actions">

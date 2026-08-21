@@ -369,7 +369,12 @@ async fn proxy_openai(
             "missing_authorization",
         );
     };
-    let is_streaming = request_is_streaming(&body);
+    // Single decode of the request body; every consumer below reads the parsed
+    // value or the extracted facts instead of re-parsing. Unparseable bodies
+    // decode to Null so they are still forwarded (fail-open).
+    let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let facts = RequestFacts::from_value(&parsed_body, &state.config.default_model);
+    let is_streaming = facts.streaming;
     if uri.path() == "/v1/responses" && is_streaming {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -380,7 +385,7 @@ async fn proxy_openai(
     }
 
     let request_id = new_request_id();
-    let estimate = estimate_usage(&body, &state.config.default_model);
+    let estimate = estimate_usage(&facts);
     let reserve = ReserveRequest {
         request_id: request_id.clone(),
         presented_api_key,
@@ -419,7 +424,7 @@ async fn proxy_openai(
         );
     };
 
-    let upstream_body = upstream_body_for_request(&uri, body.clone());
+    let upstream_body = upstream_body_for_request(&uri, body, parsed_body, is_streaming);
     if is_streaming {
         let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
             Ok(response) => response,
@@ -900,20 +905,10 @@ fn new_request_id() -> String {
     format!("fp_req_{millis}_{counter}")
 }
 
-fn request_is_streaming(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| value.get("stream").and_then(Value::as_bool))
-        .unwrap_or(false)
-}
-
-fn upstream_body_for_request(uri: &Uri, body: Bytes) -> Bytes {
-    if uri.path() != "/v1/chat/completions" || !request_is_streaming(&body) {
+fn upstream_body_for_request(uri: &Uri, body: Bytes, mut value: Value, streaming: bool) -> Bytes {
+    if uri.path() != "/v1/chat/completions" || !streaming {
         return body;
     }
-    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
-        return body;
-    };
     let Some(object) = value.as_object_mut() else {
         return body;
     };
@@ -924,24 +919,12 @@ fn upstream_body_for_request(uri: &Uri, body: Bytes) -> Bytes {
     serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
 }
 
-fn estimate_usage(body: &[u8], default_model: &str) -> EstimatedUsage {
-    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
-    let model = value
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(default_model)
-        .to_string();
-    let prompt_chars = prompt_text(&value).chars().count() as i64;
-    let prompt_tokens = (prompt_chars / 4).max(1);
-    let completion_tokens = value
-        .get("max_completion_tokens")
-        .or_else(|| value.get("max_tokens"))
-        .and_then(Value::as_i64)
-        .unwrap_or(4096)
-        .max(1);
-    let usage_units = usage_units(prompt_tokens, completion_tokens, &model);
+fn estimate_usage(facts: &RequestFacts) -> EstimatedUsage {
+    let prompt_tokens = (facts.prompt_chars / 4).max(1);
+    let completion_tokens = facts.declared_max_completion_tokens.unwrap_or(4096).max(1);
+    let usage_units = usage_units(prompt_tokens, completion_tokens, &facts.model);
     EstimatedUsage {
-        model,
+        model: facts.model.clone(),
         prompt_tokens,
         completion_tokens,
         usage_units,
@@ -1080,6 +1063,38 @@ impl StreamingUsageAccumulator {
 
     fn saw_done(&self) -> bool {
         self.saw_done
+    }
+}
+
+/// Facts extracted from the single request-body decode in `proxy_openai`, so
+/// the streaming gate, usage estimate, and upstream body mutation never
+/// re-parse the body.
+#[derive(Debug)]
+struct RequestFacts {
+    streaming: bool,
+    model: String,
+    prompt_chars: i64,
+    declared_max_completion_tokens: Option<i64>,
+}
+
+impl RequestFacts {
+    fn from_value(value: &Value, default_model: &str) -> Self {
+        Self {
+            streaming: value
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            model: value
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(default_model)
+                .to_string(),
+            prompt_chars: prompt_text(value).chars().count() as i64,
+            declared_max_completion_tokens: value
+                .get("max_completion_tokens")
+                .or_else(|| value.get("max_tokens"))
+                .and_then(Value::as_i64),
+        }
     }
 }
 
@@ -1338,6 +1353,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_streaming_body_is_forwarded_byte_identical() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(core_url, upstream_url)).unwrap()).await;
+
+        // Whitespace and key order must survive verbatim: the proxy decodes the
+        // body once for facts but forwards the original bytes untouched.
+        let raw = r#"{  "max_tokens": 64, "messages": [ { "role": "user", "content": "hello" } ],  "model": "glm-5-2" }"#;
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_secret")
+            .header("content-type", "application/json")
+            .body(raw)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
+        let bodies = upstream.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(&bodies[0][..], raw.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn streaming_body_is_rewritten_with_include_usage() {
+        let core = FakeCoreState::new("fpk_live_stream", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(core_url, upstream_url)).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_stream")
+            .header("content-type", "application/json")
+            .body(
+                r#"{"model":"glm-5-2","stream":true,"messages":[{"role":"user","content":"hello"}],"max_tokens":64}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("data: [DONE]"));
+        let bodies = upstream.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        let forwarded: Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(forwarded["stream_options"]["include_usage"], true);
+        assert_eq!(forwarded["stream"], true);
+        assert_eq!(forwarded["model"], "glm-5-2");
+    }
+
+    #[tokio::test]
+    async fn malformed_body_is_still_proxied() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(core_url, upstream_url)).unwrap()).await;
+
+        // Fail-open: an unparseable body is forwarded verbatim, not rejected.
+        let raw = b"{ this is not json".as_ref();
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_secret")
+            .header("content-type", "application/json")
+            .body(raw)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(core.settle_calls.load(Ordering::SeqCst), 1);
+        let bodies = upstream.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(&bodies[0][..], raw);
+    }
+
+    #[tokio::test]
     async fn stream_done_settles_without_waiting_for_socket_close() {
         let core = FakeCoreState::new("fpk_live_stream", 10_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
@@ -1443,10 +1543,11 @@ mod tests {
 
     #[test]
     fn usage_fallback_model_is_configurable() {
-        let estimate = estimate_usage(
+        let value = serde_json::from_slice::<Value>(
             br#"{"messages":[{"role":"user","content":"hello"}],"max_tokens":8}"#,
-            "glm-5-2",
-        );
+        )
+        .unwrap();
+        let estimate = estimate_usage(&RequestFacts::from_value(&value, "glm-5-2"));
         assert_eq!(estimate.model, "glm-5-2");
 
         let actual = actual_usage(
@@ -1824,6 +1925,7 @@ mod tests {
     struct FakeUpstreamState {
         health_ok: Arc<AtomicBool>,
         calls: Arc<AtomicUsize>,
+        bodies: Arc<Mutex<Vec<Bytes>>>,
         delay_first_byte_ms: Arc<AtomicUsize>,
         stream_tail_delay_ms: Arc<AtomicUsize>,
         stream_hang_after_done: Arc<AtomicBool>,
@@ -1834,6 +1936,7 @@ mod tests {
             Self {
                 health_ok: Arc::new(AtomicBool::new(true)),
                 calls: Arc::new(AtomicUsize::new(0)),
+                bodies: Arc::new(Mutex::new(Vec::new())),
                 delay_first_byte_ms: Arc::new(AtomicUsize::new(0)),
                 stream_tail_delay_ms: Arc::new(AtomicUsize::new(0)),
                 stream_hang_after_done: Arc::new(AtomicBool::new(false)),
@@ -1873,7 +1976,8 @@ mod tests {
             sleep(Duration::from_millis(delay as u64)).await;
         }
         state.calls.fetch_add(1, Ordering::SeqCst);
-        let request = serde_json::from_slice::<Value>(&body).unwrap();
+        state.bodies.lock().unwrap().push(body.clone());
+        let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         if request["stream"].as_bool().unwrap_or(false) {
             assert_eq!(request["stream_options"]["include_usage"], true);
             if state.stream_hang_after_done.load(Ordering::SeqCst) {

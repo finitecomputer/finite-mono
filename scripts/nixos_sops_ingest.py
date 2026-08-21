@@ -297,8 +297,8 @@ def main() -> int:
         print(
             "nixos-sops-ingest: this operator cannot decrypt existing SOPS file "
             f"{display_path(inaccessible)}; add your public recipient to .sops.yaml "
-            "and ask an existing operator to run `just nixos-sops-updatekeys` before "
-            "adding or seeding secrets",
+            "and ask an existing operator to run `just infra secrets updatekeys` "
+            "before adding or seeding secrets",
             file=sys.stderr,
         )
         return 1
@@ -355,7 +355,7 @@ def main() -> int:
         print(
             "nixos-sops-ingest: new recipient set differs from existing SOPS file "
             f"{display_path(mismatch)} in the same scope; run "
-            "`just nixos-sops-updatekeys` after .sops.yaml changes, then retry",
+            "`just infra secrets updatekeys` after .sops.yaml changes, then retry",
             file=sys.stderr,
         )
         return 1
@@ -363,7 +363,7 @@ def main() -> int:
         print(
             "nixos-sops-ingest: encrypted file is not decryptable by this operator; "
             "add your public recipient to .sops.yaml and ask an existing operator to "
-            "run `just nixos-sops-updatekeys` before ingesting",
+            "run `just infra secrets updatekeys` before ingesting",
             file=sys.stderr,
         )
         return 1

@@ -1,0 +1,71 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
+# Lists finitechat commands
+default:
+    just --list
+
+# Runs the opt-in full-history Device convergence stress test.
+chat-history-stress:
+    cd .. && cargo test --locked -p finitechat-core --lib tests::late_same_account_device_converges_topics_named_chats_and_archives_after_restart -- --ignored --exact --nocapture
+
+# Fast, credential-free Hermes adapter durability gate. Uses the pinned Hermes
+# Python runtime and writes machine-checkable evidence for CI and local review.
+chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/report.json":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd .. && pwd)"
+    report_arg={{ quote(report) }}
+    if [[ "$report_arg" = /* ]]; then
+        report_path="$report_arg"
+    else
+        report_path="$repo_root/$report_arg"
+    fi
+
+    if [[ -n "${HERMES_AGENT_PYTHON:-}" && -x "$HERMES_AGENT_PYTHON" ]]; then
+        cd "$repo_root/finitechat"
+        exec "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
+            --python "$HERMES_AGENT_PYTHON" \
+            --report "$report_path"
+    fi
+
+    hermes_python_store="$(
+        nix build --no-link --print-out-paths \
+            "$repo_root#hermes-agent-python" | tail -n 1
+    )"
+    hermes_python="$hermes_python_store/bin/python3"
+    if [[ ! -x "$hermes_python" ]]; then
+        echo "Pinned Hermes Python did not produce an executable: $hermes_python" >&2
+        exit 1
+    fi
+    cd "$repo_root/finitechat"
+    exec "$hermes_python" scripts/hermes-adapter-regression-report.py \
+        --python "$hermes_python" \
+        --report "$report_path"
+
+# Focused protocol/process proof for the Hosted Web + Electron Device alpha.
+chat-device-parity:
+    cd .. && cargo test --locked -p finitechat-core --test electron_device_parity
+    cd .. && cargo test --locked -p finitechat-hosted-device --test http
+    cd .. && cargo test --locked -p finitechat-daemon
+    cd apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
+
+# Reproducible local/CI gate for every surface changed by Electron parity.
+chat-electron-check:
+    cd .. && cargo test --locked -p finitechat-daemon
+    cd .. && cargo test --locked -p finitechat-core --test electron_device_parity
+    cd .. && cargo test --locked -p finitechat-hosted-device
+    cd apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
+    cd ../finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run typecheck && pnpm run build
+
+# Build the macOS Electron app. It is ad-hoc signed by default; release callers
+# supply FINITECHAT_CODESIGN_IDENTITY (and optionally a temporary keychain) for
+# Developer ID signing. pnpm never invokes Cargo; this recipe supplies the exact
+# release daemon copied into app resources.
+chat-electron-package:
+    cd .. && cargo build --locked --release -p finitechat-daemon
+    cd apps/electron-chat && pnpm install --frozen-lockfile && FINITECHAT_DAEMON_BINARY="$PWD/../../../target/release/finitechatd" pnpm run package:mac
+
+# Regenerate the native iOS bridge/project and prove the unsigned Release
+# configuration Xcode Cloud will archive.
+ios-cloud-preflight:
+    cd .. && finitechat/scripts/ios-xcode-cloud-preflight.sh

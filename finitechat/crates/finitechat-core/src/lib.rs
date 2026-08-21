@@ -880,6 +880,77 @@ pub enum AppAction {
     RemovePushToken,
 }
 
+/// Read/write class of a command at the dispatch boundary, declared once per
+/// `AppAction` variant below. `Writer` commands mutate the client store or
+/// durable runtime state and may only run on a runtime that holds the store's
+/// single-writer lease; `ReadOnly` commands may run on a read-only open
+/// alongside the resident writer. The smoke-mystery incident class (2026-08-20
+/// audit synthesis, H2) was a nominally-read one-shot dispatching a writer
+/// action against the resident bridge's store; the class makes that a
+/// type-level property instead of a convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandClass {
+    ReadOnly,
+    Writer,
+}
+
+impl AppAction {
+    /// The declared read/write class of every action, exhaustively: adding a
+    /// variant without naming its class is a compile error, and a read-only
+    /// runtime rejects `Writer` actions with
+    /// [`FiniteChatCoreError::ReadOnly`]. Every action today mutates the
+    /// store or durable runtime state (navigation persists selection,
+    /// `StartRuntime` publishes KeyPackages and activates pending Welcomes),
+    /// so every variant is `Writer`; a future genuinely read-only action
+    /// declares `ReadOnly` here.
+    pub fn command_class(&self) -> CommandClass {
+        match self {
+            AppAction::StartRuntime => CommandClass::Writer,
+            AppAction::StopRuntime => CommandClass::Writer,
+            AppAction::OpenRoom { .. } => CommandClass::Writer,
+            AppAction::OpenTopic { .. } => CommandClass::Writer,
+            AppAction::OpenChat { .. } => CommandClass::Writer,
+            AppAction::PairAgent { .. } => CommandClass::Writer,
+            AppAction::StartHomeChat { .. } => CommandClass::Writer,
+            AppAction::RenameChat { .. } => CommandClass::Writer,
+            AppAction::SetChatArchived { .. } => CommandClass::Writer,
+            AppAction::CreateRoom { .. } => CommandClass::Writer,
+            AppAction::CreateTopic { .. } => CommandClass::Writer,
+            AppAction::StartTopicChat { .. } => CommandClass::Writer,
+            AppAction::SaveProfile { .. } => CommandClass::Writer,
+            AppAction::UploadImage { .. } => CommandClass::Writer,
+            AppAction::SaveRoomMetadata { .. } => CommandClass::Writer,
+            AppAction::StartProfileChat { .. } => CommandClass::Writer,
+            AppAction::StartGroupChat { .. } => CommandClass::Writer,
+            AppAction::AddRoomMembers { .. } => CommandClass::Writer,
+            AppAction::ScanTarget { .. } => CommandClass::Writer,
+            AppAction::SendMessage { .. } => CommandClass::Writer,
+            AppAction::SendTopicMessage { .. } => CommandClass::Writer,
+            AppAction::SendChatMessage { .. } => CommandClass::Writer,
+            AppAction::SendReply { .. } => CommandClass::Writer,
+            AppAction::SendChatReply { .. } => CommandClass::Writer,
+            AppAction::SendAttachment { .. } => CommandClass::Writer,
+            AppAction::SendAttachments { .. } => CommandClass::Writer,
+            AppAction::SendChatAttachment { .. } => CommandClass::Writer,
+            AppAction::SendChatAttachments { .. } => CommandClass::Writer,
+            AppAction::SendPoll { .. } => CommandClass::Writer,
+            AppAction::SendChatPoll { .. } => CommandClass::Writer,
+            AppAction::VotePoll { .. } => CommandClass::Writer,
+            AppAction::DownloadAttachment { .. } => CommandClass::Writer,
+            AppAction::BeginDownloadAttachment { .. } => CommandClass::Writer,
+            AppAction::LoadOlderMessages { .. } => CommandClass::Writer,
+            AppAction::ReactToMessage { .. } => CommandClass::Writer,
+            AppAction::MarkRoomRead { .. } => CommandClass::Writer,
+            AppAction::RetryMessage { .. } => CommandClass::Writer,
+            AppAction::SetTyping { .. } => CommandClass::Writer,
+            AppAction::RefreshDevices => CommandClass::Writer,
+            AppAction::RevokeDevice { .. } => CommandClass::Writer,
+            AppAction::SetPushToken { .. } => CommandClass::Writer,
+            AppAction::RemovePushToken => CommandClass::Writer,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum AppUpdate {
     FullState(AppState),
@@ -1064,6 +1135,7 @@ struct SendAttachmentInput {
 struct PreparedOutboundMessage {
     chat_message: ChatMessage,
     stored_message: StoredOutboundMessage,
+    attachment_blobs: MessageAttachmentBlobs,
 }
 
 #[derive(Clone, Debug)]
@@ -1078,6 +1150,10 @@ struct CoreSyncProjection {
     result: SyncResult,
     events: Vec<StoredAppEvent>,
     room_sync_failures: Vec<String>,
+    /// Blob references captured while projecting `result.messages`, keyed
+    /// `(room_id, message_id)`. Carried alongside the FFI record so the app
+    /// projection and the attachment cache never re-decode payloads.
+    attachment_blobs: AttachmentBlobMap,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1087,6 +1163,11 @@ struct ChatProjectionState {
     /// row insertion order. Room sequence numbers are canonical only within a
     /// room and must never be compared to choose a cross-room eviction.
     message_arrival_order: VecDeque<(String, String)>,
+    /// Blob references captured while projecting each message, keyed like
+    /// `messages`. The FFI media projection drops `HermesAttachmentV1::blob`;
+    /// keeping the references here lets attachment cache annotation and
+    /// downloads read them without re-decoding application payloads.
+    attachment_blobs: AttachmentBlobMap,
     conversations: ConversationProjection,
     chat_archives: BTreeMap<(String, String, String), ChatArchiveProjectionEntry>,
     chat_titles: BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
@@ -1300,6 +1381,20 @@ impl FiniteChatRuntime {
 }
 
 impl FiniteChatRuntime {
+    /// Open the runtime in the mode a command's declared [`CommandClass`]
+    /// requires: only `Writer` commands acquire the store's single-writer
+    /// lease (`open`); `ReadOnly` commands never take it (`open_read_only`)
+    /// and reject writer actions with [`FiniteChatCoreError::ReadOnly`].
+    pub fn open_for_class(
+        options: OpenOptions,
+        class: CommandClass,
+    ) -> Result<Arc<Self>, FiniteChatCoreError> {
+        match class {
+            CommandClass::ReadOnly => Self::open_read_only(options),
+            CommandClass::Writer => Self::open(options),
+        }
+    }
+
     fn open_with_mode(
         options: OpenOptions,
         read_only: bool,
@@ -2329,13 +2424,16 @@ impl AppRuntimeState {
                 visible_outbox.push(message);
             }
         }
-        chat_projection.append_messages(
-            visible_outbox
-                .into_iter()
-                .filter_map(|message| chat_message_from_outbox(message, &owner))
-                .collect(),
-            &owner,
-        );
+        let mut outbox_messages = Vec::new();
+        let mut outbox_attachment_blobs = AttachmentBlobMap::new();
+        for (message, attachment_blobs) in visible_outbox
+            .into_iter()
+            .filter_map(|message| chat_message_from_outbox(message, &owner))
+        {
+            record_attachment_blobs(&mut outbox_attachment_blobs, &message, attachment_blobs);
+            outbox_messages.push(message);
+        }
+        chat_projection.append_messages(outbox_messages, outbox_attachment_blobs, &owner);
         let should_persist_chat_archive_repair =
             stored_app_state.chat_archives != chat_projection.stored_chat_archives();
         let all_messages = chat_projection.messages();
@@ -2517,7 +2615,7 @@ impl AppRuntimeState {
         action: AppAction,
         requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
-        if self.core.read_only {
+        if self.core.read_only && action.command_class() == CommandClass::Writer {
             return Err(FiniteChatCoreError::ReadOnly);
         }
         self.app.toast = None;
@@ -2889,7 +2987,7 @@ impl AppRuntimeState {
         let synced = self.core.sync_with_projection()?;
         self.room_sync_failures = synced.room_sync_failures.iter().cloned().collect();
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.app.status = ready_status(self.room_sync_failures.len());
@@ -2911,7 +3009,7 @@ impl AppRuntimeState {
             self.room_sync_failures.remove(room_id);
         }
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.app.status = ready_status(self.room_sync_failures.len());
@@ -2978,7 +3076,7 @@ impl AppRuntimeState {
             .map(app_bridge_event_from_stored_event)
             .collect::<Vec<_>>();
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
@@ -3012,7 +3110,7 @@ impl AppRuntimeState {
             .map(app_bridge_event_from_stored_event)
             .collect::<Vec<_>>();
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
@@ -3972,7 +4070,7 @@ impl AppRuntimeState {
         }
         let synced = self.core.sync_with_projection()?;
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         let room_ids = self.profile_chat_room_ids(&agent_account_id);
         if !matches!(room_ids.as_slice(), [room_id] if room_id == &intended_room_id) {
@@ -3997,7 +4095,7 @@ impl AppRuntimeState {
     ) -> Result<bool, FiniteChatCoreError> {
         let synced = self.core.sync_with_projection()?;
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         if self
             .app
@@ -4174,7 +4272,7 @@ impl AppRuntimeState {
 
         let synced = self.core.sync_with_projection()?;
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
         self.upsert_room(
@@ -4317,7 +4415,7 @@ impl AppRuntimeState {
 
         let synced = self.core.sync_with_projection()?;
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
         self.upsert_room(
@@ -4473,7 +4571,7 @@ impl AppRuntimeState {
 
         let synced = self.core.sync_with_projection()?;
         self.apply_projection_events(synced.events)?;
-        self.append_messages(synced.result.messages);
+        self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
         if let Some(room) = self.room(&room_id).cloned() {
@@ -4889,8 +4987,13 @@ impl AppRuntimeState {
             .prepare_outbound_chat_message(&room_id, app_event_plaintext)?;
         let local_message_id = prepared.chat_message.message_id.clone();
         self.persist_outbox_message(&prepared.stored_message)?;
-        self.chat_projection
-            .append_messages(vec![prepared.chat_message.clone()], &owner);
+        let attachment_blobs =
+            attachment_blob_map_for(&prepared.chat_message, prepared.attachment_blobs.clone());
+        self.chat_projection.append_messages(
+            vec![prepared.chat_message.clone()],
+            attachment_blobs,
+            &owner,
+        );
         self.sync_chat_projection();
 
         let sent = match self
@@ -4900,7 +5003,7 @@ impl AppRuntimeState {
             Ok((accepted, projection)) => {
                 self.remove_outbox_message(&room_id, &local_message_id)?;
                 self.apply_projection_events(projection.events)?;
-                self.append_messages(projection.result.messages);
+                self.append_messages(projection.result.messages, projection.attachment_blobs);
                 if let Some(room) = self.room_mut(&room_id) {
                     room.last_message_preview = preview;
                 }
@@ -4920,8 +5023,10 @@ impl AppRuntimeState {
             Err(FiniteChatCoreError::ServerRejected { reason }) => {
                 let failed = failed_outbox_message(prepared.stored_message, reason);
                 self.persist_outbox_message(&failed)?;
-                if let Some(message) = chat_message_from_outbox(failed, &owner) {
-                    self.chat_projection.append_messages(vec![message], &owner);
+                if let Some((message, blobs)) = chat_message_from_outbox(failed, &owner) {
+                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
+                    self.chat_projection
+                        .append_messages(vec![message], attachment_blobs, &owner);
                     self.sync_chat_projection();
                 }
                 self.app.status = "delivery failed".to_owned();
@@ -5018,7 +5123,7 @@ impl AppRuntimeState {
         match self.core.send_attachment(input) {
             Ok(projection) => {
                 self.apply_projection_events(projection.events)?;
-                self.append_messages(projection.result.messages);
+                self.append_messages(projection.result.messages, projection.attachment_blobs);
                 self.app.status = "sent".to_owned();
             }
             Err(error) => {
@@ -5200,18 +5305,18 @@ impl AppRuntimeState {
                 reason: format!("room '{room_id}' is not ready to download attachments"),
             });
         }
-        let Some(message) = self.chat_projection.message(room_id, message_id) else {
+        if !self.chat_projection.message_exists(room_id, message_id) {
             return Err(FiniteChatCoreError::Client {
                 reason: format!("message '{message_id}' is not available in room '{room_id}'"),
             });
-        };
-        attachment_reference_for_id(message, attachment_id).ok_or_else(|| {
-            FiniteChatCoreError::Client {
+        }
+        self.chat_projection
+            .attachment_blob_reference(room_id, message_id, attachment_id)
+            .ok_or_else(|| FiniteChatCoreError::Client {
                 reason: format!(
                     "attachment '{attachment_id}' is not available on message '{message_id}'"
                 ),
-            }
-        })
+            })
     }
 
     fn load_older_messages(
@@ -5306,7 +5411,7 @@ impl AppRuntimeState {
 
         let projection = self.core.send_reaction(&room_id, &message_id, &emoji)?;
         self.apply_projection_events(projection.events)?;
-        self.append_messages(projection.result.messages);
+        self.append_messages(projection.result.messages, projection.attachment_blobs);
         self.app.status = "reacted".to_owned();
         Ok(())
     }
@@ -5427,16 +5532,13 @@ impl AppRuntimeState {
         retrying.local_state = StoredOutboundLocalState::Sending;
         retrying.server_delivery_state = StoredOutboundServerDeliveryState::Undelivered;
         self.persist_outbox_message(&retrying)?;
-        self.chat_projection.append_messages(
-            vec![
-                chat_message_from_outbox(retrying.clone(), &owner).ok_or_else(|| {
-                    FiniteChatCoreError::Client {
-                        reason: "outbox retry row did not project as a transcript row".to_owned(),
-                    }
-                })?,
-            ],
-            &owner,
-        );
+        let (retry_message, blobs) = chat_message_from_outbox(retrying.clone(), &owner)
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: "outbox retry row did not project as a transcript row".to_owned(),
+            })?;
+        let attachment_blobs = attachment_blob_map_for(&retry_message, blobs);
+        self.chat_projection
+            .append_messages(vec![retry_message], attachment_blobs, &owner);
         self.sync_chat_projection();
 
         retrying.local_state = StoredOutboundLocalState::Sent;
@@ -5444,13 +5546,15 @@ impl AppRuntimeState {
             Ok(projection) => {
                 self.remove_outbox_message(&room_id, &message_id)?;
                 self.apply_projection_events(projection.events)?;
-                self.append_messages(projection.result.messages);
+                self.append_messages(projection.result.messages, projection.attachment_blobs);
                 self.app.status = "sent".to_owned();
             }
             Err(FiniteChatCoreError::Delivery { .. }) => {
                 self.persist_outbox_message(&retrying)?;
-                if let Some(message) = chat_message_from_outbox(retrying, &owner) {
-                    self.chat_projection.append_messages(vec![message], &owner);
+                if let Some((message, blobs)) = chat_message_from_outbox(retrying, &owner) {
+                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
+                    self.chat_projection
+                        .append_messages(vec![message], attachment_blobs, &owner);
                     self.sync_chat_projection();
                 }
                 self.app.status = "sent".to_owned();
@@ -5458,8 +5562,10 @@ impl AppRuntimeState {
             Err(FiniteChatCoreError::ServerRejected { reason }) => {
                 let failed = failed_outbox_message(retrying, reason);
                 self.persist_outbox_message(&failed)?;
-                if let Some(message) = chat_message_from_outbox(failed, &owner) {
-                    self.chat_projection.append_messages(vec![message], &owner);
+                if let Some((message, blobs)) = chat_message_from_outbox(failed, &owner) {
+                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
+                    self.chat_projection
+                        .append_messages(vec![message], attachment_blobs, &owner);
                     self.sync_chat_projection();
                 }
                 self.app.status = "delivery failed".to_owned();
@@ -5499,7 +5605,7 @@ impl AppRuntimeState {
                 Ok(projection) => {
                     self.remove_outbox_message(&message.room_id, &message.message_id)?;
                     self.apply_projection_events(projection.events)?;
-                    self.append_messages(projection.result.messages);
+                    self.append_messages(projection.result.messages, projection.attachment_blobs);
                 }
                 Err(FiniteChatCoreError::Delivery { .. }) => {
                     break;
@@ -5507,9 +5613,13 @@ impl AppRuntimeState {
                 Err(FiniteChatCoreError::ServerRejected { reason }) => {
                     let failed = failed_outbox_message(message, reason);
                     self.persist_outbox_message(&failed)?;
-                    if let Some(projected) = chat_message_from_outbox(failed, &owner) {
-                        self.chat_projection
-                            .append_messages(vec![projected], &owner);
+                    if let Some((projected, blobs)) = chat_message_from_outbox(failed, &owner) {
+                        let attachment_blobs = attachment_blob_map_for(&projected, blobs);
+                        self.chat_projection.append_messages(
+                            vec![projected],
+                            attachment_blobs,
+                            &owner,
+                        );
                         self.sync_chat_projection();
                     }
                 }
@@ -6396,7 +6506,7 @@ impl AppRuntimeState {
         Ok(())
     }
 
-    fn append_messages(&mut self, messages: Vec<ChatMessage>) {
+    fn append_messages(&mut self, messages: Vec<ChatMessage>, attachment_blobs: AttachmentBlobMap) {
         if messages.is_empty() {
             return;
         }
@@ -6417,7 +6527,8 @@ impl AppRuntimeState {
                 },
             );
         }
-        self.chat_projection.append_messages(messages, &owner);
+        self.chat_projection
+            .append_messages(messages, attachment_blobs, &owner);
         if let Some(room_id) = selected_room_id
             && selected_message_count > 0
         {
@@ -6760,7 +6871,10 @@ impl AppRuntimeState {
             self.chat_projection
                 .messages_for_room_window(&room_id, count)
         };
-        self.core.apply_attachment_cache_paths(&mut messages);
+        self.core.apply_attachment_cache_paths(
+            self.chat_projection.attachment_blob_map(),
+            &mut messages,
+        );
         self.apply_attachment_download_progress(&mut messages);
         self.app.messages = messages;
         self.sync_selected_room_media_gallery(&room_id);
@@ -6781,7 +6895,10 @@ impl AppRuntimeState {
         } else {
             self.chat_projection.visual_media_messages_for_room(room_id)
         };
-        self.core.apply_attachment_cache_paths(&mut messages);
+        self.core.apply_attachment_cache_paths(
+            self.chat_projection.attachment_blob_map(),
+            &mut messages,
+        );
         self.apply_attachment_download_progress(&mut messages);
         self.app.media_gallery = Some(ChatProjectionState::media_gallery_from_messages(
             room_id, &messages,
@@ -8258,7 +8375,10 @@ impl CoreState {
         )?;
         let mut projection =
             self.send_chat_payload(&room_id, conversation_id, chat_id, chat_payload)?;
-        self.apply_attachment_cache_paths(&mut projection.result.messages);
+        self.apply_attachment_cache_paths(
+            &projection.attachment_blobs,
+            &mut projection.result.messages,
+        );
         Ok(projection)
     }
 
@@ -8339,7 +8459,7 @@ impl CoreState {
             .save_device_state(&self.device)
             .map_err(store_error)?;
 
-        let mut chat_message = project_chat_message(
+        let (mut chat_message, attachment_blobs) = project_chat_message(
             room_id.to_owned(),
             u64::MAX,
             message_id.clone(),
@@ -8365,6 +8485,7 @@ impl CoreState {
         Ok(PreparedOutboundMessage {
             chat_message,
             stored_message,
+            attachment_blobs,
         })
     }
 
@@ -8398,7 +8519,7 @@ impl CoreState {
             });
         }
 
-        let message = project_chat_message(
+        let (message, attachment_blobs) = project_chat_message(
             message.room_id.clone(),
             accepted.seq,
             message.message_id.clone(),
@@ -8416,6 +8537,7 @@ impl CoreState {
             Err(FiniteChatCoreError::Delivery { .. }) => CoreSyncProjection::default(),
             Err(error) => return Err(error),
         };
+        record_attachment_blobs(&mut projection.attachment_blobs, &message, attachment_blobs);
         projection.result.messages.insert(0, message);
         Ok((accepted, projection))
     }
@@ -8524,9 +8646,15 @@ impl CoreState {
             })
     }
 
-    fn apply_attachment_cache_paths(&self, messages: &mut [ChatMessage]) {
+    fn apply_attachment_cache_paths(
+        &self,
+        attachment_blobs: &AttachmentBlobMap,
+        messages: &mut [ChatMessage],
+    ) {
         for message in messages {
-            let references = attachment_references_by_id(message);
+            let Some(references) = attachment_blobs.get(&message_key(message)) else {
+                continue;
+            };
             for attachment in &mut message.media {
                 let Some(reference) = references.get(&attachment.attachment_id) else {
                     continue;
@@ -9252,7 +9380,7 @@ impl CoreSyncProjection {
         for entry in report.applied_entries {
             match entry.entry {
                 AppliedLogEntry::Application { plaintext, sender } => {
-                    if let Some(message) = project_chat_message(
+                    if let Some((message, attachment_blobs)) = project_chat_message(
                         entry.room_id.clone(),
                         entry.seq,
                         entry.message_id.clone(),
@@ -9261,6 +9389,11 @@ impl CoreSyncProjection {
                         entry.timestamp_unix_seconds,
                         owner,
                     ) {
+                        record_attachment_blobs(
+                            &mut self.attachment_blobs,
+                            &message,
+                            attachment_blobs,
+                        );
                         self.result.messages.push(message);
                     }
                     self.events.push(StoredAppEvent {
@@ -9393,6 +9526,9 @@ struct ChatProjectionPayload {
     reply_to_message_id: Option<String>,
     sender_name: Option<String>,
     media: Vec<ChatMediaAttachment>,
+    /// Encrypted blob locators captured while projecting `media`; travels
+    /// beside the FFI record so nothing downstream re-decodes the payload.
+    attachment_blobs: MessageAttachmentBlobs,
     poll: Option<ChatPoll>,
 }
 
@@ -9424,7 +9560,7 @@ fn project_chat_message(
     plaintext: Vec<u8>,
     timestamp_unix_seconds: u64,
     owner: &DeviceRef,
-) -> Option<ChatMessage> {
+) -> Option<(ChatMessage, MessageAttachmentBlobs)> {
     let event = StoredAppEvent {
         room_id,
         seq,
@@ -9439,12 +9575,13 @@ fn project_chat_message(
 
 /// Project a chat message from an already-decoded application event, so
 /// callers on the replay path decode once instead of re-parsing the
-/// envelope and payload per projection.
+/// envelope and payload per projection. The blob references captured from
+/// the typed payload travel with the row; the FFI record cannot hold them.
 fn project_decoded_chat_message(
     event: StoredAppEvent,
     decoded: DecodedAppEvent,
     owner: &DeviceRef,
-) -> Option<ChatMessage> {
+) -> Option<(ChatMessage, MessageAttachmentBlobs)> {
     let DecodedAppEvent::ChatMessage(decoded_message) = decoded else {
         return None;
     };
@@ -9457,6 +9594,7 @@ fn project_decoded_chat_message(
         timestamp_unix_seconds,
     } = event;
     let projection = chat_projection_for_decoded(decoded_message);
+    let attachment_blobs = projection.attachment_blobs;
     // Product authorship is account-scoped: another Device enrolled under the
     // same Principal is still "you". Delivery state, however, belongs only to
     // the Device that actually authored this local outbound message.
@@ -9467,39 +9605,42 @@ fn project_decoded_chat_message(
         &projection.text,
         &projection.display_content,
     ));
-    Some(ChatMessage {
-        room_id,
-        seq,
-        message_id,
-        conversation_id: projection.conversation_id,
-        chat_id: projection.chat_id,
-        sender_account_id: sender.account_id.clone(),
-        sender_device_id: sender.device_id.clone(),
-        sender_display_name: sender_display_name(
-            &sender,
-            projection.sender_name.as_deref(),
+    Some((
+        ChatMessage {
+            room_id,
+            seq,
+            message_id,
+            conversation_id: projection.conversation_id,
+            chat_id: projection.chat_id,
+            sender_account_id: sender.account_id.clone(),
+            sender_device_id: sender.device_id.clone(),
+            sender_display_name: sender_display_name(
+                &sender,
+                projection.sender_name.as_deref(),
+                is_mine,
+            ),
+            sender_npub,
+            text: projection.text,
+            display_content: projection.display_content,
+            rich_text_json,
+            metadata_json: chat_metadata_json(&projection.metadata),
+            kind: projection.kind,
+            status: projection.status,
+            final_delivery: projection.final_delivery,
+            edit_of_message_id: projection.edit_of_message_id,
+            payload: plaintext,
+            reply_to_message_id: projection.reply_to_message_id,
             is_mine,
-        ),
-        sender_npub,
-        text: projection.text,
-        display_content: projection.display_content,
-        rich_text_json,
-        metadata_json: chat_metadata_json(&projection.metadata),
-        kind: projection.kind,
-        status: projection.status,
-        final_delivery: projection.final_delivery,
-        edit_of_message_id: projection.edit_of_message_id,
-        payload: plaintext,
-        reply_to_message_id: projection.reply_to_message_id,
-        is_mine,
-        outbound_delivery: authored_by_current_device.then(outbound_delivered),
-        reactions: Vec::new(),
-        media: projection.media,
-        read_receipt: None,
-        poll: projection.poll,
-        timestamp_unix_seconds,
-        display_timestamp: display_timestamp(timestamp_unix_seconds),
-    })
+            outbound_delivery: authored_by_current_device.then(outbound_delivered),
+            reactions: Vec::new(),
+            media: projection.media,
+            read_receipt: None,
+            poll: projection.poll,
+            timestamp_unix_seconds,
+            display_timestamp: display_timestamp(timestamp_unix_seconds),
+        },
+        attachment_blobs,
+    ))
 }
 
 fn outbound_undelivered() -> OutboundDelivery {
@@ -9624,6 +9765,7 @@ fn chat_projection_payload(payload: &ChatMessagePayload) -> ChatProjectionPayloa
                 reply_to_message_id: None,
                 sender_name: None,
                 media: Vec::new(),
+                attachment_blobs: BTreeMap::new(),
                 poll: Some(chat_poll_from_payload(payload.clone())),
             }
         }
@@ -9633,6 +9775,7 @@ fn chat_projection_payload(payload: &ChatMessagePayload) -> ChatProjectionPayloa
                 .get("notify")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true);
+            let attachment_blobs = attachment_blob_references(payload);
             ChatProjectionPayload {
                 display_content: payload.text.clone(),
                 text: payload.text.clone(),
@@ -9652,6 +9795,7 @@ fn chat_projection_payload(payload: &ChatMessagePayload) -> ChatProjectionPayloa
                     .enumerate()
                     .map(|(index, attachment)| chat_media_attachment(index, attachment))
                     .collect(),
+                attachment_blobs,
                 poll: None,
             }
         }
@@ -9670,6 +9814,7 @@ fn chat_projection_payload(payload: &ChatMessagePayload) -> ChatProjectionPayloa
                 reply_to_message_id: None,
                 sender_name: None,
                 media: Vec::new(),
+                attachment_blobs: BTreeMap::new(),
                 poll: None,
             }
         }
@@ -10292,19 +10437,24 @@ fn encode_application_event_with_segment(
     serde_json::to_vec(&event).map_err(client_error)
 }
 
-fn chat_media_attachment(index: usize, attachment: HermesAttachmentV1) -> ChatMediaAttachment {
-    let local_pending_upload =
-        attachment.path.is_some() && attachment.url.is_none() && attachment.blob.is_none();
-    let blob = attachment.blob;
-    let dimensions = blob
-        .as_ref()
-        .and_then(|blob| blob.metadata.dimensions.as_ref());
-    let attachment_id = blob
+fn chat_media_attachment_id(index: usize, attachment: &HermesAttachmentV1) -> String {
+    attachment
+        .blob
         .as_ref()
         .map(|blob| blob.plaintext_sha256.clone())
         .or_else(|| attachment.url.clone())
         .or_else(|| attachment.path.clone())
-        .unwrap_or_else(|| format!("attachment-{index}"));
+        .unwrap_or_else(|| format!("attachment-{index}"))
+}
+
+fn chat_media_attachment(index: usize, attachment: HermesAttachmentV1) -> ChatMediaAttachment {
+    let local_pending_upload =
+        attachment.path.is_some() && attachment.url.is_none() && attachment.blob.is_none();
+    let attachment_id = chat_media_attachment_id(index, &attachment);
+    let blob = attachment.blob;
+    let dimensions = blob
+        .as_ref()
+        .and_then(|blob| blob.metadata.dimensions.as_ref());
     let url = blob
         .as_ref()
         .map(|blob| blob.url.clone())
@@ -10350,31 +10500,52 @@ fn attachment_download_key(
     )
 }
 
-fn attachment_references_by_id(
-    message: &ChatMessage,
-) -> BTreeMap<String, AttachmentBlobReferenceV1> {
-    let DecodedAppEvent::ChatMessage(decoded) = decode_application_event(&message.payload) else {
-        return BTreeMap::new();
-    };
-    let ChatMessagePayload::Hermes(payload) = decoded.payload else {
-        return BTreeMap::new();
-    };
+/// Blob references of one projected message, keyed by the projected
+/// `ChatMediaAttachment::attachment_id`.
+type MessageAttachmentBlobs = BTreeMap<String, AttachmentBlobReferenceV1>;
 
-    let mut references = BTreeMap::new();
-    for (index, attachment) in payload.attachments.into_iter().enumerate() {
-        let projected = chat_media_attachment(index, attachment.clone());
-        if let Some(reference) = attachment.blob {
-            references.insert(projected.attachment_id, reference);
-        }
-    }
-    references
+/// Blob references captured at projection time, keyed `(room_id, message_id)`.
+/// Attachment cache annotation and download lookups read these instead of
+/// re-decoding application payloads.
+type AttachmentBlobMap = BTreeMap<(String, String), MessageAttachmentBlobs>;
+
+/// Capture the encrypted blob locators of an already-typed Hermes payload,
+/// keyed by the projected attachment id. Pure field reads — the payload was
+/// decoded exactly once at the projection boundary.
+fn attachment_blob_references(payload: &HermesMessagePayloadV1) -> MessageAttachmentBlobs {
+    payload
+        .attachments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attachment)| {
+            attachment
+                .blob
+                .as_ref()
+                .map(|blob| (chat_media_attachment_id(index, attachment), blob.clone()))
+        })
+        .collect()
 }
 
-fn attachment_reference_for_id(
+/// Record one projected message's blob references in a batch map; messages
+/// without encrypted blobs leave no entry.
+fn record_attachment_blobs(
+    map: &mut AttachmentBlobMap,
     message: &ChatMessage,
-    attachment_id: &str,
-) -> Option<AttachmentBlobReferenceV1> {
-    attachment_references_by_id(message).remove(attachment_id)
+    blobs: MessageAttachmentBlobs,
+) {
+    if !blobs.is_empty() {
+        map.insert((message.room_id.clone(), message.message_id.clone()), blobs);
+    }
+}
+
+/// The blob map carrying a single projected message's references.
+fn attachment_blob_map_for(
+    message: &ChatMessage,
+    blobs: MessageAttachmentBlobs,
+) -> AttachmentBlobMap {
+    let mut map = AttachmentBlobMap::new();
+    record_attachment_blobs(&mut map, message, blobs);
+    map
 }
 
 fn attachment_plaintext_matches(reference: &AttachmentBlobReferenceV1, plaintext: &[u8]) -> bool {
@@ -10467,7 +10638,7 @@ fn chat_message_from_stored_decoded(
     message: StoredAppMessage,
     decoded: DecodedAppEvent,
     owner: &DeviceRef,
-) -> Option<ChatMessage> {
+) -> Option<(ChatMessage, MessageAttachmentBlobs)> {
     let event = StoredAppEvent {
         room_id: message.room_id,
         seq: message.seq,
@@ -10482,7 +10653,7 @@ fn chat_message_from_stored_decoded(
 fn chat_message_from_outbox(
     message: StoredOutboundMessage,
     owner: &DeviceRef,
-) -> Option<ChatMessage> {
+) -> Option<(ChatMessage, MessageAttachmentBlobs)> {
     if message.sender != *owner {
         return None;
     }
@@ -10496,7 +10667,7 @@ fn chat_message_from_outbox(
             OutboundServerDeliveryState::Failed { reason }
         }
     };
-    let mut projected = project_chat_message(
+    let (mut projected, attachment_blobs) = project_chat_message(
         message.room_id,
         u64::MAX,
         message.message_id,
@@ -10509,7 +10680,7 @@ fn chat_message_from_outbox(
         local_send,
         server_delivery,
     });
-    Some(projected)
+    Some((projected, attachment_blobs))
 }
 
 fn failed_outbox_message(
@@ -10584,8 +10755,12 @@ impl ChatProjectionState {
             // and the conversation projection; neither re-parses plaintext.
             let decoded = decode_application_event(&message.plaintext);
             let scope = ChatEventScope::from_decoded(&decoded);
-            if let Some(projected) = chat_message_from_stored_decoded(message, decoded, owner) {
+            if let Some((projected, attachment_blobs)) =
+                chat_message_from_stored_decoded(message, decoded, owner)
+            {
+                let key = message_key(&projected);
                 projection.insert_message_scoped(projected, Some(scope), owner);
+                projection.set_message_attachment_blobs(key, attachment_blobs);
             }
         }
         for event in stored_events {
@@ -10595,9 +10770,19 @@ impl ChatProjectionState {
         projection
     }
 
-    fn append_messages(&mut self, messages: Vec<ChatMessage>, owner: &DeviceRef) {
+    fn append_messages(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        mut attachment_blobs: AttachmentBlobMap,
+        owner: &DeviceRef,
+    ) {
         for message in messages {
+            let key = message_key(&message);
+            // Every appended message was projected from its typed payload, so
+            // the batch map is authoritative for it — including "no blobs".
+            let blobs = attachment_blobs.remove(&key).unwrap_or_default();
             self.insert_message(message, owner);
+            self.set_message_attachment_blobs(key, blobs);
         }
         self.trim_to_limit();
     }
@@ -10631,8 +10816,12 @@ impl ChatProjectionState {
             // re-running the projection would only repeat its parse work.
             DecodedAppEvent::ChatMessage(_) if duplicate_projected_message => false,
             DecodedAppEvent::ChatMessage(_) => {
-                if let Some(message) = project_decoded_chat_message(event, decoded, owner) {
+                if let Some((message, attachment_blobs)) =
+                    project_decoded_chat_message(event, decoded, owner)
+                {
+                    let key = message_key(&message);
                     self.insert_message_record(message, owner);
+                    self.set_message_attachment_blobs(key, attachment_blobs);
                 }
                 false
             }
@@ -10972,6 +11161,38 @@ impl ChatProjectionState {
     fn message(&self, room_id: &str, message_id: &str) -> Option<&ChatMessage> {
         self.messages
             .get(&(room_id.to_owned(), message_id.to_owned()))
+    }
+
+    fn attachment_blob_map(&self) -> &AttachmentBlobMap {
+        &self.attachment_blobs
+    }
+
+    /// The captured blob reference for one projected attachment — the only
+    /// place `HermesAttachmentV1::blob` survives projection.
+    fn attachment_blob_reference(
+        &self,
+        room_id: &str,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Option<AttachmentBlobReferenceV1> {
+        self.attachment_blobs
+            .get(&(room_id.to_owned(), message_id.to_owned()))
+            .and_then(|references| references.get(attachment_id))
+            .cloned()
+    }
+
+    /// Replace one message's captured blob references; an empty set clears
+    /// the entry so the map always mirrors the message's latest projection.
+    fn set_message_attachment_blobs(
+        &mut self,
+        key: (String, String),
+        blobs: MessageAttachmentBlobs,
+    ) {
+        if blobs.is_empty() {
+            self.attachment_blobs.remove(&key);
+        } else {
+            self.attachment_blobs.insert(key, blobs);
+        }
     }
 
     fn insert_message(&mut self, message: ChatMessage, owner: &DeviceRef) {
@@ -11314,6 +11535,7 @@ impl ChatProjectionState {
                 break;
             };
             self.messages.remove(&key);
+            self.attachment_blobs.remove(&key);
             evicted = true;
         }
         if !evicted {
@@ -14790,7 +15012,7 @@ mod tests {
                 .to_owned(),
             device_id: "hosted-web".to_owned(),
         };
-        let message = project_chat_message(
+        let (message, _) = project_chat_message(
             "room-main".to_owned(),
             8,
             "tool-message-2".to_owned(),
@@ -14820,7 +15042,7 @@ mod tests {
         assert!(!legacy.final_delivery);
         assert_eq!(legacy.edit_of_message_id, None);
 
-        let raw = project_chat_message(
+        let (raw, _) = project_chat_message(
             "room-main".to_owned(),
             9,
             "native-message".to_owned(),
@@ -14847,7 +15069,7 @@ mod tests {
             account_id: owner.account_id.clone(),
             device_id: "electron-alpha".to_owned(),
         };
-        let message = project_chat_message(
+        let (message, _) = project_chat_message(
             "room-main".to_owned(),
             10,
             "message-electron".to_owned(),
@@ -14863,7 +15085,7 @@ mod tests {
         assert_eq!(message.sender_device_id, "electron-alpha");
         assert_eq!(message.outbound_delivery, None);
 
-        let current_device = project_chat_message(
+        let (current_device, _) = project_chat_message(
             "room-main".to_owned(),
             11,
             "message-hosted".to_owned(),
@@ -14918,6 +15140,7 @@ mod tests {
                 &owner,
             )
             .unwrap()
+            .0
         };
 
         let final_message = project(
@@ -15111,6 +15334,7 @@ mod tests {
                 &owner,
             )
             .unwrap()
+            .0
         };
         let mut projection = ChatProjectionState::default();
         projection.append_messages(
@@ -15123,11 +15347,13 @@ mod tests {
                     )
                 })
                 .collect(),
+            AttachmentBlobMap::new(),
             &owner,
         );
 
         projection.append_messages(
             vec![project("new-room", 1, "new-room-first-message".to_owned())],
+            AttachmentBlobMap::new(),
             &owner,
         );
 
@@ -15163,7 +15389,7 @@ mod tests {
             &encode_text_message_payload("first message", None).unwrap(),
         )
         .unwrap();
-        let message = project_chat_message(
+        let (message, _) = project_chat_message(
             "room-main".to_owned(),
             10,
             "message-10".to_owned(),
@@ -15174,7 +15400,7 @@ mod tests {
         )
         .unwrap();
         let mut projection = ChatProjectionState::default();
-        projection.append_messages(vec![message.clone()], &owner);
+        projection.append_messages(vec![message.clone()], AttachmentBlobMap::new(), &owner);
 
         let segment = ConversationSegmentStartV1 {
             segment_id: second_chat_id.to_owned(),
@@ -15196,7 +15422,7 @@ mod tests {
             }),
             &owner,
         );
-        projection.append_messages(vec![message], &owner);
+        projection.append_messages(vec![message], AttachmentBlobMap::new(), &owner);
 
         let topic = projection.conversations.get("room-main", topic_id).unwrap();
         assert_eq!(topic.updated_seq, 11);
@@ -15380,7 +15606,7 @@ mod tests {
             true,
         );
 
-        let duplicate = project_chat_message(
+        let (duplicate, _) = project_chat_message(
             "room-main".to_owned(),
             1,
             "poll-1".to_owned(),
@@ -15390,7 +15616,7 @@ mod tests {
             &owner,
         )
         .expect("poll projects as a transcript row");
-        projection.append_messages(vec![duplicate], &owner);
+        projection.append_messages(vec![duplicate], AttachmentBlobMap::new(), &owner);
         let messages = projection.messages();
         assert_poll_message(
             &messages[0],
@@ -15495,7 +15721,7 @@ mod tests {
         .encode()
         .unwrap();
 
-        let message = project_chat_message(
+        let (message, _) = project_chat_message(
             "room-main".to_owned(),
             7,
             "message-7".to_owned(),
@@ -15529,6 +15755,118 @@ mod tests {
     }
 
     #[test]
+    fn chat_projection_captures_attachment_blob_references_at_projection_time() {
+        use finitechat_proto::{
+            AttachmentBlobEncryptionV1, AttachmentBlobMetadataV1, AttachmentBlobReferenceV1,
+            AttachmentDimensionsV1,
+        };
+
+        let sender = DeviceRef {
+            account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            device_id: "phone".to_owned(),
+        };
+        let owner = DeviceRef {
+            account_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_owned(),
+            device_id: "ios".to_owned(),
+        };
+        let blob = AttachmentBlobReferenceV1 {
+            scheme: "finitechat.attachment.v1".to_owned(),
+            url: "https://blob.invalid/sha256".to_owned(),
+            ciphertext_sha256: "c".repeat(64),
+            plaintext_sha256: "p".repeat(64),
+            plaintext_size: 12,
+            ciphertext_size: 28,
+            encryption: AttachmentBlobEncryptionV1 {
+                algorithm: "AES-256-GCM".to_owned(),
+                key_hex: "00".repeat(32),
+                nonce_hex: "11".repeat(12),
+            },
+            metadata: AttachmentBlobMetadataV1 {
+                mime_type: "image/jpeg".to_owned(),
+                filename: "photo.jpg".to_owned(),
+                dimensions: Some(AttachmentDimensionsV1 {
+                    width: 640,
+                    height: 480,
+                }),
+            },
+        };
+        let media_plaintext = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: Some("topic-main".to_owned()),
+            segment_id: None,
+            text: "photo".to_owned(),
+            kind: finitechat_hermes::HermesSendKindV1::Media,
+            status: finitechat_hermes::HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: vec![HermesAttachmentV1 {
+                kind: HermesAttachmentKindV1::Image,
+                name: "photo.jpg".to_owned(),
+                mime_type: "application/octet-stream".to_owned(),
+                path: Some("/tmp/local-preview.jpg".to_owned()),
+                url: Some("https://cdn.invalid/fallback".to_owned()),
+                blob: Some(blob.clone()),
+            }],
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .unwrap();
+        let text_plaintext = encode_application_event(
+            DurableAppEventKind::ChatMessage,
+            None,
+            &encode_text_message_payload("plain text", None).unwrap(),
+        )
+        .unwrap();
+        let stored = |seq: u64, message_id: &str, plaintext: Vec<u8>| StoredAppMessage {
+            room_id: "room-main".to_owned(),
+            seq,
+            message_id: message_id.to_owned(),
+            sender: sender.clone(),
+            plaintext,
+            timestamp_unix_seconds: NOW,
+        };
+        let mut projection = ChatProjectionState::from_stored(
+            vec![
+                stored(1, "media-1", media_plaintext),
+                stored(2, "text-2", text_plaintext),
+            ],
+            Vec::new(),
+            &owner,
+        );
+
+        let message = projection
+            .message("room-main", "media-1")
+            .expect("media message projected");
+        assert_eq!(message.media.len(), 1);
+        let attachment_id = message.media[0].attachment_id.clone();
+        assert_eq!(
+            projection.attachment_blob_reference("room-main", "media-1", &attachment_id),
+            Some(blob.clone()),
+            "blob references are captured into the projection at projection time"
+        );
+        assert_eq!(
+            projection.attachment_blob_map().len(),
+            1,
+            "media-less messages carry no blob-reference entry"
+        );
+
+        // The lookup never re-decodes the payload: destroying the stored
+        // payload bytes leaves the projection-side reference intact.
+        projection
+            .messages
+            .get_mut(&("room-main".to_owned(), "media-1".to_owned()))
+            .expect("media message projected")
+            .payload = b"destroyed".to_vec();
+        assert_eq!(
+            projection.attachment_blob_reference("room-main", "media-1", &attachment_id),
+            Some(blob),
+        );
+    }
+
+    #[test]
     fn chat_projection_builds_hypernote_ast_for_hermes_markdown() {
         let sender = DeviceRef {
             account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -15557,7 +15895,7 @@ mod tests {
         .encode()
         .unwrap();
 
-        let message = project_chat_message(
+        let (message, _) = project_chat_message(
             "room-main".to_owned(),
             8,
             "message-8".to_owned(),
@@ -20769,6 +21107,141 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_device_links_converge_to_exact_receipts_without_interleaving_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let source = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("source").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "source-device".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let room_ids = (0..7)
+            .map(|index| {
+                let room_id = source
+                    .dispatch_and_wait(AppAction::CreateRoom {
+                        display_name: format!("Concurrent pairing room {index}"),
+                    })
+                    .unwrap()
+                    .selected_room_id
+                    .unwrap();
+                for message_index in 0..2 {
+                    source
+                        .dispatch_and_wait(AppAction::SendMessage {
+                            room_id: room_id.clone(),
+                            text: format!("room {index} history {message_index}"),
+                            metadata_json: None,
+                        })
+                        .unwrap();
+                }
+                room_id
+            })
+            .collect::<Vec<_>>();
+        let source_identity = source.state().unwrap().identity;
+        let ios = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("ios").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "ios-device".to_owned(),
+            account_secret_hex: Some(source_identity.account_secret_hex.clone()),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        let electron = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("electron").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "electron-device".to_owned(),
+            account_secret_hex: Some(source_identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        ios.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        electron.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let mut ios_report = None;
+        let mut electron_report = None;
+
+        // This is the old native-iOS ordering: publish the initial inventory,
+        // then poll only the source until it says Ready. More rooms than the
+        // initial KeyPackage inventory makes that ordering deterministically
+        // stall.
+        for _ in 0..20 {
+            ios_report = Some(
+                source
+                    .link_device_and_wait("simultaneous-ios".to_owned(), "ios-device".to_owned())
+                    .unwrap(),
+            );
+        }
+        let stalled_ios = ios_report.as_ref().unwrap();
+        assert!(!stalled_ios.fanout_complete);
+        assert!(stalled_ios.room_count > 0);
+        assert!(stalled_ios.room_count < room_ids.len() as u32);
+
+        const MAX_TICKS: usize = 500;
+        for _ in 0..MAX_TICKS {
+            let ios_state = ios
+                .dispatch_and_wait(AppAction::StartRuntime)
+                .expect("iOS replenishes KeyPackages while source fanout is active");
+            ios_report = Some(
+                source
+                    .link_device_and_wait("simultaneous-ios".to_owned(), "ios-device".to_owned())
+                    .expect("the iOS enrollment poll must remain retryable"),
+            );
+            electron_report = Some(
+                source
+                    .link_device_and_wait(
+                        "simultaneous-electron".to_owned(),
+                        "electron-device".to_owned(),
+                    )
+                    .expect("the Electron enrollment poll must remain retryable"),
+            );
+            let electron_state = electron.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+            let ios_ready = ios_report.as_ref().is_some_and(|report| {
+                report.fanout_complete
+                    && report.bootstrap_manifests.iter().all(|expected| {
+                        ios_state
+                            .device_link_bootstrap_receipts
+                            .iter()
+                            .any(|actual| {
+                                actual.bootstrap_id == expected.bootstrap_id
+                                    && actual.room_id == expected.room_id
+                                    && actual.manifest_sha256 == expected.manifest_sha256
+                            })
+                    })
+            });
+            let electron_ready = electron_report.as_ref().is_some_and(|report| {
+                report.fanout_complete
+                    && report.bootstrap_manifests.iter().all(|expected| {
+                        electron_state
+                            .device_link_bootstrap_receipts
+                            .iter()
+                            .any(|actual| {
+                                actual.bootstrap_id == expected.bootstrap_id
+                                    && actual.room_id == expected.room_id
+                                    && actual.manifest_sha256 == expected.manifest_sha256
+                            })
+                    })
+            });
+            if ios_ready && electron_ready {
+                for room_id in &room_ids {
+                    assert_eq!(app_room(&ios_state, room_id).state, AppRoomState::Connected);
+                    assert_eq!(
+                        app_room(&electron_state, room_id).state,
+                        AppRoomState::Connected
+                    );
+                }
+                return;
+            }
+        }
+
+        panic!(
+            "simultaneous enrollment did not converge: ios={ios_report:?}, electron={electron_report:?}"
+        );
+    }
+
+    #[test]
     fn device_link_export_restarts_at_every_boundary_and_terminal_polls_are_inert() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
@@ -21794,6 +22267,267 @@ mod tests {
             .dispatch_and_wait(AppAction::StartRuntime)
             .expect_err("read-only runtime rejects actions");
         assert!(matches!(error, FiniteChatCoreError::ReadOnly));
+    }
+
+    /// Pin the declared read/write class of every `AppAction` variant. The
+    /// expected-class match below is exhaustive on purpose: a new variant
+    /// fails to compile here (and in `AppAction::command_class`) until its
+    /// class is declared, and reclassifying a variant fails the assertion.
+    #[test]
+    fn app_action_command_class_is_pinned_for_every_variant() {
+        let profile = AppProfileSummary {
+            npub: "npub1test".to_owned(),
+            account_id: "account-id".to_owned(),
+            display_name: "Display".to_owned(),
+            about: None,
+            picture: None,
+            stale: false,
+            is_agent: false,
+        };
+        let attachment = OutboundAttachment {
+            filename: "file.bin".to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            kind: ChatMediaKind::File,
+            bytes: vec![1],
+        };
+        let text = || "text".to_owned();
+        let id = || "id".to_owned();
+        let actions = [
+            AppAction::StartRuntime,
+            AppAction::StopRuntime,
+            AppAction::OpenRoom { room_id: id() },
+            AppAction::OpenTopic {
+                room_id: id(),
+                topic_id: id(),
+            },
+            AppAction::OpenChat {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+            },
+            AppAction::PairAgent { room_id: id() },
+            AppAction::StartHomeChat {
+                text: Some(text()),
+                intent_key: id(),
+            },
+            AppAction::RenameChat {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                title: text(),
+            },
+            AppAction::SetChatArchived {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                archived: true,
+            },
+            AppAction::CreateRoom {
+                display_name: text(),
+            },
+            AppAction::CreateTopic {
+                room_id: id(),
+                title: text(),
+            },
+            AppAction::StartTopicChat {
+                room_id: id(),
+                topic_id: id(),
+                reason: None,
+            },
+            AppAction::SaveProfile {
+                display_name: text(),
+                about: text(),
+                picture: None,
+            },
+            AppAction::UploadImage {
+                bytes: vec![1],
+                content_type: "image/png".to_owned(),
+            },
+            AppAction::SaveRoomMetadata {
+                room_id: id(),
+                display_name: text(),
+                picture: None,
+            },
+            AppAction::StartProfileChat {
+                profile: profile.clone(),
+                display_name: text(),
+            },
+            AppAction::StartGroupChat {
+                profiles: vec![profile.clone()],
+                display_name: text(),
+            },
+            AppAction::AddRoomMembers {
+                room_id: id(),
+                profiles: vec![profile],
+            },
+            AppAction::ScanTarget { value: text() },
+            AppAction::SendMessage {
+                room_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendTopicMessage {
+                room_id: id(),
+                topic_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendChatMessage {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                text: text(),
+                metadata_json: None,
+            },
+            AppAction::SendReply {
+                room_id: id(),
+                text: text(),
+                reply_to_message_id: id(),
+                metadata_json: None,
+            },
+            AppAction::SendChatReply {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                text: text(),
+                reply_to_message_id: id(),
+                metadata_json: None,
+            },
+            AppAction::SendAttachment {
+                room_id: id(),
+                filename: "file.bin".to_owned(),
+                mime_type: "application/octet-stream".to_owned(),
+                kind: ChatMediaKind::File,
+                bytes: vec![1],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendAttachments {
+                room_id: id(),
+                attachments: vec![attachment.clone()],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendChatAttachment {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                filename: "file.bin".to_owned(),
+                mime_type: "application/octet-stream".to_owned(),
+                kind: ChatMediaKind::File,
+                bytes: vec![1],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendChatAttachments {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                attachments: vec![attachment],
+                caption: text(),
+                reply_to_message_id: None,
+            },
+            AppAction::SendPoll {
+                room_id: id(),
+                question: text(),
+                options: vec![text()],
+            },
+            AppAction::SendChatPoll {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                question: text(),
+                options: vec![text()],
+            },
+            AppAction::VotePoll {
+                room_id: id(),
+                message_id: id(),
+                option_id: id(),
+            },
+            AppAction::DownloadAttachment {
+                room_id: id(),
+                message_id: id(),
+                attachment_id: id(),
+            },
+            AppAction::BeginDownloadAttachment {
+                room_id: id(),
+                message_id: id(),
+                attachment_id: id(),
+            },
+            AppAction::LoadOlderMessages {
+                room_id: id(),
+                before_message_id: id(),
+                limit: 10,
+            },
+            AppAction::ReactToMessage {
+                room_id: id(),
+                message_id: id(),
+                emoji: "+".to_owned(),
+            },
+            AppAction::MarkRoomRead { room_id: id() },
+            AppAction::RetryMessage {
+                room_id: id(),
+                message_id: id(),
+            },
+            AppAction::SetTyping {
+                room_id: id(),
+                is_typing: true,
+            },
+            AppAction::RefreshDevices,
+            AppAction::RevokeDevice {
+                account_id: id(),
+                device_id: id(),
+            },
+            AppAction::SetPushToken { token: text() },
+            AppAction::RemovePushToken,
+        ];
+        for action in &actions {
+            let expected = match action {
+                AppAction::StartRuntime => CommandClass::Writer,
+                AppAction::StopRuntime => CommandClass::Writer,
+                AppAction::OpenRoom { .. } => CommandClass::Writer,
+                AppAction::OpenTopic { .. } => CommandClass::Writer,
+                AppAction::OpenChat { .. } => CommandClass::Writer,
+                AppAction::PairAgent { .. } => CommandClass::Writer,
+                AppAction::StartHomeChat { .. } => CommandClass::Writer,
+                AppAction::RenameChat { .. } => CommandClass::Writer,
+                AppAction::SetChatArchived { .. } => CommandClass::Writer,
+                AppAction::CreateRoom { .. } => CommandClass::Writer,
+                AppAction::CreateTopic { .. } => CommandClass::Writer,
+                AppAction::StartTopicChat { .. } => CommandClass::Writer,
+                AppAction::SaveProfile { .. } => CommandClass::Writer,
+                AppAction::UploadImage { .. } => CommandClass::Writer,
+                AppAction::SaveRoomMetadata { .. } => CommandClass::Writer,
+                AppAction::StartProfileChat { .. } => CommandClass::Writer,
+                AppAction::StartGroupChat { .. } => CommandClass::Writer,
+                AppAction::AddRoomMembers { .. } => CommandClass::Writer,
+                AppAction::ScanTarget { .. } => CommandClass::Writer,
+                AppAction::SendMessage { .. } => CommandClass::Writer,
+                AppAction::SendTopicMessage { .. } => CommandClass::Writer,
+                AppAction::SendChatMessage { .. } => CommandClass::Writer,
+                AppAction::SendReply { .. } => CommandClass::Writer,
+                AppAction::SendChatReply { .. } => CommandClass::Writer,
+                AppAction::SendAttachment { .. } => CommandClass::Writer,
+                AppAction::SendAttachments { .. } => CommandClass::Writer,
+                AppAction::SendChatAttachment { .. } => CommandClass::Writer,
+                AppAction::SendChatAttachments { .. } => CommandClass::Writer,
+                AppAction::SendPoll { .. } => CommandClass::Writer,
+                AppAction::SendChatPoll { .. } => CommandClass::Writer,
+                AppAction::VotePoll { .. } => CommandClass::Writer,
+                AppAction::DownloadAttachment { .. } => CommandClass::Writer,
+                AppAction::BeginDownloadAttachment { .. } => CommandClass::Writer,
+                AppAction::LoadOlderMessages { .. } => CommandClass::Writer,
+                AppAction::ReactToMessage { .. } => CommandClass::Writer,
+                AppAction::MarkRoomRead { .. } => CommandClass::Writer,
+                AppAction::RetryMessage { .. } => CommandClass::Writer,
+                AppAction::SetTyping { .. } => CommandClass::Writer,
+                AppAction::RefreshDevices => CommandClass::Writer,
+                AppAction::RevokeDevice { .. } => CommandClass::Writer,
+                AppAction::SetPushToken { .. } => CommandClass::Writer,
+                AppAction::RemovePushToken => CommandClass::Writer,
+            };
+            assert_eq!(action.command_class(), expected, "{action:?}");
+        }
     }
 
     /// Snapshot a data dir's client store through the SQLite backup API

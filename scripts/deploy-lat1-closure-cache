@@ -93,6 +93,13 @@ echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
 
+if git cat-file -e "$REV:infra/nixos/modules/metrics.nix" 2>/dev/null \
+  && git grep -q 'FINITE_LOGS_WRITE_PASSWORD' "$REV" -- infra/nixos/modules/metrics.nix; then
+  echo "==> verifying lat1 host-local monitoring secrets"
+  ssh -o BatchMode=yes "$LAT1" \
+    'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+fi
+
 # Deploys are when the Hosted Web Chat + Identity recovery snapshot happens
 # (no calendar timer since 2026-07-14): capture pre-upgrade state while a
 # service blip is expected.
@@ -158,6 +165,95 @@ PROFILE="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /nix/var/nix/profiles/sys
 ACTUAL="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /run/current-system)"
 test "$PROFILE" = "$SYSTEM"
 test "$ACTUAL" = "$SYSTEM"
+
+# Twice in production (2026-08-18 and 2026-08-20) the switch left long-running
+# services on their OLD store-path binaries: the switch stops a unit, an
+# external healthcheck/watchdog restarts it with the old binary in the gap
+# before activation, and the switch then sees the unit already running and
+# skips starting the new one. Profile/current-system path equality and
+# is-active cannot see this — the unit is active, the system path is new, but
+# the running process is old. Compare each service's resolved running exe
+# against the ExecStart binary of its NEW unit file.
+echo "==> verifying service binaries match the new closure"
+ssh -o BatchMode=yes "$LAT1" \
+  bash -s -- "$SYSTEM" <<'VERIFY'
+set -euo pipefail
+system="$1"
+[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
+
+# Long-running units whose running binary must come from the new closure.
+long_running=(
+  finite-saas-core
+  finitechat-server
+  finitechat-hosted-device
+  finite-brain-app
+  finite-saas-sites
+  finite-identity
+)
+# finite-saas-runner is a timer-driven run-once (Type=oneshot, no persistent
+# MainPID), so the stale-running-exe race does not apply; instead prove its
+# ExecStart store path is part of the new system closure.
+run_once=(finite-saas-runner)
+
+# The switch reloads systemd, so post-switch `systemctl cat` already reflects
+# the NEW unit files (including drop-in overrides); the failure we guard
+# against is in the RUNNING process, not the unit file. The last non-empty
+# ExecStart wins, matching systemd override semantics.
+expected_exe() {
+  local unit="$1" line token
+  line="$(systemctl cat "$unit" | sed -n 's/^ExecStart=//p' | sed '/^[[:space:]]*$/d' | tail -n 1)"
+  [[ -n "$line" ]] || { echo "verify: $unit has no ExecStart" >&2; return 1; }
+  token="${line%%[[:space:]]*}"
+  # Strip systemd ExecStart prefix modifiers (@ - : + !).
+  while [[ -n "$token" && "${token:0:1}" != "/" ]]; do token="${token:1}"; done
+  [[ "$token" == /nix/store/* ]] || {
+    echo "verify: $unit ExecStart is not a store path: $line" >&2
+    return 1
+  }
+  readlink -f "$token"
+}
+
+running_exe() {
+  local unit="$1" pid
+  pid="$(systemctl show --property=MainPID --value "$unit")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || {
+    echo "verify: $unit has no running main process (MainPID=$pid)" >&2
+    return 1
+  }
+  readlink -f "/proc/$pid/exe"
+}
+
+for unit in "${long_running[@]}"; do
+  expected="$(expected_exe "$unit")"
+  running="$(running_exe "$unit")"
+  status=OK
+  if [[ "$running" != "$expected" ]]; then
+    echo "verify: $unit running stale binary $running (expected $expected); restarting" >&2
+    systemctl restart "$unit"
+    systemctl is-active --quiet "$unit"
+    running="$(running_exe "$unit")"
+    if [[ "$running" != "$expected" ]]; then
+      echo "DEPLOY FAILED: $unit still runs a stale binary after restart" >&2
+      echo "  running:  $running" >&2
+      echo "  expected: $expected" >&2
+      exit 1
+    fi
+    status=RESTARTED
+  fi
+  echo "verify: unit=$unit exe=$expected status=$status"
+done
+
+for unit in "${run_once[@]}"; do
+  expected="$(expected_exe "$unit")"
+  store_path="$(echo "$expected" | cut -d/ -f1-4)"
+  if ! nix-store -qR "$system" | grep -qxF "$store_path"; then
+    echo "DEPLOY FAILED: $unit ExecStart $store_path is not in the new system closure $system" >&2
+    exit 1
+  fi
+  echo "verify: unit=$unit exe=$expected status=OK"
+done
+VERIFY
+
 ssh -n -o BatchMode=yes "$LAT1" systemctl stop "$UNIT"
 ssh -n -o BatchMode=yes "$LAT1" \
   'systemctl is-active finite-saas-core podman-finite-saas-dashboard >/dev/null'

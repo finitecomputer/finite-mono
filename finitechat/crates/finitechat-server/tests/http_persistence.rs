@@ -15,6 +15,7 @@ use finitechat_http::{
     CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
     ExpireKeyPackageLeaseResponse, FailPushWakeRequest, FailPushWakeResponse,
     FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
+    GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
     GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
     GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest,
     HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
@@ -4719,6 +4720,31 @@ async fn sqlite_ephemeral_activity_over_http_authorizes_members_and_bounds_cache
         );
     }
 
+    // Eviction is per route and drops the oldest record first; the response
+    // stays sorted by received_at_ms.
+    let response = post_json(
+        app.clone(),
+        "/activities/get",
+        &GetEphemeralActivitiesRequest {
+            room_id: room_id.clone(),
+            conversation_id: Some("topic-route".to_owned()),
+            requester: alice.clone(),
+            now_ms: 2_000,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let activities: GetEphemeralActivitiesResponse = read_json(response).await;
+    let received: Vec<u64> = activities
+        .records
+        .iter()
+        .map(|record| record.received_at_ms)
+        .collect();
+    let expected: Vec<u64> = (1..=MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE)
+        .map(|index| 2_000 + u64::from(index))
+        .collect();
+    assert_eq!(received, expected);
+
     revoke_device(&app, &bob).await;
     let response = post_json(
         app.clone(),
@@ -4745,6 +4771,160 @@ async fn sqlite_ephemeral_activity_over_http_authorizes_members_and_bounds_cache
     let page: HttpSyncPage = read_json(response).await;
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.next_after_seq, 1);
+}
+
+#[tokio::test]
+async fn sqlite_ephemeral_activity_query_spans_routes_and_prunes_queried_room() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let room_id = "room-ephemeral-activity-query".to_owned();
+    let mls_group_id = "mls-ephemeral-activity-query".to_owned();
+    let other_room_id = "room-ephemeral-activity-query-other".to_owned();
+    let other_mls_group_id = "mls-ephemeral-activity-query-other".to_owned();
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let add_bob = submit_add_device_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-ephemeral-query-bob",
+        "commit-ephemeral-query-bob",
+    );
+    let app = persistent_app(&db_path);
+
+    for (room_id, mls_group_id) in [
+        (room_id.clone(), mls_group_id.clone()),
+        (other_room_id.clone(), other_mls_group_id.clone()),
+    ] {
+        let response = post_json(
+            app.clone(),
+            "/account-rooms/bootstrap",
+            &BootstrapAccountRoomRequest {
+                room_id,
+                mls_group_id,
+                creator: alice.clone(),
+                protocol: RoomProtocol::default(),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    publish_and_claim_key_package_for_add(&app, &add_bob).await;
+    let response = post_json(app.clone(), "/commits", &add_bob).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = post_json(
+        app.clone(),
+        "/welcomes/claim",
+        &ClaimWelcomesRequest {
+            recipient: member_for_device(&bob),
+            limit: 10,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed: Vec<HttpClaimedWelcome> = read_json(response).await;
+    assert_eq!(claimed.len(), 1);
+    let response = post_json(
+        app.clone(),
+        "/welcomes/ack",
+        &AckWelcomeRequest {
+            message_id: id("welcome-ephemeral-query-bob"),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Two routes (senders) in one room+conversation; each sender's first
+    // record is expired at query time.
+    for (sender, received_at_ms) in [
+        (&alice, 1_000),
+        (&bob, 1_500),
+        (&alice, 4_100),
+        (&alice, 4_500),
+        (&bob, 4_500),
+    ] {
+        let response = post_json(
+            app.clone(),
+            "/activities",
+            &ephemeral_activity_request(
+                &room_id,
+                &mls_group_id,
+                sender,
+                1,
+                Some("topic-shared"),
+                received_at_ms,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    // Same room, room-wide route: never part of the conversation query.
+    let response = post_json(
+        app.clone(),
+        "/activities",
+        &ephemeral_activity_request(&room_id, &mls_group_id, &alice, 1, None, 4_200),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // Other room: expired at the same query instant, but pruned only by a
+    // query against its own room.
+    let response = post_json(
+        app.clone(),
+        "/activities",
+        &ephemeral_activity_request(&other_room_id, &other_mls_group_id, &alice, 0, None, 1_000),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = post_json(
+        app.clone(),
+        "/activities/get",
+        &GetEphemeralActivitiesRequest {
+            room_id: room_id.clone(),
+            conversation_id: Some("topic-shared".to_owned()),
+            requester: alice.clone(),
+            now_ms: 5_000,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let activities: GetEphemeralActivitiesResponse = read_json(response).await;
+    let observed: Vec<(DeviceRef, u64)> = activities
+        .records
+        .iter()
+        .map(|record| (record.sender.clone(), record.received_at_ms))
+        .collect();
+    assert_eq!(
+        observed,
+        vec![
+            (alice.clone(), 4_100),
+            (alice.clone(), 4_500),
+            (bob.clone(), 4_500)
+        ]
+    );
+
+    // The first query pruned only its own room: the other room's record,
+    // expired at the same instant, is still cached and still served.
+    let response = post_json(
+        app,
+        "/activities/get",
+        &GetEphemeralActivitiesRequest {
+            room_id: other_room_id.clone(),
+            conversation_id: None,
+            requester: alice.clone(),
+            now_ms: 1_500,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let activities: GetEphemeralActivitiesResponse = read_json(response).await;
+    let observed: Vec<(DeviceRef, u64)> = activities
+        .records
+        .iter()
+        .map(|record| (record.sender.clone(), record.received_at_ms))
+        .collect();
+    assert_eq!(observed, vec![(alice.clone(), 1_000)]);
 }
 
 #[tokio::test]
@@ -4975,6 +5155,77 @@ async fn sqlite_nostr_profile_cache_rejects_invalid_records_without_side_effects
                 fetched_at_ms: 1_000,
                 expires_at_ms: 2_000,
             },
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app,
+        "/profiles/nostr/get",
+        &GetNostrProfilesRequest {
+            account_ids: vec![account_id],
+            now_ms: 1_500,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let profiles: GetNostrProfilesResponse = read_json(response).await;
+    assert!(profiles.profiles.is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_nostr_profile_cache_rejects_invalid_metadata_json_without_side_effects() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let app = persistent_app(&db_path);
+    let account_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+
+    let profile = |metadata_json: String| NostrProfileRecord {
+        account_id: account_id.clone(),
+        name: Some("alice".to_owned()),
+        display_name: None,
+        about: None,
+        picture: None,
+        bot: None,
+        finite_role: None,
+        metadata_json: Some(metadata_json),
+        fetched_at_ms: 1_000,
+        expires_at_ms: 2_000,
+    };
+
+    let oversized = format!(r#"{{"big":"{}"}}"#, "x".repeat(16 * 1024));
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile(oversized),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile("not json".to_owned()),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = read_json(response).await;
+    assert_eq!(error.kind, "invalid_nostr_profile_request");
+
+    let response = post_json(
+        app.clone(),
+        "/profiles/nostr",
+        &PutNostrProfileRequest {
+            profile: profile(r#"["not","an","object"]"#.to_owned()),
         },
     )
     .await;

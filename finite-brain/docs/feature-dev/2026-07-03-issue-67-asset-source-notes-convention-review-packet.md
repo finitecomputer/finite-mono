@@ -18,7 +18,7 @@ agent-readable handles for those Assets.
 - `crates/finite-brain-cli/src/sync_engine.rs`
 - `crates/finite-brain-server/src/product-client.js`
 - `crates/finite-brain-server/src/product-client.test.js`
-- `skills/finitebrain/SKILL.md`
+- `skills/finitebrain/SKILL.md` (now `finite-skills/skills/software-development/finitebrain/SKILL.md`)
 
 ## Review Focus
 

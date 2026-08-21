@@ -61,11 +61,11 @@ test("device enrollment accepts only the exact encrypted resume grant shape", ()
   );
 });
 
-test("only throttling and server failures retry durable dashboard enrollment", () => {
-  for (const status of [429, 500, 502, 503, 599]) {
+test("route skew, throttling, and server failures retry durable dashboard enrollment", () => {
+  for (const status of [404, 429, 500, 502, 503, 599]) {
     assert.equal(retryableDashboardStatus(status), true, `${status} retries`);
   }
-  for (const status of [0, 200, 400, 401, 403, 404, 409, 410, 600, "503"]) {
+  for (const status of [0, 200, 400, 401, 403, 409, 410, 600, "503"]) {
     assert.equal(retryableDashboardStatus(status), false, `${status} is terminal`);
   }
 });

@@ -1,4 +1,4 @@
-# Shared, loopback-only Prometheus transport for the monitoring MVP.
+# Shared, loopback-only Prometheus/Loki transport for the monitoring MVP.
 {
   config,
   lib,
@@ -13,6 +13,86 @@ let
       config.finite.secrets.files."metrics-remote-write".path
     else
       "/etc/finite/metrics-remote-write.env";
+  logsWriteEnvironmentFile =
+    if builtins.hasAttr "logs-write" config.finite.secrets.files then
+      config.finite.secrets.files."logs-write".path
+    else
+      "/etc/finite/logs-write.env";
+  allowedMetricNamesRegex = lib.concatStringsSep "|" [
+    "finite_component_build_info"
+    "finite_component_version_mismatch"
+    "finite_component_version_mismatched_active_agents"
+    "finite_healthcheck_success"
+    "finite_runtime_artifact_active_agents"
+    "finite_runtime_artifact_info"
+    "finite_service_health_status"
+    "node_cpu_seconds_total"
+    "node_disk_io_time_seconds_total"
+    "node_disk_read_bytes_total"
+    "node_disk_written_bytes_total"
+    "node_filesystem_avail_bytes"
+    "node_filesystem_readonly"
+    "node_filesystem_size_bytes"
+    "node_load1"
+    "node_load5"
+    "node_load15"
+    "node_memory_MemAvailable_bytes"
+    "node_memory_MemTotal_bytes"
+    "node_memory_SwapFree_bytes"
+    "node_memory_SwapTotal_bytes"
+    "node_network_receive_bytes_total"
+    "node_network_receive_errs_total"
+    "node_network_transmit_bytes_total"
+    "node_network_transmit_errs_total"
+    "node_textfile_mtime_seconds"
+    "node_textfile_scrape_error"
+    "up"
+  ];
+  journalSourceFor = index: unit: ''
+    loki.source.journal "finite_unit_${toString index}" {
+      forward_to    = [loki.write.finite_monitoring_logs.receiver]
+      matches       = ${builtins.toJSON "_SYSTEMD_UNIT=${unit}"}
+      max_age       = "10m"
+      relabel_rules = loki.relabel.finite_journal.rules
+      labels        = {
+        host = ${builtins.toJSON config.networking.hostName},
+        role = ${builtins.toJSON cfg.logRole},
+      }
+    }
+  '';
+  journalSources = lib.concatStringsSep "\n" (
+    builtins.genList (index: journalSourceFor index (builtins.elemAt cfg.journalLogUnits index)) (
+      builtins.length cfg.journalLogUnits
+    )
+  );
+  logPipeline = lib.optionalString (cfg.journalLogUnits != [ ]) ''
+    loki.relabel "finite_journal" {
+      forward_to = []
+
+      rule {
+        source_labels = ["__journal__systemd_unit"]
+        target_label  = "unit"
+      }
+
+      rule {
+        source_labels = ["__journal_priority_keyword"]
+        target_label  = "priority"
+      }
+    }
+
+    ${journalSources}
+
+    loki.write "finite_monitoring_logs" {
+      endpoint {
+        url = "https://metrics-ingest.finite.computer/loki/api/v1/push"
+
+        basic_auth {
+          username = sys.env("FINITE_LOGS_WRITE_USERNAME")
+          password = sys.env("FINITE_LOGS_WRITE_PASSWORD")
+        }
+      }
+    }
+  '';
   staticMetrics = pkgs.writeText "finite-version-static.prom" cfg.staticVersionMetrics;
   runtimeMetrics =
     pkgs.runCommand "finite-runtime-metrics" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
@@ -38,6 +118,22 @@ in
       default = false;
       description = "Collect Core-recorded Runtime artifact metrics on this host.";
     };
+    logsWriteEnvironmentFile = lib.mkOption {
+      type = lib.types.str;
+      default = logsWriteEnvironmentFile;
+      readOnly = true;
+      description = "Resolved environment file holding the Loki write credential.";
+    };
+    logRole = lib.mkOption {
+      type = lib.types.str;
+      default = config.networking.hostName;
+      description = "Low-cardinality role label applied to forwarded journald logs.";
+    };
+    journalLogUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Explicit systemd unit allowlist for journald log shipping.";
+    };
   };
 
   config = lib.mkIf cfg.enable (
@@ -62,7 +158,6 @@ in
 
         services.alloy = {
           enable = true;
-          environmentFile = metricsRemoteWriteEnvironmentFile;
           extraFlags = [ "--disable-reporting" ];
         };
         environment.etc."alloy/config.alloy".text = ''
@@ -84,7 +179,7 @@ in
             rule {
               action        = "keep"
               source_labels = ["__name__"]
-              regex         = "finite_component_build_info|finite_component_version_mismatch|finite_component_version_mismatched_active_agents|finite_healthcheck_success|finite_runtime_artifact_active_agents|finite_runtime_artifact_info|finite_service_health_status|node_textfile_mtime_seconds|node_textfile_scrape_error|up"
+              regex         = "${allowedMetricNamesRegex}"
             }
           }
 
@@ -98,11 +193,34 @@ in
               }
             }
           }
+          ${logPipeline}
         '';
         systemd.services.alloy = {
           after = [ "prometheus-node-exporter.service" ];
           wants = [ "prometheus-node-exporter.service" ];
+          serviceConfig = {
+            EnvironmentFile = [
+              metricsRemoteWriteEnvironmentFile
+            ]
+            ++ lib.optional (cfg.journalLogUnits != [ ]) cfg.logsWriteEnvironmentFile;
+            SupplementaryGroups = [
+              "adm"
+              "systemd-journal"
+            ];
+          };
         };
+
+        assertions = [
+          {
+            assertion = cfg.journalLogUnits == lib.unique cfg.journalLogUnits;
+            message = "finite.metrics.journalLogUnits must not contain duplicates";
+          }
+          {
+            assertion =
+              cfg.journalLogUnits == [ ] || cfg.logsWriteEnvironmentFile != metricsRemoteWriteEnvironmentFile;
+            message = "finite.metrics logs must use a separate Loki credential file";
+          }
+        ];
       }
       (lib.mkIf cfg.collectRuntimeArtifacts {
         systemd.services.finite-runtime-metrics = {

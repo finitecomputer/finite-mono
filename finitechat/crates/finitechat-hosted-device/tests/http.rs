@@ -726,6 +726,130 @@ async fn encrypted_enrollment_capability_resumes_after_grant_expiry_without_work
     assert!(!record_path.exists());
 }
 
+#[tokio::test]
+async fn completed_but_expired_device_link_is_expired_on_every_entry_path() {
+    let root = TempDir::new().unwrap();
+    let user_id = "user_pairing_completed_expired";
+    let pairing_session_id = "pair-completed-expired";
+    let target_device_id = "ios-completed-expired";
+    let capability_hex = "11".repeat(32);
+    let issued = test_now_unix_seconds();
+    let enrollment_expiry = issued + 7 * 24 * 60 * 60;
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("completed-expired-hosted"),
+        server_url: "http://127.0.0.1:9".to_owned(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    // Stage the exact persisted shape both entry paths admit: a well-formed
+    // record whose terminal completion was written inside its TTL. Neither
+    // expiry arm opens the sealed state, so an opaque placeholder keeps this
+    // probe focused on admission ordering rather than pairing cryptography.
+    let record_path = device_link_record_path(&config.data_root, user_id, pairing_session_id);
+    fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+    fs::write(
+        &record_path,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "pairing_session_id": pairing_session_id,
+            "target_device_id": target_device_id,
+            "target_public_key": "22".repeat(32),
+            "source_public_key": "33".repeat(32),
+            "account_id": "acct-completed-expired",
+            "server_url": PUBLIC_SERVER_URL,
+            "issued_at_unix_seconds": issued,
+            "expires_at_unix_seconds": issued + 120,
+            "sealed_state": "admission-ordering-probe",
+            "fanout_id": format!("device-link-{}", "44".repeat(20)),
+            "enrollment_capability_sha256": hex::encode(sha2::Sha256::digest(capability_hex.as_bytes())),
+            "enrollment_expires_at_unix_seconds": enrollment_expiry,
+            "enrollment_completion": {
+                "completed_at_unix_seconds": issued + 60,
+                "room_count": 1,
+                "active_room_count": 1,
+                "bootstrap_manifests": [],
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Inside the TTL both entry paths replay the durable terminal result:
+    // reconcile reports Ready and the capability resume returns the same
+    // Ready, without any pairing-service round-trip.
+    let live = app_with_fixed_device_link_now(config.clone(), issued + 300);
+    let status = device_link_for(
+        live.clone(),
+        user_id,
+        "/v1/device-links/status",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status: Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status["status"], "ready");
+    assert_eq!(status["room_count"], 1);
+    let resumed = device_enrollment_json(
+        live,
+        pairing_session_id,
+        target_device_id,
+        user_id,
+        &capability_hex,
+    )
+    .await;
+    assert_eq!(resumed["status"], "ready");
+    assert_eq!(resumed["room_count"], 1);
+
+    // Once the TTL passes, expiry dominates completion identically on both
+    // entry paths: reconcile reports Expired, the capability resume is
+    // NotFound, and the authenticated resume removes the tombstone so a later
+    // status poll agrees the link is gone.
+    let expired = app_with_fixed_device_link_now(config, enrollment_expiry + 1);
+    let status = device_link_for(
+        expired.clone(),
+        user_id,
+        "/v1/device-links/status",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status: Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        status["status"], "expired",
+        "reconcile must not report a completed-but-expired link as ready"
+    );
+    let resumed = device_enrollment_for(
+        expired.clone(),
+        pairing_session_id,
+        target_device_id,
+        user_id,
+        &capability_hex,
+    )
+    .await;
+    assert_eq!(
+        resumed.status(),
+        StatusCode::NOT_FOUND,
+        "resume must not admit a completed-but-expired link"
+    );
+    assert!(
+        !record_path.exists(),
+        "the authenticated expired resume removes the exact tombstone"
+    );
+    let status = device_link_for(
+        expired,
+        user_id,
+        "/v1/device-links/status",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn device_reconciliation_requires_the_sealed_project_binding_and_resumes_fanout() {
     let root = TempDir::new().unwrap();

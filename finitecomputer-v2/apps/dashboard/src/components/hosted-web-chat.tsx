@@ -71,9 +71,9 @@ import {
   useBrainApprovalDetails,
 } from "@/components/brain-action-cards";
 import {
-  parseApproveQuestion,
-  parseApproveResponse,
+  decodeApproveEnvelope,
   type BrainApproveChoice,
+  type BrainApproveEnvelope,
 } from "@/lib/brain-approval-metadata";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
@@ -281,32 +281,41 @@ export function HostedWebChat({
     () => transcriptItems(messages, state?.identity.account_id ?? null),
     [messages, state?.identity.account_id]
   );
-  // Approval questions anchor to the agent messages carrying them; the
-  // referenced request ids are the only server fetch trigger (no polling).
+  // Approval questions anchor to the agent messages carrying them. Each
+  // message's approval envelope decodes once per state version; the map feeds
+  // the request-id fetch trigger, the resolution lookup, and the cards.
+  const approveEnvelopes = useMemo(() => {
+    const decoded = new Map<string, BrainApproveEnvelope>();
+    for (const message of messages) {
+      decoded.set(message.message_id, decodeApproveEnvelope(message));
+    }
+    return decoded;
+  }, [messages]);
+  // The referenced request ids are the only server fetch trigger (no polling).
   const approvalRequestIds = useMemo(
     () =>
       Array.from(
         new Set(
-          messages.flatMap((message) =>
-            (parseApproveQuestion(message)?.requests ?? []).map((reference) => reference.requestId)
+          Array.from(approveEnvelopes.values()).flatMap((envelope) =>
+            (envelope.question?.requests ?? []).map((reference) => reference.requestId)
           )
         )
       ),
-    [messages]
+    [approveEnvelopes]
   );
   const approvalDetails = useBrainApprovalDetails(approvalRequestIds);
   const approvalResolutions = useMemo(() => {
     const resolved = new Map<string, BrainApproveChoice>();
     for (const message of messages) {
       if (!message.is_mine) continue;
-      const response = parseApproveResponse(message);
+      const response = approveEnvelopes.get(message.message_id)?.response;
       if (!response) continue;
       for (const reference of response.requests) {
         resolved.set(reference.requestId, response.choice);
       }
     }
     return resolved;
-  }, [messages]);
+  }, [approveEnvelopes, messages]);
   const liveMembers = useMemo(
     () => {
       if (!selectedRoom || !selectedTopic || !selectedChat) return [];
@@ -995,6 +1004,7 @@ export function HostedWebChat({
                           {selectedRoom ? (
                             <BrainApprovalCards
                               message={item.message}
+                              envelope={approveEnvelopes.get(item.message.message_id) ?? null}
                               details={approvalDetails}
                               resolution={approvalResolutions}
                               onSendChoice={

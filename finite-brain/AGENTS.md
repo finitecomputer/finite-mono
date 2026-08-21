@@ -14,11 +14,13 @@ Use the default Matt Pocock skill label vocabulary. See `docs/agents/triage-labe
 
 This is a single-context repo: read root `CONTEXT.md` and root `docs/adr/` when present. See `docs/agents/domain.md`.
 
-### Packaged FiniteBrain agent skill
+### FiniteBrain agent skill
 
-The repo-packaged FiniteBrain agent skill lives at `skills/finitebrain/SKILL.md`.
-Keep it aligned with `fbrain` CLI ergonomics and Brain Working Tree conventions
-until it moves into the shared `finite-skills` packaging path.
+The FiniteBrain agent skill has one source:
+`finite-skills/skills/software-development/finitebrain/SKILL.md` (monorepo
+root). There is no component-local copy. Keep it aligned with `fbrain` CLI
+ergonomics and Brain Working Tree conventions; `just skills check` and the
+`finite-brain-cli` tests validate it.
 
 ### Asset source notes
 

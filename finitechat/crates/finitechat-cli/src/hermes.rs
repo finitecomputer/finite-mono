@@ -35,22 +35,24 @@ use finitechat_blob::{
     prepare_blossom_download_http_request, sha256_hex,
 };
 use finitechat_client::{
-    FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, ReqwestHttpRuntimeTransport,
-    SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent, StoredAppRoom, StoredAppRoomState,
+    ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
+    ReqwestHttpRuntimeTransport, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
+    StoredAppMessage, StoredAppRoom, StoredAppRoomState,
 };
 use finitechat_core::{
     AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, ChatMediaKind,
     FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
-    HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
-    HermesMessageStatusV1, HermesMessageTypeV1, HermesPollEventV1, HermesSendRequestV1,
-    MAX_HERMES_METADATA_BYTES, MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
+    HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
+    HermesEditRequestV1, HermesMessagePayloadV1, HermesMessageStatusV1, HermesMessageTypeV1,
+    HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_METADATA_BYTES,
+    MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
 };
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
-    AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
+    AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DeviceRef, DurableAppEventKind,
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
     ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
     RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
@@ -1454,11 +1456,14 @@ fn cmd_room_status<W: Write>(
     let room_id = args.room_id;
 
     let home = load_home(home_dir)?;
-    // Read-only on purpose: a resident `hermes serve` owns the store's
-    // writer lease, and a status read must never sync or send. A one-shot
-    // StartRuntime against the resident service's store is exactly the
-    // ratchet-divergence incident this command used to cause.
-    let summary = read_only_room_status(&home, &room_id)?;
+    // Read-only on purpose, and typed that way: a resident `hermes serve`
+    // owns the store's writer lease, and a status read must never sync or
+    // send. `ReadOnlyAgentStore` can only be built from the read-only open,
+    // so this command cannot name the writer open — a one-shot StartRuntime
+    // against the resident service's store is exactly the ratchet-divergence
+    // incident this command used to cause.
+    let store = ReadOnlyAgentStore::open(&home.dir, &home.secret, &home.config.device_id)?;
+    let summary = read_only_room_status(&store, &home, &room_id)?;
 
     if json_mode {
         crate::write_pretty_json(output, &summary)
@@ -1481,10 +1486,10 @@ fn cmd_room_status<W: Write>(
 const ROOM_STATUS_MESSAGE_SCAN_LIMIT: u32 = 512;
 
 fn read_only_room_status(
+    store: &ReadOnlyAgentStore,
     home: &AgentHome,
     room_id: &str,
 ) -> Result<HermesRoomStatusSummary, CliError> {
-    let store = open_store_read_only(&home.dir, &home.secret, &home.config.device_id)?;
     let config = device_config(&home.secret, &home.config.device_id, now_secs());
     let device = store
         .load_device(config)
@@ -2196,9 +2201,24 @@ fn hermes_poll_event_from_chat_payload(
     payload: &[u8],
     typed_chat_message: bool,
 ) -> Result<Option<HermesPollEventV1>, CliError> {
-    if let Some(payload) = HermesMessagePayloadV1::decode(payload)
-        .map_err(|error| CliError::Hermes(error.to_string()))?
-    {
+    // Single JSON pass over the payload: parse once, dispatch on the "type"
+    // tag, and convert only the hermes form. Twin of the chat projection's
+    // resolve_chat_message_payload; the payload previously got one full Value
+    // parse per probe (the hermes decode, then the typed-JSON sniff).
+    let value = serde_json::from_slice::<Value>(payload).ok();
+    let payload_type = value
+        .as_ref()
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let decoded = match value {
+        Some(value) if payload_type.as_deref() == Some(HERMES_MESSAGE_PAYLOAD_TYPE_V1) => {
+            HermesMessagePayloadV1::decode_value(value)
+                .map_err(|error| CliError::Hermes(error.to_string()))?
+        }
+        _ => None,
+    };
+    if let Some(payload) = decoded {
         let mut event = payload.into_poll_event(
             context.room_id.to_owned(),
             context.seq,
@@ -2220,7 +2240,7 @@ fn hermes_poll_event_from_chat_payload(
         return Ok(Some(event));
     }
 
-    if typed_chat_message && payload_is_typed_json(payload) {
+    if typed_chat_message && payload_type.is_some() {
         return Ok(None);
     }
 
@@ -2522,13 +2542,6 @@ fn sanitized_attachment_filename(filename: &str) -> String {
     } else {
         sanitized
     }
-}
-
-fn payload_is_typed_json(payload: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(payload)
-        .ok()
-        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
-        .is_some()
 }
 
 fn encode_application_event(
@@ -3323,17 +3336,42 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
-/// Diagnostics-only store handle: never takes the writer lease and rejects
-/// every write, so it is safe alongside a resident `hermes serve`.
-fn open_store_read_only(
-    dir: &Path,
-    secret: &NostrSecretKey,
-    device_id: &str,
-) -> Result<SqliteClientStore, CliError> {
-    let options = SqliteClientStoreOptions::from_nostr_secret(secret, device_id)
-        .map_err(|error| CliError::Hermes(error.to_string()))?;
-    SqliteClientStore::open_read_only(dir.join(STORE_FILE), options)
-        .map_err(|error| CliError::Hermes(error.to_string()))
+/// The store handle for read-only status probes (the typed read/write
+/// command class at this dispatch boundary): constructible only through the
+/// read-only open mode, so a probe command cannot name the writer open —
+/// routing one through `open_store` is a compile error, not a convention
+/// slip. Never takes the writer lease, runs no migrations, and the store
+/// rejects any write through it, so it is safe alongside a resident
+/// `hermes serve` that owns the store.
+struct ReadOnlyAgentStore(SqliteClientStore);
+
+impl ReadOnlyAgentStore {
+    fn open(dir: &Path, secret: &NostrSecretKey, device_id: &str) -> Result<Self, CliError> {
+        let options = SqliteClientStoreOptions::from_nostr_secret(secret, device_id)
+            .map_err(|error| CliError::Hermes(error.to_string()))?;
+        SqliteClientStore::open_read_only(dir.join(STORE_FILE), options)
+            .map(Self)
+            .map_err(|error| CliError::Hermes(error.to_string()))
+    }
+
+    fn load_device(
+        &self,
+        config: FiniteChatDeviceConfig,
+    ) -> Result<FiniteChatDevice, ClientStoreError> {
+        self.0.load_device(config)
+    }
+
+    fn load_app_rooms(&self, owner: &DeviceRef) -> Result<Vec<StoredAppRoom>, ClientStoreError> {
+        self.0.load_app_rooms(owner)
+    }
+
+    fn load_app_messages(
+        &self,
+        owner: &DeviceRef,
+        limit: u32,
+    ) -> Result<Vec<StoredAppMessage>, ClientStoreError> {
+        self.0.load_app_messages(owner, limit)
+    }
 }
 
 fn device_config(
@@ -3957,6 +3995,61 @@ mod tests {
         .expect("typed plain-text chat is still bridge-visible");
         assert_eq!(event.text, "plain hello");
         assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+    }
+
+    #[test]
+    fn poll_decoder_degrades_malformed_json_payload_to_lossy_text() {
+        let home = tempfile::tempdir().unwrap();
+        let malformed = br#"{"type":"finitechat.hermes.message.v1","#.to_vec();
+        let wrapped = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: None,
+            segment_id: None,
+            payload: malformed.clone(),
+        };
+        let plaintext = serde_json::to_vec(&wrapped).unwrap();
+        let event = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
+                room_id: "room-main",
+                seq: 1,
+                message_id: "message-malformed",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &plaintext,
+        )
+        .unwrap()
+        .expect("malformed JSON degrades to lossy text like any plain payload");
+        assert_eq!(event.text, String::from_utf8(malformed).unwrap());
+        assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+
+        let wrapped_binary = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: None,
+            segment_id: None,
+            payload: vec![0xff, 0xfe],
+        };
+        let plaintext = serde_json::to_vec(&wrapped_binary).unwrap();
+        let event = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
+                room_id: "room-main",
+                seq: 2,
+                message_id: "message-binary",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &plaintext,
+        )
+        .unwrap();
+        assert!(event.is_none(), "non-UTF-8 payloads stay undeliverable");
     }
 
     #[test]

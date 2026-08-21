@@ -1,0 +1,17 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
+# Lists finitecomputer-v2 commands
+default:
+    just --list
+
+# Measured eight-H200 DeepSeek serving identity and scheduler contract.
+finite-private-deepseek-contract:
+    cd .. && python3 scripts/check_finite_private_deepseek_candidate.py
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_deepseek_candidate.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_ops.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_load_comparison.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_deepseek_v4_0731_quality.py'
+
+# Promotion-time form: the model image and MPK must already be immutable.
+finite-private-deepseek-release-contract:
+    cd .. && python3 scripts/check_finite_private_deepseek_candidate.py --release-ready

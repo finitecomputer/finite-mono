@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+finite-mail = { workspace = true }
 finitesites-proto = { path = "../finitesites-proto" }
 finitesites-blob = { path = "../finitesites-blob" }
 finitesites-store = { path = "../finitesites-store" }

@@ -188,6 +188,27 @@ pub struct ObjectDeleteRequest {
     pub tombstone_event: serde_json::Value,
 }
 
+/// Sync-record submission body: one typed parse at the route door, tagged on
+/// `recordType` with the object payload flattened in.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(tag = "recordType")]
+pub(crate) enum SyncRecordSubmitRequest {
+    #[serde(rename = "folder_object_revision", rename_all = "camelCase")]
+    FolderObjectRevision {
+        folder_id: String,
+        object_id: String,
+        #[serde(flatten)]
+        request: ObjectWriteRequest,
+    },
+    #[serde(rename = "folder_object_tombstone", rename_all = "camelCase")]
+    FolderObjectTombstone {
+        folder_id: String,
+        object_id: String,
+        #[serde(flatten)]
+        request: ObjectDeleteRequest,
+    },
+}
+
 /// Signed permanent deletion of one complete Folder subtree.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

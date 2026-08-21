@@ -51,6 +51,7 @@ impl BrainStore {
             revocations: 0,
         };
         for plan in &plans {
+            let departed = &plan.departed_npub;
             let inserted = tx.execute(
                 r#"
                 INSERT OR IGNORE INTO brain_principal_revocations (
@@ -131,47 +132,19 @@ impl BrainStore {
             }
             tx.execute(
                 "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
-                params![
-                    plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str()
-                ],
+                params![plan.brain_id.as_str(), departed.as_str()],
             )?;
             tx.execute(
                 "DELETE FROM personal_agents WHERE brain_id = ?1 AND agent_npub = ?2",
-                params![
-                    plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str()
-                ],
+                params![plan.brain_id.as_str(), departed.as_str()],
             )?;
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
-                params![
-                    plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str()
-                ],
+                params![plan.brain_id.as_str(), departed.as_str()],
             )?;
             tx.execute(
                 "DELETE FROM folder_key_grants WHERE brain_id = ?1 AND recipient_npub = ?2",
-                params![
-                    plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str()
-                ],
+                params![plan.brain_id.as_str(), departed.as_str()],
             )?;
             // Pending invitations for a permanently departed Principal can
             // never legitimately complete; revoke them with the access.
@@ -181,34 +154,16 @@ impl BrainStore {
                    AND (user_id = ?2 OR invited_email = ?4)",
                 params![
                     plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str(),
+                    departed.as_str(),
                     application.applied_at,
                     application.principal_ref.trim().to_ascii_lowercase(),
                 ],
             )?;
             tx.execute(
                 "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
-                params![
-                    plan.brain_id.as_str(),
-                    application
-                        .departed_npub
-                        .as_ref()
-                        .expect("plans only exist for resolved principals")
-                        .as_str()
-                ],
+                params![plan.brain_id.as_str(), departed.as_str()],
             )?;
-            pending_wraps::clear_pending_grant_wraps_for_recipient(
-                &tx,
-                &plan.brain_id,
-                application
-                    .departed_npub
-                    .as_ref()
-                    .expect("plans only exist for resolved principals"),
-            )?;
+            pending_wraps::clear_pending_grant_wraps_for_recipient(&tx, &plan.brain_id, departed)?;
         }
         tx.execute(
             "UPDATE brain_departure_fact_cursor SET last_applied_revision = ?1, updated_at = ?2 WHERE id = 1",
@@ -499,6 +454,7 @@ impl BrainStore {
         }
         Ok(DepartureRevocationPlan {
             brain_id: brain_id.clone(),
+            departed_npub: departed.clone(),
             pending_rotation_folders,
             mount_removals,
         })
@@ -508,6 +464,7 @@ impl BrainStore {
 #[derive(Debug)]
 struct DepartureRevocationPlan {
     brain_id: BrainId,
+    departed_npub: UserId,
     pending_rotation_folders: Vec<(FolderId, u32)>,
     mount_removals: Vec<DepartureMountRemoval>,
 }

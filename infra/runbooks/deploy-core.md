@@ -165,8 +165,7 @@ Fleet scope requires both `--roll-all` and an explicit
    public Core. Then use a canary Finite Private key from a mode-0600 env file
    to GET status and POST reset; never put the raw key in argv or logs.
 3. Units are up: `ssh root@64.34.82.77 'systemctl status finite-saas-core
-   finite-saas-dashboard'` (`podman-finite-saas-dashboard.service` for the
-   container unit name if querying journald).
+   podman-finite-saas-dashboard'`.
 4. Core still exposes no build fingerprint in its health payload. The
    authoritative identity check is therefore the exact comparison of
    `/run/current-system` to the prebuilt `SYSTEM` path in step 2; a generation

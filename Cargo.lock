@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "finite-brain-server",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "backon",
@@ -1102,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1116,13 +1116,14 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "axum",
  "base64",
  "finite-brain-core",
  "finite-brain-store",
+ "finite-mail",
  "finite-nostr",
  "http-body-util",
  "nostr",
@@ -1138,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "finite-brain-core",
  "rusqlite",
@@ -1157,6 +1158,7 @@ dependencies = [
  "base64",
  "bech32",
  "dirs",
+ "finite-mail",
  "fs4",
  "rusqlite",
  "secp256k1",
@@ -1168,6 +1170,17 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "finite-mail"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "ureq",
 ]
 
@@ -1426,6 +1439,7 @@ dependencies = [
  "finitechat-transport",
  "hex",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror",
 ]
@@ -1617,6 +1631,7 @@ version = "0.2.16"
 dependencies = [
  "axum",
  "base64",
+ "finite-mail",
  "finitesites-blob",
  "finitesites-engine",
  "finitesites-proto",

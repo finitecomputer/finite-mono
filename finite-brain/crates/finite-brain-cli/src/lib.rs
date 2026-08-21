@@ -593,19 +593,11 @@ fn daemon<W: Write>(
                 state.daemon.tick_count = 1;
                 state.daemon.watch_strategy = Some("manual-start".to_owned());
                 state.daemon.last_local_change_count = None;
-                match &sync_result {
-                    Ok(report) => {
-                        state.daemon.last_error = None;
-                        state.daemon.retry_backoff_millis = 0;
-                        state.sync.status = report.status.clone();
-                    }
-                    Err(error) => {
-                        state.daemon.failure_count = state.daemon.failure_count.saturating_add(1);
-                        state.daemon.last_error = Some(error.to_string());
-                        state.daemon.retry_backoff_millis = 0;
-                        state.sync.status = format!("blocked: {error}");
-                    }
-                }
+                state.daemon.retry_backoff_millis = 0;
+                state.record_sync_outcome(match &sync_result {
+                    Ok(report) => Ok(report.status.clone()),
+                    Err(error) => Err(error.to_string()),
+                });
                 state.add_activity(now, "daemon.started", "Agent Sync Daemon marked running");
                 Ok(())
             })?;
@@ -616,7 +608,7 @@ fn daemon<W: Write>(
                 state.daemon.state = DaemonRunState::Stopped;
                 state.daemon.retry_backoff_millis = 0;
                 state.daemon.watch_strategy = Some("stopped".to_owned());
-                state.sync.status = "paused".to_owned();
+                state.sync.status = AgentSyncStatus::Paused;
                 state.add_activity(now, "daemon.stopped", "Agent Sync Daemon marked stopped");
                 Ok(())
             })?;
@@ -643,19 +635,11 @@ fn daemon<W: Write>(
                 state.daemon.tick_count = state.daemon.tick_count.saturating_add(1);
                 state.daemon.watch_strategy = Some("manual-tick".to_owned());
                 state.daemon.last_local_change_count = None;
-                match &report {
-                    Ok(report) => {
-                        state.daemon.last_error = None;
-                        state.daemon.retry_backoff_millis = 0;
-                        state.sync.status = report.status.clone();
-                    }
-                    Err(error) => {
-                        state.daemon.failure_count = state.daemon.failure_count.saturating_add(1);
-                        state.daemon.last_error = Some(error.to_string());
-                        state.daemon.retry_backoff_millis = 0;
-                        state.sync.status = format!("blocked: {error}");
-                    }
-                }
+                state.daemon.retry_backoff_millis = 0;
+                state.record_sync_outcome(match &report {
+                    Ok(report) => Ok(report.status.clone()),
+                    Err(error) => Err(error.to_string()),
+                });
                 Ok(())
             })?;
             let report = report?;
@@ -1336,8 +1320,8 @@ fn run_brain_sync_worker(
     tree_env.cwd = path;
     run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, |notification| {
         let result = retry_transient_notification_work(&cancelled, || {
-            let paused_for_access =
-                read_agent_state(&tree_env.cwd)?.sync.status == "paused-access-revoked";
+            let paused_for_access = read_agent_state(&tree_env.cwd)?.sync.status
+                == AgentSyncStatus::PausedAccessRevoked;
             if paused_for_access && notification.reason == "local_updated" {
                 return Ok(());
             }
@@ -1446,11 +1430,14 @@ fn persist_brain_worker_outcome(
         }
         Err(error) => {
             let _ = mutate_agent_state(tree_env, |state, now| {
-                if state.sync.status != "paused-access-revoked" {
-                    state.sync.status = format!("blocked: {error}");
+                // An access-revoked pause is a deliberate state, not a sync
+                // failure: keep it instead of stomping it with `blocked`.
+                if state.sync.status != AgentSyncStatus::PausedAccessRevoked {
+                    state.record_sync_outcome(Err(error.clone()));
+                } else {
+                    state.daemon.failure_count = state.daemon.failure_count.saturating_add(1);
+                    state.daemon.last_error = Some(error.clone());
                 }
-                state.daemon.failure_count = state.daemon.failure_count.saturating_add(1);
-                state.daemon.last_error = Some(error.clone());
                 state.add_activity(
                     now,
                     "daemon.sync_blocked",
@@ -1557,7 +1544,7 @@ fn daemon_watch<W: Write>(
         state.daemon.retry_backoff_millis = 0;
         state.daemon.watch_strategy = Some(watch_strategy.to_owned());
         state.daemon.last_local_change_count = None;
-        state.sync.status = "watching".to_owned();
+        state.sync.status = AgentSyncStatus::Watching;
         state.search_lifecycle.semantic_refresh_pending = env.embedding_provider.is_some();
         state.add_activity(
             now,
@@ -1589,7 +1576,7 @@ fn daemon_watch<W: Write>(
     let mut skipped_ticks = 0_usize;
     let mut tick_backoff = daemon_watch_tick_backoff(poll);
     let mut retry_backoff_millis: u64 = 0;
-    let mut last_status = None::<String>;
+    let mut last_status = None::<AgentSyncStatus>;
     let mut last_error: Option<String>;
     loop {
         ticks += 1;
@@ -1647,7 +1634,7 @@ fn daemon_watch<W: Write>(
                     let error = error.to_string();
                     last_error = Some(error.clone());
                     mutate_agent_state(env, |state, now| {
-                        state.sync.status = format!("blocked: {error}");
+                        state.record_sync_outcome(Err(error.clone()));
                         state.add_activity(
                             now,
                             "daemon.watch.blocked",
@@ -1664,10 +1651,10 @@ fn daemon_watch<W: Write>(
             // failed syncs survives idle ticks (previously the reset here let
             // a persistently failing server be retried at the base rate
             // forever).
-            last_status = Some("idle-no-local-changes".to_owned());
+            last_status = Some(AgentSyncStatus::IdleNoLocalChanges);
             last_error = None;
             mutate_agent_state(env, |state, _| {
-                state.sync.status = "idle-no-local-changes".to_owned();
+                state.sync.status = AgentSyncStatus::IdleNoLocalChanges;
                 Ok(())
             })?;
         }
@@ -1737,8 +1724,12 @@ fn daemon_watch<W: Write>(
 
     let final_status = last_status
         .clone()
-        .or_else(|| last_error.as_ref().map(|error| format!("blocked: {error}")))
-        .unwrap_or_else(|| "idle".to_owned());
+        .or_else(|| {
+            last_error.as_ref().map(|error| AgentSyncStatus::Blocked {
+                reason: error.clone(),
+            })
+        })
+        .unwrap_or(AgentSyncStatus::Idle);
     mutate_agent_state(env, |state, now| {
         state.daemon.state = DaemonRunState::Stopped;
         state.daemon.failure_count = failures as u64;
@@ -1758,7 +1749,7 @@ fn daemon_watch<W: Write>(
         "ticks": ticks,
         "skippedTicks": skipped_ticks,
         "failures": failures,
-        "lastStatus": last_status,
+        "lastStatus": last_status.as_ref().map(AgentSyncStatus::to_string),
         "lastError": last_error,
         "watchStrategy": watch_strategy,
         "retryBackoffMillis": retry_backoff_millis,
@@ -2151,18 +2142,21 @@ fn open_brain<W: Write>(
             "working_tree.opened.sync"
         },
     ) {
-        Ok(report) => report.status,
+        Ok(report) => report.status.to_string(),
         Err(error) => {
+            let status = AgentSyncStatus::Blocked {
+                reason: error.to_string(),
+            };
             let mut state = read_agent_state(&path)?;
             let now = timestamp(env);
-            state.sync.status = format!("blocked: {error}");
+            state.sync.status = status.clone();
             state.add_activity(
                 now,
                 "sync.blocked",
                 format!("Automatic sync blocked: {error}"),
             );
             write_agent_state(&path, &state)?;
-            format!("blocked: {error}")
+            status.to_string()
         }
     };
     drop(working_tree_lock);
@@ -5482,15 +5476,13 @@ mod tests {
 
     #[test]
     fn packaged_cli_references_match_the_supported_auth_and_mount_surface() {
-        let component = include_str!("../../../skills/finitebrain/references/fbrain-cli.md");
-        let runtime = include_str!(
+        let reference = include_str!(
             "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
         );
-        assert_eq!(component, runtime);
-        assert!(component.contains("auth status|import [--file <path>]|login <email>|redeem"));
-        assert!(component.contains("mount offer create|list|inspect|revoke"));
-        assert!(component.contains("Only the old secret-bearing"));
-        assert!(!component.contains("`auth login` is legacy guidance"));
+        assert!(reference.contains("auth status|import [--file <path>]|login <email>|redeem"));
+        assert!(reference.contains("mount offer create|list|inspect|revoke"));
+        assert!(reference.contains("Only the old secret-bearing"));
+        assert!(!reference.contains("`auth login` is legacy guidance"));
     }
 
     fn start_malformed_collaboration_success_server(
@@ -8059,7 +8051,9 @@ mod tests {
         let old_body = fs::read_to_string(&agent_state_path).unwrap();
         let mut old_handle = fs::File::open(&agent_state_path).unwrap();
         let mut state = read_agent_state(&tree).unwrap();
-        state.sync.status = "atomic-replacement".to_owned();
+        state.sync.status = AgentSyncStatus::Blocked {
+            reason: "atomic-replacement".to_owned(),
+        };
 
         write_agent_state(&tree, &state).unwrap();
 
@@ -8109,6 +8103,91 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
         assert_eq!(rewritten[legacy_brain_id_field], "brain");
         assert!(rewritten.get("brainId").is_none());
+    }
+
+    #[test]
+    fn daemon_status_classifies_every_sync_status_variant() {
+        let cases: [(AgentSyncStatus, &str, &str); 11] = [
+            (AgentSyncStatus::Idle, "running", "stopped"),
+            (AgentSyncStatus::Paused, "running", "stopped"),
+            (AgentSyncStatus::PausedAccessRevoked, "paused", "paused"),
+            (
+                AgentSyncStatus::Reconnecting,
+                "reconnecting",
+                "reconnecting",
+            ),
+            (AgentSyncStatus::Watching, "running", "stopped"),
+            (AgentSyncStatus::IdleNoLocalChanges, "running", "stopped"),
+            (AgentSyncStatus::CaughtUp, "running", "stopped"),
+            (AgentSyncStatus::PushedLocalChanges, "running", "stopped"),
+            (AgentSyncStatus::AppliedRemoteRecords, "running", "stopped"),
+            // Success-class despite the `blocked-` prefix in its legacy
+            // spelling: never classified as blocked (the old
+            // `starts_with("blocked")` reader did exactly that).
+            (AgentSyncStatus::BlockedLocalConflicts, "running", "stopped"),
+            (
+                AgentSyncStatus::Blocked {
+                    reason: "sync failed".to_owned(),
+                },
+                "blocked",
+                "blocked",
+            ),
+        ];
+        for (status, when_running, when_stopped) in cases {
+            let mut state = AgentState::new("brain", "2026-08-20T00:00:00Z");
+            state.sync.status = status;
+            assert_eq!(daemon_status_from_state(&state, true).state, when_running);
+            assert_eq!(daemon_status_from_state(&state, false).state, when_stopped);
+        }
+    }
+
+    #[test]
+    fn daemon_status_notification_precedence_outranks_blocked() {
+        let mut state = AgentState::new("brain", "2026-08-20T00:00:00Z");
+        state.sync.status = AgentSyncStatus::Blocked {
+            reason: "sync failed".to_owned(),
+        };
+        state.daemon.notification_status = Some("reconnecting".to_owned());
+        assert_eq!(daemon_status_from_state(&state, true).state, "reconnecting");
+        state.daemon.notification_status = Some("unsupported".to_owned());
+        assert_eq!(daemon_status_from_state(&state, true).state, "degraded");
+    }
+
+    #[test]
+    fn legacy_blocked_sync_status_string_migrates_to_tagged_variant() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["sync"]["status"] = Value::String("blocked: legacy sync failure".to_owned());
+        write_json_file(&state_path, &legacy).unwrap();
+
+        let state = read_agent_state(&tree).unwrap();
+        assert_eq!(
+            state.sync.status,
+            AgentSyncStatus::Blocked {
+                reason: "legacy sync failure".to_owned()
+            }
+        );
+
+        let rewritten: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            rewritten["sync"]["status"],
+            serde_json::json!({ "blocked": { "reason": "legacy sync failure" } })
+        );
+        assert_eq!(rewritten["version"], AGENT_STATE_VERSION);
+
+        // The rewritten file loads again without further migration.
+        let state = read_agent_state(&tree).unwrap();
+        assert_eq!(
+            state.sync.status,
+            AgentSyncStatus::Blocked {
+                reason: "legacy sync failure".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -10066,7 +10145,7 @@ mod tests {
 
         let state = read_agent_state(&tree).unwrap();
         assert_eq!(state.daemon.state, DaemonRunState::Stopped);
-        assert_eq!(state.sync.status, "caught-up");
+        assert_eq!(state.sync.status, AgentSyncStatus::CaughtUp);
         assert!(
             state
                 .activity
@@ -10178,7 +10257,7 @@ mod tests {
             "# Daemon\n"
         );
         let state = read_agent_state(&tree).unwrap();
-        assert_eq!(state.sync.status, "applied-remote-records");
+        assert_eq!(state.sync.status, AgentSyncStatus::AppliedRemoteRecords);
         let tree_state = read_working_tree_state(&tree).unwrap();
         assert_eq!(tree_state.sync.latest_sequence, 7);
 
@@ -11974,7 +12053,7 @@ mod tests {
         )
         .unwrap();
         let report = SyncOnceReport {
-            status: "ok".to_owned(),
+            status: AgentSyncStatus::PushedLocalChanges,
             latest_sequence: 1,
             record_count: 1,
             server_url: "http://127.0.0.1".to_owned(),
@@ -12630,7 +12709,7 @@ mod tests {
                 .unwrap()
                 .contains("server URL")
         );
-        assert!(state.sync.status.contains("blocked:"));
+        assert!(matches!(state.sync.status, AgentSyncStatus::Blocked { .. }));
         assert!(
             state
                 .activity
@@ -14270,7 +14349,12 @@ mod tests {
             state.daemon.last_error.as_deref(),
             Some("server URL is required")
         );
-        assert_eq!(state.sync.status, "blocked: server URL is required");
+        assert_eq!(
+            state.sync.status,
+            AgentSyncStatus::Blocked {
+                reason: "server URL is required".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -14739,7 +14823,12 @@ mod tests {
             &Err("synthetic sync failure".to_owned()),
         );
         let failed = read_agent_state(workspace.path()).unwrap();
-        assert!(failed.sync.status.starts_with("blocked:"));
+        assert_eq!(
+            failed.sync.status,
+            AgentSyncStatus::Blocked {
+                reason: "synthetic sync failure".to_owned()
+            }
+        );
         assert_eq!(failed.daemon.failure_count, 1);
         assert_eq!(
             failed.daemon.last_error.as_deref(),

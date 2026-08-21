@@ -10,14 +10,17 @@
 //!
 //! The engine is proven by the upstream conformance suite in this module's
 //! unit tests (file-backed with real restarts, plus in-memory).
+//!
+//! Comments cite the reference implementation as `D:<line>`
+//! (finitechat/crates/finitechat-delivery/src/lib.rs).
 
 use finitechat_delivery::{
     HttpClaimedKeyPackage, HttpCommitAdmission, HttpDelivery, HttpDeliveryLimits,
     HttpDeliveryPlane, HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishReceipt,
     HttpPublishTarget, HttpQueuedDelivery, HttpSequence, HttpServerError, HttpSyncPage,
-    MAX_HTTP_ID_BYTES, MAX_HTTP_KEY_PACKAGE_BYTES, MAX_HTTP_MESSAGE_CAUSAL_DEPS,
-    MAX_HTTP_MESSAGE_PAYLOAD_BYTES, MAX_HTTP_SOURCE_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES,
-    MAX_HTTP_TRANSPORT_GROUP_ID_BYTES, digest_transport_message,
+    digest_transport_message, validate_group_id, validate_key_package_publication,
+    validate_member_id, validate_page_limit, validate_target_matches_message,
+    validate_transport_group_id, validate_transport_message,
 };
 use finitechat_transport::engine::{KeyPackage, KeyPackageSource};
 use finitechat_transport::transport::{
@@ -67,7 +70,7 @@ impl SqlDelivery {
     ) -> Result<HttpPublishReceipt, StoreWriteError> {
         let limits = self.limits;
         self.store.write(move |tx| {
-            // Check order mirrors HttpDeliveryService::publish (D:405-428).
+            // Check order mirrors HttpDeliveryService::publish (D:408-447).
             validate_transport_message(&message)?;
             validate_target_matches_message(&target, &message)?;
             let digest = digest_transport_message(&message);
@@ -96,7 +99,7 @@ impl SqlDelivery {
         limit: usize,
     ) -> Result<HttpSyncPage, StoreWriteError> {
         // Validation order mirrors HttpDeliveryService::sync_group
-        // (D:430-442): ids first, then the page limit, then route lookup.
+        // (D:449-461): ids first, then the page limit, then route lookup.
         validate_group_id(group_id).map_err(StoreWriteError::Domain)?;
         validate_page_limit(limit).map_err(StoreWriteError::Domain)?;
         self.store
@@ -109,7 +112,7 @@ impl SqlDelivery {
         after_seq: HttpSequence,
         limit: usize,
     ) -> Result<HttpSyncPage, StoreWriteError> {
-        // Mirrors HttpDeliveryService::sync_inbox (D:444-456).
+        // Mirrors HttpDeliveryService::sync_inbox (D:463-475).
         validate_member_id("recipient", recipient).map_err(StoreWriteError::Domain)?;
         validate_page_limit(limit).map_err(StoreWriteError::Domain)?;
         self.store
@@ -122,7 +125,7 @@ impl SqlDelivery {
     ) -> Result<(), StoreWriteError> {
         let limits = self.limits;
         self.store.write(move |tx| {
-            // Mirrors HttpDeliveryService::publish_key_package (D:458-491).
+            // Mirrors HttpDeliveryService::publish_key_package (D:477-510).
             validate_key_package_publication(&publication)?;
             let existing: Option<(Vec<u8>, Vec<u8>)> = tx
                 .query_row(
@@ -138,7 +141,7 @@ impl SqlDelivery {
                 // KeyPackage equality is bytes-only (finitechat-transport
                 // engine.rs:39-45), so the optional source provenance is
                 // deliberately not part of the match, exactly like
-                // key_package_record_matches (D:873-878).
+                // key_package_record_matches (D:834-841).
                 if owner == publication.owner.as_slice() && bytes == publication.key_package.bytes {
                     return Ok(());
                 }
@@ -147,7 +150,7 @@ impl SqlDelivery {
                 }
                 .into());
             }
-            // Cap counts every unconsumed package for the owner (D:471-481);
+            // Cap counts every unconsumed package for the owner (D:490-500);
             // 'claimed' exists for a later lease phase and counts as
             // unconsumed.
             let unconsumed: i64 = tx
@@ -193,11 +196,11 @@ impl SqlDelivery {
         owner: &MemberId,
     ) -> Result<Option<HttpClaimedKeyPackage>, StoreWriteError> {
         self.store.write(|tx| {
-            // Mirrors HttpDeliveryService::claim_key_package (D:493-519).
+            // Mirrors HttpDeliveryService::claim_key_package (D:512-538).
             validate_member_id("owner", owner)?;
             // Deterministic claim order: the smallest available id. SQLite
             // orders BLOBs by memcmp, which matches the reference's
-            // Vec<u8> lexicographic min (D:498-505).
+            // Vec<u8> lexicographic min (D:517-524).
             let selected: Option<(Vec<u8>, Vec<u8>, Option<String>)> = tx
                 .query_row(
                     "SELECT key_package_id, key_package_bytes, key_package_source_json
@@ -311,8 +314,8 @@ fn publish_group(
 ) -> Result<HttpPublishReceipt, StoreTxError> {
     let route = match lookup_route(tx, PLANE_GROUP, group_id.as_slice())? {
         Some(route) => {
-            // Existing route check order mirrors GroupQueue::check_append
-            // (D:574-606): duplicate replay first, then commit-epoch
+            // Existing route check order mirrors DeliveryQueue::check_append
+            // (D:595-623): duplicate replay first, then commit-epoch
             // admission, then queue space.
             if let Some(receipt) = replay_or_reject_duplicate(
                 tx,
@@ -348,7 +351,7 @@ fn publish_group(
             route
         }
         None => {
-            // New route: enforce the group cap before creating (D:532-536).
+            // New route: enforce the group cap before creating (D:560-569).
             let groups = count_routes(tx, PLANE_GROUP)?;
             if groups >= limits.max_groups as u64 {
                 return Err(HttpServerError::GroupLimitExceeded {
@@ -390,7 +393,7 @@ fn publish_inbox(
 ) -> Result<HttpPublishReceipt, StoreTxError> {
     let route = match lookup_route(tx, PLANE_INBOX, recipient.as_slice())? {
         Some(route) => {
-            // Mirrors InboxQueue::check_append (D:652-674).
+            // Mirrors DeliveryQueue::check_append (D:595-623).
             if let Some(receipt) = replay_or_reject_duplicate(
                 tx,
                 &route,
@@ -408,7 +411,7 @@ fn publish_inbox(
             route
         }
         None => {
-            // New route: enforce the inbox cap before creating (D:553-557).
+            // New route: enforce the inbox cap before creating (D:560-569).
             let inboxes = count_routes(tx, PLANE_INBOX)?;
             if inboxes >= limits.max_recipient_inboxes as u64 {
                 return Err(HttpServerError::InboxLimitExceeded {
@@ -481,7 +484,7 @@ fn create_route(
 }
 
 /// Sequences are dense from 1, so the route head doubles as the entry count
-/// for the queue-space check (D:823-836).
+/// for the queue-space check (D:778-791).
 fn ensure_queue_has_space(
     plane: HttpDeliveryPlane,
     last_seq: HttpSequence,
@@ -498,7 +501,7 @@ fn ensure_queue_has_space(
 }
 
 /// Digest-exact duplicates replay the original receipt; a different digest
-/// under the same id is a conflict (D:769-787).
+/// under the same id is a conflict (D:724-742).
 fn replay_or_reject_duplicate(
     tx: &Transaction<'_>,
     route: &Route,
@@ -584,7 +587,7 @@ fn bump_route_head(
     Ok(())
 }
 
-/// Page semantics mirror the reference `sync_page` (D:797-821): entries
+/// Page semantics mirror the reference `sync_page` (D:752-776): entries
 /// strictly after `after_seq` in seq order, the cursor points at the last
 /// returned entry (or stays at `after_seq` for an empty page), and
 /// `has_more` is set exactly when a full page has a successor.
@@ -596,7 +599,7 @@ fn sync_route(
     limit: usize,
 ) -> Result<HttpSyncPage, StoreTxError> {
     let Some(route) = lookup_route(conn, plane, route_key)? else {
-        // Unknown routes sync as empty pages (D:438-439, D:452-453).
+        // Unknown routes sync as empty pages (D:457-459, D:471-473).
         return Ok(HttpSyncPage {
             entries: Vec::new(),
             next_after_seq: after_seq,
@@ -673,150 +676,9 @@ fn row_to_queued_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<HttpQueue
     })
 }
 
-// --- Mirrored validation ----------------------------------------------------
-//
-// finitechat-delivery keeps its validators private ("D:<line>" refers to
-// finitechat/crates/finitechat-delivery/src/lib.rs); its only public entry
-// point, HttpDeliveryService::check_publish, requires a reference-service
-// instance and does not cover sync/claim validation. These mirrors reproduce
-// the checks bit-for-bit — field names included, since HttpServerError
-// carries them — so SqlDelivery rejects exactly what the reference rejects.
-
-/// Mirrors `validate_transport_message` (D:880-904).
-fn validate_transport_message(message: &TransportMessage) -> Result<(), HttpServerError> {
-    validate_message_id("message.id", &message.id)?;
-    validate_non_empty_len(
-        "message.payload",
-        message.payload.len(),
-        MAX_HTTP_MESSAGE_PAYLOAD_BYTES,
-    )?;
-    validate_non_empty_len(
-        "message.source",
-        message.source.0.len(),
-        MAX_HTTP_SOURCE_BYTES,
-    )?;
-    validate_item_count(
-        "message.causal_deps",
-        message.causal_deps.len(),
-        MAX_HTTP_MESSAGE_CAUSAL_DEPS,
-    )?;
-    for dep in &message.causal_deps {
-        validate_message_id("message.causal_deps", dep)?;
-    }
-    match &message.envelope {
-        TransportEnvelope::GroupMessage { transport_group_id } => {
-            validate_transport_group_id(transport_group_id)
-        }
-        TransportEnvelope::Welcome { recipient } => {
-            validate_member_id("welcome.recipient", recipient)
-        }
-    }
-}
-
-/// Mirrors `validate_target_matches_message` (D:838-859).
-fn validate_target_matches_message(
-    target: &HttpPublishTarget,
-    message: &TransportMessage,
-) -> Result<(), HttpServerError> {
-    match (target, &message.envelope) {
-        (
-            HttpPublishTarget::Group {
-                transport_group_id, ..
-            },
-            TransportEnvelope::GroupMessage {
-                transport_group_id: message_group_id,
-            },
-        ) if transport_group_id == message_group_id => Ok(()),
-        (
-            HttpPublishTarget::Inbox { recipient },
-            TransportEnvelope::Welcome {
-                recipient: message_recipient,
-            },
-        ) if recipient == message_recipient => Ok(()),
-        _ => Err(HttpServerError::PublishTargetMismatch),
-    }
-}
-
-/// Mirrors `validate_key_package_publication` (D:861-871).
-fn validate_key_package_publication(
-    publication: &HttpKeyPackagePublication,
-) -> Result<(), HttpServerError> {
-    validate_non_empty_len(
-        "key_package_id",
-        publication.key_package_id.as_slice().len(),
-        MAX_HTTP_ID_BYTES,
-    )?;
-    validate_member_id("owner", &publication.owner)?;
-    validate_non_empty_len(
-        "key_package.bytes",
-        publication.key_package.bytes.len(),
-        MAX_HTTP_KEY_PACKAGE_BYTES,
-    )
-}
-
-/// Mirrors `validate_group_id` (D:906-908).
-fn validate_group_id(group_id: &GroupId) -> Result<(), HttpServerError> {
-    validate_non_empty_len("group_id", group_id.as_slice().len(), MAX_HTTP_ID_BYTES)
-}
-
-/// Mirrors `validate_member_id` (D:910-912).
-fn validate_member_id(field: &'static str, member_id: &MemberId) -> Result<(), HttpServerError> {
-    validate_non_empty_len(field, member_id.as_slice().len(), MAX_HTTP_ID_BYTES)
-}
-
-/// Mirrors `validate_message_id` (D:914-916).
-fn validate_message_id(field: &'static str, message_id: &MessageId) -> Result<(), HttpServerError> {
-    validate_non_empty_len(field, message_id.as_slice().len(), MAX_HTTP_ID_BYTES)
-}
-
-/// Mirrors `validate_transport_group_id` (D:926-932).
-fn validate_transport_group_id(transport_group_id: &[u8]) -> Result<(), HttpServerError> {
-    validate_non_empty_len(
-        "transport_group_id",
-        transport_group_id.len(),
-        MAX_HTTP_TRANSPORT_GROUP_ID_BYTES,
-    )
-}
-
-/// Mirrors `validate_non_empty_len` (D:946-958).
-fn validate_non_empty_len(
-    field: &'static str,
-    actual: usize,
-    max: usize,
-) -> Result<(), HttpServerError> {
-    if actual == 0 {
-        return Err(HttpServerError::Empty { field });
-    }
-    if actual > max {
-        return Err(HttpServerError::TooLarge { field, actual, max });
-    }
-    Ok(())
-}
-
-/// Mirrors `validate_item_count` (D:960-970).
-fn validate_item_count(
-    field: &'static str,
-    actual: usize,
-    max: usize,
-) -> Result<(), HttpServerError> {
-    if actual <= max {
-        Ok(())
-    } else {
-        Err(HttpServerError::TooLarge { field, actual, max })
-    }
-}
-
-/// Mirrors `validate_page_limit` (D:972-981).
-fn validate_page_limit(limit: usize) -> Result<(), HttpServerError> {
-    if (1..=MAX_HTTP_SYNC_PAGE_ENTRIES).contains(&limit) {
-        Ok(())
-    } else {
-        Err(HttpServerError::InvalidPageLimit {
-            actual: limit,
-            max: MAX_HTTP_SYNC_PAGE_ENTRIES,
-        })
-    }
-}
+// Validation is imported from finitechat-delivery (see the `use` block), so
+// this engine rejects exactly what the reference rejects — field names
+// included, since HttpServerError carries them.
 
 #[cfg(test)]
 mod tests {

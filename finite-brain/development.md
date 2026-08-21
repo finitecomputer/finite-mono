@@ -149,8 +149,8 @@ loopback addresses, or the exact development host explicitly named by
   `fbrain auth login|redeem` for email proof. `fbrain` defaults to the public
   Authority `https://identity.finite.vip`; this variable is an override.
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
-  `resend`, `postmark`, or `none`.
-- `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend` or `postmark`.
+  `resend`, or `none`.
+- `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend`.
 - `FBRAIN_CONFIG_DIR`: local `fbrain` config directory for prototype signer
   state. Prefer global `--config-dir` in scripts and agent runtimes.
 - `FBRAIN_WORKING_TREE_ROOT`: optional default parent for `fbrain open`; hosted
@@ -239,4 +239,5 @@ UI is the production client.
 - `docs/specs/finitebrain-portability-spec.md`: Portable v1 contract.
 - `docs/adr/`: decisions and alternatives.
 - `docs/runbooks/`: operational smoke and local parity runbooks.
-- `skills/finitebrain/SKILL.md`: packaged FiniteBrain agent skill.
+- `../finite-skills/skills/software-development/finitebrain/SKILL.md`: the
+  FiniteBrain agent skill (single source, monorepo root).

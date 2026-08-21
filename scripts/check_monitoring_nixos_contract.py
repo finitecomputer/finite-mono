@@ -5,11 +5,84 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
+
+HOST_METRIC_NAMES = [
+    "node_cpu_seconds_total",
+    "node_load1",
+    "node_load5",
+    "node_load15",
+    "node_memory_MemTotal_bytes",
+    "node_memory_MemAvailable_bytes",
+    "node_memory_SwapTotal_bytes",
+    "node_memory_SwapFree_bytes",
+    "node_filesystem_size_bytes",
+    "node_filesystem_avail_bytes",
+    "node_filesystem_readonly",
+    "node_disk_read_bytes_total",
+    "node_disk_written_bytes_total",
+    "node_disk_io_time_seconds_total",
+    "node_network_receive_bytes_total",
+    "node_network_transmit_bytes_total",
+    "node_network_receive_errs_total",
+    "node_network_transmit_errs_total",
+]
+
+HOST_PANEL_TITLES = [
+    "LAT Host Scrape Health",
+    "LAT CPU Busy",
+    "LAT Load Average",
+    "LAT Memory Used",
+    "LAT Swap Used",
+    "LAT Filesystem Used",
+    "LAT Disk Throughput",
+    "LAT Disk I/O Time",
+    "LAT Network Throughput",
+    "LAT Network Errors",
+    "LAT Filesystem Read-only",
+]
+
+LOG_PANEL_TITLES = [
+    "LAT Recent Warning Logs",
+]
+
+LAT_LOG_UNITS = {
+    "finite-lat-1": [
+        "alloy.service",
+        "caddy.service",
+        "finite-healthcheck.service",
+        "finite-saas-core.service",
+        "finitechat-server.service",
+        "finitechat-hosted-device.service",
+        "finite-brain-app.service",
+        "finite-saas-sites.service",
+        "finite-identity.service",
+        "finite-saas-runner.service",
+        "prometheus-node-exporter.service",
+        "finite-litestream-health.service",
+        "borgbackup-job-finite-hosted-web-chat-offsite.service",
+    ],
+    "finite-lat-3": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
+}
+
+LAT_ROLES = {
+    "finite-lat-1": "app",
+    "finite-lat-3": "runner",
+}
 
 
 def nix_eval() -> dict[str, Any]:
@@ -62,6 +135,18 @@ def nix_eval() -> dict[str, Any]:
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
+        latAlloy = {
+          finite-lat-1 = {
+            config = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+          };
+          finite-lat-3 = {
+            config = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+          };
+        };
       }
     '''
     completed = subprocess.run(
@@ -88,6 +173,85 @@ def require(condition: bool, message: str) -> None:
 
 def require_contains(haystack: str, needle: str, subject: str) -> None:
     require(needle in haystack, f"{subject} missing {needle!r}")
+
+
+def panel_targets(panel: dict[str, Any]) -> list[dict[str, Any]]:
+    return panel.get("targets", [])
+
+
+def panel_rect(panel: dict[str, Any]) -> tuple[int, int, int, int]:
+    grid = panel["gridPos"]
+    return (grid["x"], grid["y"], grid["x"] + grid["w"], grid["y"] + grid["h"])
+
+
+def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_x1, left_y1, left_x2, left_y2 = panel_rect(left)
+    right_x1, right_y1, right_x2, right_y2 = panel_rect(right)
+    return left_x1 < right_x2 and right_x1 < left_x2 and left_y1 < right_y2 and right_y1 < left_y2
+
+
+def check_dashboard_contract() -> None:
+    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    panels = dashboard["panels"]
+    panel_ids = [panel["id"] for panel in panels]
+    require(len(panel_ids) == len(set(panel_ids)), "Grafana panel IDs must be unique")
+
+    for index, left in enumerate(panels):
+        for right in panels[index + 1 :]:
+            require(
+                not overlaps(left, right),
+                f"Grafana panels overlap: {left['title']!r} and {right['title']!r}",
+            )
+
+    panels_by_title = {panel["title"]: panel for panel in panels}
+    for title in HOST_PANEL_TITLES:
+        require(title in panels_by_title, f"missing Grafana host panel {title!r}")
+    for title in LOG_PANEL_TITLES:
+        require(title in panels_by_title, f"missing Grafana log panel {title!r}")
+
+    rendered_dashboard = json.dumps(dashboard)
+    for metric_name in HOST_METRIC_NAMES:
+        require_contains(rendered_dashboard, metric_name, "Grafana host panels")
+
+    for title in HOST_PANEL_TITLES:
+        for target in panel_targets(panels_by_title[title]):
+            expression = target["expr"]
+            require_contains(expression, 'instance=~"finite-lat-1|finite-lat-3"', title)
+            require(
+                "finite-lat-2" not in expression,
+                f"{title} must not include finite-lat-2 in production host panels",
+            )
+
+    require_contains(
+        panels_by_title["LAT Filesystem Used"]["targets"][0]["expr"],
+        'mountpoint=~"/|/data"',
+        "LAT Filesystem Used",
+    )
+    require_contains(
+        panels_by_title["LAT Network Throughput"]["targets"][0]["expr"],
+        'device=~"en.*|eth.*|wg-finite"',
+        "LAT Network Throughput",
+    )
+
+    for title in LOG_PANEL_TITLES:
+        panel = panels_by_title[title]
+        require(panel["datasource"]["uid"] == "finite-loki", f"{title} must use Loki")
+        for target in panel_targets(panel):
+            expression = target["expr"]
+            require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
+            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
+            require(
+                "finite-lat-2" not in expression,
+                f"{title} must not include finite-lat-2 in production log panels",
+            )
+
+
+def check_ubuntu_contract() -> None:
+    subprocess.run(
+        [sys.executable, "infra/monitoring/ubuntu/check_contract.py"],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def main() -> int:
@@ -155,6 +319,51 @@ def main() -> int:
     require_contains(caddy["ingestVhost"], "{$LOGS_USERNAME}", "ingest vhost")
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost")
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost")
+
+    for host_name, alloy in contract["latAlloy"].items():
+        alloy_config = alloy["config"]
+        require(
+            "/etc/finite/metrics-remote-write.env" in alloy["envFiles"],
+            f"{host_name} Alloy must load the metrics write credential",
+        )
+        require(
+            "/etc/finite/logs-write.env" in alloy["envFiles"],
+            f"{host_name} Alloy must load the logs write credential",
+        )
+        require(
+            "adm" in alloy["supplementaryGroups"]
+            and "systemd-journal" in alloy["supplementaryGroups"],
+            f"{host_name} Alloy must be able to read journald",
+        )
+
+        for metric_name in HOST_METRIC_NAMES:
+            require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
+
+        for expected in (
+            'loki.relabel "finite_journal"',
+            'loki.write "finite_monitoring_logs"',
+            "https://metrics-ingest.finite.computer/loki/api/v1/push",
+            'sys.env("FINITE_LOGS_WRITE_USERNAME")',
+            'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
+            'source_labels = ["__journal__systemd_unit"]',
+            'target_label  = "unit"',
+            'source_labels = ["__journal_priority_keyword"]',
+            'target_label  = "priority"',
+            'max_age       = "10m"',
+            f'host = "{host_name}"',
+            f'role = "{LAT_ROLES[host_name]}"',
+        ):
+            require_contains(alloy_config, expected, f"{host_name} Alloy log config")
+
+        for unit in LAT_LOG_UNITS[host_name]:
+            require_contains(
+                alloy_config,
+                f'matches       = "_SYSTEMD_UNIT={unit}"',
+                f"{host_name} journald allowlist",
+            )
+
+    check_dashboard_contract()
+    check_ubuntu_contract()
 
     print("monitoring NixOS contract OK")
     return 0

@@ -9,6 +9,10 @@ from importlib.machinery import SourceFileLoader
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SELECT_HARNESSES = ROOT / "scripts" / "ci" / "select-harnesses"
 
+# select-harnesses imports its sibling changed_paths module; running the
+# script directly puts scripts/ci on sys.path, so do the same here.
+sys.path.insert(0, str(SELECT_HARNESSES.parent))
+
 loader = SourceFileLoader("select_harnesses", str(SELECT_HARNESSES))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 select_harnesses = importlib.util.module_from_spec(spec)
@@ -37,10 +41,72 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_monitoring_nixos_contract"},
         )
 
+    def test_monitoring_justfile_runs_only_monitoring_contract(self) -> None:
+        self.assertEqual(
+            selected("infra/monitoring/justfile"),
+            {"run_monitoring_nixos_contract"},
+        )
+
+    def test_nixos_justfile_runs_nixos_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/nixos/justfile"),
+            {"run_nix_checks", "run_nix_service_packages"},
+        )
+
+    def test_infra_justfile_runs_platform_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/justfile"),
+            {"run_finite_status_contract", "run_nix_checks"},
+        )
+
+    def test_brain_justfile_runs_brain_contracts(self) -> None:
+        self.assertEqual(
+            selected("finite-brain/justfile"),
+            {
+                "run_brain_product_matrix",
+                "run_nix_checks",
+                "run_nix_service_packages",
+            },
+        )
+
+    def test_chat_justfile_runs_chat_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitechat/justfile"),
+            {"run_hermes_bridge", "run_rust"},
+        )
+
+    def test_identity_justfile_runs_identity_contracts(self) -> None:
+        self.assertEqual(
+            selected("finite-identity/justfile"),
+            {"run_nix_checks"},
+        )
+
+    def test_dashboard_justfile_runs_dashboard_and_nix_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitecomputer-v2/apps/dashboard/justfile"),
+            {"run_dashboard", "run_nix_checks"},
+        )
+
+    def test_finitecomputer_justfiles_run_nix_contracts(self) -> None:
+        self.assertEqual(
+            selected("finitecomputer-v2/justfile"),
+            {"run_nix_checks"},
+        )
+        self.assertEqual(
+            selected("finitecomputer-v2/deploy/finite-computer/images/justfile"),
+            {"run_nix_checks"},
+        )
+
     def test_dashboard_readme_is_docs_only(self) -> None:
         self.assertEqual(
             selected("finitecomputer-v2/apps/dashboard/README.md"),
             set(),
+        )
+
+    def test_runbook_markdown_runs_nix_checks(self) -> None:
+        self.assertEqual(
+            selected("infra/runbooks/deploy-core.md"),
+            {"run_nix_checks"},
         )
 
     def test_ci_workflow_selects_every_active_harness(self) -> None:
@@ -215,6 +281,28 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(value, "false")
             else:
                 self.assertEqual(value, "true", key)
+
+    def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
+        args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
+        selection, _reason, paths = select_harnesses.select_harnesses(args)
+        values = selection.values()
+
+        self.assertEqual(paths, [".github/workflows/README.md"])
+        for key, value in values.items():
+            if key == "run_electron_alpha":
+                self.assertEqual(value, "false")
+            else:
+                self.assertEqual(value, "true", key)
+
+    def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
+        prefixed = argparse.Namespace(changed_files=["./justfile"])
+        bare = argparse.Namespace(changed_files=["justfile"])
+
+        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(prefixed)
+        bare_selection, _reason, bare_paths = select_harnesses.select_harnesses(bare)
+
+        self.assertEqual(prefixed_paths, bare_paths)
+        self.assertEqual(prefixed_selection.values(), bare_selection.values())
 
 
 if __name__ == "__main__":

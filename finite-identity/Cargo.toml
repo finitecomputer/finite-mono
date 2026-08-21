@@ -32,8 +32,8 @@ thiserror = "2"
 # RFC3339 created_at timestamps.
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-# Production Identity Authority mail delivery via Resend/Postmark JSON APIs.
-ureq = { version = "2", features = ["json"] }
+# Production Identity Authority mail delivery via the shared Resend transport.
+finite-mail.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

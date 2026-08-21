@@ -69,8 +69,9 @@ services. Credentials:
    intact. Secret file verified root:root 0600 with both names present. The
    tiny `smoke-test/` prefix left in the bucket may be deleted from the
    dashboard at any time.
-2. Deploy the enabling closure via the normal chain
-   (`just nixos-build-lat1 REV` → `scripts/deploy-lat1 REV`).
+2. Deploy the enabling closure via the normal CI-built artifact chain:
+   build or download `lat1-nixos-closure-REV`, then run
+   `just deploy-lat1-closure ARTIFACT_DIR`.
 3. Watch the initial snapshot uploads:
    `journalctl -fu finite-litestream-finite-chat-server -fu finite-litestream-finite-brain`.
    Chat (`curl -s http://127.0.0.1:8788/health`)

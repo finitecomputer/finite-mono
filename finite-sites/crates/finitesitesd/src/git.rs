@@ -486,7 +486,7 @@ fn reconcile_ref_event(
                 return Err(message.to_string());
             }
         };
-        if output_config.kind.as_str() != output_record.kind
+        if output_config.kind != output_record.kind
             || output_config
                 .routing_name()
                 .map_err(|error| error.to_string())?

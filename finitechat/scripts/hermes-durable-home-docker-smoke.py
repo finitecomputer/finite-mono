@@ -267,10 +267,36 @@ def docker_agent_hermes(
     )
 
 
+# H2 typed read/write command class: probe execs against the agent container
+# run alongside the resident bridge that holds the store's single-writer
+# lease, so they may only name hermes commands the CLI declares read-only
+# (finitechat-core `CommandClass` / `ReadOnlyAgentStore`). Setup steps run
+# writer commands against the user's own volume instead (create_welcome_room,
+# run_model_smoke), never against the agent's live home.
+READ_ONLY_HERMES_PROBE_COMMANDS = frozenset({"room-status"})
+
+
+def docker_agent_hermes_probe(
+    *,
+    container: str,
+    args: list[str],
+    timeout: float = 30,
+) -> dict[str, Any]:
+    command = args[0] if args else ""
+    if command not in READ_ONLY_HERMES_PROBE_COMMANDS:
+        raise SmokeFailure(
+            f"read-only probe path cannot name writer hermes command {command!r}; "
+            f"allowed read-only probes: {sorted(READ_ONLY_HERMES_PROBE_COMMANDS)!r}"
+        )
+    return docker_agent_hermes(container=container, args=args, timeout=timeout)
+
+
 def docker_agent_app_state(*, container: str, server_url: str) -> dict[str, Any]:
-    # This is deliberately `app state` without `--start-runtime`: waiting for
-    # the resident sidecar to persist the room must not itself claim the
-    # Welcome and accidentally turn the canary into a polling loop.
+    # This is deliberately `app state` without `--start-runtime` — the CLI
+    # classifies exactly this form ReadOnly (AppCommand::command_class), so it
+    # opens the store read-only and dispatches nothing: waiting for the
+    # resident sidecar to persist the room must not itself claim the Welcome
+    # and accidentally turn the canary into a polling loop.
     return run_json(
         [
             "docker",
@@ -408,7 +434,7 @@ def wait_agent_room_connected(
             if room and room.get("state") == "Connected":
                 # The non-mutating state read above is the actual wait gate.
                 # Once connected, collect the richer member/paired evidence.
-                status = docker_agent_hermes(
+                status = docker_agent_hermes_probe(
                     container=container,
                     args=["room-status", "--room-id", room_id, "--json"],
                     timeout=30,

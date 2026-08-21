@@ -1016,27 +1016,39 @@ fn device_link_approval_stage<T>(
     })
 }
 
-fn reconcile_device_link(
+// The admission decision shared by both device-link entry paths. Check order
+// is a security contract: expiry dominates completion. The enrollment TTL
+// bounds how long a persisted record may drive or replay enrollment — the
+// completion tombstone's replay window ends at the same deadline, so a
+// completed-but-expired record classifies as `Expired`, never `Completed`.
+// Only records bound for fanout pay for the runtime handle and the
+// pairing-service round-trip. This helper takes no locks itself, so callers
+// may run it before or after acquiring the device-link mutation lock.
+enum DeviceLinkAdmission {
+    Expired,
+    Completed(DeviceLinkResponse),
+    Admitted {
+        runtime: Arc<FiniteChatRuntime>,
+        session: HttpPairingSessionRecord,
+    },
+}
+
+fn admit_pending_device_link(
     state: &HostedDeviceState,
     user_id: &str,
-    mut pending: PendingDeviceLinkV1,
-) -> Result<DeviceLinkResponse, HostedDeviceError> {
-    validate_pending_device_link(state, &pending)?;
+    pending: &PendingDeviceLinkV1,
+) -> Result<DeviceLinkAdmission, HostedDeviceError> {
+    validate_pending_device_link(state, pending)?;
     if device_link_now(state)? > pending.enrollment_expires_at_unix_seconds {
-        return Ok(device_link_response(
-            &pending,
-            DeviceLinkStatusKind::Expired,
-            0,
-            0,
-        ));
+        return Ok(DeviceLinkAdmission::Expired);
     }
-    if let Some(response) = completed_device_link_response(&pending) {
-        return Ok(response);
+    if let Some(response) = completed_device_link_response(pending) {
+        return Ok(DeviceLinkAdmission::Completed(response));
     }
     let runtime = state.runtime_for(user_id)?;
     if runtime.state()?.identity.account_id != pending.account_id {
         return Err(HostedDeviceError::DeviceLinkConflict(
-            "the approving account no longer matches this request".to_owned(),
+            "the device-link account no longer matches this request".to_owned(),
         ));
     }
 
@@ -1047,9 +1059,29 @@ fn reconcile_device_link(
         || session.target_public_key != pending.target_public_key
     {
         return Err(HostedDeviceError::DeviceLinkConflict(
-            "pairing session no longer matches the approved Device".to_owned(),
+            "pairing session no longer matches the pending Device".to_owned(),
         ));
     }
+    Ok(DeviceLinkAdmission::Admitted { runtime, session })
+}
+
+fn reconcile_device_link(
+    state: &HostedDeviceState,
+    user_id: &str,
+    mut pending: PendingDeviceLinkV1,
+) -> Result<DeviceLinkResponse, HostedDeviceError> {
+    let (runtime, session) = match admit_pending_device_link(state, user_id, &pending)? {
+        DeviceLinkAdmission::Expired => {
+            return Ok(device_link_response(
+                &pending,
+                DeviceLinkStatusKind::Expired,
+                0,
+                0,
+            ));
+        }
+        DeviceLinkAdmission::Completed(response) => return Ok(response),
+        DeviceLinkAdmission::Admitted { runtime, session } => (runtime, session),
+    };
     if device_link_now(state)? > pending.expires_at_unix_seconds
         && session.state != HttpPairingSessionState::Completed
     {
@@ -1238,29 +1270,11 @@ fn resume_device_link_enrollment_for_user(
     user_id: &str,
     pending: PendingDeviceLinkV1,
 ) -> Result<DeviceLinkResponse, HostedDeviceError> {
-    validate_pending_device_link(state, &pending)?;
-    if device_link_now(state)? > pending.enrollment_expires_at_unix_seconds {
-        return Err(HostedDeviceError::DeviceLinkNotFound);
-    }
-    if let Some(response) = completed_device_link_response(&pending) {
-        return Ok(response);
-    }
-    let runtime = state.runtime_for(user_id)?;
-    if runtime.state()?.identity.account_id != pending.account_id {
-        return Err(HostedDeviceError::DeviceLinkConflict(
-            "the enrollment account no longer matches this request".to_owned(),
-        ));
-    }
-    let session = get_pairing_session(state, &pending.pairing_session_id)?
-        .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
-    if session.pairing_session_id != pending.pairing_session_id
-        || session.target_device_id != pending.target_device_id
-        || session.target_public_key != pending.target_public_key
-    {
-        return Err(HostedDeviceError::DeviceLinkConflict(
-            "pairing session no longer matches the enrolled Device".to_owned(),
-        ));
-    }
+    let (runtime, session) = match admit_pending_device_link(state, user_id, &pending)? {
+        DeviceLinkAdmission::Expired => return Err(HostedDeviceError::DeviceLinkNotFound),
+        DeviceLinkAdmission::Completed(response) => return Ok(response),
+        DeviceLinkAdmission::Admitted { runtime, session } => (runtime, session),
+    };
     if !matches!(
         session.state,
         HttpPairingSessionState::ResponsePublished

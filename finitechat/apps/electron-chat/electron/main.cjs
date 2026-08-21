@@ -4,7 +4,6 @@ const os = require("node:os");
 const { spawn } = require("node:child_process");
 const {
   app,
-  autoUpdater,
   BrowserWindow,
   ipcMain,
   protocol,
@@ -15,6 +14,7 @@ const {
   WebContentsView,
 } = require("electron");
 const { createAppUpdater } = require("./app-updater.cjs");
+const { getAutoUpdater } = require("./updater-provider.cjs");
 const {
   attachmentActionUsesBinaryTransport,
   forwardAttachmentUpload,
@@ -111,7 +111,7 @@ const exposeLocalChatBridge = shouldExposeLocalChatBridge({
   isPackaged: app.isPackaged,
   disabledInDevelopment: process.env.FINITECHAT_DISABLE_LOCAL_CHAT_BRIDGE === "1",
 });
-const releaseAppUpdater = createAppUpdater({ app, autoUpdater });
+const releaseAppUpdater = createAppUpdater({ app, autoUpdater: getAutoUpdater() });
 
 if (process.env.FINITECHAT_USER_DATA_DIR) {
   fs.mkdirSync(process.env.FINITECHAT_USER_DATA_DIR, { recursive: true, mode: 0o700 });
@@ -1154,6 +1154,7 @@ async function waitForDeviceEnrollmentReady(
   return waitForSourceEnrollment({
     request: expected,
     pollEnrollment: dashboardDeviceEnrollmentRequest,
+    advanceTarget: () => dispatchInternalDaemonAction({ StartRuntime: null }),
     parseResponse: parseDeviceLinkPublicResponse,
     isRetryableError: (error) => error?.retryable === true,
     assertActive: generation === null
@@ -1294,7 +1295,7 @@ async function ensureLocalDeviceNow(generation) {
       expectedAccountId: identity.expected_account_id,
       expectedDeviceId: deviceId,
       expectedManifests: source.bootstrap_manifests,
-      readState: requestDaemonState,
+      readState: () => dispatchInternalDaemonAction({ StartRuntime: null }),
       assertActive: () => assertLocalDeviceGeneration(generation),
       reportStatus: deviceLinkStatus,
       delay,

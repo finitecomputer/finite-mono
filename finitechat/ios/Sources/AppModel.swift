@@ -1028,39 +1028,6 @@ final class AppModel: ObservableObject, AppReconciler {
         }
     }
 
-    private func waitForLocalEnrollment(
-        expectedAccountID: String,
-        expectedManifests: [NativeDeviceEnrollmentManifest]
-    ) async throws {
-        guard !expectedManifests.isEmpty else {
-            throw AppLaunchConfigurationError(
-                message: "The linked account has no available agent rooms."
-            )
-        }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(30 * 60))
-        while true {
-            try Task.checkCancellation()
-            guard ContinuousClock.now < deadline else {
-                throw AppLaunchConfigurationError(
-                    message: "This iPhone could not finish syncing its complete chat history. Please try again."
-                )
-            }
-            let runtime = try currentRuntime()
-            let nextState = try await Task.detached(priority: .utility) {
-                try runtime.dispatchAndWait(action: .startRuntime)
-            }.value
-            applyRuntimeSnapshot(nextState)
-            if Self.localEnrollmentIsReady(
-                nextState,
-                expectedAccountID: expectedAccountID,
-                expectedManifests: expectedManifests
-            ) {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(750))
-        }
-    }
-
     private func finishPendingEnrollment(
         _ enrollment: AppDeviceEnrollment
     ) async throws {
@@ -1071,13 +1038,43 @@ final class AppModel: ObservableObject, AppReconciler {
                 grant: enrollment.nativeGrant
             )
         }.value
-        let ready = try await Task.detached(priority: .utility) {
-            try session.waitUntilReady()
-        }.value
-        try await waitForLocalEnrollment(
-            expectedAccountID: enrollment.accountID,
-            expectedManifests: ready.manifests
-        )
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30 * 60))
+        var expectedManifests: [NativeDeviceEnrollmentManifest]?
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw AppLaunchConfigurationError(
+                    message: "This iPhone could not finish syncing its complete chat history. Please try again."
+                )
+            }
+
+            // Source fanout consumes one target KeyPackage per room. Keep the
+            // fresh local runtime moving while the source is still enrolling
+            // it so KeyPackages are replenished and Welcomes are consumed.
+            let runtime = try currentRuntime()
+            let nextState = try await Task.detached(priority: .utility) {
+                try runtime.dispatchAndWait(action: .startRuntime)
+            }.value
+            applyRuntimeSnapshot(nextState)
+
+            if let expectedManifests,
+               Self.localEnrollmentIsReady(
+                   nextState,
+                   expectedAccountID: enrollment.accountID,
+                   expectedManifests: expectedManifests
+               )
+            {
+                break
+            }
+
+            if expectedManifests == nil {
+                let ready = try await Task.detached(priority: .utility) {
+                    try session.pollOnce()
+                }.value
+                expectedManifests = ready?.manifests
+            }
+            try await Task.sleep(for: .milliseconds(750))
+        }
         guard let identity = nostrIdentity,
               identity.pendingEnrollment == enrollment
         else {
@@ -2042,7 +2039,7 @@ final class AppModel: ObservableObject, AppReconciler {
     ) throws {
         closeRuntime()
         if resetStore {
-            try? RuntimeDataStore.deleteDataDir(
+            try RuntimeDataStore.deleteDataDir(
                 deviceID: deviceID,
                 applicationSupportURL: applicationSupportURL,
                 transient: usesTransientStore

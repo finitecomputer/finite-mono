@@ -67,10 +67,16 @@ pub struct ServeOptions {
     /// Omitting `--mailer` is an error; there is no implicit default.
     /// The API key for an HTTP provider comes from its environment variable,
     /// never from argv.
-    pub mail_provider: Option<mailer::MailProvider>,
+    pub mail_provider: Option<mailer::MailerKind>,
     pub mail_from: Option<String>,
     /// How tier-2 apps are isolated and run.
     pub app_runner_kind: AppRunnerKind,
+    /// Exact operator-owned sudo executable used only by the Kata app runner.
+    pub app_sudo_path: PathBuf,
+    /// Exact operator-owned nerdctl executable authorized by sudoers.
+    pub app_nerdctl_path: PathBuf,
+    /// Exact CNI plugin directory forwarded to nerdctl after sudo resets env.
+    pub app_cni_path: PathBuf,
     /// Apps with no requests for this long are stopped to free memory and
     /// woken on the next request (the density mechanism).
     pub idle_timeout_seconds: u64,
@@ -121,8 +127,10 @@ fn usage() -> String {
      [--identity-authority-url http://127.0.0.1:8790] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
-     --mailer dev|resend|postmark [--mail-from ADDR] \
-     [--app-runner none|systemd|kata] [--app-idle-timeout SECONDS]\n  \
+     --mailer dev|resend [--mail-from ADDR] \
+     [--app-runner none|systemd|kata] [--app-sudo-path PATH] \
+     [--app-nerdctl-path PATH] [--app-cni-path PATH] \
+     [--app-idle-timeout SECONDS]\n  \
      finitesitesd allow --data DIR PUBKEY_OR_NPUB [--note TEXT]\n  \
      finitesitesd disallow --data DIR PUBKEY_OR_NPUB\n  \
      finitesitesd allowed --data DIR\n  \
@@ -185,17 +193,17 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
     let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
     let mail_provider = match flag_value(&flags, "mailer") {
         None => {
-            return Err("--mailer is required (dev|resend|postmark)".to_string());
+            return Err("--mailer is required (dev|resend)".to_string());
         }
         Some("dev") => None,
         Some(raw) => Some(
-            mailer::MailProvider::parse(raw)
-                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend|postmark)"))?,
+            mailer::MailerKind::parse(raw)
+                .ok_or_else(|| format!("unknown --mailer `{raw}` (dev|resend)"))?,
         ),
     };
     let mail_from = flag_value(&flags, "mail-from").map(str::to_string);
     if mail_provider.is_some() && mail_from.is_none() {
-        return Err("--mailer resend|postmark requires --mail-from".to_string());
+        return Err("--mailer resend requires --mail-from".to_string());
     }
     let listen: SocketAddr = flag_value(&flags, "listen")
         .unwrap_or("127.0.0.1:8787")
@@ -292,6 +300,9 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
             ));
         }
     };
+    let app_sudo_path = nonempty_operator_path(&flags, "app-sudo-path", "sudo")?;
+    let app_nerdctl_path = nonempty_operator_path(&flags, "app-nerdctl-path", "nerdctl")?;
+    let app_cni_path = nonempty_operator_path(&flags, "app-cni-path", "/opt/cni/bin")?;
     let idle_timeout_seconds = match flag_value(&flags, "app-idle-timeout") {
         None => apps::DEFAULT_IDLE_TIMEOUT_SECONDS,
         Some(raw) => raw
@@ -317,8 +328,23 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         mail_provider,
         mail_from,
         app_runner_kind,
+        app_sudo_path,
+        app_nerdctl_path,
+        app_cni_path,
         idle_timeout_seconds,
     })
+}
+
+fn nonempty_operator_path(
+    flags: &[(String, String)],
+    name: &str,
+    default: &str,
+) -> Result<PathBuf, String> {
+    let raw = flag_value(flags, name).unwrap_or(default);
+    if raw.trim().is_empty() {
+        return Err(format!("--{name} must not be empty"));
+    }
+    Ok(PathBuf::from(raw))
 }
 
 pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Result<(), String> {
@@ -412,14 +438,17 @@ fn serve(options: ServeOptions) -> Result<(), String> {
                 .map_err(|error| format!("cannot open outbox: {error}"))?,
         ),
         Some(provider) => {
-            let env_var = provider.api_key_env_var();
+            let env_var = match provider {
+                mailer::MailerKind::Dev => unreachable!("dev is represented as None"),
+                mailer::MailerKind::Resend => mailer::RESEND_API_KEY_ENV_VAR,
+            };
             let api_key = std::env::var(env_var)
                 .map_err(|_| format!("--mailer requires the {env_var} environment variable"))?;
             let from_address = options
                 .mail_from
                 .clone()
                 .expect("mail_from is validated alongside mail_provider");
-            Box::new(mailer::HttpMailer::new(provider, api_key, from_address))
+            Box::new(mailer::HttpMailer::new(api_key, from_address))
         }
     };
 
@@ -430,8 +459,13 @@ fn serve(options: ServeOptions) -> Result<(), String> {
                 .map_err(|error| format!("cannot set up systemd app runner: {error}"))?,
         ),
         AppRunnerKind::Kata => Box::new(
-            apps::KataAppRunner::new(options.data_dir.join("apps"))
-                .map_err(|error| format!("cannot set up kata app runner: {error}"))?,
+            apps::KataAppRunner::new(
+                options.data_dir.join("apps"),
+                options.app_sudo_path.clone(),
+                options.app_nerdctl_path.clone(),
+                options.app_cni_path.clone(),
+            )
+            .map_err(|error| format!("cannot set up kata app runner: {error}"))?,
         ),
     };
     let supervisor = apps::Supervisor::new(app_runner, options.idle_timeout_seconds);
@@ -1045,5 +1079,30 @@ mod tests {
             Err(error) => panic!("--mailer dev should select DevMailer, got {error}"),
         };
         assert!(options.mail_provider.is_none());
+    }
+
+    #[test]
+    fn kata_operator_paths_have_safe_nonempty_defaults_and_reject_empty_overrides() {
+        assert_eq!(
+            nonempty_operator_path(&[], "app-sudo-path", "sudo").unwrap(),
+            PathBuf::from("sudo")
+        );
+        assert_eq!(
+            nonempty_operator_path(&[], "app-nerdctl-path", "nerdctl").unwrap(),
+            PathBuf::from("nerdctl")
+        );
+        assert_eq!(
+            nonempty_operator_path(&[], "app-cni-path", "/opt/cni/bin").unwrap(),
+            PathBuf::from("/opt/cni/bin")
+        );
+        assert_eq!(
+            nonempty_operator_path(
+                &[("app-nerdctl-path".to_string(), "  ".to_string())],
+                "app-nerdctl-path",
+                "nerdctl"
+            )
+            .unwrap_err(),
+            "--app-nerdctl-path must not be empty"
+        );
     }
 }

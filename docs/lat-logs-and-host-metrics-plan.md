@@ -2,12 +2,13 @@
 
 Status: in progress
 
-Repository implementation has started with a hard-cut NixOS monitoring receiver.
-The old Docker Compose monitoring stack is removed from the active path. LAT
-host collection and production rollout remain separate steps.
+Repository implementation has pivoted to a hard-cut Ubuntu/systemd monitoring
+receiver because Latitude VMs do not offer NixOS as a supported VM image. The
+old Docker Compose monitoring stack is removed from the active path. LAT host
+collection and production rollout remain separate steps.
 
-Current implementation progress: steps 1 and 2 below are implemented for the
-NixOS receiver; steps 3 through 5 remain pending.
+Current implementation progress: steps 1 through 4 below are implemented;
+step 5 remains pending.
 
 ## Goal
 
@@ -33,8 +34,11 @@ inventory names it as a decommission target rather than production capacity.
 
 ## Existing Base
 
-- The repository now defines `nixosConfigurations.finite-monitoring` as the
-  dedicated Grafana, Prometheus, Loki, blackbox exporter, and Caddy receiver.
+- The active monitoring receiver is the Latitude Ubuntu VM, configured from
+  `infra/monitoring/ubuntu/` with systemd services for Grafana, Prometheus,
+  Loki, blackbox exporter, and Caddy.
+- The repository still contains the earlier `nixosConfigurations.finite-monitoring`
+  experiment, but it is not the deploy target for the Latitude VM path.
 - LAT NixOS hosts already run Grafana Alloy and node exporter through
   `infra/nixos/modules/metrics.nix`.
 - Alloy already remote-writes selected Prometheus series to
@@ -73,9 +77,9 @@ Bound the cardinality at collection time where practical:
 
 ### Logs
 
-Run Grafana Loki as a native NixOS service on `finite-monitoring` and keep
-Alloy as the only LAT-side collector. Alloy reads journald and pushes selected
-service logs to Loki over HTTPS.
+Run Grafana Loki as a native systemd service on the Ubuntu monitoring VM and
+keep Alloy as the only LAT-side collector. Alloy reads journald and pushes
+selected service logs to Loki over HTTPS.
 
 Initial Loki labels:
 
@@ -111,22 +115,22 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 
 ## Implementation Steps
 
-1. Add the NixOS monitoring receiver.
-   - Add `nixosConfigurations.finite-monitoring` on the same NixOS 26.05 pin
-     used by the LAT hosts.
+1. Add the Ubuntu/systemd monitoring receiver.
+   - Add repo-owned Ubuntu configs and systemd units for the existing Latitude
+     monitoring VM.
    - Run Grafana, Prometheus, blackbox exporter, Loki, and Caddy as native
-     NixOS services.
+     systemd services.
    - Keep Prometheus, Loki, blackbox exporter, and Grafana loopback-only behind
      Caddy.
    - Add repository-owned Loki configuration with local filesystem storage and
      bounded retention.
    - Add a Grafana Loki datasource with a stable UID.
-   - Add static contract checks for the NixOS host, services, datasources,
+   - Add static contract checks for the Ubuntu service files, datasources,
      retention, protected routes, and lack of direct public port exposure.
 
 2. Add protected Loki ingest.
    - Use a separate logs-write credential from the metrics-write credential.
-   - Extend the NixOS Caddy config with a TLS-only Loki push route.
+   - Extend the Ubuntu Caddy config with a TLS-only Loki push route.
    - Return 404 for non-push Loki routes.
    - Document the credential file names and env variable names without
      committing values.
@@ -147,8 +151,19 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    - Keep the Loki credential in a root-owned environment file or SOPS-managed
      equivalent; do not reuse the Prometheus credential.
 
+   Repo status: implemented in `infra/nixos/modules/metrics.nix` for
+   `finite-lat-1` and `finite-lat-3`. The next LAT NixOS activation will require
+   `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
+   and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
+   covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
+   deploys run it automatically for revisions with log shipping, and lat3/manual
+   activations should run it over SSH before switching.
+
 5. Roll out one host at a time.
    - Run `scripts/finite-status --json` before each host rollout.
+   - Run `infra/nixos/scripts/check-lat-monitoring-secrets` on the target host
+     before activation; this is automatic for lat1 through
+     `scripts/deploy-lat1-closure-cache`.
    - Roll out `finite-lat-3` first.
    - Verify Prometheus host metrics and Loki logs in Grafana.
    - Roll out `finite-lat-1` after `finite-lat-3` is clean.

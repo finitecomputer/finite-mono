@@ -20,13 +20,14 @@ use axum::{Json, Router};
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
-    CoreError, CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder,
-    Folder, FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
-    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
-    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
-    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
-    bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
-    validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
+    CoreError, CryptoRecordError, DecodedSyncPayload, DisplayName, EmailInviteScopeError,
+    EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId, FolderObjectOperation,
+    FolderObjectRevisionPayload, FolderObjectTombstonePayload, FolderRotationFanout,
+    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, RevisionValidation,
+    SafeRelativePath, TombstoneValidation, UserId, bootstrap_organization_brain,
+    bootstrap_organization_brain_with_requester, bootstrap_personal_brain, decode_sync_payload,
+    derive_email_invite_scope, validate_admin_access_change_event, validate_folder_rotation_fanout,
+    validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
     BrainInvitationTargetKind, BrainStore, ControlSyncRecord, DepartureFactApplication,
@@ -381,23 +382,14 @@ impl ServerState {
         self
     }
 
-    /// Deliver Brain-owned Brain invitation emails through Resend.
+    /// Deliver Brain-owned Brain invitation emails through the shared
+    /// Resend transport.
     pub fn with_resend_invite_mailer(
         mut self,
         api_key: impl Into<String>,
         from: impl Into<String>,
     ) -> Self {
         self.invite_mailer = Some(resend_invite_mailer(api_key.into(), from.into()));
-        self
-    }
-
-    /// Deliver Brain-owned Brain invitation emails through Postmark.
-    pub fn with_postmark_invite_mailer(
-        mut self,
-        server_token: impl Into<String>,
-        from: impl Into<String>,
-    ) -> Self {
-        self.invite_mailer = Some(postmark_invite_mailer(server_token.into(), from.into()));
         self
     }
 
@@ -1603,40 +1595,17 @@ fn deliver_plan_courtesy_email(
 }
 
 fn resend_invite_mailer(api_key: String, from: String) -> BrainInviteMailer {
+    let resend = finite_mail::ResendMailer::new(api_key, from);
     Arc::new(move |email| {
-        let body = serde_json::to_string(&serde_json::json!({
-            "from": from,
-            "to": [email.to],
-            "subject": email.subject,
-            "text": email.text,
-        }))
-        .map_err(|error| format!("could not encode Resend invite email: {error}"))?;
-        ureq::post("https://api.resend.com/emails")
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-            .map_err(|error| format!("Resend request failed: {error}"))?;
-        Ok(())
-    })
-}
+        use finite_mail::MailTransport as _;
 
-fn postmark_invite_mailer(server_token: String, from: String) -> BrainInviteMailer {
-    Arc::new(move |email| {
-        let body = serde_json::to_string(&serde_json::json!({
-            "From": from,
-            "To": email.to,
-            "Subject": email.subject,
-            "TextBody": email.text,
-            "TrackOpens": false,
-            "TrackLinks": "None",
-        }))
-        .map_err(|error| format!("could not encode Postmark invite email: {error}"))?;
-        ureq::post("https://api.postmarkapp.com/email")
-            .set("X-Postmark-Server-Token", &server_token)
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-            .map_err(|error| format!("Postmark request failed: {error}"))?;
-        Ok(())
+        resend
+            .send_text_email(&finite_mail::TextEmail {
+                to: email.to.as_str(),
+                subject: email.subject.as_str(),
+                text: email.text.as_str(),
+            })
+            .map_err(|error| format!("Resend request failed: {error}"))
     })
 }
 
@@ -2206,7 +2175,7 @@ fn enrich_shared_folder_connection_identities(
 }
 
 fn event_from_value(value: serde_json::Value) -> Result<Event, ApiError> {
-    Event::from_json(value.to_string()).map_err(|_| {
+    serde_json::from_value(value).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             "signed Nostr event JSON did not parse",
@@ -2648,13 +2617,17 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
             .as_ref()
             .is_some_and(|folder_id| folder_visible(stored, folder_id, actor_npub)),
         SyncRecordType::FolderKeyGrant => {
-            is_admin || grant_payload_recipient(&record.payload_json).as_deref() == Some(actor_npub)
+            is_admin
+                || matches!(
+                    decode_sync_payload(&record.payload_json),
+                    DecodedSyncPayload::KeyGrant { recipient_npub } if recipient_npub == actor_npub
+                )
         }
         SyncRecordType::BrainAdminAccessChange => {
             is_owner
                 || is_admin
                 || is_personal_agent
-                || (is_folder_subtree_tombstone(&record.payload_json)
+                || (decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                     && stored
                         .folder_deletion_audience
                         .get(&record.record_event_id)
@@ -2665,44 +2638,8 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
     }
 }
 
-fn is_folder_subtree_tombstone(payload_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()
-        .and_then(|payload| payload.get("recordType")?.as_str().map(ToOwned::to_owned))
-        .as_deref()
-        == Some("folder_subtree_tombstone")
-}
-
-fn grant_payload_recipient(payload_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()?
-        .get("recipientNpub")?
-        .as_str()
-        .map(ToOwned::to_owned)
-}
-
 fn object_ciphertext(payload_json: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("ciphertext")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| payload_json.to_owned())
-}
-
-fn request_field(body: &[u8], field: &'static str) -> Result<String, ApiError> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, format!("{field} is required")))
+    decode_sync_payload(payload_json).ciphertext_or_raw(payload_json)
 }
 
 fn lock_error<T>(_error: T) -> ApiError {
@@ -4678,7 +4615,7 @@ mod tests {
             assert_eq!(
                 pull.records.iter().any(|record| {
                     record.record_type == "brain_admin_access_change"
-                        && record.payload_json.contains("folder_subtree_tombstone")
+                        && decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                 }),
                 should_see_tombstone
             );
@@ -4697,7 +4634,7 @@ mod tests {
             assert_eq!(
                 bootstrap.control_records.iter().any(|record| {
                     record.record_type == "brain_admin_access_change"
-                        && record.payload_json.contains("folder_subtree_tombstone")
+                        && decode_sync_payload(&record.payload_json).is_folder_subtree_tombstone()
                 }),
                 should_see_tombstone
             );
@@ -7064,6 +7001,60 @@ mod tests {
                 .payload_json
                 .contains("\"tombstoneEvent\"")
         );
+    }
+
+    #[tokio::test]
+    async fn sync_record_submit_rejects_malformed_bodies() {
+        let keys = Keys::generate();
+        let router = test_router();
+
+        let bodies = [
+            "not json".to_owned(),
+            serde_json::json!({ "folderId": "getting-started" }).to_string(),
+            serde_json::json!({ "recordType": "unknown_record" }).to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_revision",
+                "objectId": "obj_000000000001",
+                "baseRevision": null,
+                "keyVersion": 1,
+                "cipher": "AES-256-GCM",
+                "ciphertext": "{}",
+                "revisionEvent": {},
+            })
+            .to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_revision",
+                "folderId": "getting-started",
+                "objectId": "obj_000000000001",
+                "keyVersion": 1,
+                "cipher": "AES-256-GCM",
+            })
+            .to_string(),
+            serde_json::json!({
+                "recordType": "folder_object_tombstone",
+                "folderId": "getting-started",
+                "baseRevision": 1,
+                "tombstoneEvent": {},
+            })
+            .to_string(),
+        ];
+        for body in bodies {
+            let response = authed_request(
+                router.clone(),
+                &keys,
+                "POST",
+                "/v1/brains/acme/sync/records",
+                Some(body),
+                TEST_NOW,
+            )
+            .await;
+            assert_error(
+                response,
+                StatusCode::BAD_REQUEST,
+                "invalid JSON request body",
+            )
+            .await;
+        }
     }
 
     #[tokio::test]

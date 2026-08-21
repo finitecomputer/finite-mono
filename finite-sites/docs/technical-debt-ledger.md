@@ -6,8 +6,9 @@ delete condition is unfinished design, not accepted debt.
 
 ## 1. RESOLVED — real mailer implemented
 
-`HttpMailer` (Resend/Postmark) ships behind the `Mailer` trait, selected
-with `--mailer` + `--mail-from`, key via env var. Remaining work is
+`HttpMailer` (Resend, via the shared `finite-mail` transport) ships behind
+the `Mailer` trait, selected with `--mailer` + `--mail-from`, key via env
+var. Remaining work is
 configuration, tracked in `docs/deploy-finite-lat-2.md` (domain
 verification + a real-inbox validation gate). Local and Devfinity select
 the dev mailer with `--mailer dev`; omitting the flag is an error.
@@ -113,9 +114,11 @@ snapshot suspend deferred (stop/start already gets idle RAM to ~0).
 - **Risk**: a finitesitesd compromise reaches root via `sudo nerdctl`
   (true regardless of ProtectSystem once that sudo path exists). The
   daemon still runs as the unprivileged finite-sites user.
-- **Proof**: `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf`,
-  `finite-sites-nerdctl-sudoers` (mono root; moved from
-  `deploy/finite-lat-2/`).
+- **Proof**: `infra/nixos/modules/finitesitesd.nix` declares the relaxed unit,
+  exact Nix-store nerdctl command, and passwordless rule for only the
+  `finite-sites` user. Historical lat2 proof remains in
+  `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf` and
+  `finite-sites-nerdctl-sudoers`.
 - **Delete condition**: drive containerd via its gRPC API from the daemon
   (no nerdctl, no sudo) with a privilege-separated networking helper, if
   the daemon's own attack surface ever warrants it.

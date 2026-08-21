@@ -106,7 +106,7 @@ Notes:
 ## 2. Outbound mail (Resend)
 
 Cloudflare Email Routing is inbound-only; magic links are sent through
-Resend (or Postmark — both are wired in `--mailer`):
+Resend (`--mailer resend`):
 
 1. Create a Resend account, add the `finite.chat` domain, and add the DKIM
    and Return-Path records Resend lists into the Cloudflare zone

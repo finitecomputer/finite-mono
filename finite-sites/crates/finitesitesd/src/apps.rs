@@ -187,7 +187,8 @@ impl AppRunner for SystemdAppRunner {
 // ---- kata runner: hardware-isolated microVMs ------------------------------
 
 /// Each app runs as a Kata Containers microVM managed through `nerdctl`
-/// (containerd + the `io.containerd.kata.v2` runtime, Cloud Hypervisor VMM).
+/// (containerd + the `io.containerd.kata-clh.v2` runtime, Cloud Hypervisor
+/// VMM).
 /// The app's bundle is bind-mounted read-only; its `$DATA_DIR` is a
 /// read-write host directory that survives stop/start; networking is a CNI
 /// bridge and the proxy forwards to the microVM's IP. No custom image build
@@ -195,12 +196,30 @@ impl AppRunner for SystemdAppRunner {
 /// only daemons are containerd and the Kata shim.
 pub struct KataAppRunner {
     apps_root: PathBuf,
+    sudo_path: PathBuf,
+    nerdctl_path: PathBuf,
+    cni_path: PathBuf,
 }
 
 impl KataAppRunner {
-    pub fn new(apps_root: PathBuf) -> Result<KataAppRunner, AppRunnerError> {
+    /// Cloud Hypervisor has its own Kata configuration file. Production uses
+    /// this shim alias so small app guests do not inherit the much larger QEMU
+    /// profile used by hosted Agent Runtimes on the same containerd host.
+    const OCI_RUNTIME: &'static str = "io.containerd.kata-clh.v2";
+
+    pub fn new(
+        apps_root: PathBuf,
+        sudo_path: PathBuf,
+        nerdctl_path: PathBuf,
+        cni_path: PathBuf,
+    ) -> Result<KataAppRunner, AppRunnerError> {
         std::fs::create_dir_all(&apps_root)?;
-        Ok(KataAppRunner { apps_root })
+        Ok(KataAppRunner {
+            apps_root,
+            sudo_path,
+            nerdctl_path,
+            cni_path,
+        })
     }
 
     fn container_name(site_id: &str) -> String {
@@ -235,12 +254,20 @@ impl KataAppRunner {
     /// scoped to nerdctl). All argv here is daemon-constructed; the only
     /// tenant-controlled value is the start command, validated to printable
     /// ascii and passed as one argv element into the guest's shell.
-    fn nerdctl(&self, args: &[&str]) -> Result<String, AppRunnerError> {
-        let output = Command::new("sudo")
+    fn nerdctl_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(&self.sudo_path);
+        command
             .arg("-n")
-            .arg("nerdctl")
-            .args(args)
-            .output()?;
+            .arg("--")
+            .arg(&self.nerdctl_path)
+            .arg("--cni-path")
+            .arg(&self.cni_path)
+            .args(args);
+        command
+    }
+
+    fn nerdctl(&self, args: &[&str]) -> Result<String, AppRunnerError> {
+        let output = self.nerdctl_command(args).output()?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if output.status.success() {
             Ok(stdout)
@@ -278,7 +305,7 @@ impl KataAppRunner {
             "--name",
             &name,
             "--runtime",
-            "io.containerd.kata.v2",
+            Self::OCI_RUNTIME,
             "--restart",
             "no",
             "--memory",
@@ -997,6 +1024,7 @@ mod supervisor_tests {
 #[cfg(test)]
 mod kata_tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn runtime_image_selected_by_start_command() {
@@ -1021,5 +1049,32 @@ mod kata_tests {
             KataAppRunner::container_name("site_0a1b"),
             "finite-app-site_0a1b"
         );
+    }
+
+    #[test]
+    fn operator_paths_and_small_guest_runtime_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = KataAppRunner::new(
+            dir.path().join("apps"),
+            PathBuf::from("/run/wrappers/bin/sudo"),
+            PathBuf::from("/nix/store/example-nerdctl/bin/nerdctl"),
+            PathBuf::from("/nix/store/example-cni-plugins/bin"),
+        )
+        .unwrap();
+        let command = runner.nerdctl_command(&["ps"]);
+
+        assert_eq!(command.get_program(), OsStr::new("/run/wrappers/bin/sudo"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                OsStr::new("-n"),
+                OsStr::new("--"),
+                OsStr::new("/nix/store/example-nerdctl/bin/nerdctl"),
+                OsStr::new("--cni-path"),
+                OsStr::new("/nix/store/example-cni-plugins/bin"),
+                OsStr::new("ps"),
+            ]
+        );
+        assert_eq!(KataAppRunner::OCI_RUNTIME, "io.containerd.kata-clh.v2");
     }
 }

@@ -84,6 +84,15 @@ use crate::{
     PAIRING_SESSION_TTL_SECONDS, SNAPSHOT_INTERVAL_OPS, ServerHttpError, finite_delivery_limits,
 };
 
+/// Per-route activity records inside one `(room_id, conversation_id)` bucket,
+/// keyed by the sender-inclusive wire `route_key`.
+type EphemeralActivityBucket = BTreeMap<String, Vec<EphemeralActivityRecord>>;
+
+/// RAM-only activity cache keyed for readers: every query is per room (and
+/// per conversation for `/activities/get`), so records bucket by
+/// `(room_id, conversation_id)`.
+type EphemeralActivityCache = BTreeMap<(String, Option<String>), EphemeralActivityBucket>;
+
 #[derive(Clone, Debug, Default)]
 pub struct HttpServerState {
     service: Arc<Mutex<HttpDeliveryService>>,
@@ -95,7 +104,7 @@ pub struct HttpServerState {
     account_rooms: Arc<Mutex<BTreeMap<String, BTreeMap<String, Value>>>>,
     room_memberships: Arc<Mutex<BTreeMap<String, HttpRoomMembershipProjection>>>,
     application_effects: Arc<Mutex<BTreeMap<String, HttpApplicationDeliveryEffect>>>,
-    ephemeral_activity: Arc<Mutex<BTreeMap<String, Vec<EphemeralActivityRecord>>>>,
+    ephemeral_activity: Arc<Mutex<EphemeralActivityCache>>,
     device_liveness: Arc<Mutex<BTreeMap<String, DeviceLivenessRecord>>>,
     nostr_profiles: Arc<Mutex<BTreeMap<String, NostrProfileRecord>>>,
     welcome_claims: Arc<Mutex<HashMap<MessageId, WelcomeClaimRecord>>>,
@@ -1294,9 +1303,10 @@ impl HttpServerState {
             .lock()
             .expect("HTTP ephemeral activity mutex");
         activity
-            .values()
+            .range((room_id.to_owned(), None)..)
+            .take_while(|((bucket_room_id, _), _)| bucket_room_id == room_id)
+            .flat_map(|(_, routes)| routes.values())
             .flat_map(|records| records.iter())
-            .filter(|record| record.room_id == room_id)
             .map(|record| record.received_at_ms)
             .max()
             .unwrap_or_default()
@@ -2337,7 +2347,12 @@ impl HttpServerState {
             .ephemeral_activity
             .lock()
             .expect("HTTP ephemeral activity mutex");
-        let records = activity.entry(route_key.clone()).or_default();
+        let bucket_key = (record.room_id.clone(), record.conversation_id.clone());
+        let records = activity
+            .entry(bucket_key)
+            .or_default()
+            .entry(route_key.clone())
+            .or_default();
         records.retain(|record| record.expires_at_ms > record.received_at_ms);
         records.push(record);
         while records.len() > MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE as usize {
@@ -2390,17 +2405,12 @@ impl HttpServerState {
             .lock()
             .expect("HTTP ephemeral activity mutex");
         let mut records = Vec::new();
-        for route_records in activity.values_mut() {
-            route_records.retain(|record| record.expires_at_ms > request.now_ms);
-            records.extend(
-                route_records
-                    .iter()
-                    .filter(|record| {
-                        record.room_id == request.room_id
-                            && record.conversation_id == request.conversation_id
-                    })
-                    .cloned(),
-            );
+        let bucket_key = (request.room_id.clone(), request.conversation_id.clone());
+        if let Some(routes) = activity.get_mut(&bucket_key) {
+            for route_records in routes.values_mut() {
+                route_records.retain(|record| record.expires_at_ms > request.now_ms);
+                records.extend(route_records.iter().cloned());
+            }
         }
         records.sort_by(|left, right| {
             left.received_at_ms

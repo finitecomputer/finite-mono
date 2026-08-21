@@ -4,9 +4,8 @@
 # 127.0.0.1:3002. FoundationDB is omitted (experimental NUQ_BACKEND=fdb path
 # was not active; the queue runs on nuq-postgres as captured).
 #
-# TODO: digest-pin every image below. lat2 ran searxng/searxng:latest and
-# BUILT the firecrawl images on-box from the upstream checkout; here we take
-# the upstream GHCR images by tag until CI mirrors/pins them.
+# Images below are pinned to the linux/amd64 manifest digests recorded from
+# finite-lat-1's podman RepoDigests on 2026-08-14.
 { pkgs, ... }:
 let
   # Replicates lat2's /home/ubuntu/finite-search/searxng/settings.yml.
@@ -60,7 +59,8 @@ in
 {
   virtualisation.oci-containers.containers = {
     searxng = {
-      image = "searxng/searxng:latest"; # TODO: digest-pin
+      # Source tag docker.io/searxng/searxng:latest; digest recorded from lat1 on 2026-08-14.
+      image = "docker.io/searxng/searxng@sha256:70e5d035b085b1a2da116d145e1cba4425cadd317b072daa4385e8d7f7e21062";
       ports = [ "127.0.0.1:8080:8080" ];
       volumes = [ "${searxngSettings}:/etc/searxng/settings.yml:ro" ];
       # NAMES only (values from lat2 /home/ubuntu/finite-search/searxng/.env):
@@ -71,7 +71,8 @@ in
     };
 
     firecrawl-redis = {
-      image = "docker.io/library/redis:alpine"; # TODO: digest-pin
+      # Source tag docker.io/library/redis:alpine; digest recorded from lat1 on 2026-08-14.
+      image = "docker.io/library/redis@sha256:cd5f3ac681c77791c6a8eaa62de876ad2be043ee5a428afb7c0095aa08246277";
       cmd = [
         "redis-server"
         "--bind"
@@ -81,12 +82,14 @@ in
     };
 
     firecrawl-rabbitmq = {
-      image = "docker.io/library/rabbitmq:3-management"; # TODO: digest-pin
+      # Source tag docker.io/library/rabbitmq:3-management; digest recorded from lat1 on 2026-08-14.
+      image = "docker.io/library/rabbitmq@sha256:9cfb7e92ae7d296aec4d1ae799e431209f7ed57d55f9c929d95667d0ccf1c920";
       extraOptions = [ "--network=firecrawl" ];
     };
 
     firecrawl-nuq-postgres = {
-      image = "ghcr.io/firecrawl/nuq-postgres:latest"; # TODO: digest-pin (lat2 built this on-box)
+      # Source tag ghcr.io/firecrawl/nuq-postgres:latest; digest recorded from lat1 on 2026-08-14.
+      image = "ghcr.io/firecrawl/nuq-postgres@sha256:4ca6718b2cef40404b046db5cd37ae45db3e44d1a5750c80522f3587a5b193d5";
       volumes = [ "firecrawl-nuq-postgres-data:/var/lib/postgresql/data" ];
       # NAMES only (values from lat2 firecrawl-upstream/.env):
       #   POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
@@ -95,7 +98,8 @@ in
     };
 
     firecrawl-playwright = {
-      image = "ghcr.io/firecrawl/playwright-service:latest"; # TODO: digest-pin (lat2 built this on-box)
+      # Source tag ghcr.io/firecrawl/playwright-service:latest; digest recorded from lat1 on 2026-08-14.
+      image = "ghcr.io/firecrawl/playwright-service@sha256:c13a0e147e8b6a503093d68edfb223ac65c989058f7e0ef606ee2958b38ff604";
       environment = {
         PORT = "3000";
         MAX_CONCURRENT_PAGES = "10";
@@ -104,7 +108,8 @@ in
     };
 
     firecrawl-api = {
-      image = "ghcr.io/firecrawl/firecrawl:latest"; # TODO: digest-pin (lat2 built this on-box)
+      # Source tag ghcr.io/firecrawl/firecrawl:latest; digest recorded from lat1 on 2026-08-14.
+      image = "ghcr.io/firecrawl/firecrawl@sha256:e7c96367e8e6f783405f52c24d1c44daac06415679b3be724fe46c0730fc0504";
       ports = [ "127.0.0.1:3002:3002" ];
       dependsOn = [
         "firecrawl-redis"

@@ -1,0 +1,18 @@
+modules:
+  http_200:
+    prober: http
+    timeout: 3s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: true
+      preferred_ip_protocol: ip4
+
+  http_404:
+    prober: http
+    timeout: 3s
+    http:
+      method: GET
+      valid_status_codes: [404]
+      follow_redirects: true
+      preferred_ip_protocol: ip4

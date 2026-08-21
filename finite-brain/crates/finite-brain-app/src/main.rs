@@ -114,15 +114,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let from = std::env::var("FINITE_BRAIN_INVITE_MAIL_FROM")?;
                 state = state.with_resend_invite_mailer(api_key, from);
             }
-            "postmark" => {
-                let token = std::env::var("POSTMARK_SERVER_TOKEN")?;
-                let from = std::env::var("FINITE_BRAIN_INVITE_MAIL_FROM")?;
-                state = state.with_postmark_invite_mailer(token, from);
-            }
             other => {
-                return Err(
-                    format!("unsupported FINITE_BRAIN_INVITE_MAILER value: {other}").into(),
-                );
+                return Err(format!(
+                    "unsupported FINITE_BRAIN_INVITE_MAILER value: {other} (none|dev|resend)"
+                )
+                .into());
             }
         }
     }
