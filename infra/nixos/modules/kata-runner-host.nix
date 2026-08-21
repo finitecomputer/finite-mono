@@ -29,7 +29,12 @@ let
   # (credentials, drain state, deliberate overrides).
   sharedEnvironment = {
     FC_RUNNER_CLASS = "kata";
-    FC_RUNNER_RUNTIME_ARTIFACT_ID = "finite-agent-runtime-2026-08-01.1";
+    # FC_RUNNER_RUNTIME_ARTIFACT_ID is deliberately absent. The promoted
+    # Runtime artifact is an operator-managed pin in /etc/finite/runner.env on
+    # each host (infra/runbooks/runtime-image.md); a literal here was only ever
+    # a stale shadow of it. The runner fails closed at start without it
+    # ("FC_RUNNER_RUNTIME_ARTIFACT_ID is required"), and
+    # scripts/check_runner_host_contract.py rejects any attempt to render it.
     # N-1 expand fallback only for rows without RuntimeSpec. New leases
     # receive these same public values from Core's FC_CORE_RUNTIME_ENV_JSON
     # and ignore this Runner-side map entirely.
