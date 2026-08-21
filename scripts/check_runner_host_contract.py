@@ -41,6 +41,11 @@ CANONICAL_FINITE_PRIVATE_BASE_URL = (
 )
 CANONICAL_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731"
 
+# The promoted Runtime artifact is an operator-managed pin in runner.env
+# (infra/runbooks/runtime-image.md). A rendered default was only ever a stale
+# shadow of it, so the shared env must not carry one.
+OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
+
 # systemd.services.finite-saas-runner.environment key that is legitimately
 # per-host (loopback Authority on the Core host, overlay proxy on a remote
 # Runner). It must exist on both hosts but may differ.
@@ -78,6 +83,13 @@ def parse_env(text: str) -> dict[str, str]:
 def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
     reference, *others = HOSTS
     for host in HOSTS:
+        rendered_operator_keys = sorted(OPERATOR_ONLY_KEYS & set(envs[host]))
+        if rendered_operator_keys:
+            raise SystemExit(
+                f"{host}: {rendered_operator_keys} rendered into "
+                f"{SHARED_ENV_PATH}; the Runtime artifact pin lives only in "
+                f"{OPERATOR_ENV_PATH}"
+            )
         if envs[host].get("FC_RUNNER_KATA_STOP_TIMEOUT_SECS") != SHARED_STOP_TIMEOUT:
             raise SystemExit(
                 f"{host}: FC_RUNNER_KATA_STOP_TIMEOUT_SECS is "
