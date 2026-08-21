@@ -45,22 +45,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| format!("http://{address}"));
     let database_path =
         std::env::var("FINITE_BRAIN_DB").unwrap_or_else(|_| "finite-brain.sqlite3".to_owned());
-    let identity_authority_url = std::env::var("FINITE_IDENTITY_AUTHORITY")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let core_authority_url = std::env::var("FC_CORE_API_BASE_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let core_authority_token = std::env::var("FC_CORE_API_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let identity_operator_token = std::env::var("FINITE_IDENTITY_OPERATOR_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
     let listener = tokio::net::TcpListener::bind(address).await?;
 
     println!("FiniteBrain smoke server listening on http://{address}");
@@ -77,31 +61,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })?
     {
         state = state.with_rate_limit(max_requests, window_seconds);
-    }
-    if let Some(url) = identity_authority_url.as_ref() {
-        state = state.with_identity_authority_url(url.clone());
-    }
-    match (
-        core_authority_url,
-        core_authority_token,
-        identity_authority_url,
-        identity_operator_token,
-    ) {
-        (Some(core_url), Some(core_token), Some(identity_url), Some(identity_token)) => {
-            state = state.with_agent_bootstrap_authorities(
-                core_url,
-                core_token,
-                identity_url,
-                identity_token,
-            );
-        }
-        (None, None, _, None) => {}
-        _ => {
-            return Err(
-                "agent-first Brain bootstrap requires FC_CORE_API_BASE_URL, FC_CORE_API_TOKEN, FINITE_IDENTITY_AUTHORITY, and FINITE_IDENTITY_OPERATOR_TOKEN together"
-                    .into(),
-            );
-        }
     }
     if let Ok(mailer) = std::env::var("FINITE_BRAIN_INVITE_MAILER") {
         match mailer.trim() {
@@ -122,11 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let router = finite_brain_server::router_with_state(state.clone());
-    // Consume Core's Permanent Departure Facts in the background; no-op when
-    // the Core/Identity authorities are not configured. Routine authorization
-    // never depends on it.
-    finite_brain_server::spawn_departure_fact_consumer(&state);
+    let router = finite_brain_server::router_with_state(state);
     axum::serve(listener, router).await?;
 
     Ok(())

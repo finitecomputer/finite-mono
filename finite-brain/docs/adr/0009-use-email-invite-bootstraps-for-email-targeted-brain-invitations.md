@@ -1,5 +1,12 @@
 # Use Email Invite Bootstraps For Email-Targeted Brain Invitations
 
+Status: **superseded 2026-08 by the auth-kernel cut.** Email Invite Bootstraps
+and the Identity Authority email proof they required are removed; invitations
+are npub-targeted or single-use capability Invite Tokens (email is delivery
+only, never identity). Unredeemed email-bootstrap invitations became
+unclaimable at deploy; their rows remain in `brain_invitations` as historical
+state. This document is retained for history.
+
 Email-targeted Brain Invitations extend the existing Brain invitation flow
 rather than adding a separate permission system. The inviting admin's trusted
 client creates NIP-59-shaped gift-wrapped Email Invite Bootstrap material from

@@ -55,36 +55,26 @@ impl IdentityAuthorityClient {
     ) -> Result<EmailRedeemReport, CliError> {
         let identity = load_or_generate_identity(env)?;
         let key = finite_identity::client::LocalIdentityKey::from_identity(&identity);
-        if is_finite_vip_email(email) {
-            let request = self
-                .client
-                .vip_email_binding_redeem(&key, email, token, unix_timestamp())
-                .map_err(|error| CliError::Identity(error.to_string()))?;
-            let response: VipEmailRedeemResponse = self.send_signed_json(request)?;
-            Ok(EmailRedeemReport {
-                email: response.email,
-                pubkey: response.pubkey,
-                principal_kind: "native".to_owned(),
-                nip05: Some(response.nip05),
-                limitation: None,
-            })
-        } else {
-            let request = self
-                .client
-                .email_only_redeem(&key, email, token, unix_timestamp())
-                .map_err(|error| CliError::Identity(error.to_string()))?;
-            let response: EmailOnlyRedeemResponse = self.send_signed_json(request)?;
-            Ok(EmailRedeemReport {
-                email: response.email,
-                pubkey: response.pubkey,
-                principal_kind: "email_only".to_owned(),
-                nip05: None,
-                limitation: Some(
-                    "FiniteBrain direct permission grants still require an npub recipient; email-targeted Brain Invitations can be claimed after email proof."
-                        .to_owned(),
-                ),
-            })
+        if !is_finite_vip_email(email) {
+            // The Directory only claims name@finite.vip bindings. Brain
+            // invitations no longer consume email proofs (auth kernel cut):
+            // capability Invite Tokens replaced them.
+            return Err(CliError::InvalidInput(
+                "only name@finite.vip emails can be claimed against the Directory; to join a Brain by email, ask the inviter for an invite-token link"
+                    .to_owned(),
+            ));
         }
+        let request = self
+            .client
+            .vip_email_binding_redeem(&key, email, token, unix_timestamp())
+            .map_err(|error| CliError::Identity(error.to_string()))?;
+        let response: VipEmailRedeemResponse = self.send_signed_json(request)?;
+        Ok(EmailRedeemReport {
+            email: response.email,
+            pubkey: response.pubkey,
+            principal_kind: "native".to_owned(),
+            nip05: Some(response.nip05),
+        })
     }
 
     fn send_signed_json<T: serde::de::DeserializeOwned>(
@@ -113,7 +103,6 @@ pub(crate) struct EmailRedeemReport {
     pub(crate) pubkey: String,
     pub(crate) principal_kind: String,
     pub(crate) nip05: Option<String>,
-    pub(crate) limitation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,12 +110,6 @@ struct VipEmailRedeemResponse {
     email: String,
     pubkey: String,
     nip05: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmailOnlyRedeemResponse {
-    email: String,
-    pubkey: String,
 }
 
 fn identity_response_json<T: serde::de::DeserializeOwned>(

@@ -189,31 +189,6 @@ impl BrainStore {
         self.load_brain_approval_request(request_id)
     }
 
-    /// Record the committed invitation ids an approved request produced, so
-    /// members (whose agents cannot list org-brain invitations) can still
-    /// observe their filing's outcome through `approvals list --all`.
-    pub fn record_brain_approval_result_invitations(
-        &mut self,
-        request_id: &str,
-        invitation_ids: &[String],
-        updated_at: &str,
-    ) -> Result<(), StoreError> {
-        let encoded =
-            serde_json::to_string(invitation_ids).map_err(|error| StoreError::BrokenInvariant {
-                reason: format!("approval result invitations did not serialize: {error}"),
-            })?;
-        let updated = self.conn.execute(
-            "UPDATE brain_approval_requests SET result_invitations_json = ?2, updated_at = ?3 WHERE id = ?1",
-            params![request_id, encoded, updated_at],
-        )?;
-        if updated == 0 {
-            return Err(StoreError::UnavailableLink {
-                kind: "brain approval request",
-            });
-        }
-        Ok(())
-    }
-
     /// True when this approval nonce was already consumed on this Brain.
     pub fn approval_nonce_seen(&self, brain_id: &BrainId, nonce: &str) -> Result<bool, StoreError> {
         self.conn
