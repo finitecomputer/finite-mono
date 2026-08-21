@@ -40,8 +40,9 @@ use finitechat_client::{
     StoredAppMessage, StoredAppRoom, StoredAppRoomState,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, ChatMediaKind,
-    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
+    AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions,
+    OutboundAttachment,
 };
 use finitechat_hermes::{
     HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
@@ -97,6 +98,12 @@ const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 /// normal turn. Override with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
 const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 15 * 60 * 1000;
 const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
+/// Policy for a `thread_id` that resolves to no conversation or segment in the
+/// agent store. Default is a typed error (the safe choice per HARDENING.md,
+/// which requires a visible adapter failure rather than a silent Home
+/// fallback). Set to `home`/`default` to instead route unknown threads to
+/// Core's Home default, logged as an explicit routing decision.
+const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
 /// Bounded ring of recently-acked entry keys. It makes a post-restart
 /// duplicate ack a no-op and blocks a redelivery of an already-acked entry
 /// from durable recovery even if its seq is re-observed, so the sidecar is
@@ -827,17 +834,19 @@ fn handle_hermes_service_action(
             result
         }
         "send" => {
-            let request: HermesSendRequestV1 =
+            let mut request: HermesSendRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
+            resolve_hermes_send_route(&state.runtime, &mut request)?;
             let sent = send_hermes_request_with_runtime(&state.runtime, &request)?;
             update_running_after_send(&state.agent_home, &request, &sent.message_id)?;
             Ok(sent_message_value(&sent))
         }
         "edit" => {
-            let request: HermesEditRequestV1 =
+            let mut request: HermesEditRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
+            resolve_hermes_edit_route(&state.agent_home, &state.runtime, &mut request)?;
             let sent = edit_hermes_request_with_runtime(&state.runtime, &request)?;
             update_running_after_edit(&state.agent_home, &request)?;
             Ok(sent_message_value(&sent))
@@ -911,6 +920,7 @@ fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, Cl
             room_id: message.room_id.clone(),
             conversation_id: message.conversation_id.clone(),
             segment_id: message.segment_id.clone(),
+            thread_id: None,
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
             kind: message.kind,
@@ -931,8 +941,9 @@ fn handle_hermes_service_activity(
     state: &HermesServiceState,
     payload: Value,
 ) -> Result<Value, CliError> {
-    let request: HermesActivityRequestV1 =
+    let mut request: HermesActivityRequestV1 =
         serde_json::from_value(payload).map_err(CliError::Json)?;
+    resolve_hermes_activity_route(&state.runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
     let accepted = state
         .runtime
@@ -2782,24 +2793,28 @@ fn encode_application_event(
 }
 
 fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesSendRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
+    let mut request: HermesSendRequestV1 =
+        serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_send_route(&runtime, &mut request)?;
     let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
     write_sent_message(output, &sent)
 }
 
 fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesEditRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
+    let mut request: HermesEditRequestV1 =
+        serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_edit_route(home_dir, &runtime, &mut request)?;
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
     write_sent_message(output, &sent)
@@ -2813,6 +2828,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
             room_id: message.room_id.clone(),
             conversation_id: message.conversation_id.clone(),
             segment_id: message.segment_id.clone(),
+            thread_id: None,
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
             kind: message.kind,
@@ -2846,6 +2862,190 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         save_hermes_running(home_dir, &HermesRunningState::default())?;
     }
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
+}
+
+enum UnknownThreadRoutePolicy {
+    Error,
+    HomeDefault,
+}
+
+fn unknown_thread_route_policy() -> UnknownThreadRoutePolicy {
+    match std::env::var(HERMES_UNKNOWN_THREAD_ROUTE_ENV)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("home") | Some("default") => UnknownThreadRoutePolicy::HomeDefault,
+        _ => UnknownThreadRoutePolicy::Error,
+    }
+}
+
+/// Resolve a Hermes `thread_id` against the agent store: it is either a
+/// conversation (topic) id, or a segment (chat) id inside one of the room's
+/// topics. Returns `(conversation_id, segment_id)`. `hermes.rs`'s inbound path
+/// mints `thread_id = segment_id.or(conversation_id)`, so this is the inverse
+/// the Python adapter used to persist in its own route table.
+fn resolve_thread_id_route(
+    topics: &[AppTopicSummary],
+    room_id: &str,
+    thread_id: &str,
+) -> Option<(String, Option<String>)> {
+    if topics
+        .iter()
+        .any(|topic| topic.room_id == room_id && topic.topic_id == thread_id && !topic.archived)
+    {
+        return Some((thread_id.to_owned(), None));
+    }
+    for topic in topics
+        .iter()
+        .filter(|topic| topic.room_id == room_id && !topic.archived)
+    {
+        if topic.chats.iter().any(|chat| chat.chat_id == thread_id) {
+            return Some((topic.topic_id.clone(), Some(thread_id.to_owned())));
+        }
+    }
+    None
+}
+
+/// Turn the request's optional `thread_id` into concrete route fields. An
+/// explicit `conversation_id`/`segment_id` always wins (thread_id is only a
+/// resolver); with neither route nor thread_id the send is an intentional Home
+/// message (Core applies its default). An unknown thread_id is a typed error
+/// unless the Home-default policy is opted into.
+fn resolve_route_fields(
+    runtime: &FiniteChatRuntime,
+    room_id: &str,
+    conversation_id: Option<String>,
+    segment_id: Option<String>,
+    thread_id: Option<&str>,
+    context: &str,
+) -> Result<(Option<String>, Option<String>), CliError> {
+    if conversation_id.is_some() || segment_id.is_some() {
+        return Ok((conversation_id, segment_id));
+    }
+    let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok((None, None));
+    };
+    let state = runtime.state().map_err(map_core_hermes_error)?;
+    if let Some((conversation_id, segment_id)) =
+        resolve_thread_id_route(&state.topics, room_id, thread_id)
+    {
+        return Ok((Some(conversation_id), segment_id));
+    }
+    match unknown_thread_route_policy() {
+        UnknownThreadRoutePolicy::Error => Err(CliError::Hermes(format!(
+            "unknown thread_id {thread_id:?} for room {room_id} ({context}): \
+             no matching conversation or segment in the agent store"
+        ))),
+        UnknownThreadRoutePolicy::HomeDefault => {
+            eprintln!(
+                "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room \
+                 {room_id}; routing to the Home default ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=home)"
+            );
+            Ok((None, None))
+        }
+    }
+}
+
+fn resolve_hermes_send_route(
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesSendRequestV1,
+) -> Result<(), CliError> {
+    let (conversation_id, segment_id) = resolve_route_fields(
+        runtime,
+        &request.room_id,
+        request.conversation_id.take(),
+        request.segment_id.take(),
+        request.thread_id.as_deref(),
+        "send",
+    )?;
+    request.conversation_id = conversation_id;
+    request.segment_id = segment_id;
+    Ok(())
+}
+
+fn resolve_hermes_activity_route(
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesActivityRequestV1,
+) -> Result<(), CliError> {
+    let (conversation_id, segment_id) = resolve_route_fields(
+        runtime,
+        &request.room_id,
+        request.conversation_id.take(),
+        request.segment_id.take(),
+        request.thread_id.as_deref(),
+        "activity",
+    )?;
+    request.conversation_id = conversation_id;
+    request.segment_id = segment_id;
+    Ok(())
+}
+
+fn lookup_running_message(
+    home_dir: &Path,
+    room_id: &str,
+    message_id: &str,
+) -> Result<Option<HermesRunningMessage>, CliError> {
+    let running = load_hermes_running(home_dir)?;
+    Ok(running
+        .messages
+        .into_iter()
+        .find(|message| message.room_id == room_id && message.message_id == message_id))
+}
+
+/// Resolve an edit's route. An explicit route wins; otherwise a `thread_id` is
+/// resolved against the store; otherwise the original message's route is looked
+/// up by `(room_id, message_id)` from the running-turn file, so the adapter no
+/// longer needs to remember outbound message routes.
+fn resolve_hermes_edit_route(
+    home_dir: &Path,
+    runtime: &FiniteChatRuntime,
+    request: &mut HermesEditRequestV1,
+) -> Result<(), CliError> {
+    if request.conversation_id.is_some() || request.segment_id.is_some() {
+        // A route override must name a real conversation, so a wrong override
+        // is a typed error rather than a silent misroute to a phantom topic.
+        if let Some(conversation_id) = request.conversation_id.as_deref() {
+            let state = runtime.state().map_err(map_core_hermes_error)?;
+            let exists = state.topics.iter().any(|topic| {
+                topic.room_id == request.room_id
+                    && topic.topic_id == conversation_id
+                    && !topic.archived
+            });
+            if !exists {
+                return Err(CliError::Hermes(format!(
+                    "edit conversation_id {conversation_id:?} override does not name a \
+                     conversation in room {}",
+                    request.room_id
+                )));
+            }
+        }
+        return Ok(());
+    }
+    if request
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        let (conversation_id, segment_id) = resolve_route_fields(
+            runtime,
+            &request.room_id,
+            None,
+            None,
+            request.thread_id.as_deref(),
+            "edit",
+        )?;
+        request.conversation_id = conversation_id;
+        request.segment_id = segment_id;
+        return Ok(());
+    }
+    if let Some(message) = lookup_running_message(home_dir, &request.room_id, &request.message_id)?
+    {
+        request.conversation_id = message.conversation_id;
+        request.segment_id = message.segment_id;
+    }
+    Ok(())
 }
 
 fn send_hermes_request_with_runtime(
@@ -3158,14 +3358,15 @@ fn remove_hermes_running_message(
 }
 
 fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
-    let request: HermesActivityRequestV1 =
+    let mut request: HermesActivityRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let input = app_bridge_activity_input(request)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
+    resolve_hermes_activity_route(&runtime, &mut request)?;
+    let input = app_bridge_activity_input(request)?;
     let accepted = runtime
         .append_ephemeral_activity_and_wait(input)
         .map_err(map_core_hermes_error)?;
@@ -4694,6 +4895,7 @@ mod tests {
             room_id: "room-main".to_owned(),
             conversation_id: Some("topic-build".to_owned()),
             segment_id: Some("segment-7".to_owned()),
+            thread_id: None,
             activity_kind: finitechat_proto::FINITECHAT_ACTIVITY_KIND_WORKING.to_owned(),
             activity_id: None,
             action: EphemeralActivityActionV1::Set,
@@ -4973,6 +5175,101 @@ mod tests {
             pending_hermes_inbox_events(&reloaded, None, 10).is_empty(),
             "an acked entry must not be re-enqueued even when the cursor is behind"
         );
+    }
+
+    fn topic_with_chats(room_id: &str, topic_id: &str, chat_ids: &[&str]) -> AppTopicSummary {
+        use finitechat_core::AppChatSummary;
+        AppTopicSummary {
+            room_id: room_id.to_owned(),
+            topic_id: topic_id.to_owned(),
+            title: topic_id.to_owned(),
+            description: None,
+            last_message_preview: String::new(),
+            unread_count: 0,
+            message_count: 0,
+            created_seq: 0,
+            updated_seq: 0,
+            archived: false,
+            active_chat_id: chat_ids.first().map(|id| (*id).to_owned()),
+            chats: chat_ids
+                .iter()
+                .map(|id| AppChatSummary {
+                    chat_id: (*id).to_owned(),
+                    title: (*id).to_owned(),
+                    last_message_preview: String::new(),
+                    unread_count: 0,
+                    message_count: 0,
+                    started_seq: 0,
+                    updated_seq: 0,
+                    active: false,
+                    archived: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_thread_id_route_matches_segment_then_conversation() {
+        let topics = vec![topic_with_chats(
+            "room-a",
+            "topic-build",
+            &["chat-build-1", "chat-build-2"],
+        )];
+        // A segment (chat) id resolves to its parent topic plus itself.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "chat-build-1"),
+            Some(("topic-build".to_owned(), Some("chat-build-1".to_owned())))
+        );
+        // A conversation (topic) id resolves to itself with no segment.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "topic-build"),
+            Some(("topic-build".to_owned(), None))
+        );
+        // An unknown thread id resolves to nothing (the caller then applies the
+        // configured unknown-thread policy).
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "chat-unknown"),
+            None
+        );
+        // A chat id in another room does not leak across rooms.
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-b", "chat-build-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_thread_id_route_ignores_archived_topics() {
+        let mut topics = vec![topic_with_chats("room-a", "topic-old", &["chat-old"])];
+        topics[0].archived = true;
+        assert_eq!(resolve_thread_id_route(&topics, "room-a", "chat-old"), None);
+        assert_eq!(
+            resolve_thread_id_route(&topics, "room-a", "topic-old"),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_thread_route_policy_defaults_to_typed_error() {
+        // The env var is process-global; this test owns it and restores it.
+        // SAFETY: single-threaded mutation of a test-only environment variable.
+        unsafe {
+            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+        }
+        assert!(matches!(
+            unknown_thread_route_policy(),
+            UnknownThreadRoutePolicy::Error
+        ));
+        unsafe {
+            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home");
+        }
+        assert!(matches!(
+            unknown_thread_route_policy(),
+            UnknownThreadRoutePolicy::HomeDefault
+        ));
+        unsafe {
+            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+        }
     }
 
     #[test]
