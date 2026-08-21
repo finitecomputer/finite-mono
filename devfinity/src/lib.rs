@@ -377,7 +377,6 @@ pub struct Stack {
     core_token: String,
     hosted_web_device_token: String,
     sites_viewer_session_token: String,
-    identity_sites_notification_token: String,
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
@@ -460,8 +459,6 @@ impl Stack {
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
             sites_viewer_session_token:
                 "dededededededededededededededededededededededededededededededede".to_string(),
-            identity_sites_notification_token:
-                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_string(),
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
             inference_mode,
@@ -683,9 +680,8 @@ impl Stack {
         write_mode_600(
             &self.identity_authority_secret_file(),
             format!(
-                "export FINITE_IDENTITY_OPERATOR_TOKEN={}\nexport FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN={}\n",
-                shell_quote(&identity_operator_token),
-                shell_quote(&self.identity_sites_notification_token)
+                "export FINITE_IDENTITY_OPERATOR_TOKEN={}\n",
+                shell_quote(&identity_operator_token)
             )
             .as_bytes(),
         )?;
@@ -713,14 +709,6 @@ impl Stack {
         write_mode_600(
             &self.dashboard_auth_secret_file(),
             dashboard_auth.as_bytes(),
-        )?;
-        write_mode_600(
-            &self.brain_auth_secret_file(),
-            format!(
-                "export FC_CORE_API_TOKEN={}\n",
-                shell_quote(&self.core_token)
-            )
-            .as_bytes(),
         )?;
 
         if !self.profile.includes_runtime() {
@@ -778,7 +766,6 @@ impl Stack {
             self.runner_auth_secret_file(),
             self.limiter_auth_secret_file(),
             self.dashboard_auth_secret_file(),
-            self.brain_auth_secret_file(),
             self.identity_authority_secret_file(),
         ] {
             remove_file_best_effort(&path);
@@ -1630,21 +1617,13 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[
-                format!(
-                    ". {}",
-                    shell_quote(&self.identity_authority_secret_file().display().to_string())
-                ),
-                format!("exec {}", self.finitechat_hosted_device_command()),
-            ],
+            &[format!("exec {}", self.finitechat_hosted_device_command())],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
-        let _ = writeln!(yaml, "        condition: process_healthy");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -1662,7 +1641,6 @@ wait "$postgres_pid"
                     self.hosted_web_device_token.clone(),
                 ),
                 ("FINITECHAT_SERVER_URL", self.finitechat_url()),
-                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
                 ("FINITECHAT_PUBLIC_URL", self.finitechat_url()),
             ],
         );
@@ -1704,23 +1682,14 @@ wait "$postgres_pid"
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         self.write_environment(
             yaml,
-            &[
-                (
-                    "FINITE_SITES_VIEWER_SESSION_TOKEN",
-                    self.sites_viewer_session_token.clone(),
-                ),
-                (
-                    "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN",
-                    self.identity_sites_notification_token.clone(),
-                ),
-                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
-            ],
+            &[(
+                "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                self.sites_viewer_session_token.clone(),
+            )],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
-        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_http_probe(yaml, "/api/v1/healthz", self.ports.finitesites, 1, 2, 3, 45);
     }
 
@@ -1736,26 +1705,12 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[
-                format!(
-                    ". {}",
-                    shell_quote(&self.brain_auth_secret_file().display().to_string())
-                ),
-                format!(
-                    ". {}",
-                    shell_quote(&self.identity_authority_secret_file().display().to_string())
-                ),
-                format!("exec {}", self.finite_brain_command()),
-            ],
+            &[format!("exec {}", self.finite_brain_command())],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
-        let _ = writeln!(yaml, "        condition: process_healthy");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
-        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
             &[
@@ -1780,8 +1735,6 @@ wait "$postgres_pid"
                 // raise the ceiling generously; production deployments leave
                 // this unset and keep the real limits.
                 ("FINITE_BRAIN_PROTECTED_RATE_LIMIT", "10000:60".to_string()),
-                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
-                ("FC_CORE_API_BASE_URL", self.core_url()),
             ],
         );
         self.write_http_probe_host(
@@ -3532,9 +3485,6 @@ wait "$postgres_pid"
     fn dashboard_auth_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("dashboard-auth.sh")
     }
-    fn brain_auth_secret_file(&self) -> PathBuf {
-        self.secrets_dir().join("brain-auth.sh")
-    }
     fn identity_authority_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("identity-authority.sh")
     }
@@ -4891,14 +4841,8 @@ mod tests {
         assert!(!dashboard_exports.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN"));
         assert!(!dashboard_exports.contains("WORKOS_API_KEY"));
 
-        let brain_exports = fs::read_to_string(stack.brain_auth_secret_file()).unwrap();
-        assert_eq!(
-            brain_exports,
-            format!(
-                "export FC_CORE_API_TOKEN={}\n",
-                shell_quote(&stack.core_token)
-            )
-        );
+        // Brain reads no service credential: it no longer calls Core.
+        assert!(!stack.secrets_dir().join("brain-auth.sh").exists());
 
         let _ = fs::remove_dir_all(state_dir);
     }
@@ -5232,9 +5176,13 @@ printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
         assert!(yaml.contains("finite-identity:"));
         assert!(yaml.contains("finite-identityd serve"));
         assert!(yaml.contains("--public-listen 127.0.0.1:8791"));
+        // The Runner still binds managed Agent Email through the Directory, so
+        // it keeps FINITE_IDENTITY_AUTHORITY and the operator secret file;
+        // Sites, Brain, and Hosted Device no longer receive either.
         assert!(yaml.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
         assert!(yaml.contains("secrets/identity-authority.sh"));
         assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
+        assert!(!yaml.contains("FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN"));
         assert!(!yaml.contains("--operator-token"));
         assert!(yaml.contains("exec finite-brain"));
         assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
@@ -5271,8 +5219,8 @@ printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
             .nth(1)
             .and_then(|tail| tail.split("\n  finite-identity:\n").next())
             .unwrap();
-        assert!(sites.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
-        assert!(sites.contains("finite-identity:\n        condition: process_healthy"));
+        assert!(!sites.contains("FINITE_IDENTITY_AUTHORITY"));
+        assert!(!sites.contains("FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN"));
         assert!(sites.contains("--mailer dev"));
         assert!(sites.contains("--app-runner none"));
         assert!(!sites.contains("identity-authority.sh"));

@@ -13,10 +13,7 @@ use crate::{
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
     AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, BrainAccountAgentRoster, BrainAccountAgentRosterEntry,
-    BrainAccountRosterLookup, BrainAgentAccount, BrainAgentDepartureFact,
-    BrainAgentDepartureFactsPage, BrainDeparturePrincipalKind, BrainDepartureReason,
-    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
+    BillingOverview, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
     CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, FinitePrivateAdminAccount, FinitePrivateAdminAuditEvent,
@@ -200,27 +197,6 @@ impl CoreStore {
             .batch_execute(CORE_SCHEMA_SQL)
             .await
             .map_err(store_error)
-    }
-
-    /// The authoritative account agent roster for the Brain enrichment layer
-    /// (ADR-0046). Routine Brain authorization never calls this.
-    pub async fn brain_account_agent_roster(
-        &self,
-        lookup: &BrainAccountRosterLookup,
-    ) -> CoreResult<Option<BrainAccountAgentRoster>> {
-        let lookup = normalize_brain_roster_lookup(lookup);
-        let client = self.connection().await?;
-        postgres_brain_account_agent_roster(&**client, &lookup).await
-    }
-
-    /// One replayable cursor page of Permanent Departure Facts (ADR-0046).
-    pub async fn brain_agent_departure_facts(
-        &self,
-        after_revision: i64,
-        limit: i64,
-    ) -> CoreResult<BrainAgentDepartureFactsPage> {
-        let client = self.connection().await?;
-        postgres_brain_agent_departure_facts(&**client, after_revision, limit).await
     }
 
     pub async fn issue_launch_code_batch(
@@ -641,33 +617,6 @@ impl CoreStore {
     ) -> CoreResult<Vec<VisibleProject>> {
         let client = self.connection().await?;
         postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
-    }
-
-    pub async fn brain_agent_account(
-        &self,
-        managed_agent_email: &str,
-    ) -> CoreResult<Option<BrainAgentAccount>> {
-        let email = managed_agent_email.trim().to_ascii_lowercase();
-        let client = self.connection().await?;
-        client
-            .query_opt(
-                "SELECT u.workos_user_id, u.normalized_email, p.agent_email
-                 FROM projects p
-                 JOIN users u ON u.id = p.owner_user_id
-                 WHERE p.agent_email = $1 AND u.workos_user_id IS NOT NULL",
-                &[&email],
-            )
-            .await
-            .map_err(store_error)?
-            .map(|row| {
-                Ok(BrainAgentAccount {
-                    workos_user_id: row.get("workos_user_id"),
-                    managed_agent_email: row.get("agent_email"),
-                    verified_email: row.get("normalized_email"),
-                    status: "active".to_owned(),
-                })
-            })
-            .transpose()
     }
 
     pub async fn agent_creation_requests_for_workos_user(
@@ -2029,12 +1978,6 @@ where
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_completed(client, &input.request_id, &runtime_id, &now).await?;
-    // Roster membership change: a freshly completed (non-relocation) creation
-    // adds the agent to the owner's roster.
-    if request.relocation.is_none() {
-        postgres_bump_account_roster_revision_for_user(client, &request.owner_user_id, &now)
-            .await?;
-    }
     Ok(AgentCreationLease {
         project,
         request,
@@ -4530,15 +4473,6 @@ where
         Some(&admin_email),
     )
     .await?;
-    // Archiving an owner-acknowledged unrecoverable runtime is a permanent
-    // departure without a retirement snapshot: recorded as a deletion.
-    postgres_record_agent_departure(
-        client,
-        &input.project_id,
-        &now,
-        BrainDepartureReason::Deleted,
-    )
-    .await?;
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     insert_finite_private_admin_audit_event(
         client,
@@ -4699,19 +4633,6 @@ where
         Some(&admin_email),
     )
     .await?;
-    // The retirement receipt proves this is a retirement, not a deletion. The
-    // facts log is append-only with no uniqueness constraint, so a partially
-    // applied older offboarding must not gain a second fact for the same
-    // departure.
-    if !postgres_agent_departure_fact_exists(client, &input.project_id).await? {
-        postgres_record_agent_departure(
-            client,
-            &input.project_id,
-            &now,
-            BrainDepartureReason::Retired,
-        )
-        .await?;
-    }
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     let retirement_locator = snapshot.receipt.locator.clone();
     insert_finite_private_admin_audit_event(
@@ -5991,311 +5912,6 @@ where
     Ok(request)
 }
 
-fn normalize_brain_roster_lookup(lookup: &BrainAccountRosterLookup) -> BrainAccountRosterLookup {
-    BrainAccountRosterLookup {
-        workos_user_id: trim_to_option(lookup.workos_user_id.as_deref()),
-        email: normalize_owner_email(lookup.email.as_deref()),
-        managed_agent_email: trim_to_option(lookup.managed_agent_email.as_deref())
-            .map(|email| email.to_ascii_lowercase()),
-    }
-}
-
-/// Bump the account's monotonic roster revision (ADR-0046) inside the calling
-/// transaction. `account_id` is the owner's WorkOS user id.
-async fn postgres_bump_account_roster_revision<C>(
-    client: &C,
-    account_id: &str,
-    now: &str,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO brain_account_roster_revisions (account_id, roster_revision, updated_at)
-             VALUES ($1, 1, $2::text::timestamptz)
-             ON CONFLICT (account_id) DO UPDATE
-             SET roster_revision = brain_account_roster_revisions.roster_revision + 1,
-                 updated_at = EXCLUDED.updated_at",
-            &[&account_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn postgres_bump_account_roster_revision_for_user<C>(
-    client: &C,
-    user_id: &str,
-    now: &str,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let account_id = client
-        .query_opt(
-            "SELECT workos_user_id FROM users WHERE id = $1",
-            &[&user_id],
-        )
-        .await
-        .map_err(store_error)?
-        .and_then(|row| row.get::<_, Option<String>>("workos_user_id"));
-    if let Some(account_id) = account_id {
-        postgres_bump_account_roster_revision(client, &account_id, now).await?;
-    }
-    Ok(())
-}
-
-/// Append a Permanent Departure Fact for the project's agent and bump the
-/// owner's roster revision inside the calling transaction (ADR-0046).
-/// Projects without a provisioned identity (`agent_email`) or an unlinked
-/// owner have no account roster, so there is nothing to record.
-async fn postgres_record_agent_departure<C>(
-    client: &C,
-    project_id: &str,
-    now: &str,
-    reason: BrainDepartureReason,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let Some(row) = client
-        .query_opt(
-            "SELECT u.workos_user_id, p.agent_email
-             FROM projects p
-             JOIN users u ON u.id = p.owner_user_id
-             WHERE p.id = $1",
-            &[&project_id],
-        )
-        .await
-        .map_err(store_error)?
-    else {
-        return Ok(());
-    };
-    let account_id: Option<String> = row.get("workos_user_id");
-    let agent_email: Option<String> = row.get("agent_email");
-    let (Some(account_id), Some(agent_email)) = (account_id, agent_email) else {
-        return Ok(());
-    };
-    client
-        .execute(
-            "INSERT INTO brain_agent_departure_facts (
-               account_id, principal_kind, principal_ref, departed_at, reason
-             ) VALUES ($1, $2, $3, $4::text::timestamptz, $5)",
-            &[
-                &account_id,
-                &BrainDeparturePrincipalKind::Agent.as_str(),
-                &agent_email,
-                &now,
-                &reason.as_str(),
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    postgres_bump_account_roster_revision(client, &account_id, now).await
-}
-
-/// True when a Permanent Departure Fact already exists for the project's
-/// agent. `brain_agent_departure_facts` is append-only with no uniqueness
-/// constraint, so repair paths that complete a partially applied offboarding
-/// must check before appending a second fact for the same departure.
-async fn postgres_agent_departure_fact_exists<C>(client: &C, project_id: &str) -> CoreResult<bool>
-where
-    C: GenericClient + Sync,
-{
-    let exists = client
-        .query_opt(
-            "SELECT 1
-             FROM projects p
-             JOIN users u ON u.id = p.owner_user_id
-             JOIN brain_agent_departure_facts AS fact
-               ON fact.account_id = u.workos_user_id
-              AND fact.principal_kind = 'agent'
-              AND fact.principal_ref = p.agent_email
-             WHERE p.id = $1
-             LIMIT 1",
-            &[&project_id],
-        )
-        .await
-        .map_err(store_error)?
-        .is_some();
-    Ok(exists)
-}
-
-/// The authoritative account agent roster (ADR-0046): account-owned,
-/// identity-provisioned agents whose creation completed and whose runtime
-/// link is still active, regardless of temporary runtime health.
-async fn postgres_brain_account_agent_roster<C>(
-    client: &C,
-    lookup: &BrainAccountRosterLookup,
-) -> CoreResult<Option<BrainAccountAgentRoster>>
-where
-    C: GenericClient + Sync,
-{
-    let account = if let Some(workos_user_id) = lookup.workos_user_id.as_deref() {
-        client
-            .query_opt(
-                "SELECT id, workos_user_id, normalized_email
-                 FROM users WHERE workos_user_id = $1",
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?
-    } else if let Some(email) = lookup.email.as_deref() {
-        client
-            .query_opt(
-                "SELECT id, workos_user_id, normalized_email
-                 FROM users WHERE normalized_email = $1",
-                &[&email],
-            )
-            .await
-            .map_err(store_error)?
-    } else if let Some(managed_agent_email) = lookup.managed_agent_email.as_deref() {
-        client
-            .query_opt(
-                "SELECT u.id, u.workos_user_id, u.normalized_email
-                 FROM projects p
-                 JOIN users u ON u.id = p.owner_user_id
-                 WHERE p.agent_email = $1",
-                &[&managed_agent_email],
-            )
-            .await
-            .map_err(store_error)?
-    } else {
-        None
-    };
-    let Some(account) = account else {
-        return Ok(None);
-    };
-    let workos_user_id: Option<String> = account.get("workos_user_id");
-    let Some(workos_user_id) = workos_user_id else {
-        return Ok(None);
-    };
-    let user_id: String = account.get("id");
-    let human_mailbox: String = account.get("normalized_email");
-    let rows = client
-        .query(
-            "SELECT p.agent_email, r.runner_class
-             FROM projects p
-             JOIN agent_creation_requests r ON r.project_id = p.id
-             WHERE p.owner_user_id = $1
-               AND p.agent_email IS NOT NULL
-               AND r.status = 'running'
-               AND EXISTS (
-                 SELECT 1 FROM project_runtime_links l
-                 WHERE l.project_id = p.id AND l.active
-               )
-             ORDER BY p.agent_email",
-            &[&user_id],
-        )
-        .await
-        .map_err(store_error)?;
-    let mut agents = Vec::with_capacity(rows.len());
-    for row in rows {
-        let runner_class: String = row.get("runner_class");
-        let placement_runner_class = parse_runner_class(&runner_class).ok_or_else(|| {
-            CoreError::Store(format!("invalid agent runner class {runner_class}"))
-        })?;
-        agents.push(BrainAccountAgentRosterEntry {
-            managed_agent_email: row.get("agent_email"),
-            agent_npub: None,
-            status: "active".to_owned(),
-            placement_runner_class,
-        });
-    }
-    let roster_revision = client
-        .query_opt(
-            "SELECT roster_revision FROM brain_account_roster_revisions WHERE account_id = $1",
-            &[&workos_user_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| row.get::<_, i64>("roster_revision"))
-        .unwrap_or(0);
-    Ok(Some(BrainAccountAgentRoster {
-        workos_user_id,
-        human_mailbox,
-        roster_revision,
-        agents,
-        departed: Vec::new(),
-    }))
-}
-
-fn brain_departure_fact_from_row(row: &Row) -> CoreResult<BrainAgentDepartureFact> {
-    let principal_kind: &str = row.get("principal_kind");
-    let principal_kind = match principal_kind {
-        "human" => BrainDeparturePrincipalKind::Human,
-        "agent" => BrainDeparturePrincipalKind::Agent,
-        other => {
-            return Err(CoreError::Store(format!(
-                "invalid departure principal kind {other}"
-            )));
-        }
-    };
-    let reason: &str = row.get("reason");
-    let reason = match reason {
-        "retired" => BrainDepartureReason::Retired,
-        "deleted" => BrainDepartureReason::Deleted,
-        "unlinked" => BrainDepartureReason::Unlinked,
-        other => {
-            return Err(CoreError::Store(format!(
-                "invalid departure reason {other}"
-            )));
-        }
-    };
-    Ok(BrainAgentDepartureFact {
-        revision: row.get("revision"),
-        account_id: row.get("account_id"),
-        principal_kind,
-        principal_ref: row.get("principal_ref"),
-        departed_at: row.get("departed_at"),
-        reason,
-    })
-}
-
-/// Replayable cursor page of Permanent Departure Facts (ADR-0046), ordered by
-/// revision, plus the global maximum revision so a consumer with no new facts
-/// still learns how far the log has advanced.
-async fn postgres_brain_agent_departure_facts<C>(
-    client: &C,
-    after_revision: i64,
-    limit: i64,
-) -> CoreResult<BrainAgentDepartureFactsPage>
-where
-    C: GenericClient + Sync,
-{
-    let limit = limit.clamp(0, 1000);
-    let sql = format!(
-        "SELECT revision, account_id, principal_kind, principal_ref,
-                {departed_at} AS departed_at, reason
-         FROM brain_agent_departure_facts
-         WHERE revision > $1
-         ORDER BY revision ASC
-         LIMIT $2",
-        departed_at = rfc3339_col("departed_at"),
-    );
-    let rows = client
-        .query(&sql, &[&after_revision, &limit])
-        .await
-        .map_err(store_error)?;
-    let mut facts = Vec::with_capacity(rows.len());
-    for row in &rows {
-        facts.push(brain_departure_fact_from_row(row)?);
-    }
-    let max_revision = client
-        .query_one(
-            "SELECT COALESCE(MAX(revision), 0) AS max_revision FROM brain_agent_departure_facts",
-            &[],
-        )
-        .await
-        .map_err(store_error)?
-        .get::<_, i64>("max_revision");
-    Ok(BrainAgentDepartureFactsPage {
-        facts,
-        max_revision,
-    })
-}
-
 /// Row-scoped `offboard_destroyed_runtime`: hide the normal project from its
 /// room members, deactivate the runtime's links, drop its relay credential,
 /// revoke every active Finite Private key bound to the runtime or its project,
@@ -6316,15 +5932,6 @@ where
         now,
         "finite_private.runtime.destroy_revoke_keys",
         None,
-    )
-    .await?;
-    // Runtime Retirement is the destroy flow: every destroy completion carries
-    // a verified retirement snapshot, so the departure is a retirement.
-    postgres_record_agent_departure(
-        client,
-        &request.project_id,
-        now,
-        BrainDepartureReason::Retired,
     )
     .await?;
     Ok(())
@@ -10403,181 +10010,6 @@ mod tests {
         .await;
     }
 
-    /// ADR-0046 Permanent Departure Facts against Postgres: a completed
-    /// creation joins the roster at revision 1, an owner-acknowledged archive
-    /// emits a durable 'deleted' fact and bumps the roster transactionally,
-    /// and the cursor page replays deterministically.
-    #[tokio::test]
-    async fn postgres_brain_departure_facts_emit_on_archive_and_replay_with_cursor() {
-        with_isolated_postgres(|store| async move {
-            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
-            store
-                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                    id: "artifact-departure-v1".to_string(),
-                    kind: RuntimeArtifactKind::OciImage,
-                    reference: format!(
-                        "ghcr.io/finitecomputer/finite-agent-runtime:departure-v1@sha256:{}",
-                        "2".repeat(64)
-                    ),
-                    version_label: "departure-v1".to_string(),
-                    source_git_sha: None,
-                    finitec_version: None,
-                    hermes_source_ref: None,
-                    finite_platform_plugin_ref: None,
-                    state_schema_version: "state-v1".to_string(),
-                    base_image: Some("python:3.11-trixie".to_string()),
-                    recover_known_good_chat: false,
-                    promoted: true,
-                    now: Some("2026-05-28T12:00:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let created = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: "departure-owner@finite.vip".to_string(),
-                    workos_user_id: "workos_departure_owner".to_string(),
-                    display_name: "Departure Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "browser-submit-departure".to_string(),
-                    now: Some("2026-05-28T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let lease = store
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "runner-departure-1".to_string(),
-                    source_host_id: None,
-                    lease_token: "lease-departure-1".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: None,
-                    now: Some("2026-05-28T12:02:00Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .expect("departure request should lease");
-            store
-                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                    request_id: lease.request.id.clone(),
-                    runner_id: "runner-departure-1".to_string(),
-                    lease_token: "lease-departure-1".to_string(),
-                    source_host_id: "departure-host".to_string(),
-                    source_machine_id: "departure-agent-001".to_string(),
-                    runtime_artifact_id: Some("artifact-departure-v1".to_string()),
-                    state_schema_version: Some("state-v1".to_string()),
-                    provider_runtime_handle: None,
-                    contact_endpoint: None,
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    display_name: Some("Departure Agent".to_string()),
-                    hostname: None,
-                    runtime_host: Some("departure-host".to_string()),
-                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                    active_inference_profile: Some("finite-private".to_string()),
-                    hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
-                    now: Some("2026-05-28T12:02:30Z".to_string()),
-                })
-                .await
-                .unwrap();
-            store
-                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                    request_id: lease.request.id.clone(),
-                    runner_id: "runner-departure-1".to_string(),
-                    lease_token: "lease-departure-1".to_string(),
-                    source_host_id: "departure-host".to_string(),
-                    source_machine_id: "departure-agent-001".to_string(),
-                    runtime_artifact_id: Some("artifact-departure-v1".to_string()),
-                    state_schema_version: Some("state-v1".to_string()),
-                    provider_runtime_handle: None,
-                    contact_endpoint: None,
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    display_name: Some("Departure Agent".to_string()),
-                    hostname: None,
-                    runtime_host: Some("departure-host".to_string()),
-                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                    active_inference_profile: Some("finite-private".to_string()),
-                    hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
-                    now: Some("2026-05-28T12:03:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let _ = created;
-            let runtime_id = store
-                .visible_projects_for_workos_user("workos_departure_owner")
-                .await
-                .unwrap()
-                .into_iter()
-                .next()
-                .and_then(|project| project.runtime)
-                .expect("completed creation exposes its runtime")
-                .id;
-
-            let lookup = BrainAccountRosterLookup {
-                workos_user_id: Some("workos_departure_owner".to_string()),
-                ..BrainAccountRosterLookup::default()
-            };
-            let roster = store
-                .brain_account_agent_roster(&lookup)
-                .await
-                .unwrap()
-                .expect("completed creation joins the roster");
-            assert_eq!(roster.roster_revision, 1);
-            assert_eq!(roster.agents.len(), 1);
-            let agent_email = roster.agents[0].managed_agent_email.clone();
-
-            // The archive hook emits a durable 'deleted' departure fact and
-            // bumps the roster revision in the same transaction.
-            let archive = store
-                .admin_archive_unrecoverable_runtime(AdminArchiveUnrecoverableRuntimeInput {
-                    admin_verified_email: "ops@finite.vip".to_string(),
-                    admin_workos_user_id: "workos_departure_ops".to_string(),
-                    project_id: lease.request.project_id.clone(),
-                    expected_agent_runtime_id: runtime_id.clone(),
-                    expected_source_host_id: "departure-host".to_string(),
-                    expected_source_machine_id: "departure-agent-001".to_string(),
-                    expected_owner_email: "departure-owner@finite.vip".to_string(),
-                    operator_observed_compute_absent: true,
-                    operator_observed_durable_state_absent: true,
-                    owner_acknowledged_unrecoverable: true,
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert_eq!(archive.agent_runtime_id, runtime_id);
-
-            let page = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(page.max_revision, 1);
-            assert_eq!(page.facts.len(), 1);
-            let fact = &page.facts[0];
-            assert_eq!(fact.revision, 1);
-            assert_eq!(fact.account_id, "workos_departure_owner");
-            assert_eq!(fact.principal_kind, BrainDeparturePrincipalKind::Agent);
-            assert_eq!(fact.principal_ref, agent_email);
-            assert_eq!(fact.reason, BrainDepartureReason::Deleted);
-            assert!(!fact.departed_at.is_empty());
-
-            // The roster revision moved with the departure; the departed
-            // agent left the roster.
-            let roster = store
-                .brain_account_agent_roster(&lookup)
-                .await
-                .unwrap()
-                .expect("account still resolves");
-            assert_eq!(roster.roster_revision, 2);
-            assert!(roster.agents.is_empty());
-            assert!(roster.departed.is_empty());
-
-            // Cursor replay is deterministic: nothing new after revision 1,
-            // and the full page replays identically from 0.
-            let empty = store.brain_agent_departure_facts(1, 100).await.unwrap();
-            assert!(empty.facts.is_empty());
-            assert_eq!(empty.max_revision, 1);
-            let replay = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(replay, page);
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn postgres_finite_private_default_survives_reapply_and_n_minus_one_schema() {
         with_isolated_postgres(|store| async move {
@@ -11487,13 +10919,7 @@ mod tests {
                     && event.target_id == runtime_id
             }));
 
-            // The departure is recorded as a retirement exactly once, and a
-            // second run fails closed on the inactive link without adding a
-            // second fact.
-            let facts = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts.facts.len(), 1);
-            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
-            assert_eq!(facts.facts[0].account_id, format!("workos_{run}_owner"));
+            // A repair rerun fails closed on the inactive link.
             assert!(matches!(
                 store
                     .admin_offboard_retired_runtime(input(true))
@@ -11501,8 +10927,6 @@ mod tests {
                     .unwrap_err(),
                 CoreError::ProjectRuntimeNotFound
             ));
-            let facts_after_rerun = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts_after_rerun.facts.len(), 1);
         })
         .await;
     }
