@@ -234,6 +234,10 @@ pub struct FailRuntimeControlRequest {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    /// Named lifecycle failure stage; absent from N-1 Runners, which Core
+    /// records as `unknown`.
+    #[serde(default)]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub now: Option<String>,
 }
 
@@ -266,6 +270,9 @@ pub struct RuntimeControlRequestView {
     pub kind: crate::RuntimeControlKind,
     pub target_runtime_artifact_id: Option<String>,
     pub status: crate::RuntimeControlRequestStatus,
+    /// The named failure stage; present exactly when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub failure_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -284,6 +291,7 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
             kind: request.kind,
             target_runtime_artifact_id: request.target_runtime_artifact_id,
             status: request.status,
+            failure_stage: request.failure_stage,
             failure_message: request.failure_message,
             created_at: request.created_at,
             updated_at: request.updated_at,
@@ -550,6 +558,9 @@ pub struct PublicRuntimeControl {
     pub id: String,
     pub kind: crate::RuntimeControlKind,
     pub status: crate::RuntimeControlRequestStatus,
+    /// The named failure stage; present exactly when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub retrying: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -564,6 +575,7 @@ impl From<VisibleProject> for PublicVisibleProject {
                     id: request.id,
                     kind: request.kind,
                     status: request.status,
+                    failure_stage: request.failure_stage,
                     retrying: request.failure_message.is_some(),
                     created_at: request.created_at,
                     updated_at: request.updated_at,
@@ -1942,6 +1954,7 @@ async fn fail_runtime_control_request(
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 failure_message: input.failure_message,
+                failure_stage: input.failure_stage,
                 now: input.now,
             })
             .await?,
@@ -2576,7 +2589,7 @@ impl From<CoreError> for ApiError {
             | CoreError::RuntimeRetirementSnapshotMismatch
             | CoreError::RuntimeRetirementSnapshotConflict
             | CoreError::RuntimeRetirementNotEnabled
-            | CoreError::RuntimeControlRequestNotRunning
+            | CoreError::RuntimeControlRequestNotLaunching
             | CoreError::RuntimeControlRequestLeaseConflict
             | CoreError::FinitePrivateGrantNotActive
             | CoreError::FinitePrivateReservationAlreadySettled
@@ -3266,7 +3279,8 @@ mod tests {
             requested_by_user_id: "user_123".to_string(),
             kind: crate::RuntimeControlKind::Destroy,
             target_runtime_artifact_id: None,
-            status: crate::RuntimeControlRequestStatus::Running,
+            status: crate::RuntimeControlRequestStatus::Launching,
+            failure_stage: None,
             runner_id: Some("runner-1".to_string()),
             lease_token: Some("secret-lease-token".to_string()),
             lease_expires_at: Some("2026-05-25T13:10:00Z".to_string()),
@@ -6000,7 +6014,7 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(lease["request"]["id"], restart_id.as_str());
-            assert_eq!(lease["request"]["status"], "running");
+            assert_eq!(lease["request"]["status"], "launching");
             assert_eq!(lease["runtime"]["source_machine_id"], "oslo-agent-001");
 
             let (status, completed) = send_json(

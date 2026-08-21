@@ -2,6 +2,10 @@
 -- Run immediately before rolling Core back to a generation that cannot parse
 -- RuntimeControlKind::Upgrade. The audit row preserves the original operation
 -- and target before the compatibility rewrite.
+-- H1 (0020_runtime_lifecycle.sql): the active statuses below are the
+-- post-H1 lifecycle vocabulary. Rolling Core back across H1 additionally
+-- requires the reverse status remap runbook from the H1 PR body; this rescue
+-- only rewrites the upgrade KIND.
 BEGIN;
 
 LOCK TABLE runtime_control_requests IN SHARE ROW EXCLUSIVE MODE;
@@ -12,7 +16,7 @@ BEGIN
     SELECT 1
     FROM runtime_control_requests
     WHERE kind = 'upgrade'
-      AND status IN ('requested', 'running')
+      AND status IN ('requested', 'launching', 'compute_up', 'ready')
   ) THEN
     RAISE EXCEPTION
       'runtime upgrade rollback rescue refused: active upgrade requests still exist'
