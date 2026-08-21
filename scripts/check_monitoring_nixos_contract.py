@@ -48,6 +48,42 @@ HOST_PANEL_TITLES = [
     "LAT Filesystem Read-only",
 ]
 
+LOG_PANEL_TITLES = [
+    "LAT Recent Warning Logs",
+]
+
+LAT_LOG_UNITS = {
+    "finite-lat-1": [
+        "alloy.service",
+        "caddy.service",
+        "finite-healthcheck.service",
+        "finite-saas-core.service",
+        "finitechat-server.service",
+        "finitechat-hosted-device.service",
+        "finite-brain-app.service",
+        "finite-saas-sites.service",
+        "finite-identity.service",
+        "finite-saas-runner.service",
+        "prometheus-node-exporter.service",
+        "finite-litestream-health.service",
+        "borgbackup-job-finite-hosted-web-chat-offsite.service",
+    ],
+    "finite-lat-3": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
+}
+
+LAT_ROLES = {
+    "finite-lat-1": "app",
+    "finite-lat-3": "runner",
+}
+
 
 def nix_eval() -> dict[str, Any]:
     expression = r'''
@@ -99,9 +135,17 @@ def nix_eval() -> dict[str, Any]:
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
-        latMetrics = {
-          finite-lat-1 = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
-          finite-lat-3 = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
+        latAlloy = {
+          finite-lat-1 = {
+            config = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+          };
+          finite-lat-3 = {
+            config = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+          };
         };
       }
     '''
@@ -162,6 +206,8 @@ def check_dashboard_contract() -> None:
     panels_by_title = {panel["title"]: panel for panel in panels}
     for title in HOST_PANEL_TITLES:
         require(title in panels_by_title, f"missing Grafana host panel {title!r}")
+    for title in LOG_PANEL_TITLES:
+        require(title in panels_by_title, f"missing Grafana log panel {title!r}")
 
     rendered_dashboard = json.dumps(dashboard)
     for metric_name in HOST_METRIC_NAMES:
@@ -186,6 +232,18 @@ def check_dashboard_contract() -> None:
         'device=~"en.*|eth.*|wg-finite"',
         "LAT Network Throughput",
     )
+
+    for title in LOG_PANEL_TITLES:
+        panel = panels_by_title[title]
+        require(panel["datasource"]["uid"] == "finite-loki", f"{title} must use Loki")
+        for target in panel_targets(panel):
+            expression = target["expr"]
+            require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
+            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
+            require(
+                "finite-lat-2" not in expression,
+                f"{title} must not include finite-lat-2 in production log panels",
+            )
 
 
 def check_ubuntu_contract() -> None:
@@ -262,9 +320,47 @@ def main() -> int:
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost")
     require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost")
 
-    for host_name, alloy_config in contract["latMetrics"].items():
+    for host_name, alloy in contract["latAlloy"].items():
+        alloy_config = alloy["config"]
+        require(
+            "/etc/finite/metrics-remote-write.env" in alloy["envFiles"],
+            f"{host_name} Alloy must load the metrics write credential",
+        )
+        require(
+            "/etc/finite/logs-write.env" in alloy["envFiles"],
+            f"{host_name} Alloy must load the logs write credential",
+        )
+        require(
+            "adm" in alloy["supplementaryGroups"]
+            and "systemd-journal" in alloy["supplementaryGroups"],
+            f"{host_name} Alloy must be able to read journald",
+        )
+
         for metric_name in HOST_METRIC_NAMES:
             require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
+
+        for expected in (
+            'loki.relabel "finite_journal"',
+            'loki.write "finite_monitoring_logs"',
+            "https://metrics-ingest.finite.computer/loki/api/v1/push",
+            'sys.env("FINITE_LOGS_WRITE_USERNAME")',
+            'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
+            'source_labels = ["__journal__systemd_unit"]',
+            'target_label  = "unit"',
+            'source_labels = ["__journal_priority_keyword"]',
+            'target_label  = "priority"',
+            'max_age       = "10m"',
+            f'host = "{host_name}"',
+            f'role = "{LAT_ROLES[host_name]}"',
+        ):
+            require_contains(alloy_config, expected, f"{host_name} Alloy log config")
+
+        for unit in LAT_LOG_UNITS[host_name]:
+            require_contains(
+                alloy_config,
+                f'matches       = "_SYSTEMD_UNIT={unit}"',
+                f"{host_name} journald allowlist",
+            )
 
     check_dashboard_contract()
     check_ubuntu_contract()

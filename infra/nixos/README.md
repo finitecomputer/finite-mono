@@ -92,7 +92,10 @@ The routine deploy path is:
    `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
    prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
    the exact `SYSTEM` path in a transient systemd unit, and verifies
-   `/run/current-system` equals that path.
+   `/run/current-system` equals that path. For revisions that include LAT
+   journald shipping, the deploy script first runs the values-redacting
+   `infra/nixos/scripts/check-lat-monitoring-secrets` preflight on lat1 so a
+   missing `/etc/finite/logs-write.env` blocks before activation.
 
 Do not build production closures on the Mac, clawland, lat1, or lat2. There is
 no lat2 fallback deploy path. Rollback remains
@@ -107,6 +110,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 |---|---|---|
 | `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_CORE_RUNNER_CREDENTIALS_JSON`, one `FC_CORE_RUNNER_CREDENTIAL_TOKEN_*` variable per active Runner credential, `FC_FINITE_PRIVATE_USAGE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `FC_WORKOS_OPERATOR_ORG_ID` | Existing names come from the k8s Secret on old lat1. The checked-in production Kata generation may temporarily retain legacy `FC_CORE_RUNNER_API_TOKEN`; before any second worker starts, replace it with the metadata keyring and separately named Kata/Phala bearer variables documented in `finitecomputer-v2/docs/finite-stack-deployment.md`. Route and worker credentials must be distinct. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover**. Core uses the WorkOS API key only to resolve the verified user record for a validated JWT `sub`. |
 | `/etc/finite/metrics-remote-write.env` | `FINITE_METRICS_REMOTE_WRITE_USERNAME`, `FINITE_METRICS_REMOTE_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-1 and finite-lat-3. The username must match the NixOS monitoring receiver's `METRICS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The remote-write URL is fixed in Nix to `https://metrics-ingest.finite.computer/api/v1/write`. This file is read only by Grafana Alloy and must exist before activating a closure that enables Alloy. |
+| `/etc/finite/logs-write.env` | `FINITE_LOGS_WRITE_USERNAME`, `FINITE_LOGS_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-1 and finite-lat-3 before activating a closure with LAT journald shipping. The username must match the monitoring receiver's `LOGS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The Loki push URL is fixed in Nix to `https://metrics-ingest.finite.computer/loki/api/v1/push`. This is deliberately separate from the Prometheus remote-write credential. |
 | `/etc/finite/runner.env` | only credentials and deliberate overrides: `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY`, drain state (see `infra/hosts/lat1/systemd/runner.env.example`); the shared non-secret keys are Nix-rendered to `/etc/finite/runner-shared.env` by `modules/kata-runner-host.nix` | provision the route-scoped Runner credential; copy the dedicated specialization worker client token from its owning host secret without reusing the GLM key |
 | `/etc/finite/phala-runner.env` | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` | Installed with `scripts/install-phala-canary-credentials` for the ACTIVE one-canary run. The script creates a distinct Core keyring credential named `finite-phala-runner-1`, bound to class `phala` and source host `finite-lat-1-phala-control-1`, and accepts the host-only Phala key through a hidden prompt. Never reuse the Kata token or put either credential in Runtime environment. Non-secret workspace/artifact/runtime facts are pinned in the Nix unit; shared runtime secrets enter through a systemd credential copy. |
 | `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, Phala Runner, Brain, and Hosted Device; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
@@ -141,6 +145,19 @@ record and an isolated restore/authentication drill. Do not add values,
 fingerprints, or password-derived hashes to the public contract.
 The complete custody and operator-copy gate is
 [`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
+
+The current monitoring MVP still uses host-local env files rather than SOPS.
+Before any manual LAT activation that includes Alloy log shipping, run the
+narrow monitoring preflight against the target host:
+
+```sh
+ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+```
+
+The helper checks only `/etc/finite/metrics-remote-write.env` and
+`/etc/finite/logs-write.env` metadata plus required variable names. It discards
+values and prints none.
 
 Finite Brain reads `/etc/finite/identity-operator.env`,
 `/etc/finite/brain-authority.env`, and the send-only Resend credential from

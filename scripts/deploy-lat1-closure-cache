@@ -93,6 +93,13 @@ echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
 
+if git cat-file -e "$REV:infra/nixos/modules/metrics.nix" 2>/dev/null \
+  && git grep -q 'FINITE_LOGS_WRITE_PASSWORD' "$REV" -- infra/nixos/modules/metrics.nix; then
+  echo "==> verifying lat1 host-local monitoring secrets"
+  ssh -o BatchMode=yes "$LAT1" \
+    'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+fi
+
 # Deploys are when the Hosted Web Chat + Identity recovery snapshot happens
 # (no calendar timer since 2026-07-14): capture pre-upgrade state while a
 # service blip is expected.

@@ -48,6 +48,17 @@ in
 
   finite.metrics = {
     enable = true;
+    logRole = "runner";
+    journalLogUnits = [
+      "alloy.service"
+      "finite-md-check.service"
+      "finite-saas-runner.service"
+      "finite-storage-health.service"
+      "prometheus-node-exporter.service"
+      "systemd-networkd.service"
+      "systemd-networkd-persistent-storage.service"
+      "wireguard-wg-finite.service"
+    ];
     staticVersionMetrics = ''
       finite_component_build_info{host="finite-lat-3",component="finite-saas-runner",version="${finitePackages.finite-saas-runner.version}",git_sha="${revision}",image_digest="",source="nix"} 1
       finite_component_version_mismatch{host="finite-lat-3",component="finite-saas-runner"} 0

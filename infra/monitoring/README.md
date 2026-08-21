@@ -34,6 +34,28 @@ LOGS_PASSWORD_HASH=...
 Do not put credential values, password hashes, or generated Grafana secrets in
 this repository.
 
+LAT hosts send data with separate root-owned env files:
+
+- `/etc/finite/metrics-remote-write.env`
+- `/etc/finite/logs-write.env`
+
+The logs file must contain `FINITE_LOGS_WRITE_USERNAME` and
+`FINITE_LOGS_WRITE_PASSWORD`, matching the monitoring receiver's logs-write
+credential. It is intentionally separate from the Prometheus remote-write
+credential.
+
+Before activating a LAT host closure that includes journald log shipping,
+validate the host-local files without printing values:
+
+```sh
+ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+```
+
+`scripts/deploy-lat1-closure-cache` runs this preflight automatically for lat1
+when the target revision contains the log-shipping Alloy config. Lat3 currently
+needs the explicit preflight before its activation path.
+
 Deploy from a clean checkout after the change is on `origin/main`:
 
 ```sh

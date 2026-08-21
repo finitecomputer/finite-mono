@@ -29,6 +29,8 @@ HEALTH_PROBES = tuple(finite_status.CONTRACT["healthcheck"]["probes"])
 METRICS_DIRECTORY = "/run/finite-monitoring"
 METRICS_ENVIRONMENT_FILE = "/etc/finite/metrics-remote-write.env"
 METRICS_REMOTE_WRITE_URL = "https://metrics-ingest.finite.computer/api/v1/write"
+LOGS_ENVIRONMENT_FILE = "/etc/finite/logs-write.env"
+LOGS_WRITE_URL = "https://metrics-ingest.finite.computer/loki/api/v1/push"
 
 
 def nix_eval(attribute: str, *, raw: bool = False) -> str:
@@ -142,12 +144,26 @@ def main() -> None:
 
     if json.loads(nix_eval("services.alloy.enable")) is not True:
         raise SystemExit("Grafana Alloy is not enabled")
-    environment_file = nix_eval("services.alloy.environmentFile", raw=True)
-    if environment_file != METRICS_ENVIRONMENT_FILE:
-        raise SystemExit(
-            f"Alloy environment file is {environment_file!r}, "
-            f"expected {METRICS_ENVIRONMENT_FILE!r}"
-        )
+    environment_files = json.loads(
+        nix_eval("systemd.services.alloy.serviceConfig.EnvironmentFile")
+    )
+    for expected_file in (METRICS_ENVIRONMENT_FILE, LOGS_ENVIRONMENT_FILE):
+        if expected_file not in environment_files:
+            raise SystemExit(
+                f"Alloy environment files are {environment_files!r}, "
+                f"missing {expected_file!r}"
+            )
+
+    supplementary_groups = json.loads(
+        nix_eval("systemd.services.alloy.serviceConfig.SupplementaryGroups")
+    )
+    for expected_group in ("adm", "systemd-journal"):
+        if expected_group not in supplementary_groups:
+            raise SystemExit(
+                f"Alloy supplementary groups are {supplementary_groups!r}, "
+                f"missing {expected_group!r}"
+            )
+
     alloy_config = nix_eval('environment.etc."alloy/config.alloy".text', raw=True)
     for expected in (
         '"instance"    = "finite-lat-1"',
@@ -159,15 +175,38 @@ def main() -> None:
         "finite_runtime_artifact_active_agents",
         "finite_runtime_artifact_info",
         "finite_service_health_status",
+        "node_cpu_seconds_total",
+        "node_load1",
+        "node_memory_MemAvailable_bytes",
+        "node_filesystem_avail_bytes",
+        "node_disk_read_bytes_total",
+        "node_network_receive_bytes_total",
         "node_textfile_mtime_seconds",
         "node_textfile_scrape_error",
         METRICS_REMOTE_WRITE_URL,
         'prometheus.remote_write "finite_monitoring"',
         'sys.env("FINITE_METRICS_REMOTE_WRITE_USERNAME")',
         'sys.env("FINITE_METRICS_REMOTE_WRITE_PASSWORD")',
+        'loki.relabel "finite_journal"',
+        'loki.write "finite_monitoring_logs"',
+        'matches       = "_SYSTEMD_UNIT=finite-saas-core.service"',
+        'matches       = "_SYSTEMD_UNIT=finitechat-server.service"',
+        'matches       = "_SYSTEMD_UNIT=caddy.service"',
+        'host = "finite-lat-1"',
+        'role = "app"',
+        LOGS_WRITE_URL,
+        'sys.env("FINITE_LOGS_WRITE_USERNAME")',
+        'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
     ):
         if expected not in alloy_config:
             raise SystemExit(f"Alloy config is missing {expected!r}")
+
+    old_environment_file = json.loads(nix_eval("services.alloy.environmentFile"))
+    if old_environment_file is not None:
+        raise SystemExit(
+            "Alloy credentials should be declared on the systemd service so "
+            "metrics and logs can use separate environment files"
+        )
 
     recovery, recovery_metrics, recovery_leftovers, recovery_curl_count = run_synthetic(
         script, recover_after_first_pass=True

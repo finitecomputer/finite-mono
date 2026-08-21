@@ -7,8 +7,8 @@ receiver because Latitude VMs do not offer NixOS as a supported VM image. The
 old Docker Compose monitoring stack is removed from the active path. LAT host
 collection and production rollout remain separate steps.
 
-Current implementation progress: steps 1 through 3 below are implemented;
-steps 4 and 5 remain pending.
+Current implementation progress: steps 1 through 4 below are implemented;
+step 5 remains pending.
 
 ## Goal
 
@@ -151,8 +151,19 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    - Keep the Loki credential in a root-owned environment file or SOPS-managed
      equivalent; do not reuse the Prometheus credential.
 
+   Repo status: implemented in `infra/nixos/modules/metrics.nix` for
+   `finite-lat-1` and `finite-lat-3`. The next LAT NixOS activation will require
+   `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
+   and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
+   covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
+   deploys run it automatically for revisions with log shipping, and lat3/manual
+   activations should run it over SSH before switching.
+
 5. Roll out one host at a time.
    - Run `scripts/finite-status --json` before each host rollout.
+   - Run `infra/nixos/scripts/check-lat-monitoring-secrets` on the target host
+     before activation; this is automatic for lat1 through
+     `scripts/deploy-lat1-closure-cache`.
    - Roll out `finite-lat-3` first.
    - Verify Prometheus host metrics and Loki logs in Grafana.
    - Roll out `finite-lat-1` after `finite-lat-3` is clean.

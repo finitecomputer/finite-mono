@@ -28,13 +28,15 @@ let
       finite_component_version_mismatch{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}"} 0
     '';
   last = values: builtins.elemAt values (builtins.length values - 1);
-  imageDigest = image: if lib.hasInfix "@" image then last (lib.splitString "@" image) else "";
+  imageDigest =
+    containerImage:
+    if lib.hasInfix "@" containerImage then last (lib.splitString "@" containerImage) else "";
   imageVersion =
-    image:
+    containerImage:
     let
-      digest = imageDigest image;
+      digest = imageDigest containerImage;
     in
-    if digest != "" then digest else last (lib.splitString ":" image);
+    if digest != "" then digest else last (lib.splitString ":" containerImage);
   dashboardImage = config.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
   searxngImage = config.virtualisation.oci-containers.containers.searxng.image;
   firecrawlImage = config.virtualisation.oci-containers.containers.firecrawl-api.image;
@@ -56,6 +58,30 @@ in
   finite.metrics = {
     enable = true;
     collectRuntimeArtifacts = true;
+    logRole = "app";
+    journalLogUnits = lib.unique (
+      probedServiceUnits
+      ++ [
+        "alloy.service"
+        "borgbackup-job-finite-hosted-web-chat-offsite.service"
+        "caddy.service"
+        "finite-core-private-proxy.service"
+        "finite-healthcheck.service"
+        "finite-hosted-web-chat-offsite-health.service"
+        "finite-hosted-web-chat-snapshot-health.service"
+        "finite-identity-backup-health.service"
+        "finite-identity-backup.service"
+        "finite-identity-private-proxy.service"
+        "finite-identity.service"
+        "finite-litestream-finite-brain.service"
+        "finite-litestream-finite-chat-server.service"
+        "finite-litestream-health.service"
+        "finite-postgres-backup.service"
+        "finite-runtime-metrics.service"
+        "finite-saas-runner-phala.service"
+        "finite-saas-runner.service"
+      ]
+    );
     staticVersionMetrics = lib.concatMapStrings versionMetric [
       {
         component = "finite-saas-core";
