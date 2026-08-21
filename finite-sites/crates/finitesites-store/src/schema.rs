@@ -426,4 +426,16 @@ CREATE TABLE IF NOT EXISTS site_events (
 );
 
 CREATE INDEX IF NOT EXISTS site_events_site ON site_events(site_id, id);
+
+-- One-shot migration ledger. `legacy_migrated:<name>` rows are written once,
+-- when the matching shape migration actually rebuilds state;
+-- `schema_migrations_complete` is upserted after every successful boot
+-- migration sequence. Together they let a future removal of the legacy
+-- migration paths prove that every live and restorable store is post-legacy
+-- by reading rows instead of re-deriving shapes from PRAGMA probes.
+CREATE TABLE IF NOT EXISTS store_schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ";

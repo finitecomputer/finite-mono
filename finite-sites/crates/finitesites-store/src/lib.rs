@@ -653,13 +653,30 @@ impl Store {
              ON versions(site_id, git_ref_event_id) WHERE git_ref_event_id IS NOT NULL",
             [],
         )?;
-        Self::migrate_publish_grant_sources(&conn)?;
-        Self::migrate_project_visibility_shape(&conn)?;
-        Self::migrate_site_kind_shape(&conn)?;
-        Self::migrate_project_output_document_shape(&conn)?;
+        let publish_grant_sources_migrated = Self::migrate_publish_grant_sources(&conn)?;
+        Self::record_legacy_migration(
+            &conn,
+            "publish_grant_sources",
+            publish_grant_sources_migrated,
+        )?;
+        let project_visibility_migrated = Self::migrate_project_visibility_shape(&conn)?;
+        Self::record_legacy_migration(
+            &conn,
+            "project_visibility_shape",
+            project_visibility_migrated,
+        )?;
+        let site_kind_migrated = Self::migrate_site_kind_shape(&conn)?;
+        Self::record_legacy_migration(&conn, "site_kind_shape", site_kind_migrated)?;
+        let project_output_document_migrated = Self::migrate_project_output_document_shape(&conn)?;
+        Self::record_legacy_migration(
+            &conn,
+            "project_output_document_shape",
+            project_output_document_migrated,
+        )?;
         Self::migrate_name_claim_namespace_shape(&conn)?;
         Self::migrate_versions_git_ref_event_index(&conn)?;
-        Self::migrate_legacy_sites_shape(&conn)?;
+        let legacy_sites_shape_migrated = Self::migrate_legacy_sites_shape(&conn)?;
+        Self::record_legacy_migration(&conn, "sites_shape", legacy_sites_shape_migrated)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
         // Shape-rebuild migrations above intentionally preserve only columns
         // known to their legacy source shape, so re-assert newer attribution
@@ -688,6 +705,10 @@ impl Store {
             "originating_publisher_principal_id",
             "originating_publisher_principal_id TEXT REFERENCES principals(id)",
         )?;
+        // Must be the final migration-sequence write: the presence of this
+        // stamp proves the store completed a full boot migration pass under
+        // ledger-aware code (i.e. every legacy shape has been rebuilt).
+        Self::stamp_migrations_complete(&conn)?;
         Ok(Store { conn, path })
     }
 
@@ -736,6 +757,51 @@ impl Store {
             columns.push(row?);
         }
         Ok(columns)
+    }
+
+    fn unix_now() -> Result<u64, StoreError> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| StoreError::CorruptState("system clock preceded Unix epoch"))
+            .map(|duration| duration.as_secs())
+    }
+
+    /// Record, once, that a legacy shape migration actually rebuilt state on
+    /// this store. The row is the durable audit trail that lets a future
+    /// removal of the legacy migration paths prove whether a given store
+    /// (live, or restored from a snapshot) ever needed them after
+    /// ledger-aware code shipped: a store with the completion stamp and no
+    /// `legacy_migrated:*` rows booted fully under ledger-aware code without
+    /// encountering any legacy shape.
+    fn record_legacy_migration(
+        conn: &Connection,
+        name: &str,
+        fired: bool,
+    ) -> Result<(), StoreError> {
+        if !fired {
+            return Ok(());
+        }
+        let now = Self::unix_now()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO store_schema_meta (key, value, updated_at)
+             VALUES (?1, '1', ?2)",
+            params![format!("legacy_migrated:{name}"), now as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the store as having completed a full migration pass under
+    /// ledger-aware code. Upserted on every successful boot so the
+    /// `updated_at` also records the last migration-verified boot.
+    fn stamp_migrations_complete(conn: &Connection) -> Result<(), StoreError> {
+        let now = Self::unix_now()?;
+        conn.execute(
+            "INSERT INTO store_schema_meta (key, value, updated_at)
+             VALUES ('schema_migrations_complete', '1', ?1)
+             ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
+            params![now as i64],
+        )?;
+        Ok(())
     }
 
     fn reconcile_sites_identity_evidence(conn: &Connection) -> Result<(), StoreError> {
@@ -1068,12 +1134,14 @@ impl Store {
         Ok(())
     }
 
-    fn migrate_legacy_sites_shape(conn: &Connection) -> Result<(), StoreError> {
+    /// Returns whether a legacy `sites` shape (owner_email/site_pubkey
+    /// columns) was present and rebuilt.
+    fn migrate_legacy_sites_shape(conn: &Connection) -> Result<bool, StoreError> {
         let columns = Self::table_column_names(conn, "sites")?;
         let has_owner_email = columns.iter().any(|column| column == "owner_email");
         let has_site_pubkey = columns.iter().any(|column| column == "site_pubkey");
         if !has_owner_email && !has_site_pubkey {
-            return Ok(());
+            return Ok(false);
         }
         let has_owner_pubkey = columns.iter().any(|column| column == "owner_pubkey");
         let owner_expr = if has_owner_pubkey {
@@ -1144,7 +1212,7 @@ impl Store {
                 "foreign key violation after sites migration",
             ));
         }
-        Ok(())
+        Ok(true)
     }
 
     fn migrate_legacy_allowed_pubkeys(conn: &Connection) -> Result<(), StoreError> {
@@ -1158,14 +1226,16 @@ impl Store {
         Ok(())
     }
 
-    fn migrate_publish_grant_sources(conn: &Connection) -> Result<(), StoreError> {
+    /// Returns whether the `publish_grants` table predates the `self` grant
+    /// source and was rebuilt.
+    fn migrate_publish_grant_sources(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'publish_grants'",
             [],
             |row| row.get(0),
         )?;
         if sql.contains("'self'") {
-            return Ok(());
+            return Ok(false);
         }
         let result: Result<(), StoreError> = (|| {
             conn.execute_batch(
@@ -1207,17 +1277,19 @@ impl Store {
                 "publish grants source migration did not apply",
             ));
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn migrate_project_visibility_shape(conn: &Connection) -> Result<(), StoreError> {
+    /// Returns whether the `projects` table predates the `public-read`
+    /// visibility vocabulary and was rebuilt.
+    fn migrate_project_visibility_shape(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
             [],
             |row| row.get(0),
         )?;
         if sql.contains("'public-read'") {
-            return Ok(());
+            return Ok(false);
         }
 
         conn.pragma_update(None, "foreign_keys", "OFF")?;
@@ -1276,17 +1348,19 @@ impl Store {
                 "project visibility migration did not apply",
             ));
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn migrate_site_kind_shape(conn: &Connection) -> Result<(), StoreError> {
+    /// Returns whether the `sites` table predates the `document` site kind
+    /// and was rebuilt.
+    fn migrate_site_kind_shape(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sites'",
             [],
             |row| row.get(0),
         )?;
         if sql.contains("'document'") {
-            return Ok(());
+            return Ok(false);
         }
 
         conn.pragma_update(None, "foreign_keys", "OFF")?;
@@ -1321,17 +1395,19 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         result?;
         Self::assert_no_foreign_key_violations(conn, "sites kind migration")?;
-        Ok(())
+        Ok(true)
     }
 
-    fn migrate_project_output_document_shape(conn: &Connection) -> Result<(), StoreError> {
+    /// Returns whether the `project_outputs` table predates the
+    /// document/start-command columns and was rebuilt.
+    fn migrate_project_output_document_shape(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_outputs'",
             [],
             |row| row.get(0),
         )?;
         if sql.contains("'document'") && sql.contains("'app'") && sql.contains("start_command") {
-            return Ok(());
+            return Ok(false);
         }
 
         conn.pragma_update(None, "foreign_keys", "OFF")?;
@@ -1374,7 +1450,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         result?;
         Self::assert_no_foreign_key_violations(conn, "project outputs document migration")?;
-        Ok(())
+        Ok(true)
     }
 
     fn migrate_name_claim_namespace_shape(conn: &Connection) -> Result<(), StoreError> {
@@ -6654,6 +6730,103 @@ mod tests {
             .unwrap();
         assert!(!replay.created);
         assert!(!replay.outputs[0].created);
+    }
+
+    #[test]
+    fn migration_ledger_stamps_fresh_databases_without_legacy_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+
+        let store = Store::open(&db_path).unwrap();
+        let stamp: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT value FROM store_schema_meta WHERE key = 'schema_migrations_complete'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(stamp.as_deref(), Some("1"));
+        let legacy_rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM store_schema_meta WHERE key LIKE 'legacy_migrated:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_rows, 0);
+    }
+
+    #[test]
+    fn migration_ledger_records_legacy_rebuild_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sites (
+                   id TEXT PRIMARY KEY,
+                   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
+                   owner_email TEXT,
+                   site_pubkey TEXT NOT NULL CHECK (length(site_pubkey) = 64),
+                   status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
+                   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
+                   active_version_id TEXT,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO sites
+                   (id, owner_pubkey, owner_email, site_pubkey, status, visibility,
+                    active_version_id, created_at, updated_at)
+                 VALUES
+                   ('site_legacy',
+                    '1111111111111111111111111111111111111111111111111111111111111111',
+                    NULL,
+                    '2222222222222222222222222222222222222222222222222222222222222222',
+                    'claimed_unpublished',
+                    'private',
+                    NULL,
+                    1750000000,
+                    1750000000);",
+            )
+            .unwrap();
+        }
+
+        {
+            let store = Store::open(&db_path).unwrap();
+            let ledger_value: String = store
+                .conn
+                .query_row(
+                    "SELECT value FROM store_schema_meta WHERE key = 'legacy_migrated:sites_shape'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(ledger_value, "1");
+            let stamp: String = store
+                .conn
+                .query_row(
+                    "SELECT value FROM store_schema_meta WHERE key = 'schema_migrations_complete'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stamp, "1");
+        }
+
+        // Reopening a migrated store neither adds rows nor duplicates them.
+        let store = Store::open(&db_path).unwrap();
+        let ledger_rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM store_schema_meta WHERE key LIKE 'legacy_migrated:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledger_rows, 1);
     }
 
     #[test]
