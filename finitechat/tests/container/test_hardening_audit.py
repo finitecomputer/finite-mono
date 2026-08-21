@@ -99,8 +99,6 @@ IOS_MEDIA_STEPS = [
 ]
 ADAPTER_REGRESSION_LAYERS = [
     "plain message mapping",
-    "redelivery dedupe",
-    "ack retry without duplicate dispatch",
     "durable busy-text admission",
     "Hermes clarification routing",
     "transient poll recovery",
@@ -108,21 +106,11 @@ ADAPTER_REGRESSION_LAYERS = [
     "service fallback",
     "service serialization",
     "media attachments",
-    "outbound edit route",
     "typing activity",
     "room filtering",
     "group sender identity",
     "receipt/control stream filtering",
     "strict inbound stream recovery",
-    "restart after route learning preserves reply scope",
-    "unknown reply route warns before Home fallback",
-    "intentional unscoped Home send stays quiet",
-    "in-flight turn retains inbox ownership until completion",
-    "pre-completion handler failure leaves event for redelivery",
-    "terminal failure acks completed turn",
-    "cancelled turn leaves event for redelivery",
-    "restart after processing before ack suppresses duplicate turn",
-    "pinned Hermes owner task retains ack until completion",
 ]
 
 

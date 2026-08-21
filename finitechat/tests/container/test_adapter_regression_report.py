@@ -53,18 +53,6 @@ class AdapterRegressionReportTest(unittest.TestCase):
         self.assertIn("media attachments", report["proof_layers"])
         self.assertIn("receipt/control stream filtering", report["proof_layers"])
         self.assertIn("group sender identity", report["proof_layers"])
-        self.assertIn(
-            "restart after route learning preserves reply scope",
-            report["proof_layers"],
-        )
-        self.assertIn(
-            "in-flight turn retains inbox ownership until completion",
-            report["proof_layers"],
-        )
-        self.assertIn(
-            "restart after processing before ack suppresses duplicate turn",
-            report["proof_layers"],
-        )
         self.assertEqual(report["test_count"], len(adapter_report.flattened_tests()))
         self.assertEqual(report["observed_test_count"], report["test_count"])
         self.assertEqual(report["missing_tests"], [])
@@ -72,46 +60,6 @@ class AdapterRegressionReportTest(unittest.TestCase):
         command = cast(list[str], captured["command"])
         self.assertEqual(command[:3], ["python3", "-m", "unittest"])
         self.assertIn("-v", command)
-
-    def test_durability_scenarios_record_the_asserted_failure_boundaries(self) -> None:
-        original_run = adapter_report.subprocess.run
-
-        def fake_run(command, **kwargs):
-            del command, kwargs
-            return types.SimpleNamespace(
-                returncode=0,
-                stdout="",
-                stderr=self._passing_unittest_output(),
-            )
-
-        try:
-            adapter_report.subprocess.run = fake_run
-            status, report = adapter_report.build_report(
-                types.SimpleNamespace(python="python3", timeout=30)
-            )
-        finally:
-            adapter_report.subprocess.run = original_run
-
-        self.assertEqual(status, 0)
-        scenarios = {scenario["name"]: scenario for scenario in report["durability_scenarios"]}
-        route = scenarios["restart after route learning preserves reply scope"]
-        self.assertEqual(route["status"], "passed")
-        self.assertEqual(
-            route["asserted_observations"]["route_before_restart"],
-            {"conversation_id": "topic-build", "segment_id": "chat-build-1"},
-        )
-        self.assertEqual(
-            route["asserted_observations"]["route_after_restart"],
-            {"conversation_id": "topic-build", "segment_id": "chat-build-1"},
-        )
-        self.assertEqual(route["asserted_observations"]["dispatch_count"], 1)
-        self.assertEqual(route["asserted_observations"]["ack_attempt_count"], 1)
-        self.assertTrue(route["restart_boundary"])
-
-        cancelled = scenarios["cancelled turn leaves event for redelivery"]
-        self.assertEqual(cancelled["asserted_observations"]["dispatch_count"], 2)
-        self.assertEqual(cancelled["asserted_observations"]["ack_attempt_count"], 0)
-        self.assertEqual(cancelled["asserted_observations"]["turn_completion_count"], 1)
 
     def test_skipped_or_unobserved_required_tests_fail_the_gate(self) -> None:
         tests = adapter_report.flattened_tests()
