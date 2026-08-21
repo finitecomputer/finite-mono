@@ -1,26 +1,38 @@
-//! Outbound mail. Two implementations behind one trait:
+//! Outbound mail for Finite Sites. Two implementations behind one trait:
 //!
 //! - `DevMailer`: writes each magic-link email to a file under `DATA/outbox/`
 //!   and logs the link. Selected with `--mailer dev`. Local development only;
 //!   omitting `--mailer` is an error, not an implicit DevMailer.
-//! - `HttpMailer`: sends through Resend or Postmark via their JSON APIs.
-//!   Selected with `--mailer resend|postmark`; the API key comes from the
-//!   RESEND_API_KEY / POSTMARK_SERVER_TOKEN environment variable so secrets
-//!   stay in the service env file, never in argv.
+//! - `HttpMailer`: sends through the shared `finite-mail` Resend transport.
+//!   Selected with `--mailer resend`; the API key comes from the
+//!   RESEND_API_KEY environment variable so secrets stay in the service env
+//!   file, never in argv.
+//!
+//! Message text lives here (service-owned); delivery lives in `finite-mail`.
 
-use std::io::Write as _;
 use std::path::PathBuf;
-use std::time::Duration;
 
+use finite_mail::{MailTransport, ResendMailer, TextEmail};
 use finitesites_proto::dto::ProjectOutputSummary;
-use finitesites_proto::{hex, ids};
 
-#[derive(Debug, thiserror::Error)]
-pub enum MailerError {
-    #[error("mail io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("mail send failed: {0}")]
-    Send(String),
+pub use finite_mail::MailError as MailerError;
+pub use finite_mail::RESEND_API_KEY_ENV_VAR;
+
+/// Which delivery mode `--mailer` selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailerKind {
+    Dev,
+    Resend,
+}
+
+impl MailerKind {
+    pub fn parse(value: &str) -> Option<MailerKind> {
+        match value {
+            "dev" => Some(MailerKind::Dev),
+            "resend" => Some(MailerKind::Resend),
+            _ => None,
+        }
+    }
 }
 
 pub trait Mailer: Send + Sync {
@@ -74,7 +86,7 @@ impl IdentityNotifier {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(10))
                 .build(),
         }
     }
@@ -266,29 +278,27 @@ fn api_prefix(api_url: &str) -> String {
 // ---- dev mailer ------------------------------------------------------------
 
 pub struct DevMailer {
-    outbox_dir: PathBuf,
+    outbox: finite_mail::FileOutboxMailer,
 }
 
 impl DevMailer {
     pub fn new(outbox_dir: PathBuf) -> Result<DevMailer, MailerError> {
-        std::fs::create_dir_all(&outbox_dir)?;
-        Ok(DevMailer { outbox_dir })
+        Ok(DevMailer {
+            outbox: finite_mail::FileOutboxMailer::new(outbox_dir)?,
+        })
     }
 }
 
 impl Mailer for DevMailer {
     fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError> {
-        let nonce = hex::encode(&ids::random_32()[..4]);
-        let safe_email: String = email
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let path = self.outbox_dir.join(format!("{nonce}-{safe_email}.txt"));
-        let mut file = std::fs::File::create(&path)?;
-        writeln!(file, "To: {email}")?;
-        writeln!(file, "Subject: {}", login_link_subject(site_name))?;
-        writeln!(file)?;
-        write!(file, "{}", login_link_text(site_name, url))?;
+        let path = self.outbox.write(
+            &TextEmail {
+                to: email,
+                subject: &login_link_subject(site_name),
+                text: &login_link_text(site_name, url),
+            },
+            "",
+        )?;
         eprintln!(
             "dev-mail: login link for {email} -> {url} (written to {})",
             path.display()
@@ -297,19 +307,14 @@ impl Mailer for DevMailer {
     }
 
     fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
-        let nonce = hex::encode(&ids::random_32()[..4]);
-        let safe_email: String = email
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let path = self
-            .outbox_dir
-            .join(format!("{nonce}-{safe_email}-email-login.txt"));
-        let mut file = std::fs::File::create(&path)?;
-        writeln!(file, "To: {email}")?;
-        writeln!(file, "Subject: {}", email_login_subject())?;
-        writeln!(file)?;
-        write!(file, "{}", email_login_text(email, token))?;
+        let path = self.outbox.write(
+            &TextEmail {
+                to: email,
+                subject: email_login_subject(),
+                text: &email_login_text(email, token),
+            },
+            "email-login",
+        )?;
         eprintln!(
             "dev-mail: email login token for {email} -> {token} (written to {})",
             path.display()
@@ -318,255 +323,107 @@ impl Mailer for DevMailer {
     }
 
     fn send_viewer_invite(&self, invite: &ViewerInvite<'_>) -> Result<(), MailerError> {
-        self.write_text_email(
-            invite.email,
-            &viewer_invite_subject(invite.site_name),
-            &viewer_invite_text(invite),
+        self.outbox.write(
+            &TextEmail {
+                to: invite.email,
+                subject: &viewer_invite_subject(invite.site_name),
+                text: &viewer_invite_text(invite),
+            },
             "viewer-invite",
-        )
+        )?;
+        Ok(())
     }
 
     fn send_project_collaborator_invite(
         &self,
         invite: &ProjectCollaboratorInvite<'_>,
     ) -> Result<(), MailerError> {
-        self.write_text_email(
-            invite.email,
-            &project_collaborator_invite_subject(invite.project_slug),
-            &project_collaborator_invite_text(invite),
+        self.outbox.write(
+            &TextEmail {
+                to: invite.email,
+                subject: &project_collaborator_invite_subject(invite.project_slug),
+                text: &project_collaborator_invite_text(invite),
+            },
             "project-invite",
-        )
+        )?;
+        Ok(())
     }
 
     fn send_site_access_request(
         &self,
         request: &SiteAccessRequestEmail<'_>,
     ) -> Result<(), MailerError> {
-        self.write_text_email(
-            request.owner_email,
-            &site_access_request_subject(request.site_name),
-            &site_access_request_text(request),
+        self.outbox.write(
+            &TextEmail {
+                to: request.owner_email,
+                subject: &site_access_request_subject(request.site_name),
+                text: &site_access_request_text(request),
+            },
             "site-access-request",
-        )
-    }
-}
-
-impl DevMailer {
-    fn write_text_email(
-        &self,
-        email: &str,
-        subject: &str,
-        text: &str,
-        suffix: &str,
-    ) -> Result<(), MailerError> {
-        let nonce = hex::encode(&ids::random_32()[..4]);
-        let safe_email: String = email
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let path = self
-            .outbox_dir
-            .join(format!("{nonce}-{safe_email}-{suffix}.txt"));
-        let mut file = std::fs::File::create(&path)?;
-        writeln!(file, "To: {email}")?;
-        writeln!(file, "Subject: {subject}")?;
-        writeln!(file)?;
-        write!(file, "{text}")?;
-        eprintln!(
-            "dev-mail: {suffix} for {email} (written to {})",
-            path.display()
-        );
+        )?;
         Ok(())
     }
 }
 
-// ---- http mailer (Resend / Postmark) ----------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MailProvider {
-    Resend,
-    Postmark,
-}
-
-impl MailProvider {
-    pub fn parse(value: &str) -> Option<MailProvider> {
-        match value {
-            "resend" => Some(MailProvider::Resend),
-            "postmark" => Some(MailProvider::Postmark),
-            _ => None,
-        }
-    }
-
-    pub fn api_key_env_var(&self) -> &'static str {
-        match self {
-            MailProvider::Resend => "RESEND_API_KEY",
-            MailProvider::Postmark => "POSTMARK_SERVER_TOKEN",
-        }
-    }
-
-    fn endpoint(&self) -> &'static str {
-        match self {
-            MailProvider::Resend => "https://api.resend.com/emails",
-            MailProvider::Postmark => "https://api.postmarkapp.com/email",
-        }
-    }
-
-    fn auth_header(&self) -> &'static str {
-        match self {
-            MailProvider::Resend => "Authorization",
-            MailProvider::Postmark => "X-Postmark-Server-Token",
-        }
-    }
-}
+// ---- http mailer (Resend via finite-mail) ------------------------------------
 
 pub struct HttpMailer {
-    provider: MailProvider,
-    api_key: String,
-    from_address: String,
-    agent: ureq::Agent,
+    resend: ResendMailer,
 }
 
 impl HttpMailer {
-    pub fn new(provider: MailProvider, api_key: String, from_address: String) -> HttpMailer {
-        assert!(!api_key.is_empty() && from_address.contains('@'));
+    pub fn new(api_key: String, from_address: String) -> HttpMailer {
         HttpMailer {
-            provider,
-            api_key,
-            from_address,
-            // Login mail is latency-sensitive; fail fast and let the viewer
-            // retry rather than hanging the request.
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(10))
-                .build(),
+            resend: ResendMailer::new(api_key, from_address),
         }
-    }
-}
-
-/// Build the provider-specific JSON payload. Split out for tests.
-fn build_payload(
-    provider: MailProvider,
-    from_address: &str,
-    to_email: &str,
-    site_name: &str,
-    url: &str,
-) -> serde_json::Value {
-    build_text_payload(
-        provider,
-        from_address,
-        to_email,
-        &login_link_subject(site_name),
-        &login_link_text(site_name, url),
-    )
-}
-
-fn build_text_payload(
-    provider: MailProvider,
-    from_address: &str,
-    to_email: &str,
-    subject: &str,
-    text: &str,
-) -> serde_json::Value {
-    match provider {
-        MailProvider::Resend => serde_json::json!({
-            "from": from_address,
-            "to": [to_email],
-            "subject": subject,
-            "text": text,
-        }),
-        MailProvider::Postmark => serde_json::json!({
-            "From": from_address,
-            "To": to_email,
-            "Subject": subject,
-            "TextBody": text,
-            "MessageStream": "outbound",
-        }),
     }
 }
 
 impl Mailer for HttpMailer {
     fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError> {
-        let payload = build_payload(self.provider, &self.from_address, email, site_name, url);
-        self.send_payload(payload)
+        self.resend.send_text_email(&TextEmail {
+            to: email,
+            subject: &login_link_subject(site_name),
+            text: &login_link_text(site_name, url),
+        })
     }
 
     fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
-        let payload = build_text_payload(
-            self.provider,
-            &self.from_address,
-            email,
-            email_login_subject(),
-            &email_login_text(email, token),
-        );
-        self.send_payload(payload)
+        self.resend.send_text_email(&TextEmail {
+            to: email,
+            subject: email_login_subject(),
+            text: &email_login_text(email, token),
+        })
     }
 
     fn send_viewer_invite(&self, invite: &ViewerInvite<'_>) -> Result<(), MailerError> {
-        let payload = build_text_payload(
-            self.provider,
-            &self.from_address,
-            invite.email,
-            &viewer_invite_subject(invite.site_name),
-            &viewer_invite_text(invite),
-        );
-        self.send_payload(payload)
+        self.resend.send_text_email(&TextEmail {
+            to: invite.email,
+            subject: &viewer_invite_subject(invite.site_name),
+            text: &viewer_invite_text(invite),
+        })
     }
 
     fn send_project_collaborator_invite(
         &self,
         invite: &ProjectCollaboratorInvite<'_>,
     ) -> Result<(), MailerError> {
-        let payload = build_text_payload(
-            self.provider,
-            &self.from_address,
-            invite.email,
-            &project_collaborator_invite_subject(invite.project_slug),
-            &project_collaborator_invite_text(invite),
-        );
-        self.send_payload(payload)
+        self.resend.send_text_email(&TextEmail {
+            to: invite.email,
+            subject: &project_collaborator_invite_subject(invite.project_slug),
+            text: &project_collaborator_invite_text(invite),
+        })
     }
 
     fn send_site_access_request(
         &self,
         request: &SiteAccessRequestEmail<'_>,
     ) -> Result<(), MailerError> {
-        let payload = build_text_payload(
-            self.provider,
-            &self.from_address,
-            request.owner_email,
-            &site_access_request_subject(request.site_name),
-            &site_access_request_text(request),
-        );
-        self.send_payload(payload)
-    }
-}
-
-impl HttpMailer {
-    fn send_payload(&self, payload: serde_json::Value) -> Result<(), MailerError> {
-        let auth_value = match self.provider {
-            MailProvider::Resend => format!("Bearer {}", self.api_key),
-            MailProvider::Postmark => self.api_key.clone(),
-        };
-        let result = self
-            .agent
-            .post(self.provider.endpoint())
-            .set(self.provider.auth_header(), &auth_value)
-            .set("Accept", "application/json")
-            .send_json(payload);
-        match result {
-            Ok(_response) => Ok(()),
-            Err(ureq::Error::Status(code, response)) => {
-                // Provider error bodies are short JSON; bound the read and
-                // log enough to debug deliverability without the API key.
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "unreadable body".to_string());
-                let truncated: String = body.chars().take(500).collect();
-                Err(MailerError::Send(format!(
-                    "provider returned {code}: {truncated}"
-                )))
-            }
-            Err(transport) => Err(MailerError::Send(format!("transport error: {transport}"))),
-        }
+        self.resend.send_text_email(&TextEmail {
+            to: request.owner_email,
+            subject: &site_access_request_subject(request.site_name),
+            text: &site_access_request_text(request),
+        })
     }
 }
 
@@ -576,28 +433,32 @@ mod tests {
     use finitesites_proto::dto::ProjectOutputSummary;
 
     #[test]
-    fn payloads_match_provider_shapes() {
-        let resend = build_payload(
-            MailProvider::Resend,
-            "Finite Sites <sites@finite.chat>",
-            "friend@example.com",
-            "hello",
-            "https://hello.finite.chat/_finite/auth?token=abc",
-        );
-        assert_eq!(resend["to"][0], "friend@example.com");
-        assert_eq!(resend["subject"], "Your link to hello");
-        assert!(resend["text"].as_str().unwrap().contains("token=abc"));
+    fn mailer_kind_parsing_and_env_vars() {
+        assert_eq!(MailerKind::parse("dev"), Some(MailerKind::Dev));
+        assert_eq!(MailerKind::parse("resend"), Some(MailerKind::Resend));
+        assert_eq!(MailerKind::parse("postmark"), None);
+        assert_eq!(MailerKind::parse("sendgrid"), None);
+        assert_eq!(RESEND_API_KEY_ENV_VAR, "RESEND_API_KEY");
+    }
 
-        let postmark = build_payload(
-            MailProvider::Postmark,
-            "sites@finite.chat",
-            "friend@example.com",
-            "hello",
-            "https://hello.finite.chat/_finite/auth?token=abc",
-        );
-        assert_eq!(postmark["To"], "friend@example.com");
-        assert_eq!(postmark["MessageStream"], "outbound");
-        assert!(postmark["TextBody"].as_str().unwrap().contains("token=abc"));
+    #[test]
+    fn dev_mailer_writes_login_link_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mailer = DevMailer::new(dir.path().to_path_buf()).unwrap();
+        mailer
+            .send_login_link(
+                "friend@example.com",
+                "hello",
+                "https://hello.finite.chat/_finite/auth?token=abc",
+            )
+            .unwrap();
+        let mut entries = std::fs::read_dir(dir.path()).unwrap();
+        let path = entries.next().unwrap().unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.ends_with("-friend_example_com.txt"), "{name}");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("To: friend@example.com\nSubject: Your link to hello\n\n"));
+        assert!(contents.contains("token=abc"));
     }
 
     #[test]
@@ -678,20 +539,5 @@ For your agent\n\n"
         ));
         assert!(project.contains("git clone https://git.finite.chat/finitechat-native.git"));
         assert!(project.contains("mockup (site)"));
-    }
-
-    #[test]
-    fn provider_parsing_and_env_vars() {
-        assert_eq!(MailProvider::parse("resend"), Some(MailProvider::Resend));
-        assert_eq!(
-            MailProvider::parse("postmark"),
-            Some(MailProvider::Postmark)
-        );
-        assert_eq!(MailProvider::parse("sendgrid"), None);
-        assert_eq!(MailProvider::Resend.api_key_env_var(), "RESEND_API_KEY");
-        assert_eq!(
-            MailProvider::Postmark.api_key_env_var(),
-            "POSTMARK_SERVER_TOKEN"
-        );
     }
 }

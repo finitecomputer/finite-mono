@@ -221,6 +221,7 @@ let
     "finite-brain/crates/finite-brain-server"
     "finite-brain/crates/finite-brain-store"
     "finite-identity"
+    "finite-mail"
     "finite-nostr"
     "finitechat/crates/finitechat-blob"
     "finitechat/crates/finitechat-client"
@@ -236,6 +237,7 @@ let
   ];
   finitechatCliSourcePaths = [
     "finite-identity"
+    "finite-mail"
     "finite-nostr"
     "finitechat/crates/finitechat-blob"
     "finitechat/crates/finitechat-cli"
@@ -254,6 +256,7 @@ let
   ];
   finitechatRmpSourcePaths = [
     "finite-identity"
+    "finite-mail"
     "finite-nostr"
     "finitechat/crates/finitechat-blob"
     "finitechat/crates/finitechat-client"
@@ -290,6 +293,7 @@ let
     "finite-brain/crates/finite-brain-core"
     "finite-brain/crates/finite-brain-server"
     "finite-brain/crates/finite-brain-store"
+    "finite-mail"
     "finite-nostr"
   ];
   finiteBrainCliSourcePaths = [
@@ -298,6 +302,7 @@ let
     "finite-brain/crates/finite-brain-server"
     "finite-brain/crates/finite-brain-store"
     "finite-identity"
+    "finite-mail"
     "finite-nostr"
   ];
   finiteBrainCargoArtifacts = mkCargoArtifacts {
@@ -427,6 +432,7 @@ rec {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";
     sourcePaths = [
+      "finite-mail"
       "finite-sites/crates/finitesites-blob"
       "finite-sites/crates/finitesites-engine"
       "finite-sites/crates/finitesites-proto"
@@ -446,7 +452,10 @@ rec {
   finite-identity = mkWorkspaceCrate {
     pname = "finite-identity";
     dir = "finite-identity";
-    sourcePaths = [ "finite-identity" ];
+    sourcePaths = [
+      "finite-identity"
+      "finite-mail"
+    ];
     mainProgram = "finite-identityd";
   };
 
@@ -457,6 +466,7 @@ rec {
     dir = "finite-sites/crates/fsite-cli";
     sourcePaths = [
       "finite-identity"
+      "finite-mail"
       "finite-sites/crates/finitesites-proto"
       "finite-sites/crates/fsite-cli"
       "finite-sites/examples"

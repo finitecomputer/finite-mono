@@ -6,8 +6,9 @@ delete condition is unfinished design, not accepted debt.
 
 ## 1. RESOLVED — real mailer implemented
 
-`HttpMailer` (Resend/Postmark) ships behind the `Mailer` trait, selected
-with `--mailer` + `--mail-from`, key via env var. Remaining work is
+`HttpMailer` (Resend, via the shared `finite-mail` transport) ships behind
+the `Mailer` trait, selected with `--mailer` + `--mail-from`, key via env
+var. Remaining work is
 configuration, tracked in `docs/deploy-finite-lat-2.md` (domain
 verification + a real-inbox validation gate). Local and Devfinity select
 the dev mailer with `--mailer dev`; omitting the flag is an error.

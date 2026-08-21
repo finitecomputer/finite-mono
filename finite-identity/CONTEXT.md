@@ -162,7 +162,7 @@ A short-lived, single-use receipt proving that one exact NIP-98 signing key just
 _Avoid_: identity binding, login session, global email ownership
 
 **Mailer Adapter**:
-The deployment-specific implementation that delivers Email Challenges. Finite Identity owns the challenge flow, while a Mailer Adapter performs delivery through dev outbox, Resend, Postmark, or another provider.
+The deployment-specific implementation that delivers Email Challenges. Finite Identity owns the challenge flow, while a Mailer Adapter performs delivery through dev outbox, the shared `finite-mail` Resend transport, or another provider.
 _Avoid_: email service, notification service
 
 ## Relationships

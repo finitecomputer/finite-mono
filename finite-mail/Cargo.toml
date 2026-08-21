@@ -1,0 +1,25 @@
+[package]
+name = "finite-mail"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared outbound email transport for Finite services: Resend HTTP client and dev file outbox."
+
+[lib]
+name = "finite_mail"
+path = "src/lib.rs"
+
+[dependencies]
+getrandom = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

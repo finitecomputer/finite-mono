@@ -100,9 +100,11 @@ finite-identityd serve \
   --mail-from "Finite Identity <identity@finite.chat>"
 ```
 
-Postmark is also supported with `--mailer postmark` and
-`POSTMARK_SERVER_TOKEN`. Challenge creation, hashing, expiry, redemption, and
-replay rejection remain inside Finite Identity; only delivery changes.
+Postmark was previously supported with `--mailer postmark`; it was removed
+when mail delivery was consolidated onto the shared `finite-mail` Resend
+transport (production only ever configured Resend). Challenge creation,
+hashing, expiry, redemption, and replay rejection remain inside Finite
+Identity; only delivery changes.
 
 The daemon binds two listeners: `--listen` (default 127.0.0.1:8790) serves the
 full router for trusted loopback services, and `--public-listen` (default
