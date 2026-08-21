@@ -1486,7 +1486,6 @@ dependencies = [
  "time",
  "tokio",
  "tower",
- "ureq",
  "zeroize",
 ]
 
