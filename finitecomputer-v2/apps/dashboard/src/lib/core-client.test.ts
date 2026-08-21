@@ -636,7 +636,7 @@ test("the runtime-control conflict message names the in-progress request", () =>
   const control = (kind: CorePublicRuntimeControl["kind"]): CorePublicRuntimeControl => ({
     id: "control_1",
     kind,
-    status: "running",
+    status: "launching",
     retrying: false,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",

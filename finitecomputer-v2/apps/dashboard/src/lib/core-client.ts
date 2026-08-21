@@ -52,10 +52,34 @@ export type CoreVisibleProject = {
   active_runtime_control?: CorePublicRuntimeControl | null;
 };
 
+/**
+ * The canonical runtime-control lifecycle states, mirroring Core's
+ * RuntimeControlRequestStatus. Dashboard renders from these values only;
+ * `stopped` is the terminal for stop/destroy and must never read as
+ * ready/succeeded.
+ */
+export type CoreRuntimeLifecycleStatus =
+  | "requested"
+  | "launching"
+  | "compute_up"
+  | "ready"
+  | "succeeded"
+  | "stopped"
+  | "failed";
+
+/** The named stage a failed runtime-control request carries. */
+export type CoreRuntimeLifecycleStage =
+  | "launch"
+  | "compute"
+  | "readiness"
+  | "retirement"
+  | "unknown";
+
 export type CorePublicRuntimeControl = {
   id: string;
   kind: "restart" | "recover_known_good_chat_runtime" | "upgrade" | "stop" | "destroy";
-  status: "requested" | "running" | "succeeded" | "failed";
+  status: CoreRuntimeLifecycleStatus;
+  failure_stage?: CoreRuntimeLifecycleStage | null;
   retrying: boolean;
   created_at: string;
   updated_at: string;
@@ -112,7 +136,8 @@ export type CoreRuntimeControlRequest = {
   requested_by_user_id: string;
   kind: "restart" | "recover_known_good_chat_runtime" | "upgrade" | "stop" | "destroy";
   target_runtime_artifact_id?: string | null;
-  status: "requested" | "running" | "succeeded" | "failed";
+  status: CoreRuntimeLifecycleStatus;
+  failure_stage?: CoreRuntimeLifecycleStage | null;
   failure_message?: string | null;
   created_at: string;
   updated_at: string;

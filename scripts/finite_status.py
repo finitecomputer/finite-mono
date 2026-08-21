@@ -149,10 +149,20 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
             where prl.agent_runtime_id = ar.id
          ) then 'inactive'
          else 'unlinked'
-       end as link_state
+       end as link_state,
+       control.kind as control_kind,
+       control.status as control_status
   from agent_runtimes ar
   left join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
   left join projects p on p.id = ar.project_id
+  left join lateral (
+    select request.kind, request.status
+      from runtime_control_requests request
+     where request.agent_runtime_id = ar.id
+       and request.status in ('requested', 'launching', 'compute_up', 'ready')
+     order by request.created_at, request.id
+     limit 1
+  ) control on true
   order by ar.source_host_id, ar.id;"""
 
 # The runner's read-only lifecycle probe. App health (endpoints, versions)
@@ -304,6 +314,8 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "agent_name",
                 "version_label",
                 "link_state",
+                "control_kind",
+                "control_status",
             ],
         ),
     ]
@@ -803,17 +815,21 @@ def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
     for group in groups:
         count = int(group["count"])
         for index in range(1, count + 1):
-            raw["core"].setdefault("runtimes", []).append(
-                {
-                    "source_host_id": group["source_host_id"],
-                    "agent_runtime_id": f"{group['id_prefix']}-{index:02d}",
-                    "project_id": f"{group['project_prefix']}-{index:02d}",
-                    "source_machine_id": f"machine-{group['id_prefix']}-{index:02d}",
-                    "agent_name": f"{group['name_prefix']} {index:02d}",
-                    "version_label": group["version_label"],
-                    "link_state": group["link_state"],
-                }
-            )
+            row = {
+                "source_host_id": group["source_host_id"],
+                "agent_runtime_id": f"{group['id_prefix']}-{index:02d}",
+                "project_id": f"{group['project_prefix']}-{index:02d}",
+                "source_machine_id": f"machine-{group['id_prefix']}-{index:02d}",
+                "agent_name": f"{group['name_prefix']} {index:02d}",
+                "version_label": group["version_label"],
+                "link_state": group["link_state"],
+            }
+            # Optional canonical-control projection, mirroring the lateral
+            # active-control columns of RUNTIME_DETAILS_QUERY.
+            if group.get("control_status"):
+                row["control_kind"] = group["control_kind"]
+                row["control_status"] = group["control_status"]
+            raw["core"].setdefault("runtimes", []).append(row)
     return raw
 
 
@@ -871,6 +887,13 @@ def build_fleet(
             "agent_name": row["agent_name"],
             "version_label": row["version_label"],
         }
+        # The canonical runtime-control lifecycle state, projected straight
+        # from Core's one-active request row; never re-derived locally.
+        if row.get("control_status"):
+            entry["control"] = {
+                "kind": row["control_kind"],
+                "status": row["control_status"],
+            }
         lifecycle = probe_agents.get(row["agent_runtime_id"])
         if lifecycle is not None:
             # App health (version above) and lifecycle-control health are
@@ -891,6 +914,7 @@ def build_fleet(
         lifecycle_attention = [
             row for row in lifecycle_probed if row["lifecycle"]["verdict"] != "operable"
         ]
+        control_active = [row for row in active if "control" in row]
         host_reports.append(
             {
                 "source_host_id": hostname,
@@ -905,6 +929,7 @@ def build_fleet(
                 "unlinked": groups["unlinked"],
                 "lifecycle_probed_count": len(lifecycle_probed),
                 "lifecycle_attention": lifecycle_attention,
+                "control_active": control_active,
             }
         )
 
@@ -1420,6 +1445,12 @@ def render_human(report: dict[str, Any]) -> str:
                 lines.append(
                     f"    LIFECYCLE {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
                     f"{lifecycle['verdict']} ({reason})"
+                )
+            for runtime in host.get("control_active", []):
+                control = runtime["control"]
+                lines.append(
+                    f"    CONTROL {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
+                    f"{control['kind']} {control['status']}"
                 )
     else:
         lines.append(f"  {fleet.get('error', 'unavailable')}")
