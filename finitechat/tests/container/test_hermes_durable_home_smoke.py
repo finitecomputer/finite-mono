@@ -152,6 +152,57 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
             )
         self.assertIn("FINITE_DEFAULT_INFERENCE_PROFILE=openrouter", captured[0])
 
+    def test_probe_path_may_only_name_read_only_hermes_commands(self) -> None:
+        with mock.patch.object(smoke, "docker_agent_hermes", return_value={"ok": True}) as hermes:
+            result = smoke.docker_agent_hermes_probe(
+                container="agent-container",
+                args=["room-status", "--room-id", "room-welcome", "--json"],
+            )
+        self.assertEqual(result, {"ok": True})
+        hermes.assert_called_once_with(
+            container="agent-container",
+            args=["room-status", "--room-id", "room-welcome", "--json"],
+            timeout=30,
+        )
+
+        for writer_args in (
+            ["send"],
+            ["poll"],
+            ["edit"],
+            ["recover"],
+            ["activity"],
+            ["serve"],
+            ["init"],
+            ["home-channel"],
+            [],
+        ):
+            with self.assertRaises(smoke.SmokeFailure) as raised:
+                smoke.docker_agent_hermes_probe(container="agent-container", args=list(writer_args))
+            message = str(raised.exception)
+            self.assertIn("read-only probe path", message)
+            self.assertIn("room-status", message)
+
+    def test_agent_app_state_probe_cannot_name_a_writer_open(self) -> None:
+        captured: list[str] = []
+
+        def fake_run_json(args: list[str], **_kwargs: object) -> dict[str, bool]:
+            captured.extend(args)
+            return {"ok": True}
+
+        with mock.patch.object(smoke, "run_json", side_effect=fake_run_json):
+            smoke.docker_agent_app_state(
+                container="agent-container", server_url="https://chat.example"
+            )
+
+        # The probe exec is exactly `app state`: the CLI classifies only this
+        # flag-free form ReadOnly, and this helper accepts no args that could
+        # turn it into a writer (`--start-runtime`, `--wait-update-ms`,
+        # `--room-id`).
+        self.assertEqual(captured[-1], "state")
+        self.assertNotIn("--start-runtime", captured)
+        self.assertNotIn("--wait-update-ms", captured)
+        self.assertNotIn("--room-id", captured)
+
     def test_reply_timeout_includes_agent_container_log_tail(self) -> None:
         clock = iter([0.0, 0.0, 200.0])
         with (

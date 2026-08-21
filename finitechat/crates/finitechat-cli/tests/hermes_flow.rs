@@ -1,6 +1,11 @@
+use finite_identity::{FiniteIdentity, IdentityPaths};
+use finitechat_client::{
+    FiniteChatDeviceConfig, FiniteChatDeviceState, SqliteClientStore, SqliteClientStoreOptions,
+    StoredAppEvent, StoredAppMessage, StoredAppRoom, StoredAppState, StoredOutboundMessage,
+};
 use finitechat_core::{AppAction, AppRoomState, ChatMediaKind, FiniteChatRuntime, OpenOptions};
 use finitechat_hermes::HermesMessagePayloadV1;
-use finitechat_mls::NOSTR_SECRET_KEY_BYTES;
+use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::DecryptedApplicationEventV1;
 use finitechat_server::{HttpServerState, http_router};
 use serde_json::{Value, json};
@@ -422,6 +427,57 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
     );
 }
 
+/// The full durable content of an agent store: device state (MLS ratchets
+/// and KeyPackage inventory), projected rooms, persisted app state, the
+/// outbox, and the stored message/event op log. A probe that writes anything
+/// — a StartRuntime's KeyPackage publication, a Welcome activation, a
+/// persisted selection — changes this snapshot, so equality across a probe
+/// proves the probe did not write.
+#[derive(Debug, PartialEq)]
+struct AgentStoreSnapshot {
+    device: FiniteChatDeviceState,
+    rooms: Vec<StoredAppRoom>,
+    app_state: StoredAppState,
+    outbox: Vec<StoredOutboundMessage>,
+    messages: Vec<StoredAppMessage>,
+    events: Vec<StoredAppEvent>,
+}
+
+fn snapshot_agent_store(agent_home: &str, device_id: &str, now: u64) -> AgentStoreSnapshot {
+    let paths = IdentityPaths::resolve().expect("identity paths resolve");
+    let identity = FiniteIdentity::load(&paths).expect("shared identity loads");
+    let secret = NostrSecretKey::from_bytes(identity.expose_secret_bytes())
+        .expect("identity secret is a nostr key");
+    let options =
+        SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).expect("store options");
+    let store = SqliteClientStore::open_read_only(
+        PathBuf::from(agent_home).join("client.sqlite3"),
+        options,
+    )
+    .expect("read-only store opens alongside the resident writer");
+    let config = FiniteChatDeviceConfig {
+        account_secret_key: secret,
+        device_id: device_id.to_owned(),
+        now_unix_seconds: now,
+        credential_not_before_unix_seconds: now.saturating_sub(3600),
+        credential_not_after_unix_seconds: now + 90 * 24 * 60 * 60,
+    };
+    let device = store.load_device(config).expect("device loads");
+    let owner = device.device_ref().clone();
+    AgentStoreSnapshot {
+        device: device.export_state().expect("device state exports"),
+        rooms: store.load_app_rooms(&owner).expect("rooms load"),
+        app_state: store.load_app_state(&owner).expect("app state loads"),
+        outbox: store.load_app_outbox(&owner).expect("outbox loads"),
+        messages: store
+            .load_app_messages(&owner, u32::MAX)
+            .expect("messages load"),
+        events: store
+            .load_app_events(&owner, u32::MAX)
+            .expect("events load"),
+    }
+}
+
 /// Regression for the poison-entry incident class: a one-shot `room-status`
 /// (and a plain `app state` read) must report persisted state WITHOUT
 /// dispatching StartRuntime or taking the store's writer lease, so it is safe
@@ -474,6 +530,8 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
     })
     .expect("resident runtime opens");
 
+    let before = snapshot_agent_store(&agent_home, "agent", now);
+
     let status = cli_json(&[
         "hermes",
         "--home",
@@ -506,5 +564,37 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
             .unwrap()
             .iter()
             .any(|room| room["room_id"] == room_id)
+    );
+
+    // Both probes ran against the live store the resident writer holds; the
+    // durable content — device ratchets, rooms, the message/event op log —
+    // must be byte-for-byte what the writer left behind.
+    let after = snapshot_agent_store(&agent_home, "agent", now);
+    assert_eq!(
+        before, after,
+        "read-only probes must not write the store (no StartRuntime dispatch, no writer lease)"
+    );
+
+    // Sanity that the snapshot detects writes: once the resident releases
+    // the lease, a writer command changes the durable content.
+    drop(_resident);
+    cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "create-room",
+        "--display-name",
+        "Writer Proof",
+    ]);
+    let after_write = snapshot_agent_store(&agent_home, "agent", now);
+    assert_ne!(
+        before, after_write,
+        "the snapshot must detect a writer command's durable writes"
     );
 }

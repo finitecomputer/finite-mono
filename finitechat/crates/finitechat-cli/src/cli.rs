@@ -25,6 +25,8 @@ use std::net::SocketAddr;
 
 use clap::{Args, Parser, Subcommand};
 
+use finitechat_core::CommandClass;
+
 use crate::DEFAULT_SERVER_URL;
 use crate::DEFAULT_SYNC_LIMIT;
 
@@ -226,6 +228,43 @@ pub(crate) enum AppCommand {
 
     /// Refresh the room device lists and print the resulting state.
     RefreshDevices,
+}
+
+impl AppCommand {
+    /// The subcommand's read/write class, declared once at registration and
+    /// exhaustively: a new subcommand must name its class. The class selects
+    /// the runtime open mode in `app::run` — only `Writer` commands acquire
+    /// the store's single-writer lease; `ReadOnly` commands open read-only
+    /// and never dispatch a writer action.
+    pub(crate) fn command_class(&self) -> CommandClass {
+        match self {
+            // A plain `state` read is the operator's non-mutating look at a
+            // resident service's home: no StartRuntime dispatch, no writer
+            // lease. Any flag that starts the runtime, waits on a sync, or
+            // opens a room makes the invocation a writer.
+            Self::State {
+                start_runtime: false,
+                wait_update_ms: None,
+                room_id: None,
+            } => CommandClass::ReadOnly,
+            Self::State { .. } => CommandClass::Writer,
+            // `identity` resolves through the runtime open, which initializes
+            // the store on first run; a read-only open requires an existing,
+            // schema-current store, so this stays a writer open.
+            Self::Identity => CommandClass::Writer,
+            Self::Start => CommandClass::Writer,
+            // `wait` applies sync hints to the store when an update lands.
+            Self::Wait { .. } => CommandClass::Writer,
+            Self::Stop => CommandClass::Writer,
+            Self::OpenRoom { .. } => CommandClass::Writer,
+            Self::CreateRoom { .. } => CommandClass::Writer,
+            Self::AddMember { .. } => CommandClass::Writer,
+            Self::Scan { .. } => CommandClass::Writer,
+            Self::Send { .. } => CommandClass::Writer,
+            Self::MarkRead { .. } => CommandClass::Writer,
+            Self::RefreshDevices => CommandClass::Writer,
+        }
+    }
 }
 
 // --- http ---
@@ -1091,6 +1130,59 @@ mod tests {
 
         let error = parse_err(&["http", "claim-key-packages", "--idempotency-key", "k"]);
         assert!(error.contains("--owner"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn app_subcommand_classes_pin_the_smoke_harness_forms() {
+        // The durable smoke's probe exec (`app state`, no flags — the exact
+        // form hermes-durable-home-docker-smoke.py runs against the agent
+        // container) is the read-only command class; every setup/action form
+        // is a writer. The classes select the runtime open mode in app::run.
+        fn class(args: &[&str]) -> CommandClass {
+            match parse(args).command {
+                Command::App(args) => args.command.command_class(),
+                other => panic!("expected app, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            class(&[
+                "app",
+                "--data-dir",
+                "/home/node/.finitechat/agent",
+                "--server",
+                "http://server",
+                "--device-id",
+                "durable-docker",
+                "state",
+            ]),
+            CommandClass::ReadOnly
+        );
+        for writer_form in [
+            &["app", "state", "--start-runtime"][..],
+            &["app", "state", "--wait-update-ms", "4000"][..],
+            &["app", "state", "--room-id", "room"][..],
+            &["app", "identity"][..],
+            &["app", "start"][..],
+            &["app", "wait"][..],
+            &["app", "stop"][..],
+            &["app", "open-room", "--room-id", "room"][..],
+            &["app", "create-room"][..],
+            &[
+                "app",
+                "add-member",
+                "--room-id",
+                "room",
+                "--account-id",
+                "acct",
+            ][..],
+            &["app", "scan", "--value", "npub"][..],
+            &["app", "send", "--room-id", "room", "--text", "hi"][..],
+            &["app", "mark-read", "--room-id", "room"][..],
+            &["app", "refresh-devices"][..],
+        ] {
+            assert_eq!(class(writer_form), CommandClass::Writer, "{writer_form:?}");
+        }
     }
 
     #[test]

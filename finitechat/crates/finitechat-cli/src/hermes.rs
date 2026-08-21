@@ -35,8 +35,9 @@ use finitechat_blob::{
     prepare_blossom_download_http_request, sha256_hex,
 };
 use finitechat_client::{
-    FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, ReqwestHttpRuntimeTransport,
-    SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent, StoredAppRoom, StoredAppRoomState,
+    ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
+    ReqwestHttpRuntimeTransport, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
+    StoredAppMessage, StoredAppRoom, StoredAppRoomState,
 };
 use finitechat_core::{
     AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, ChatMediaKind,
@@ -51,7 +52,7 @@ use finitechat_hermes::{
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
-    AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
+    AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DeviceRef, DurableAppEventKind,
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
     ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
     RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
@@ -1455,11 +1456,14 @@ fn cmd_room_status<W: Write>(
     let room_id = args.room_id;
 
     let home = load_home(home_dir)?;
-    // Read-only on purpose: a resident `hermes serve` owns the store's
-    // writer lease, and a status read must never sync or send. A one-shot
-    // StartRuntime against the resident service's store is exactly the
-    // ratchet-divergence incident this command used to cause.
-    let summary = read_only_room_status(&home, &room_id)?;
+    // Read-only on purpose, and typed that way: a resident `hermes serve`
+    // owns the store's writer lease, and a status read must never sync or
+    // send. `ReadOnlyAgentStore` can only be built from the read-only open,
+    // so this command cannot name the writer open — a one-shot StartRuntime
+    // against the resident service's store is exactly the ratchet-divergence
+    // incident this command used to cause.
+    let store = ReadOnlyAgentStore::open(&home.dir, &home.secret, &home.config.device_id)?;
+    let summary = read_only_room_status(&store, &home, &room_id)?;
 
     if json_mode {
         crate::write_pretty_json(output, &summary)
@@ -1482,10 +1486,10 @@ fn cmd_room_status<W: Write>(
 const ROOM_STATUS_MESSAGE_SCAN_LIMIT: u32 = 512;
 
 fn read_only_room_status(
+    store: &ReadOnlyAgentStore,
     home: &AgentHome,
     room_id: &str,
 ) -> Result<HermesRoomStatusSummary, CliError> {
-    let store = open_store_read_only(&home.dir, &home.secret, &home.config.device_id)?;
     let config = device_config(&home.secret, &home.config.device_id, now_secs());
     let device = store
         .load_device(config)
@@ -3332,17 +3336,42 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
-/// Diagnostics-only store handle: never takes the writer lease and rejects
-/// every write, so it is safe alongside a resident `hermes serve`.
-fn open_store_read_only(
-    dir: &Path,
-    secret: &NostrSecretKey,
-    device_id: &str,
-) -> Result<SqliteClientStore, CliError> {
-    let options = SqliteClientStoreOptions::from_nostr_secret(secret, device_id)
-        .map_err(|error| CliError::Hermes(error.to_string()))?;
-    SqliteClientStore::open_read_only(dir.join(STORE_FILE), options)
-        .map_err(|error| CliError::Hermes(error.to_string()))
+/// The store handle for read-only status probes (the typed read/write
+/// command class at this dispatch boundary): constructible only through the
+/// read-only open mode, so a probe command cannot name the writer open —
+/// routing one through `open_store` is a compile error, not a convention
+/// slip. Never takes the writer lease, runs no migrations, and the store
+/// rejects any write through it, so it is safe alongside a resident
+/// `hermes serve` that owns the store.
+struct ReadOnlyAgentStore(SqliteClientStore);
+
+impl ReadOnlyAgentStore {
+    fn open(dir: &Path, secret: &NostrSecretKey, device_id: &str) -> Result<Self, CliError> {
+        let options = SqliteClientStoreOptions::from_nostr_secret(secret, device_id)
+            .map_err(|error| CliError::Hermes(error.to_string()))?;
+        SqliteClientStore::open_read_only(dir.join(STORE_FILE), options)
+            .map(Self)
+            .map_err(|error| CliError::Hermes(error.to_string()))
+    }
+
+    fn load_device(
+        &self,
+        config: FiniteChatDeviceConfig,
+    ) -> Result<FiniteChatDevice, ClientStoreError> {
+        self.0.load_device(config)
+    }
+
+    fn load_app_rooms(&self, owner: &DeviceRef) -> Result<Vec<StoredAppRoom>, ClientStoreError> {
+        self.0.load_app_rooms(owner)
+    }
+
+    fn load_app_messages(
+        &self,
+        owner: &DeviceRef,
+        limit: u32,
+    ) -> Result<Vec<StoredAppMessage>, ClientStoreError> {
+        self.0.load_app_messages(owner, limit)
+    }
 }
 
 fn device_config(

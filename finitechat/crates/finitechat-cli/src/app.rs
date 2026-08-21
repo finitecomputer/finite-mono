@@ -19,23 +19,12 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
         account_secret_hex: None,
         now_unix_seconds: args.now,
     };
-    // A plain `state` read is the operator's non-mutating look at a resident
-    // service's home: open read-only so it neither takes the writer lease nor
-    // writes (StartRuntime/OpenRoom need the writer and fail fast when the
-    // resident service holds the lease).
-    let read_only = matches!(
-        &args.command,
-        AppCommand::State {
-            start_runtime: false,
-            wait_update_ms: None,
-            room_id: None,
-        }
-    );
-    let runtime = if read_only {
-        FiniteChatRuntime::open_read_only(options).map_err(map_core_error)?
-    } else {
-        FiniteChatRuntime::open(options).map_err(map_core_error)?
-    };
+    // The subcommand's declared class selects the open mode: a plain `state`
+    // read is the operator's non-mutating look at a resident service's home
+    // (no writer lease, no dispatch — the smoke-mystery incident class),
+    // while writer commands acquire the store's single-writer lease.
+    let runtime = FiniteChatRuntime::open_for_class(options, args.command.command_class())
+        .map_err(map_core_error)?;
 
     match args.command {
         AppCommand::Identity => {
