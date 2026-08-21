@@ -175,7 +175,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     let runner_id = required_env("FC_RUNNER_ID")?;
     let lease_seconds = optional_i64("FC_RUNNER_LEASE_SECONDS", 600)?;
     let runtime_ready_timeout =
-        Duration::from_secs(optional_u64("FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS", 120)?);
+        Duration::from_secs(optional_u64("FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS", 180)?);
     let runtime_ready_interval =
         Duration::from_millis(optional_u64("FC_RUNNER_RUNTIME_READY_INTERVAL_MS", 2_000)?);
     let finite_private_base_url = optional_env(

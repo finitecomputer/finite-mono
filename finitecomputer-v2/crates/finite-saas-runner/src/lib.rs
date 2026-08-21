@@ -7,9 +7,9 @@ use finite_saas_core::{
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
-    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
-    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeLifecycleStage,
+    RuntimePlacement, RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
+    RuntimeSpecV1, RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -44,7 +44,11 @@ pub use lifecycle_probe::{
 };
 pub use phala::{PhalaConfig, PhalaLauncher};
 
-const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+// The runner-side readiness deadline matches agentd's 180s Finite Chat
+// bridge readiness deadline (post-#571): a restart whose runtime proves
+// nothing within this window fails with the `readiness` lifecycle stage,
+// and a large-room bridge that needs the full 180s is not failed early.
+const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -247,6 +251,11 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    /// The post-compute readiness wait expired. Core records this as a
+    /// `readiness`-stage lifecycle failure, distinct from compute faults: a
+    /// restart whose runtime never proves ready must surface as exactly that.
+    #[error("runtime readiness deadline expired: {0}")]
+    RuntimeReadinessTimeout(String),
     #[error("failed to execute command {program}: {message}")]
     CommandExecution { program: String, message: String },
     #[error("command {program} timed out after {timeout_secs}s")]
@@ -740,6 +749,8 @@ where
                     runner_id: self.runner_id.clone(),
                     lease_token,
                     failure_message: failure_message.clone(),
+                    // The operation was rejected before any compute ran.
+                    failure_stage: Some(RuntimeLifecycleStage::Launch),
                     now: None,
                 },
             )?;
@@ -864,6 +875,7 @@ where
                     &request_id,
                     &lease_token,
                     &failure_message,
+                    runtime_control_failure_stage(&error),
                 )?;
                 Ok(runtime_control_failed_outcome(
                     kind,
@@ -880,6 +892,7 @@ where
         request_id: &str,
         lease_token: &str,
         failure_message: &str,
+        failure_stage: RuntimeLifecycleStage,
     ) -> Result<(), RunnerError> {
         if kind == RuntimeControlKind::Destroy {
             self.queue.retry_runtime_control(
@@ -900,6 +913,7 @@ where
                     runner_id: self.runner_id.clone(),
                     lease_token: lease_token.to_string(),
                     failure_message: failure_message.to_string(),
+                    failure_stage: Some(failure_stage),
                     now: None,
                 },
             )?;
@@ -1346,6 +1360,17 @@ fn runtime_control_failed_outcome(
             request_id,
             failure_message,
         },
+    }
+}
+
+/// The lifecycle stage a control-operation failure belongs to. Only the
+/// post-compute readiness wait names `readiness`; every other adapter fault
+/// is a compute fault. Pre-dispatch rejections name `launch` at their own
+/// call site.
+fn runtime_control_failure_stage(error: &RunnerError) -> RuntimeLifecycleStage {
+    match error {
+        RunnerError::RuntimeReadinessTimeout(_) => RuntimeLifecycleStage::Readiness,
+        _ => RuntimeLifecycleStage::Compute,
     }
 }
 
@@ -2904,7 +2929,7 @@ fn wait_for_http_json_ready(
             Err(error) => error.to_string(),
         };
         if started.elapsed() >= timeout {
-            return Err(RunnerError::RuntimeLaunch(format!(
+            return Err(RunnerError::RuntimeReadinessTimeout(format!(
                 "{name} did not become ready within {}s: {last_error}",
                 timeout.as_secs()
             )));
@@ -6328,7 +6353,8 @@ mod tests {
                 requested_by_user_id: "user_123".to_string(),
                 kind,
                 target_runtime_artifact_id: None,
-                status: RuntimeControlRequestStatus::Running,
+                status: RuntimeControlRequestStatus::Launching,
+                failure_stage: None,
                 runner_id: Some("runner-1".to_string()),
                 lease_token: Some("lease-1".to_string()),
                 lease_expires_at: Some("2026-05-25T13:10:00Z".to_string()),
