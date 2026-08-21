@@ -126,9 +126,11 @@ rows; the migration deliberately fails closed instead of guessing which
 already-running provider operation to cancel:
 
 ```sql
+-- Post-H1 lifecycle vocabulary: the active (non-terminal) states are
+-- 'requested', 'launching', 'compute_up', 'ready'.
 SELECT agent_runtime_id, count(*)
 FROM runtime_control_requests
-WHERE status IN ('requested', 'running')
+WHERE status IN ('requested', 'launching', 'compute_up', 'ready')
 GROUP BY agent_runtime_id
 HAVING count(*) > 1;
 ```
@@ -339,7 +341,8 @@ unavoidable:
    `finite-saas-runner.timer` and `finite-saas-runner.service` so no lease can
    move while inspecting provider topology.
 2. Query `runtime_control_requests` for `kind = 'upgrade' AND status IN
-   ('requested','running')`. For every result, use the compatible runner
+   ('requested','launching','compute_up','ready')`. For every result, use the
+   compatible runner
    generation to reconcile the operation-scoped Kata candidate/rollback
    handles to one healthy canonical handle, verify `/healthz`, `/contact`, the
    expected image digest, and the single `/data` writer, then let Core record a
