@@ -25,23 +25,8 @@ pub(crate) async fn resolve_invitation_plan(
     state: &ServerState,
     email: &str,
 ) -> Result<PlanResolution, ApiError> {
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Brain account-agent authority is not configured",
-        )
-    })?;
-    let roster: Option<CoreAccountAgentRosterResponse> = post_authority_json_optional(
-        &format!(
-            "{}/api/core/v1/brain/account-agent-roster",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "email": email }),
-        "Finite Core account agent roster",
-    )
-    .await?;
+    let authorities = state.account_agent_authorities()?;
+    let roster = authorities.core_account_agent_roster(email).await?;
 
     let mut human_npub = None;
     let mut agents = Vec::new();
@@ -53,29 +38,7 @@ pub(crate) async fn resolve_invitation_plan(
                 "Finite Core returned a mismatched account mailbox",
             ));
         }
-        if roster.workos_user_id.trim().is_empty() {
-            return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "Finite Core returned an empty account id",
-            ));
-        }
-        let owner: IdentityUserResolutionResponse = post_authority_json(
-            &format!(
-                "{}/api/v1/operator/brain/user-resolution",
-                authorities.identity_base_url
-            ),
-            "X-Finite-Operator-Token",
-            &authorities.identity_token,
-            &serde_json::json!({ "workosUserId": roster.workos_user_id }),
-            "Finite Identity User Nostr Identity resolution",
-        )
-        .await?;
-        if owner.workos_user_id != roster.workos_user_id {
-            return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "Finite Identity returned a mismatched WorkOS account",
-            ));
-        }
+        let owner = resolve_account_owner(authorities, &roster).await?;
         human_npub = Some(owner.user_npub);
         for agent in &roster.agents {
             match resolve_roster_agent(state, agent).await? {
@@ -115,8 +78,10 @@ pub(crate) async fn resolve_invitation_plan(
     })
 }
 
-/// Resolve one roster agent to its Agent Principal npub and verify the binding
-/// through Finite Identity. Any failure is an explicit exclusion with a reason.
+/// Resolve one roster agent to its Agent Principal npub (the roster's own npub
+/// when it has one, else its mailbox under
+/// [`ResolutionPolicy::ManagedAgentMailbox`]) and verify the binding through
+/// Finite Identity. Any failure is an explicit exclusion with a reason.
 async fn resolve_roster_agent(
     state: &ServerState,
     agent: &CoreRosterAgentEntry,
@@ -141,7 +106,13 @@ async fn resolve_roster_agent(
     {
         Some(agent_npub.to_owned())
     } else {
-        match resolve_identity_input(state, &managed_agent_email).await {
+        match resolve_principal(
+            state,
+            &managed_agent_email,
+            ResolutionPolicy::ManagedAgentMailbox,
+        )
+        .await
+        {
             Ok(identity) => Some(identity.npub),
             Err(_) => None,
         }
@@ -149,23 +120,10 @@ async fn resolve_roster_agent(
     let Some(agent_npub) = agent_npub else {
         return exclusion("agent npub is not resolvable");
     };
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Brain account-agent authority is not configured",
-        )
-    })?;
-    let binding: Option<IdentityAgentResolutionResponse> = post_authority_json_optional(
-        &format!(
-            "{}/api/v1/operator/brain/agent-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "agentNpub": agent_npub }),
-        "Finite Identity Managed Agent resolution",
-    )
-    .await?;
+    let binding = state
+        .account_agent_authorities()?
+        .identity_agent_resolution(&agent_npub, "Finite Identity Managed Agent resolution")
+        .await?;
     let Some(binding) = binding else {
         return exclusion("Finite Identity has no Managed Agent binding for the resolved npub");
     };

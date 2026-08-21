@@ -99,11 +99,15 @@ pub(crate) async fn create_brain_handler(
         CreateBrainKind::Organization => None,
         CreateBrainKind::Personal => {
             let email_identity = match request.personal_agent_email.as_deref() {
-                Some(email) => Some(resolve_identity_input(&state, email).await?),
+                Some(email) => Some(
+                    resolve_principal(&state, email, ResolutionPolicy::ManagedAgentMailbox).await?,
+                ),
                 None => None,
             };
             let npub_identity = match request.personal_agent_npub.as_deref() {
-                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
+                Some(npub) => Some(
+                    resolve_principal(&state, npub, ResolutionPolicy::ManagedAgentMailbox).await?,
+                ),
                 None => None,
             };
             if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
@@ -155,11 +159,15 @@ pub(crate) async fn create_brain_handler(
         CreateBrainKind::Personal => None,
         CreateBrainKind::Organization => {
             let email_identity = match request.initial_agent_email.as_deref() {
-                Some(email) => Some(resolve_identity_input(&state, email).await?),
+                Some(email) => Some(
+                    resolve_principal(&state, email, ResolutionPolicy::ManagedAgentMailbox).await?,
+                ),
                 None => None,
             };
             let npub_identity = match request.initial_agent_npub.as_deref() {
-                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
+                Some(npub) => Some(
+                    resolve_principal(&state, npub, ResolutionPolicy::ManagedAgentMailbox).await?,
+                ),
                 None => None,
             };
             if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)

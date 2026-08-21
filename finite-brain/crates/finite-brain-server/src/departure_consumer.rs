@@ -134,12 +134,14 @@ pub(crate) async fn poll_departure_facts_once(state: &ServerState) -> Result<usi
 
 /// Bind a departed principal to its npub. Humans resolve through Finite
 /// Identity's user binding (Core's `account_id` is the WorkOS user id); agents
-/// resolve their Managed Agent Email through NIP-05 and verify the binding
-/// through Identity's agent resolution. When the authority-side binding is
-/// already gone (retired or deleted principals), the identity alias the Brain
-/// recorded at grant time is the fallback evidence. Returns `None` when
-/// nothing can bind the principal; the fact is then consumed with no local
-/// effect because no local access can be attributed to it.
+/// resolve their Managed Agent Email under
+/// [`ResolutionPolicy::ManagedAgentMailbox`] (NIP-05 through the identity
+/// authority, never the account roster) and verify the binding through
+/// Identity's agent resolution. When the authority-side binding is already
+/// gone (retired or deleted principals), the identity alias the Brain recorded
+/// at grant time is the fallback evidence. Returns `None` when nothing can
+/// bind the principal; the fact is then consumed with no local effect because
+/// no local access can be attributed to it.
 async fn resolve_departed_principal(
     state: &ServerState,
     fact: &CoreDepartureFact,
@@ -160,23 +162,10 @@ async fn resolve_departed_human(
     state: &ServerState,
     fact: &CoreDepartureFact,
 ) -> Result<Option<UserId>, ApiError> {
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Brain account-agent authority is not configured",
-        )
-    })?;
-    let owner: Option<IdentityUserResolutionResponse> = post_authority_json_optional(
-        &format!(
-            "{}/api/v1/operator/brain/user-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "workosUserId": fact.account_id }),
-        "Finite Identity departed User resolution",
-    )
-    .await?;
+    let owner = state
+        .account_agent_authorities()?
+        .identity_user_resolution(&fact.account_id, "Finite Identity departed User resolution")
+        .await?;
     match owner {
         Some(owner) if owner.workos_user_id == fact.account_id => {
             Ok(Some(UserId::new(owner.user_npub)?))
@@ -195,30 +184,23 @@ async fn resolve_departed_agent(
     state: &ServerState,
     fact: &CoreDepartureFact,
 ) -> Result<Option<UserId>, ApiError> {
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Brain account-agent authority is not configured",
-        )
-    })?;
+    let authorities = state.account_agent_authorities()?;
     let managed_agent_email = canonical_email(&fact.principal_ref)?;
-    let resolved = match resolve_identity_input(state, &managed_agent_email).await {
+    let resolved = match resolve_principal(
+        state,
+        &managed_agent_email,
+        ResolutionPolicy::ManagedAgentMailbox,
+    )
+    .await
+    {
         Ok(resolved) => Some(resolved),
         Err(error) if error.status == StatusCode::NOT_FOUND => None,
         Err(error) => return Err(error),
     };
     if let Some(resolved) = resolved {
-        let agent: Option<IdentityAgentResolutionResponse> = post_authority_json_optional(
-            &format!(
-                "{}/api/v1/operator/brain/agent-resolution",
-                authorities.identity_base_url
-            ),
-            "X-Finite-Operator-Token",
-            &authorities.identity_token,
-            &serde_json::json!({ "agentNpub": resolved.npub }),
-            "Finite Identity departed Agent resolution",
-        )
-        .await?;
+        let agent = authorities
+            .identity_agent_resolution(&resolved.npub, "Finite Identity departed Agent resolution")
+            .await?;
         match agent {
             Some(agent)
                 if agent.agent_npub == resolved.npub
