@@ -4,9 +4,12 @@ Status: living checklist. Every PR that adds, removes, or orphans a
 user-facing Brain capability updates this file. The map exists so "does X
 exist?" is a lookup, not archaeology.
 
-Grounded in the server route catalog (48 routes under `/v1`), the `fbrain`
+Grounded in the server route catalog (44 routes under `/v1`), the `fbrain`
 verb list, the hosted-device signing operations, and the dashboard state
-after the web-client deletion. Verified against the tree on 2026-08-15.
+after the web-client deletion. Verified against the tree on 2026-08-21,
+after the auth-kernel cut removed the Core/Identity coordination machinery
+(invitation plans, email-proof invites, the departure-fact consumer,
+account-bound agent bootstrap).
 
 ## Where this chain came from (design lineage)
 
@@ -38,7 +41,7 @@ rewrite actually serves.
 
 | Capability | CLI/agent | Human surface | State |
 | --- | --- | --- | --- |
-| Create personal brain (user-first) | `brain bootstrap-personal` (agent-first) | none | scripted only until the viewer |
+| Create personal brain (user-first) | — | none | **no route** — the agent-first bootstrap route was removed in the auth-kernel cut; re-homed to Finite Core |
 | Create organization brain | `brain create organization` | none | OK (agent-driven) |
 | List brains / metadata | `brain list`, `brain metadata` | none | viewer territory |
 | Rename a brain | — | — | **no route** |
@@ -67,9 +70,10 @@ rewrite actually serves.
 
 | Capability | CLI/agent | Human surface | State |
 | --- | --- | --- | --- |
-| Invite by email → plan → per-principal | `invite brain create` (#543) | approval card ✓ (chat) | CLI done |
-| Invite by npub / one-time email invite | `invite brain create` | none | OK |
-| Cohort folder invite (mailbox → one Folder, per-principal guests) | `invite folder create --target <email>` | card escalation pending | CLI done (#444 v1) |
+| Invite by npub / resolvable NIP-05 | `invite brain create` | none | OK |
+| Invite by email (capability Invite Token) | `invite-token create --email` | none | OK (token redeems to membership; email is delivery only) |
+| ~~Invite by email → plan → per-principal~~ | — | — | **removed** (auth-kernel cut) |
+| ~~Cohort folder invite (mailbox → one Folder)~~ | — | — | **removed** (auth-kernel cut); Folder guests are npub share links |
 | Accept invitation | `invite brain accept` | invitation card ✓ (chat) | CLI done |
 | Discover my invitations | `invite brain list` (`my-invitations`) | none | OK |
 | Revoke invitation | `invite brain revoke` | none | OK |
@@ -78,8 +82,8 @@ rewrite actually serves.
 | Self-leave a brain | — | — | **no route** (admin removal only) |
 | Folder access grant / revoke / ensure | `admin folder-access …`, `admin ensure-access` | none | OK |
 | Mounts (cross-brain folders) | full verb set | none | expert-only, fine |
-| Departure facts / roster revocation | automatic (#489) | n/a | OK |
-| Approval cards (agent asks, human signs) | `approvals list/approve/deny` (#543) | approval card ✓ (chat, hosted signature) | done |
+| Departure / offboarding revocation | `admin member remove` (explicit) | n/a | automatic Core-departure consumer **removed** (auth-kernel cut) |
+| Approval cards (agent asks, human signs) | `approvals list/approve/deny` (#543) | approval card ✓ (chat, hosted signature) | done; `delegation-grant` only — invite-commit **removed** (auth-kernel cut), validation is purely local |
 | File a delegation-grant request | — | — | route exists, no verb |
 | Key delivery to invitees | pending wraps on sync (#530) | n/a | automatic; key-holder agent must be online (accepted trade) |
 
@@ -91,9 +95,10 @@ operations (`identifyMember`, `authorizeHttpRequest`, `authorizeBrainEvent`,
 tested. Two standing gaps:
 
 - **Account-principal CLI login does not exist** — an expert human cannot act
-  as their real account principal from `fbrain`; `auth login/redeem` is the
-  legacy email-proof world, and no export path puts a hosted-device key into
-  a CLI home.
+  as their real account principal from `fbrain`; `auth login/redeem` is now
+  only the Directory's `name@finite.vip` claim flow (the email-only proof
+  path died with email-targeted invites), and no export path puts a
+  hosted-device key into a CLI home.
 - The only human-usable path to the hosted ops is scripted HTTP until the
   chat approval card lands.
 
@@ -110,19 +115,19 @@ tested. Two standing gaps:
 | Issue | Story | Served by |
 | --- | --- | --- |
 | #441 | umbrella: cohorts + multi-agent Personal Brains | ADR-0046 roster facts + plans (rewrite) |
-| #442 | preview everyone included by a mailbox invitation | ✓ preflight (#489, auto in #543's CLI path) |
-| #443 | invite and accept a ready cohort into a Brain | ✓ CLI roundtrip (#543); human accept surface pending |
-| #444 | invite a cohort into one Folder | ✓ folder-scoped plans + per-principal share links (CLI key-holder path); approval-card escalation pending with the card |
+| #442 | preview everyone included by a mailbox invitation | ✗ removed (auth-kernel cut): no pre-send resolution; certainty arrives at redemption |
+| #443 | invite and accept a ready cohort into a Brain | ✗ removed (auth-kernel cut): "smart" invites belong in the inviter's agent's skill — it sends multiple capability links |
+| #444 | invite a cohort into one Folder | ✗ removed (auth-kernel cut); per-npub share links remain |
 | #445 | shared Account Invitation Inbox | ✓ `my-invitations` (CLI); human surface pending |
-| #446 | approve a reduced participant set | partial: server `reducedSet` ✓; no CLI exclusion flag |
-| #447 | narrow acceptance after an agent departs | ✓ server acceptance narrowing + departure facts |
+| #446 | approve a reduced participant set | ✗ removed with invitation plans (auth-kernel cut) |
+| #447 | narrow acceptance after an agent departs | ✗ removed (auth-kernel cut): acceptance never re-checks a roster |
 | #448 | routine administration via human-anchored authority | mechanical ✓ (approvals + hosted ops); chat card pending |
-| #449 | later mailbox-addressed Folder access for the cohort | partial: `ensure-access` by email; no cohort fan-out on folder grants |
-| #450 | revoke, exclude, and restore one cohort agent | partial: departure revoke ✓, plan exclusions ✓; restore = re-invite |
-| #451 | bootstrap Organization Brains with the creator's cohort | partial: `initialAgentEmail` at create; no auto "current cohort" |
-| #452 | bootstrap Personal Brains with every current agent | partial: `personal_agents` set model exists; surface is bootstrap + replace-primary |
-| #453 | connect a new agent without blocking launch | partial: replace-personal-agent route; onboarding path unproven end-to-end |
-| #454 | revoke permanently departed agents | ✓ departure-fact consumer (#489) |
+| #449 | later mailbox-addressed Folder access for the cohort | ✗ removed (auth-kernel cut); `ensure-access` by npub/NIP-05 remains |
+| #450 | revoke, exclude, and restore one cohort agent | partial: explicit admin revoke ✓; restore = re-invite |
+| #451 | bootstrap Organization Brains with the creator's cohort | ✗ removed (auth-kernel cut): `initialAgent*` fields rejected; add agents after creation |
+| #452 | bootstrap Personal Brains with every current agent | ✗ removed (auth-kernel cut): account-bound registration re-homed to Finite Core |
+| #453 | connect a new agent without blocking launch | ✗ replace-personal-agent route removed (auth-kernel cut) |
+| #454 | revoke permanently departed agents | ✗ consumer removed (auth-kernel cut): explicit admin revoke or a future offboarding workflow |
 | #455 | manage peer-agent access from authenticated chat | ✗ no chat surface |
 | #456 | quiet internal-beta cohort reconciliation plan | ops planning, not code |
 | #457 | reconcile existing access with complete grants | partial: `ensure-access` |
@@ -148,3 +153,9 @@ additive, not cutover; one compatibility test instead), #459 (landed as the
 departure, runbook at finite-brain/docs/runbooks/brain-restore-drill.md).
 #444 landed as folder-scoped plans with per-principal share links; its
 approval-card escalation rides the card work.
+
+Auth-kernel cut (2026-08): the roster/plan/departure machinery from #489 is
+deleted; the kernel-shaped replacements shipped as capability Invite Tokens
+(#652) plus the pre-existing npub invitations and share links. What was
+honestly given up: pre-send certainty that "this email is that npub" and
+automatic cross-product departure revocation.

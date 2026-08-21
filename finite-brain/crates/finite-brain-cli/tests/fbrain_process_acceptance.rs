@@ -80,19 +80,16 @@ impl Drop for CollaborationSmokeReport {
             },
             "passedBoundaries": self.passed_boundaries,
             "facts": {
-                "collaborationState": if self
-                    .passed_boundaries
-                    .contains(&"nativeEmailCollaboration")
-                {
+                "collaborationState": if self.passed_boundaries.contains(&"npubCollaboration") {
                     Value::String("complete".to_owned())
                 } else {
                     Value::Null
                 },
                 "independentFiniteHomes": self.passed_boundaries.contains(&"fixtureSetup"),
-                "targetForm": "canonicalManagedAgentEmail",
-                "unregisteredEmailFolderBootstrap": self
+                "targetForm": "npub",
+                "emailInvitationsRetired": self
                     .passed_boundaries
-                    .contains(&"unregisteredEmailFolderInvitationBootstrap"),
+                    .contains(&"npubFolderGuestInvitation"),
                 "existingRestrictedKnowledge": self
                     .passed_boundaries
                     .contains(&"restrictedKnowledgeBeforeCollaboration"),
@@ -108,73 +105,6 @@ impl Drop for CollaborationSmokeReport {
     }
 }
 
-fn spawn_real_brain_server_with_authorities(
-    owner_npub: &str,
-    personal_agent_npub: &str,
-    identity_authority_url: String,
-    core_authority_url: String,
-) -> (
-    String,
-    tokio::sync::oneshot::Sender<()>,
-    thread::JoinHandle<()>,
-) {
-    let (url_tx, url_rx) = mpsc::channel();
-    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
-    let owner_npub = owner_npub.to_owned();
-    thread::spawn(move || {
-        if let Ok((mut stream, _)) = nip05_listener.accept() {
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request);
-            let body = r#"{"names":{"beta":"02b3c1..."}}"#.to_owned();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-        }
-    });
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let thread = thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let mut store = finite_brain_store::BrainStore::open_in_memory().unwrap();
-            let organization = finite_brain_core::bootstrap_organization_brain(
-                "roundtrip-org",
-                "Roundtrip Org",
-                &owner_npub,
-            )
-            .unwrap();
-            store.create_brain_bootstrap(&organization, &[]).unwrap();
-            let state = finite_brain_server::ServerState::new(store, url.clone())
-                .with_identity_authority_url(nip05_url)
-                .with_agent_bootstrap_authorities(
-                    core_authority_url,
-                    "process-core-token",
-                    identity_authority_url,
-                    "process-identity-token",
-                );
-            url_tx.send(url).unwrap();
-            let router = finite_brain_server::router_with_state(state);
-            axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .unwrap();
-        });
-    });
-    let url = url_rx.recv().unwrap();
-    let _ = personal_agent_npub;
-    (url, shutdown_tx, thread)
-}
-
 fn spawn_real_brain_server(
     target_npub: &str,
     personal_agent_npub: &str,
@@ -185,27 +115,12 @@ fn spawn_real_brain_server(
     tokio::sync::oneshot::Sender<()>,
     thread::JoinHandle<()>,
 ) {
+    // The Brain server consults no account authority and fetches NIP-05 over
+    // the public internet (auth kernel cut); tests name npubs directly.
+    let _ = (target_npub, requester_npub);
     let (url_tx, url_rx) = mpsc::channel();
-    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
-    let target_hex = NostrPublicKey::parse(target_npub).unwrap().to_hex();
     let personal_agent_npub = personal_agent_npub.to_owned();
     let owner_npub = owner_npub.to_owned();
-    let (identity_authority_url, core_authority_url) =
-        spawn_requester_authorities(owner_npub.clone(), requester_npub.to_owned());
-    thread::spawn(move || {
-        if let Ok((mut stream, _)) = nip05_listener.accept() {
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request);
-            let body = format!(r#"{{"names":{{"beta":"{target_hex}"}}}}"#);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-        }
-    });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let thread = thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -229,18 +144,7 @@ fn spawn_real_brain_server(
                 )
                 .unwrap();
             let state = finite_brain_server::ServerState::new(store, url.clone())
-                .with_identity_authority_url(nip05_url)
-                .with_agent_bootstrap_authorities(
-                    core_authority_url,
-                    "process-core-token",
-                    identity_authority_url,
-                    "process-identity-token",
-                )
                 .with_dev_invite_mailer()
-                .with_smoke_email_proofs(
-                    "future-user@example.com,future-personal@example.com,existing-member@example.com,stale-user@example.com",
-                )
-                .unwrap()
                 .with_auth_clock(OffsetDateTime::now_utc().unix_timestamp() as u64, 300);
             let router = finite_brain_server::router_with_state(state);
             url_tx.send(url).unwrap();
@@ -253,137 +157,19 @@ fn spawn_real_brain_server(
     (url_rx.recv().unwrap(), shutdown_tx, thread)
 }
 
-fn spawn_requester_authorities(
-    managed_agent_npub: String,
-    requester_npub: String,
-) -> (String, String) {
-    fn serve(listener: TcpListener, responder: impl Fn(&str) -> (u16, Value) + Send + 'static) {
-        thread::spawn(move || {
-            for incoming in listener.incoming() {
-                let Ok(mut stream) = incoming else {
-                    break;
-                };
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0_u8; 4096];
-                    let bytes = stream.read(&mut chunk).unwrap_or(0);
-                    if bytes == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..bytes]);
-                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-                let request = String::from_utf8_lossy(&request);
-                let (status, body) = responder(&request);
-                let reason = if status == 200 { "OK" } else { "Not Found" };
-                let body = body.to_string();
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-            }
-        });
-    }
-
-    let identity = TcpListener::bind("127.0.0.1:0").unwrap();
-    let identity_url = format!("http://{}", identity.local_addr().unwrap());
-    let identity_agent = managed_agent_npub.clone();
-    let identity_owner = requester_npub.clone();
-    serve(identity, move |request| {
-        match request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/")
-        {
-            "/api/v1/operator/brain/agent-resolution" if request.contains(&identity_agent) => (
-                200,
-                json!({
-                    "agentNpub": identity_agent,
-                    "managedAgentEmail": "alpha@finite.vip",
-                }),
-            ),
-            "/api/v1/operator/brain/user-resolution" => (
-                200,
-                json!({
-                    "workosUserId": "process-owner",
-                    "userNpub": identity_owner,
-                }),
-            ),
-            _ => (404, json!({ "error": "not_found" })),
-        }
-    });
-
-    let core = TcpListener::bind("127.0.0.1:0").unwrap();
-    let core_url = format!("http://{}", core.local_addr().unwrap());
-    serve(core, move |request| {
-        match request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/")
-        {
-            "/api/core/v1/brain/agent-account" => (
-                200,
-                json!({
-                    "workosUserId": "process-owner",
-                    "managedAgentEmail": "alpha@finite.vip",
-                    "verifiedEmail": "owner@example.com",
-                    "status": "active",
-                }),
-            ),
-            _ => (404, json!({ "error": "not_found" })),
-        }
-    });
-    (identity_url, core_url)
-}
-
 /// Authorities for the CLI invite/approval roundtrip: Bob's account resolves
 /// to his human Principal plus one active managed agent; the agent npub is the
 /// CLI home the test drives.
-fn spawn_file_backed_brain_server_with_authorities(
+fn spawn_file_backed_brain_server(
     owner_npub: &str,
     database_path: std::path::PathBuf,
-    identity_authority_url: String,
-    core_authority_url: String,
 ) -> (
     String,
     tokio::sync::oneshot::Sender<()>,
     thread::JoinHandle<()>,
 ) {
     let (url_tx, url_rx) = mpsc::channel();
-    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
     let owner_npub = owner_npub.to_owned();
-    thread::spawn(move || {
-        if let Ok((mut stream, _)) = nip05_listener.accept() {
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request);
-            let body = r#"{"names":{"beta":"02b3c1..."}}"#.to_owned();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-        }
-    });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let thread = thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -403,14 +189,7 @@ fn spawn_file_backed_brain_server_with_authorities(
             if !brain_exists {
                 store.create_brain_bootstrap(&organization, &[]).unwrap();
             }
-            let state = finite_brain_server::ServerState::new(store, url.clone())
-                .with_identity_authority_url(nip05_url)
-                .with_agent_bootstrap_authorities(
-                    core_authority_url,
-                    "process-core-token",
-                    identity_authority_url,
-                    "process-identity-token",
-                );
+            let state = finite_brain_server::ServerState::new(store, url.clone());
             url_tx.send(url).unwrap();
             let router = finite_brain_server::router_with_state(state);
             axum::serve(
@@ -426,126 +205,6 @@ fn spawn_file_backed_brain_server_with_authorities(
     });
     let url = url_rx.recv().unwrap();
     (url, shutdown_tx, thread)
-}
-
-fn spawn_card_roundtrip_authorities(
-    bob_email: &str,
-    bob_agent_email: &str,
-    bob_workos_id: &str,
-    bob_human_npub: String,
-    bob_agent_npub: String,
-) -> (String, String) {
-    fn serve(listener: TcpListener, responder: impl Fn(&str) -> (u16, Value) + Send + 'static) {
-        thread::spawn(move || {
-            for incoming in listener.incoming() {
-                let Ok(mut stream) = incoming else {
-                    break;
-                };
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0_u8; 4096];
-                    let bytes = stream.read(&mut chunk).unwrap_or(0);
-                    if bytes == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..bytes]);
-                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-                let request = String::from_utf8_lossy(&request);
-                let (status, body) = responder(&request);
-                let reason = if status == 200 { "OK" } else { "Not Found" };
-                let body = body.to_string();
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-            }
-        });
-    }
-
-    let identity = TcpListener::bind("127.0.0.1:0").unwrap();
-    let identity_url = format!("http://{}", identity.local_addr().unwrap());
-    let identity_agent = bob_agent_npub.clone();
-    let identity_agent_email = bob_agent_email.to_owned();
-    let identity_workos = bob_workos_id.to_owned();
-    let identity_human = bob_human_npub.clone();
-    serve(identity, move |request| {
-        match request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/")
-        {
-            "/api/v1/operator/brain/agent-resolution" if request.contains(&identity_agent) => (
-                200,
-                json!({
-                    "agentNpub": identity_agent,
-                    "managedAgentEmail": identity_agent_email,
-                }),
-            ),
-            "/api/v1/operator/brain/user-resolution" if request.contains(&identity_workos) => (
-                200,
-                json!({
-                    "workosUserId": identity_workos,
-                    "userNpub": identity_human,
-                }),
-            ),
-            _ => (404, json!({ "error": "not_found" })),
-        }
-    });
-
-    let core = TcpListener::bind("127.0.0.1:0").unwrap();
-    let core_url = format!("http://{}", core.local_addr().unwrap());
-    let core_email = bob_email.to_owned();
-    let core_workos = bob_workos_id.to_owned();
-    let core_agent = bob_agent_npub.clone();
-    let core_agent_email = bob_agent_email.to_owned();
-    serve(core, move |request| {
-        match request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/")
-        {
-            "/api/core/v1/brain/account-agent-roster"
-                if request.contains(&core_email) || request.contains(&core_workos) =>
-            {
-                (
-                    200,
-                    json!({
-                        "workosUserId": core_workos,
-                        "humanMailbox": core_email,
-                        "rosterRevision": 1,
-                        "agents": [
-                            {
-                                "managedAgentEmail": core_agent_email,
-                                "agentNpub": core_agent,
-                                "status": "active",
-                            }
-                        ],
-                    }),
-                )
-            }
-            _ => (404, json!({ "error": "not_found" })),
-        }
-    });
-    (identity_url, core_url)
 }
 
 fn spawn_brain_updates_404_proxy(
@@ -1329,17 +988,18 @@ fn supervisor_quiesces_after_catch_up_when_nothing_changes() {
 #[test]
 fn built_fbrain_process_brain_restore_drill() {
     // The #459/#527 drill, service level: populate a file-backed Brain,
-    // depart a principal, stop the server, copy the database, destroy the
+    // revoke a principal, stop the server, copy the database, destroy the
     // original, and restore onto an empty target. The restored server must
-    // preserve memberships with provenance, pending approvals, accepted
-    // invitations, and departures — and a never-before-seen invitation must
-    // still be acceptable after the restore. Clients hold the keys; the
-    // server only ever sees ciphertext and access facts.
+    // preserve memberships with provenance and accepted invitations — and a
+    // still-pending npub invitation must remain acceptable after the restore.
+    // Clients hold the keys; the server only ever sees ciphertext and access
+    // facts.
     let scratch = TempDir::new().unwrap();
     let home_alice = scratch.path().join("home-alice");
     let home_member = scratch.path().join("home-member");
     let home_bob = scratch.path().join("home-bob");
-    for home in [&home_alice, &home_member, &home_bob] {
+    let home_bob_human = scratch.path().join("home-bob-human");
+    for home in [&home_alice, &home_member, &home_bob, &home_bob_human] {
         fs::create_dir_all(home).unwrap();
     }
     for (home, secret) in [
@@ -1354,6 +1014,10 @@ fn built_fbrain_process_brain_restore_drill() {
         (
             &home_member,
             "0000000000000000000000000000000000000000000000000000000000000003",
+        ),
+        (
+            &home_bob_human,
+            "0000000000000000000000000000000000000000000000000000000000000005",
         ),
     ] {
         let secret_file = scratch.path().join(format!("secret-{}", &secret[..2]));
@@ -1390,21 +1054,10 @@ fn built_fbrain_process_brain_restore_drill() {
     let member_npub = npub_of(&home_member);
     let bob_agent_npub = npub_of(&home_bob);
 
-    let (identity_url, core_url) = spawn_card_roundtrip_authorities(
-        "bob@example.com",
-        "bob-agent@example.com",
-        "process-bob",
-        bob_human_npub,
-        bob_agent_npub.clone(),
-    );
     let database_path = scratch.path().join("state").join("brain-a.sqlite3");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-    let (server_a_url, shutdown_a, server_a) = spawn_file_backed_brain_server_with_authorities(
-        &alice_npub,
-        database_path.clone(),
-        identity_url.clone(),
-        core_url.clone(),
-    );
+    let (server_a_url, shutdown_a, server_a) =
+        spawn_file_backed_brain_server(&alice_npub, database_path.clone());
     let run_against = |home: &Path, server_url: &str, args: &[&str]| {
         let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         command(home, home)
@@ -1425,8 +1078,9 @@ fn built_fbrain_process_brain_restore_drill() {
         serde_json::from_slice(&output.stdout).unwrap()
     };
 
-    // Populate: member without standing invites bob; alice approves; bob
-    // accepts; a second request stays pending across the restore.
+    // Populate: a member without admin standing can no longer file an
+    // email-targeted invite (retired with the identity-proof flow); alice
+    // invites bob's npub directly and bob accepts.
     assert!(
         run_against(
             &home_alice,
@@ -1445,10 +1099,28 @@ fn built_fbrain_process_brain_restore_drill() {
         .status
         .success()
     );
-    let requested = json_of(
-        "member invite",
+    let retired_invite = run_against(
+        &home_member,
+        &server_a_url,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "--brain",
+            "roundtrip-org",
+            "--target",
+            "bob@example.com",
+            "--json",
+        ],
+    );
+    assert!(
+        !retired_invite.status.success(),
+        "email-targeted invitation must be retired"
+    );
+    json_of(
+        "alice invites bob",
         &run_against(
-            &home_member,
+            &home_alice,
             &server_a_url,
             &[
                 "invite",
@@ -1457,18 +1129,9 @@ fn built_fbrain_process_brain_restore_drill() {
                 "--brain",
                 "roundtrip-org",
                 "--target",
-                "bob@example.com",
+                &bob_agent_npub,
                 "--json",
             ],
-        ),
-    );
-    let request_id = requested["id"].as_str().unwrap().to_owned();
-    json_of(
-        "alice approve",
-        &run_against(
-            &home_alice,
-            &server_a_url,
-            &["approvals", "approve", "--id", &request_id, "--json"],
         ),
     );
     let bob_invitations = json_of(
@@ -1503,11 +1166,12 @@ fn built_fbrain_process_brain_restore_drill() {
             ],
         ),
     );
-    // A pending request that must survive the restore unresolved.
+    // A pending npub invitation that must survive the restore unaccepted and
+    // stay acceptable afterwards.
     let pending = json_of(
-        "second member invite",
+        "pending invite for bob's other key",
         &run_against(
-            &home_member,
+            &home_alice,
             &server_a_url,
             &[
                 "invite",
@@ -1516,14 +1180,14 @@ fn built_fbrain_process_brain_restore_drill() {
                 "--brain",
                 "roundtrip-org",
                 "--target",
-                "bob@example.com",
+                &bob_human_npub,
                 "--json",
             ],
         ),
     );
     let pending_id = pending["id"].as_str().unwrap().to_owned();
 
-    // Departure: the member is removed and must stay removed after restore.
+    // Revocation: the member is removed and must stay removed after restore.
     assert!(
         run_against(
             &home_alice,
@@ -1558,14 +1222,10 @@ fn built_fbrain_process_brain_restore_drill() {
     let restored_path = scratch.path().join("empty-target").join("brain.sqlite3");
     fs::create_dir_all(restored_path.parent().unwrap()).unwrap();
     fs::copy(&backup_path, &restored_path).unwrap();
-    let (server_b_url, shutdown_b, server_b) = spawn_file_backed_brain_server_with_authorities(
-        &alice_npub,
-        restored_path,
-        identity_url,
-        core_url,
-    );
+    let (server_b_url, shutdown_b, server_b) =
+        spawn_file_backed_brain_server(&alice_npub, restored_path);
 
-    // Memberships and provenance survived; the departed member did too.
+    // Memberships and provenance survived; the revoked member did not.
     let metadata = json_of(
         "restored metadata",
         &run_against(
@@ -1596,29 +1256,33 @@ fn built_fbrain_process_brain_restore_drill() {
             .any(|brain| brain["brainId"].as_str() == Some("roundtrip-org"))
     );
 
-    // The pending approval survived unresolved and stays deniable.
-    let pending_after = json_of(
-        "restored approvals list",
-        &run_against(&home_alice, &server_b_url, &["approvals", "list", "--json"]),
+    // The pending invitation survived unaccepted and is still acceptable:
+    // bob's human key sees it and accepts it against the restored server.
+    let human_pending = json_of(
+        "restored pending list",
+        &run_against(
+            &home_bob_human,
+            &server_b_url,
+            &["invite", "brain", "list", "--json"],
+        ),
     );
     assert!(
-        pending_after["requests"]
+        human_pending["invitations"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|request| request["id"].as_str() == Some(pending_id.as_str()))
+            .any(|invitation| invitation["id"].as_str() == Some(pending_id.as_str()))
     );
-    let denied = json_of(
-        "restored deny",
+    json_of(
+        "restored accept",
         &run_against(
-            &home_alice,
+            &home_bob_human,
             &server_b_url,
-            &["approvals", "deny", "--id", &pending_id, "--json"],
+            &["invite", "brain", "accept", "--id", &pending_id, "--json"],
         ),
     );
-    assert_eq!(denied["status"], "denied");
 
-    // The departed member's standing did not survive as access.
+    // The revoked member's standing did not survive as access.
     let member_list = run_against(&home_member, &server_b_url, &["brain", "list", "--json"]);
     if member_list.status.success() {
         let member_brains: Value = serde_json::from_slice(&member_list.stdout).unwrap();
@@ -1635,266 +1299,6 @@ fn built_fbrain_process_brain_restore_drill() {
     // same ciphertext-bearing SQLite the server held all along.
     drop(shutdown_b);
     server_b.join().unwrap();
-}
-
-#[test]
-fn built_fbrain_process_cli_invite_approval_roundtrip() {
-    // The blessed invite story, CLI end to end: a member without admin
-    // standing asks to invite an account, the server files an approval
-    // request with a freshly resolved plan, the admin approves from the CLI
-    // (the chat approval card drives the identical submit route), and the
-    // invitee accepts from the CLI. No secrets, keys, or plaintext cross the
-    // server boundary.
-    let scratch = TempDir::new().unwrap();
-    let home_alice = scratch.path().join("home-alice");
-    let home_member = scratch.path().join("home-member");
-    let home_bob = scratch.path().join("home-bob");
-    for home in [&home_alice, &home_member, &home_bob] {
-        fs::create_dir_all(home).unwrap();
-    }
-    for (home, secret) in [
-        (
-            &home_alice,
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        ),
-        (
-            &home_bob,
-            "0000000000000000000000000000000000000000000000000000000000000002",
-        ),
-        (
-            &home_member,
-            "0000000000000000000000000000000000000000000000000000000000000003",
-        ),
-    ] {
-        let secret_file = scratch
-            .path()
-            .join(format!("secret-{}", secret[..2].to_owned()));
-        fs::write(&secret_file, format!("{secret}\n")).unwrap();
-        assert!(
-            run(
-                home,
-                home,
-                &[
-                    "auth",
-                    "import",
-                    "--file",
-                    secret_file.to_str().unwrap(),
-                    "--json"
-                ]
-            )
-            .status
-            .success()
-        );
-    }
-    let bob_human_keys =
-        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000005")
-            .unwrap();
-    let bob_human_npub = NostrPublicKey::from_protocol(bob_human_keys.public_key())
-        .to_npub()
-        .unwrap();
-    let npub_of = |home: &Path| -> String {
-        let output = run(home, home, &["signer", "public-key", "--json"]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        value["npub"].as_str().unwrap().to_owned()
-    };
-    let alice_npub = npub_of(&home_alice);
-    let member_npub = npub_of(&home_member);
-    let bob_agent_npub = npub_of(&home_bob);
-
-    let (identity_url, core_url) = spawn_card_roundtrip_authorities(
-        "bob@example.com",
-        "bob-agent@example.com",
-        "process-bob",
-        bob_human_npub,
-        bob_agent_npub.clone(),
-    );
-    let (server_url, shutdown, server_thread) =
-        spawn_real_brain_server_with_authorities(&alice_npub, &member_npub, identity_url, core_url);
-    let run_server = |home: &Path, args: &[&str]| {
-        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-        command(home, home)
-            .env("FBRAIN_NOW", now)
-            .env("FINITE_BRAIN_SERVER_URL", &server_url)
-            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
-            .args(args)
-            .output()
-            .unwrap()
-    };
-    let json_of = |label: &str, output: &Output| -> Value {
-        assert!(
-            output.status.success(),
-            "{label} failed: {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
-    };
-
-    // The member belongs to the organization brain but holds no admin
-    // standing: their invite must become an approval request, not a commit.
-    let member_added = run_server(
-        &home_alice,
-        &[
-            "admin",
-            "member",
-            "add",
-            "--brain",
-            "roundtrip-org",
-            "--target",
-            &member_npub,
-            "--json",
-        ],
-    );
-    assert!(
-        member_added.status.success(),
-        "{}",
-        String::from_utf8_lossy(&member_added.stderr)
-    );
-
-    let member_filing_output = run_server(
-        &home_member,
-        &[
-            "invite",
-            "brain",
-            "create",
-            "--brain",
-            "roundtrip-org",
-            "--target",
-            "bob@example.com",
-            "--json",
-        ],
-    );
-    let requested_stdout = member_filing_output.stdout.clone();
-    let requested_stderr = member_filing_output.stderr.clone();
-    let requested = json_of("member invite brain create", &member_filing_output);
-    assert_eq!(requested["status"], "pending");
-    assert_eq!(requested["action"], "invite-commit");
-    let request_id = requested["id"].as_str().unwrap().to_owned();
-    let plan_id = requested["payload"]["planId"].as_str().unwrap().to_owned();
-    assert!(!plan_id.is_empty());
-
-    // The filing emits the Runtime chat adapter's stderr marker: the agent's
-    // next final delivery carries metadata.approve naming this request, and
-    // stdout stays pure JSON for --json consumers.
-    let marker = format!("finite-brain-approval-filed brain=roundtrip-org request={request_id}");
-    assert!(
-        String::from_utf8_lossy(&requested_stderr).contains(&marker),
-        "json-mode filing emits the stderr marker: {}",
-        String::from_utf8_lossy(&requested_stderr)
-    );
-    assert!(
-        !String::from_utf8_lossy(&requested_stdout).contains("finite-brain-approval-filed"),
-        "json-mode stdout stays pure JSON: {}",
-        String::from_utf8_lossy(&requested_stdout)
-    );
-
-    // The admin sees the pending request and approves it from the CLI; the
-    // chat approval card submits the identical artifact route.
-    let listed = json_of(
-        "approvals list",
-        &run_server(&home_alice, &["approvals", "list", "--json"]),
-    );
-    let pending_ids: Vec<&str> = listed["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|request| request["id"].as_str())
-        .collect();
-    assert!(pending_ids.contains(&request_id.as_str()));
-
-    let approved = json_of(
-        "approvals approve",
-        &run_server(
-            &home_alice,
-            &["approvals", "approve", "--id", &request_id, "--json"],
-        ),
-    );
-    assert_eq!(approved["status"], "applied");
-
-    // Bob's principal discovers and accepts its per-principal invitation.
-    let bob_invitations = json_of(
-        "bob invite brain list",
-        &run_server(&home_bob, &["invite", "brain", "list", "--json"]),
-    );
-    let invitation_id = bob_invitations["invitations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find_map(|invitation| {
-            let id = invitation["id"].as_str()?;
-            (invitation["brainId"].as_str() == Some("roundtrip-org")).then_some(id.to_owned())
-        })
-        .expect("bob's agent principal has an invitation for roundtrip-org");
-    let accepted = json_of(
-        "bob invite brain accept",
-        &run_server(
-            &home_bob,
-            &[
-                "invite",
-                "brain",
-                "accept",
-                "--id",
-                &invitation_id,
-                "--json",
-            ],
-        ),
-    );
-    assert_eq!(accepted["status"], "accepted");
-
-    let bob_brains = json_of(
-        "bob brain list",
-        &run_server(&home_bob, &["brain", "list", "--json"]),
-    );
-    assert!(
-        bob_brains["brains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|brain| brain["brainId"].as_str() == Some("roundtrip-org"))
-    );
-
-    // Deny closes the door: a second request is denied and never reaches the
-    // invitee.
-    let second = json_of(
-        "second member invite",
-        &run_server(
-            &home_member,
-            &[
-                "invite",
-                "brain",
-                "create",
-                "--brain",
-                "roundtrip-org",
-                "--target",
-                "bob@example.com",
-                "--json",
-            ],
-        ),
-    );
-    let second_id = second["id"].as_str().unwrap().to_owned();
-    let denied = json_of(
-        "approvals deny",
-        &run_server(
-            &home_alice,
-            &["approvals", "deny", "--id", &second_id, "--json"],
-        ),
-    );
-    assert_eq!(denied["status"], "denied");
-    // Bob's earlier invitation is accepted (no longer pending) and the denied
-    // request never produced one: his pending list is empty.
-    let bob_after = json_of(
-        "bob invite brain list after deny",
-        &run_server(&home_bob, &["invite", "brain", "list", "--json"]),
-    );
-    assert_eq!(bob_after["invitations"].as_array().unwrap().len(), 0);
-
-    drop(shutdown);
-    server_thread.join().unwrap();
 }
 
 #[test]
@@ -1958,7 +1362,6 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let signer_b: Value = serde_json::from_slice(&signer_b.stdout).unwrap();
     let target_npub = signer_b["npub"].as_str().unwrap().to_owned();
-    let target_hex = NostrPublicKey::parse(&target_npub).unwrap().to_hex();
     let signer_a = run(&home_a, &home_a, &["signer", "public-key", "--json"]);
     assert!(signer_a.status.success());
     let signer_a: Value = serde_json::from_slice(&signer_a.stdout).unwrap();
@@ -2080,40 +1483,6 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
             .unwrap()
             .iter()
             .all(|brain| brain["brainId"] != "must-not-exist")
-    );
-    let forged_session = "forged-requester-session";
-    write_requester_context(&home_a.join("finite-home"), forged_session, &target_hex);
-    let forged_requester = command(&home_a, &home_a)
-        .env("HERMES_SESSION_PLATFORM", "finitechat")
-        .env("HERMES_SESSION_KEY", forged_session)
-        .env("HERMES_SESSION_USER_ID", &target_hex)
-        .env("FINITE_BRAIN_SERVER_URL", &server_url)
-        .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
-        .args([
-            "brain",
-            "create",
-            "organization",
-            "Forged Requester",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(!forged_requester.status.success());
-    let downgraded_agent = run(
-        &home_a,
-        &home_a,
-        &[
-            "brain",
-            "create",
-            "organization",
-            "Downgraded Agent",
-            "--json",
-        ],
-    );
-    assert!(!downgraded_agent.status.success());
-    assert!(
-        String::from_utf8_lossy(&downgraded_agent.stderr)
-            .contains("requires authenticated requester context")
     );
     let missing_folder_context = run(
         &home_b,
@@ -2323,8 +1692,11 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     smoke.pass();
 
-    smoke.enter("unregisteredEmailFolderInvitationBootstrap");
-    let email_brain_invitation = run(
+    smoke.enter("npubFolderGuestInvitation");
+    // Email-targeted invitations are retired (auth kernel cut): an email that
+    // does not resolve through public NIP-05 is rejected with guidance toward
+    // capability Invite Tokens.
+    let retired_brain_invite = run(
         &home_a,
         &tree_a,
         &[
@@ -2337,20 +1709,14 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         ],
     );
     assert!(
-        email_brain_invitation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&email_brain_invitation.stderr)
+        !retired_brain_invite.status.success(),
+        "email-targeted Brain invitations are retired"
     );
-    let email_brain_invitation: Value =
-        serde_json::from_slice(&email_brain_invitation.stdout).unwrap();
-    assert_eq!(email_brain_invitation["folderOnly"], json!(false));
-    assert_eq!(
-        email_brain_invitation["invitedEmail"],
-        "future-user@example.com"
+    assert!(
+        String::from_utf8_lossy(&retired_brain_invite.stderr)
+            .contains("does not resolve to an npub")
     );
-    assert_eq!(email_brain_invitation["deliveryStatus"], "sent");
-
-    let email_folder_invitation = run(
+    let retired_folder_invite = run(
         &home_a,
         &tree_a.join("Admin Only"),
         &[
@@ -2363,185 +1729,79 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         ],
     );
     assert!(
-        email_folder_invitation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&email_folder_invitation.stderr)
-    );
-    let email_folder_invitation: Value =
-        serde_json::from_slice(&email_folder_invitation.stdout).unwrap();
-    assert_eq!(email_folder_invitation["folderOnly"], json!(true));
-    assert_eq!(
-        email_folder_invitation["invitedEmail"],
-        "future-user@example.com"
-    );
-    assert_eq!(email_folder_invitation["deliveryStatus"], "sent");
-    assert_eq!(
-        email_folder_invitation["initialFolderAccess"],
-        json!(["admin-only"])
-    );
-    assert_eq!(
-        email_folder_invitation["bootstrapScope"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|scope| scope["folderId"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["admin-only"]
+        !retired_folder_invite.status.success(),
+        "email-targeted Folder invitations are retired"
     );
     assert!(
-        email_folder_invitation["inviteUrl"]
-            .as_str()
-            .unwrap()
-            .contains("#inviteSecret=")
+        String::from_utf8_lossy(&retired_folder_invite.stderr)
+            .contains("does not resolve to an npub")
     );
-    let listed_email_folder_invitations = run(
+
+    // Folder guest access is an npub-targeted share link, created by an admin
+    // and accepted by the guest key.
+    let folder_invitation = run(
+        &home_a,
+        &tree_a.join("Admin Only"),
+        &[
+            "invite",
+            "folder",
+            "create",
+            "--target",
+            &target_npub,
+            "--json",
+        ],
+    );
+    assert!(
+        folder_invitation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder_invitation.stderr)
+    );
+    let folder_invitation: Value = serde_json::from_slice(&folder_invitation.stdout).unwrap();
+    let folder_invitation_id = folder_invitation["id"].as_str().unwrap();
+    let listed_folder_invitations = run(
         &home_a,
         &tree_a.join("Admin Only"),
         &["invite", "folder", "list", "--json"],
     );
     assert!(
-        listed_email_folder_invitations.status.success(),
+        listed_folder_invitations.status.success(),
         "{}",
-        String::from_utf8_lossy(&listed_email_folder_invitations.stderr)
+        String::from_utf8_lossy(&listed_folder_invitations.stderr)
     );
-    let listed_email_folder_invitations: Value =
-        serde_json::from_slice(&listed_email_folder_invitations.stdout).unwrap();
+    let listed_folder_invitations: Value =
+        serde_json::from_slice(&listed_folder_invitations.stdout).unwrap();
     assert!(
-        listed_email_folder_invitations["invitations"]
+        listed_folder_invitations["invitations"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|invitation| invitation["id"] == email_folder_invitation["id"]),
-        "an email-targeted Folder Invitation must remain visible through the Folder collection"
+            .any(|invitation| invitation["id"] == folder_invitation["id"]),
+        "a pending Folder Invitation must remain visible through the Folder collection"
     );
-    let listed_brain_invitations = run(&home_a, &tree_a, &["invite", "brain", "list", "--json"]);
+    let accepted_folder_invitation = run(
+        &home_b,
+        &home_b,
+        &["invite", "folder", "accept", folder_invitation_id, "--json"],
+    );
     assert!(
-        listed_brain_invitations.status.success(),
+        accepted_folder_invitation.status.success(),
         "{}",
-        String::from_utf8_lossy(&listed_brain_invitations.stderr)
+        String::from_utf8_lossy(&accepted_folder_invitation.stderr)
     );
-    let listed_brain_invitations: Value =
-        serde_json::from_slice(&listed_brain_invitations.stdout).unwrap();
-    assert!(
-        listed_brain_invitations["invitations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|invitation| invitation["id"] == email_brain_invitation["id"]),
-        "the pending Brain Invitation must remain visible through the Brain collection"
-    );
-    assert!(
-        listed_brain_invitations["invitations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|invitation| invitation["id"] != email_folder_invitation["id"]),
-        "a Folder Invitation must not leak into the Brain Invitation collection"
-    );
-    let invite_code = email_folder_invitation["inviteCode"].as_str().unwrap();
-    let invite_secret = email_folder_invitation["inviteSecret"].as_str().unwrap();
-    let invite_secret_file = home_b.join("folder-invite-secret");
-    fs::write(&invite_secret_file, invite_secret).unwrap();
-    #[cfg(unix)]
-    fs::set_permissions(&invite_secret_file, fs::Permissions::from_mode(0o600)).unwrap();
-    let wrong_email_claim = run(
-        &home_b,
-        &home_b,
-        &[
-            "invite",
-            "folder",
-            "claim",
-            invite_code,
-            "--email",
-            "not-the-invited-user@example.com",
-            "--invite-secret-file",
-            invite_secret_file.to_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(!wrong_email_claim.status.success());
-    let claimed_email_invitation = run(
-        &home_b,
-        &home_b,
-        &[
-            "invite",
-            "folder",
-            "claim",
-            invite_code,
-            "--email",
-            "future-user@example.com",
-            "--invite-secret-file",
-            invite_secret_file.to_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(
-        claimed_email_invitation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&claimed_email_invitation.stderr)
-    );
-    let claimed_email_invitation: Value =
-        serde_json::from_slice(&claimed_email_invitation.stdout).unwrap();
-    assert_eq!(claimed_email_invitation["status"], "accepted");
-    assert_eq!(claimed_email_invitation["folderOnly"], true);
-    let duplicate_email_claim = run(
-        &home_b,
-        &home_b,
-        &[
-            "invite",
-            "folder",
-            "claim",
-            invite_code,
-            "--email",
-            "future-user@example.com",
-            "--invite-secret-file",
-            invite_secret_file.to_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(
-        !duplicate_email_claim.status.success(),
-        "a consumed Folder Invitation bootstrap must reject a duplicate claim"
-    );
-    assert!(
-        String::from_utf8_lossy(&duplicate_email_claim.stderr)
-            .contains("invitation bootstrap is unavailable")
-    );
-    let revoked_brain_invitation = run(
-        &home_a,
-        &tree_a,
-        &[
-            "invite",
-            "brain",
-            "revoke",
-            email_brain_invitation["id"].as_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(
-        revoked_brain_invitation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&revoked_brain_invitation.stderr)
-    );
-    let revoked_brain_invitation: Value =
-        serde_json::from_slice(&revoked_brain_invitation.stdout).unwrap();
-    assert_eq!(revoked_brain_invitation["status"], "revoked");
     let cancel_accepted = run(
         &home_a,
         &tree_a.join("Admin Only"),
-        &[
-            "invite",
-            "folder",
-            "revoke",
-            email_folder_invitation["id"].as_str().unwrap(),
-            "--json",
-        ],
+        &["invite", "folder", "revoke", folder_invitation_id, "--json"],
     );
     assert!(
         !cancel_accepted.status.success(),
         "an accepted Folder Invitation must not be cancellable"
     );
-    let pending_cancellation = run(
+    // A pending share link revokes cleanly and is then unacceptable.
+    let stale_npub = NostrPublicKey::from_protocol(Keys::generate().public_key())
+        .to_npub()
+        .unwrap();
+    let pending_invitation = run(
         &home_a,
         &tree_a.join("Admin Only"),
         &[
@@ -2549,24 +1809,16 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
             "folder",
             "create",
             "--target",
-            "stale-user@example.com",
+            &stale_npub,
             "--json",
         ],
     );
     assert!(
-        pending_cancellation.status.success(),
+        pending_invitation.status.success(),
         "{}",
-        String::from_utf8_lossy(&pending_cancellation.stderr)
+        String::from_utf8_lossy(&pending_invitation.stderr)
     );
-    let pending_cancellation: Value = serde_json::from_slice(&pending_cancellation.stdout).unwrap();
-    let cancelled_secret_file = home_b.join("cancelled-folder-invite-secret");
-    fs::write(
-        &cancelled_secret_file,
-        pending_cancellation["inviteSecret"].as_str().unwrap(),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    fs::set_permissions(&cancelled_secret_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let pending_invitation: Value = serde_json::from_slice(&pending_invitation.stdout).unwrap();
     let cancelled = run(
         &home_a,
         &tree_a.join("Admin Only"),
@@ -2574,7 +1826,7 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
             "invite",
             "folder",
             "revoke",
-            pending_cancellation["id"].as_str().unwrap(),
+            pending_invitation["id"].as_str().unwrap(),
             "--json",
         ],
     );
@@ -2585,24 +1837,20 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let cancelled: Value = serde_json::from_slice(&cancelled.stdout).unwrap();
     assert_eq!(cancelled["status"], "revoked");
-    let cancelled_claim = run(
+    let cancelled_accept = run(
         &home_b,
         &home_b,
         &[
             "invite",
             "folder",
-            "claim",
-            pending_cancellation["inviteCode"].as_str().unwrap(),
-            "--email",
-            "stale-user@example.com",
-            "--invite-secret-file",
-            cancelled_secret_file.to_str().unwrap(),
+            "accept",
+            pending_invitation["id"].as_str().unwrap(),
             "--json",
         ],
     );
     assert!(
-        !cancelled_claim.status.success(),
-        "a cancelled pending Folder Invitation must not be claimable"
+        !cancelled_accept.status.success(),
+        "a revoked pending Folder Invitation must not be acceptable"
     );
     let guest_metadata = run(
         &home_b,
@@ -2649,8 +1897,8 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     assert!(!tree_b.join("Restricted/secret.md").exists());
     assert!(!tree_b.join("Unrelated/other.md").exists());
     fs::write(
-        tree_b.join("Admin Only/email-guest-edit.md"),
-        "# Email guest edit\n\nBounded Folder write proof.\n",
+        tree_b.join("Admin Only/guest-edit.md"),
+        "# Guest edit\n\nBounded Folder write proof.\n",
     )
     .unwrap();
     let guest_push = run(&home_b, &tree_b, &["sync", "now", "--json"]);
@@ -2661,12 +1909,17 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     smoke.pass();
 
-    smoke.enter("nativeEmailCollaboration");
-    let target = "beta@finite.vip";
+    smoke.enter("npubCollaboration");
     let ensure = run(
         &home_a,
         &tree_a,
-        &["collaborator", "ensure-admin", "--target", target, "--json"],
+        &[
+            "collaborator",
+            "ensure-admin",
+            "--target",
+            &target_npub,
+            "--json",
+        ],
     );
     assert!(
         ensure.status.success(),
@@ -2734,8 +1987,8 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         asset_source_note
     );
     assert_eq!(
-        fs::read_to_string(tree_a.join("Admin Only/email-guest-edit.md")).unwrap(),
-        "# Email guest edit\n\nBounded Folder write proof.\n"
+        fs::read_to_string(tree_a.join("Admin Only/guest-edit.md")).unwrap(),
+        "# Guest edit\n\nBounded Folder write proof.\n"
     );
     smoke.pass();
 
@@ -2819,7 +2072,7 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
             "folder",
             "create",
             "--target",
-            "future-personal@example.com",
+            &target_npub,
             "--json",
         ],
     );
@@ -2830,30 +2083,14 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let personal_folder_invitation: Value =
         serde_json::from_slice(&personal_folder_invitation.stdout).unwrap();
-    let personal_invite_secret_file = home_b.join("personal-folder-invite-secret");
-    fs::write(
-        &personal_invite_secret_file,
-        personal_folder_invitation["inviteSecret"].as_str().unwrap(),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    fs::set_permissions(
-        &personal_invite_secret_file,
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
     let accepted_personal_folder = run(
         &home_b,
         &home_b,
         &[
             "invite",
             "folder",
-            "claim",
-            personal_folder_invitation["inviteCode"].as_str().unwrap(),
-            "--email",
-            "future-personal@example.com",
-            "--invite-secret-file",
-            personal_invite_secret_file.to_str().unwrap(),
+            "accept",
+            personal_folder_invitation["id"].as_str().unwrap(),
             "--json",
         ],
     );
@@ -3079,7 +2316,7 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         "{}",
         String::from_utf8_lossy(&member_folders_content_sync.stderr)
     );
-    let member_email_invitation = run(
+    let member_folder_invitation = run(
         &requester_home,
         &invitation_org_tree.join("Member Scope"),
         &[
@@ -3087,41 +2324,25 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
             "folder",
             "create",
             "--target",
-            "existing-member@example.com",
+            &target_npub,
             "--json",
         ],
     );
     assert!(
-        member_email_invitation.status.success(),
+        member_folder_invitation.status.success(),
         "{}",
-        String::from_utf8_lossy(&member_email_invitation.stderr)
+        String::from_utf8_lossy(&member_folder_invitation.stderr)
     );
-    let member_email_invitation: Value =
-        serde_json::from_slice(&member_email_invitation.stdout).unwrap();
-    let member_invite_secret_file = home_b.join("member-folder-invite-secret");
-    fs::write(
-        &member_invite_secret_file,
-        member_email_invitation["inviteSecret"].as_str().unwrap(),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    fs::set_permissions(
-        &member_invite_secret_file,
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    let member_folder_invitation: Value =
+        serde_json::from_slice(&member_folder_invitation.stdout).unwrap();
     let claimed_member_invitation = run(
         &home_b,
         &home_b,
         &[
             "invite",
             "folder",
-            "claim",
-            member_email_invitation["inviteCode"].as_str().unwrap(),
-            "--email",
-            "existing-member@example.com",
-            "--invite-secret-file",
-            member_invite_secret_file.to_str().unwrap(),
+            "accept",
+            member_folder_invitation["id"].as_str().unwrap(),
             "--json",
         ],
     );

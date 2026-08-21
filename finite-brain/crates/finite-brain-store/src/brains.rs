@@ -1,6 +1,7 @@
 use crate::*;
 
 impl BrainStore {
+    /// Atomically create a Personal Brain and its Personal Agent.
     pub fn create_personal_brain_bootstrap(
         &mut self,
         output: &BootstrapOutput,
@@ -8,26 +9,6 @@ impl BrainStore {
         agent_npub: &UserId,
         created_by_npub: &UserId,
         created_at: &str,
-    ) -> Result<(), StoreError> {
-        self.create_personal_brain_bootstrap_with_identities(
-            output,
-            grants,
-            agent_npub,
-            created_by_npub,
-            created_at,
-            &[],
-        )
-    }
-
-    /// Atomically create a Personal Brain, its Personal Agent, and both verified display aliases.
-    pub fn create_personal_brain_bootstrap_with_identities(
-        &mut self,
-        output: &BootstrapOutput,
-        grants: &[FolderKeyGrantMetadata],
-        agent_npub: &UserId,
-        created_by_npub: &UserId,
-        created_at: &str,
-        identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
         validate_bootstrap_output(output)?;
         validate_required_grants(&output.brain, &output.required_key_grants, grants)?;
@@ -53,24 +34,6 @@ impl BrainStore {
             return Err(StoreError::BrokenInvariant {
                 reason: "Personal Agent bootstrap actor must be the owner or agent".to_owned(),
             });
-        }
-        if !identity_aliases.is_empty() {
-            let alias_npubs = identity_aliases
-                .iter()
-                .map(|alias| alias.npub.clone())
-                .collect::<BTreeSet<_>>();
-            let alias_emails = identity_aliases
-                .iter()
-                .filter_map(|alias| alias.preferred_nip05.clone())
-                .collect::<BTreeSet<_>>();
-            if identity_aliases.len() != 2
-                || alias_npubs != BTreeSet::from([owner_npub.clone(), agent_npub.clone()])
-                || alias_emails.len() != 2
-            {
-                return Err(StoreError::BrokenInvariant {
-                    reason: "Personal Agent bootstrap identities must name the owner and agent with verified emails".to_owned(),
-                });
-            }
         }
 
         // Serialize Personal Brain creation before checking the one-owner invariant. The partial
@@ -118,9 +81,6 @@ impl BrainStore {
         for grant in grants {
             insert_grant(&tx, &output.brain.id, grant)?;
         }
-        for alias in identity_aliases {
-            upsert_identity_alias(&tx, alias)?;
-        }
         tx.execute(
             r#"
             INSERT INTO personal_agents (
@@ -155,20 +115,11 @@ impl BrainStore {
         Ok(())
     }
 
+    /// Atomically create an Organization Brain.
     pub fn create_brain_bootstrap(
         &mut self,
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
-    ) -> Result<(), StoreError> {
-        self.create_brain_bootstrap_with_identities(output, grants, &[])
-    }
-
-    /// Atomically create an Organization Brain and its verified member aliases.
-    pub fn create_brain_bootstrap_with_identities(
-        &mut self,
-        output: &BootstrapOutput,
-        grants: &[FolderKeyGrantMetadata],
-        identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
         if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
             return Err(StoreError::CapacityExceeded {
@@ -189,18 +140,6 @@ impl BrainStore {
         if output.brain.kind == BrainKind::Personal {
             return Err(StoreError::BrokenInvariant {
                 reason: "Personal Brain bootstrap requires a Personal Agent".to_owned(),
-            });
-        }
-        if identity_aliases.iter().any(|alias| {
-            !output
-                .brain
-                .members
-                .iter()
-                .any(|member| member.user_id == alias.npub)
-        }) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "Organization Brain bootstrap identities must belong to initial members"
-                    .to_owned(),
             });
         }
 
@@ -229,9 +168,6 @@ impl BrainStore {
         }
         for grant in grants {
             insert_grant(&tx, &output.brain.id, grant)?;
-        }
-        for alias in identity_aliases {
-            upsert_identity_alias(&tx, alias)?;
         }
         tx.commit()?;
         Ok(())
