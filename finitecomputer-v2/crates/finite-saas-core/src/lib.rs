@@ -49,7 +49,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0018_finite_private_5x_profile.sql"),
     "\n",
-    include_str!("../migrations/0019_brain_agent_departure_facts.sql")
+    include_str!("../migrations/0019_brain_agent_departure_facts.sql"),
+    "\n",
+    include_str!("../migrations/0020_runtime_offboarding_phases.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -149,6 +151,84 @@ wire_enum! {
     Unknown => "unknown",
     }
     parse: parse_runtime_summary_status
+}
+
+wire_enum! {
+/// The single forward-only offboarding state of a Runtime. Each phase is
+/// written in the same transaction as the side effect it records and never
+/// moves backward: a destroy request (`RetirementRequested`), a stored
+/// verified retirement receipt (`ReceiptVerified`), recorded compute removal
+/// (`ComputeRemoved`), the offboarding boundary (`LinkDeactivated`), and the
+/// terminal departure record (`Archived`). No phase means the Runtime is
+/// live. Purge User Data stays the separate retention-gated path (ADR 0001).
+    OffboardingPhase {
+    RetirementRequested => "retirement_requested",
+    ReceiptVerified => "receipt_verified",
+    ComputeRemoved => "compute_removed",
+    LinkDeactivated => "link_deactivated",
+    Archived => "archived",
+    }
+    parse: parse_offboarding_phase
+}
+
+impl OffboardingPhase {
+    fn rank(self) -> u8 {
+        match self {
+            Self::RetirementRequested => 1,
+            Self::ReceiptVerified => 2,
+            Self::ComputeRemoved => 3,
+            Self::LinkDeactivated => 4,
+            Self::Archived => 5,
+        }
+    }
+
+    /// True when `next` keeps the phase moving strictly forward. Restating
+    /// the current phase is allowed so an idempotent replay never regresses.
+    pub fn transition_allowed(current: Option<Self>, next: Self) -> bool {
+        current.is_none_or(|current| current.rank() <= next.rank())
+    }
+
+    /// True when this phase has reached or passed `phase`.
+    pub fn reached(self, phase: Self) -> bool {
+        self.rank() >= phase.rank()
+    }
+
+    /// Derive the phase from the durable facts a pre-phase-machine Core
+    /// recorded. Mirrors the 0020 backfill exactly; the pre-deploy census
+    /// enumerates these flag combinations. A stored verified receipt proves
+    /// the runner removed compute before completing the destroy, so receipt
+    /// plus an active link is the half-retired ghost (`ComputeRemoved`) and
+    /// receipt plus an inactive link is a completed retirement (`Archived`).
+    /// An inactive link with the project's active link on another Runtime is
+    /// a relocation leftover, not an offboarding (`None`).
+    pub fn from_legacy_facts(
+        has_verified_receipt: bool,
+        destroy_request_active: bool,
+        link_active: bool,
+        any_link_exists: bool,
+        project_has_active_link: bool,
+    ) -> Option<Self> {
+        if has_verified_receipt {
+            return Some(if link_active {
+                Self::ComputeRemoved
+            } else {
+                Self::Archived
+            });
+        }
+        if destroy_request_active && link_active {
+            return Some(Self::RetirementRequested);
+        }
+        if link_active || !any_link_exists || project_has_active_link {
+            return None;
+        }
+        Some(Self::Archived)
+    }
+}
+
+impl std::fmt::Display for OffboardingPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 wire_enum! {
@@ -611,6 +691,15 @@ pub enum CoreError {
     RetiredRuntimeOffboardOwnerMismatch,
     #[error("a verified runtime retirement receipt is required for retired runtime offboarding")]
     RetiredRuntimeOffboardReceiptMissing,
+    #[error("runtime offboarding phase cannot regress from {current} to {attempted}")]
+    OffboardingPhaseRegression {
+        current: OffboardingPhase,
+        attempted: OffboardingPhase,
+    },
+    #[error(
+        "runtime offboarding is already at {phase}; resume it with runtime-offboard-retired-exact instead of enqueueing a new destroy"
+    )]
+    RuntimeOffboardingResumeRequired { phase: OffboardingPhase },
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not running")]
@@ -1679,6 +1768,8 @@ pub struct AdminRuntimeOverview {
     pub active_finite_private_key_count: i64,
     pub runtime_link_active: bool,
     pub runtime_capabilities: Option<RuntimeCapabilitiesV1>,
+    #[serde(default)]
+    pub offboarding_phase: Option<OffboardingPhase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3417,6 +3508,15 @@ mod tests {
             RuntimeSummaryStatus::Unknown,
         );
 
+        assert_wire_encodings_agree!(
+            parse_offboarding_phase,
+            OffboardingPhase::RetirementRequested,
+            OffboardingPhase::ReceiptVerified,
+            OffboardingPhase::ComputeRemoved,
+            OffboardingPhase::LinkDeactivated,
+            OffboardingPhase::Archived,
+        );
+
         assert_wire_encodings_agree!(parse_runtime_artifact_kind, RuntimeArtifactKind::OciImage);
 
         assert_wire_encodings_agree!(
@@ -3490,6 +3590,118 @@ mod tests {
             FinitePrivateSettlementKind::Actual,
             FinitePrivateSettlementKind::Estimate,
         );
+    }
+
+    /// Every phase pair is classified exactly by rank: forward moves and
+    /// same-phase restatements are allowed, any backward move is refused.
+    #[test]
+    fn offboarding_phase_transitions_are_forward_only() {
+        let ordered = [
+            OffboardingPhase::RetirementRequested,
+            OffboardingPhase::ReceiptVerified,
+            OffboardingPhase::ComputeRemoved,
+            OffboardingPhase::LinkDeactivated,
+            OffboardingPhase::Archived,
+        ];
+        assert!(OffboardingPhase::transition_allowed(None, ordered[0]));
+        assert!(OffboardingPhase::transition_allowed(
+            None,
+            *ordered.last().unwrap()
+        ));
+        for (from_index, current) in ordered.iter().enumerate() {
+            for (to_index, attempted) in ordered.iter().enumerate() {
+                assert_eq!(
+                    OffboardingPhase::transition_allowed(Some(*current), *attempted),
+                    from_index <= to_index,
+                    "{current} -> {attempted}",
+                );
+                assert_eq!(current.reached(*attempted), from_index >= to_index);
+            }
+        }
+    }
+
+    /// The 0020 backfill mapping, mirrored by `from_legacy_facts`, over every
+    /// legacy flag combination. A verified receipt dominates (the destroy
+    /// completed, so compute is gone); an inactive link with no receipt and no
+    /// surviving project link is the archived-unrecoverable shape; an inactive
+    /// link superseded by another active link of the same project is a
+    /// relocation leftover, not an offboarding.
+    #[test]
+    fn offboarding_phase_maps_every_legacy_flag_combination() {
+        use OffboardingPhase::*;
+        let expected = |has_verified_receipt,
+                        destroy_request_active,
+                        link_active,
+                        any_link_exists,
+                        project_has_active_link| {
+            OffboardingPhase::from_legacy_facts(
+                has_verified_receipt,
+                destroy_request_active,
+                link_active,
+                any_link_exists,
+                project_has_active_link,
+            )
+        };
+        for destroy_request_active in [false, true] {
+            for any_link_exists in [false, true] {
+                for project_has_active_link in [false, true] {
+                    // The half-retired ghost: receipt stored, link still active.
+                    assert_eq!(
+                        expected(
+                            true,
+                            destroy_request_active,
+                            true,
+                            any_link_exists,
+                            project_has_active_link
+                        ),
+                        Some(ComputeRemoved),
+                    );
+                    // Completed retirement: receipt stored, link deactivated.
+                    assert_eq!(
+                        expected(
+                            true,
+                            destroy_request_active,
+                            false,
+                            any_link_exists,
+                            project_has_active_link
+                        ),
+                        Some(Archived),
+                    );
+                    // Live runtime, with or without an in-flight destroy.
+                    assert_eq!(
+                        expected(false, false, true, any_link_exists, project_has_active_link),
+                        None,
+                    );
+                    assert_eq!(
+                        expected(false, true, true, any_link_exists, project_has_active_link),
+                        Some(RetirementRequested),
+                    );
+                    // Never linked: no offboarding evidence at all.
+                    assert_eq!(
+                        expected(
+                            false,
+                            destroy_request_active,
+                            false,
+                            false,
+                            project_has_active_link
+                        ),
+                        None,
+                    );
+                    // Inactive link but the project has another active
+                    // runtime: superseded by relocation, not offboarded.
+                    assert_eq!(
+                        expected(false, destroy_request_active, false, true, true),
+                        None,
+                    );
+                    // Inactive link, no receipt, no surviving project link:
+                    // unrecoverable archive or legacy offboard.
+                    assert_eq!(
+                        expected(false, destroy_request_active, false, true, false),
+                        Some(Archived),
+                    );
+                }
+            }
+        }
     }
 
     fn phala_runner_capacity(provider_inventory_count: u32) -> RunnerLeaseCapacity {
