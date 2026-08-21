@@ -55,7 +55,7 @@ impl IdentityAuthorityClient {
     ) -> Result<EmailRedeemReport, CliError> {
         let identity = load_or_generate_identity(env)?;
         let key = finite_identity::client::LocalIdentityKey::from_identity(&identity);
-        if is_finite_vip_email(email) {
+        if finite_brain_core::finite_vip_email(email) {
             let request = self
                 .client
                 .vip_email_binding_redeem(&key, email, token, unix_timestamp())
@@ -170,10 +170,6 @@ fn identity_response_json<T: serde::de::DeserializeOwned>(
             "Identity Authority {method} {path} failed: {error}"
         ))),
     }
-}
-
-fn is_finite_vip_email(email: &str) -> bool {
-    email.trim().to_ascii_lowercase().ends_with("@finite.vip")
 }
 
 #[cfg(test)]
