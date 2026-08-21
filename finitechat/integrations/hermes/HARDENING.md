@@ -36,7 +36,11 @@ That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
 ## Constraints
 
 - Keep the Python adapter thin. Rust owns identity, MLS, cursors, encrypted
-  storage, invite verification, attachment materialization, and bridge JSON.
+  storage, invite verification, attachment materialization, bridge JSON, inbox
+  in-flight state (per-entry leases, `ack`/`release`, a recently-acked ring),
+  and reply/edit route resolution from `thread_id` (ownership audit O1/O2). The
+  adapter keeps no route table, dedup set, or SQLite state; it delivers, acks on
+  completion, releases on cancel, and passes `thread_id` through.
 - Keep one-shot polling only as a diagnostic/test tool; Finite Computer
   production requires the resident streaming sidecar and cursor-based reconnect.
 - Do not require SaaS or Tinfoil to test chat correctness.

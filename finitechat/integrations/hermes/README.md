@@ -110,29 +110,46 @@ from the Rust service's durable cursor. They never fall into Python timer
 polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
 remain available only when inbound streaming is disabled.
 
-Ordinary text follow-ups for a busy Hermes session stay unacknowledged in that
-same Rust inbox until the session owner task exits. The Python adapter retains
-only the first blocked event per session as an ephemeral admission head; later
-events remain exclusively in the durable inbox and preserve sequence order.
-Once Hermes begins the follow-up turn, the adapter ACKs it under the existing
-redelivery/deduplication contract. A gateway restart before that handoff loses
-only the ephemeral gate, so the inbox redelivers the message. Slash commands,
-pending approval responses, and pending clarification replies still reach the
-active turn immediately, and one busy session does not pause another.
+## Inbox in-flight state and reply routing live in Rust
 
-The Python adapter is the only writer and reader of
-`hermes-adapter-state.db`, which contains reply routes and processed event ids,
-but no message content. Schema version 1 adopts the exact unversioned tables
-created by the first durable-state release without rewriting their rows. A new
-database is initialized atomically; future, malformed, or otherwise unknown
-schemas are preserved and rejected instead of being guessed or overwritten.
-Transient SQLite failures are retried on the next operation. Home sends and
-sends with an explicit Topic/Chat remain independent of this optional route
-cache; sends that require an unreadable cached route fail closed.
+The Rust sidecar owns the chat delivery contract end to end (ownership audit
+O1/O2); the Python adapter keeps no route table, dedup set, or SQLite state of
+its own.
 
-Older adapters ignore SQLite's `user_version` and continue to read the same two
-tables, while adapters predating this file ignore it entirely. This state does
-not change the Rust inbox format, CLI/service protocol, or deployment order.
+- **In-flight state (O1).** Each inbox entry carries a lease: `Pending` or
+  `Leased`. The stream / `poll` / `inbound` deliver only deliverable entries and
+  flip them to `Leased`, so a leased entry is not re-emitted on the next tick.
+  The adapter settles the lease from the turn: the completion hook `ack`s on
+  success or failure, and a cancelled turn calls `release`, which returns the
+  entry to `Pending` for redelivery. A lease older than the TTL (config,
+  generous default) is swept back to `Pending`, so a crashed turn cannot strand
+  an entry. The sidecar keeps a bounded recently-acked ring, so a post-restart
+  duplicate ack is a no-op and an already-acked entry is never redelivered —
+  idempotency the adapter no longer has to provide. Existing `hermes-inbox.json`
+  entries load as `Pending` (`#[serde(default)]`), so the on-disk format is
+  unchanged.
+- **Busy-session admission.** While a Hermes session is busy the adapter keeps
+  at most the first blocked ordinary text event per session in memory as an
+  admission head; every redelivered head and every later event is `release`d
+  back to the durable inbox, so ordering is preserved without buffering in
+  adapter memory. Slash commands, pending approval responses, and pending
+  clarification replies still reach the active turn immediately, and one busy
+  session does not pause another. Events consumed inline by a busy session never
+  pass through a background turn, so the adapter acks them directly (exactly
+  once; the sidecar's ack is idempotent).
+- **Reply/edit routing (O2).** Every inbound event already carries its
+  conversation and segment ids, and the sidecar mints `thread_id` from them. On
+  send/edit/activity the adapter passes that `thread_id` back, and the sidecar
+  resolves it against its own agent store into the concrete route. An `edit`
+  with no route fields is resolved by looking the original message up by
+  `(room_id, message_id)`. An explicit Topic/Chat route still wins as an
+  override; an unknown thread id is a typed adapter failure by default (opt into
+  an explicit, logged Home default with
+  `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=home`), never a silent Home fallback.
+
+None of this changes the Rust inbox on-disk format, the CLI/service protocol
+(the `release` command and the optional `thread_id` request field are additive),
+or the deployment order.
 
 ## Pinned Hermes clarification and compaction boundary
 
@@ -214,12 +231,14 @@ scripts/ios-hermes-agent-media-e2e.sh
 ```
 
 The adapter regression command writes
-`target/hermes-adapter-regressions/report.json` and proves focused Python
-adapter behavior for plain messages, redelivery, ack retry, poll recovery,
-sidecar startup/fallback/serialization, media, edits, typing activity, room
-filters, group sender identity, receipt/control stream filtering, strict stream
-recovery, durable reply routes, and ack ownership across failure/restart
-boundaries. It fails if a required test is missing or skipped.
+`target/hermes-adapter-regressions/report.json` and proves the Hermes-internal
+behaviour that remains the Python adapter's responsibility: plain messages,
+busy-session admission, clarification routing, poll recovery, sidecar
+startup/fallback/serialization, media, typing activity, room filters, group
+sender identity, receipt/control stream filtering, and strict stream recovery.
+It fails if a required test is missing or skipped. Inbox lease/ack/release,
+reply/edit route resolution, and delivered-event dedup are proven by the Rust
+sidecar tests (`cargo test -p finitechat-cli -p finitechat-hermes`), not here.
 The CLI round-trip script writes `target/hermes-sidecar-smoke/report.json` for
 server startup, Welcome-first room admission, direct `finitechat hermes poll`,
 text/media replies, user decrypt, and invalid-media rejection. Despite its
@@ -510,7 +529,7 @@ canary result are all expected to be present.
 
 The Python adapter stays thin and talks to the resident loopback Finite Chat
 service. The Rust binary owns identity, MLS encryption, Welcome processing,
-durable cursors, and storage. The service surface covers inbound stream,
-acknowledge, send/edit, activity, recovery, and explicit home-channel state;
-strict hosted mode never falls back to Python polling or per-message CLI
-subprocesses.
+durable cursors, storage, inbox in-flight state (leases), and reply/edit route
+resolution. The service surface covers inbound stream, acknowledge, release,
+send/edit, activity, recovery, and explicit home-channel state; strict hosted
+mode never falls back to Python polling or per-message CLI subprocesses.

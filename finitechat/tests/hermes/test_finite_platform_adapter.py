@@ -2,13 +2,11 @@ import asyncio
 import importlib.util
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
 import types
 import unittest
-from contextlib import closing
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -270,27 +268,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             if configured_home
             else None
         )
-        adapter = self.module.FiniteChatAdapter(
-            PlatformConfig(extra=extra, home_channel=home_channel)
-        )
-        if adapter._state_store is not None:
-            self.addCleanup(adapter._state_store.close)
-        return adapter
-
-    @staticmethod
-    def _create_unversioned_adapter_state(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE TABLE inbound_chat_routes ("
-            "room_id TEXT NOT NULL, "
-            "thread_id TEXT NOT NULL, "
-            "conversation_id TEXT, "
-            "segment_id TEXT, "
-            "updated_at REAL NOT NULL, "
-            "PRIMARY KEY (room_id, thread_id))"
-        )
-        connection.execute(
-            "CREATE TABLE delivered_events (event_key TEXT PRIMARY KEY, created_at REAL NOT NULL)"
-        )
+        return self.module.FiniteChatAdapter(PlatformConfig(extra=extra, home_channel=home_channel))
 
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()
@@ -542,19 +520,15 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         cast(Any, clarify_module).mark_awaiting_text = marked.append
 
         async def exercise():
-            adapter._remember_inbound_chat_route(
-                "room-agent-1",
-                "chat-build-1",
-                "topic-build",
-                "chat-build-1",
-            )
+            # The inbound event carries the exact Topic/Chat route; the adapter
+            # pins the clarification to it and no longer keeps a route cache.
             return await adapter.send_clarify(
                 chat_id="room-agent-1",
                 question="Asking which environment should receive the change?",
                 choices=["Staging", "Production"],
                 clarify_id="clarify-choice",
                 session_key="agent:main:finitechat:dm:room-agent-1:chat-build-1",
-                metadata={"thread_id": "chat-build-1"},
+                metadata={"conversation_id": "topic-build", "segment_id": "chat-build-1"},
             )
 
         with patch.dict(sys.modules, {"tools.clarify_gateway": clarify_module}):
@@ -577,6 +551,10 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         calls = []
         adapter._finitechat_json = self._record_json(calls)
 
+        # With no route signal at all (no Topic/Chat and no Hermes thread id)
+        # the adapter refuses without a send. A present-but-unknown thread id is
+        # the sidecar's fail-closed responsibility (a typed error), covered by
+        # the Rust resolver tests.
         result = asyncio.run(
             adapter.send_clarify(
                 chat_id="room-agent-1",
@@ -584,7 +562,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 choices=None,
                 clarify_id="clarify-open",
                 session_key="agent:main:finitechat:dm:room-agent-1:unknown-chat",
-                metadata={"thread_id": "unknown-chat"},
+                metadata={},
             )
         )
 
@@ -904,55 +882,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(payload["status"], "complete")
         self.assertEqual(payload["metadata"], {"priority": "low", "notify": True})
 
-    def test_edit_reuses_thread_route_from_original_send(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            if action == "send":
-                return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
-            return self.module._FiniteChatResult(True, {"message_id": "edit-1"}, None, False)
-
-        adapter._finitechat_json = fake_json
-
-        send_result = asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "running draft",
-                metadata={
-                    "conversation_id": "topic-build",
-                    "thread_id": "chat-build-1",
-                    "_finitechat_kind": "tool",
-                },
-            )
-        )
-        edit_result = asyncio.run(
-            adapter.edit_message(
-                "room-agent-1",
-                "out-1",
-                "final answer",
-                finalize=True,
-            )
-        )
-
-        self.assertTrue(send_result.success)
-        self.assertTrue(edit_result.success)
-        self.assertEqual(edit_result.message_id, "edit-1")
-        self.assertEqual([call[0] for call in calls], ["send", "edit"])
-        self.assertEqual(calls[1][1]["conversation_id"], "topic-build")
-        self.assertEqual(calls[1][1]["segment_id"], "chat-build-1")
-        self.assertEqual(calls[1][1]["message_id"], "out-1")
-        self.assertEqual(calls[1][1]["kind"], "tool")
-        self.assertEqual(calls[1][1]["status"], "complete")
-        self.assertTrue(calls[1][1]["finalize"])
-        self.assertEqual(adapter._outbound_message_conversations["out-1"], "topic-build")
-        self.assertEqual(adapter._outbound_message_conversations["edit-1"], "topic-build")
-        self.assertEqual(adapter._outbound_message_segments["out-1"], "chat-build-1")
-        self.assertEqual(adapter._outbound_message_segments["edit-1"], "chat-build-1")
-        self.assertEqual(adapter._outbound_message_kinds["out-1"], "tool")
-        self.assertEqual(adapter._outbound_message_kinds["edit-1"], "tool")
-
     def test_media_send_uses_typed_attachment_payload(self):
         adapter = self.adapter()
         calls = []
@@ -1214,704 +1143,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         ack_calls = [call for call in calls if call[0] == "ack"]
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-42")
 
-    def test_reply_uses_inbound_chat_thread_to_restore_topic_route(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            if action == "send":
-                return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        adapter._finitechat_json = fake_json
-        asyncio.run(
-            adapter._handle_finitechat_event(
-                {
-                    "room_id": "room-agent-1",
-                    "seq": 7,
-                    "message_id": "msg-7",
-                    "conversation_id": "topic-build",
-                    "segment_id": "chat-build-1",
-                    "text": "please build",
-                }
-            )
-        )
-
-        result = asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "done",
-                metadata={"thread_id": "chat-build-1"},
-            )
-        )
-
-        self.assertTrue(result.success)
-        send_payload = next(call[1] for call in calls if call[0] == "send")
-        self.assertEqual(send_payload["conversation_id"], "topic-build")
-        self.assertEqual(send_payload["segment_id"], "chat-build-1")
-
-    def test_reply_restores_legacy_conversation_only_route(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            if action == "send":
-                return self.module._FiniteChatResult(
-                    True, {"message_id": "out-legacy"}, None, False
-                )
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        adapter._finitechat_json = fake_json
-        asyncio.run(
-            adapter._handle_finitechat_event(
-                {
-                    "room_id": "room-agent-1",
-                    "seq": 8,
-                    "message_id": "msg-8",
-                    "conversation_id": "topic-legacy",
-                    "text": "legacy topic message",
-                }
-            )
-        )
-
-        result = asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "legacy reply",
-                metadata={"thread_id": "topic-legacy"},
-            )
-        )
-
-        self.assertTrue(result.success)
-        send_payload = next(call[1] for call in calls if call[0] == "send")
-        self.assertEqual(send_payload["conversation_id"], "topic-legacy")
-        self.assertIsNone(send_payload["segment_id"])
-
-    def test_unknown_hermes_thread_or_segment_stays_unscoped(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            return self.module._FiniteChatResult(
-                True, {"message_id": f"out-{len(calls)}"}, None, False
-            )
-
-        adapter._finitechat_json = fake_json
-        asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "thread reply",
-                metadata={"thread_id": "hermes-session-random"},
-            )
-        )
-        asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "segment reply",
-                metadata={"segment_id": "hermes-chat-random"},
-            )
-        )
-        asyncio.run(
-            adapter.send_typing(
-                "room-agent-1",
-                metadata={"thread_id": "hermes-session-random"},
-            )
-        )
-
-        payloads = [call[1] for call in calls]
-        self.assertEqual([payload["conversation_id"] for payload in payloads], [None, None, None])
-        self.assertEqual([payload["segment_id"] for payload in payloads], [None, None, None])
-
-    def test_reply_route_survives_adapter_restart(self):
-        first = self.adapter()
-        first_calls = []
-
-        async def fake_first_json(action, payload, *, timeout):
-            first_calls.append((action, payload, timeout))
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        first._finitechat_json = fake_first_json
-        asyncio.run(
-            first._handle_finitechat_event(
-                {
-                    "room_id": "room-agent-1",
-                    "seq": 7,
-                    "message_id": "msg-7",
-                    "conversation_id": "topic-build",
-                    "segment_id": "chat-build-1",
-                    "text": "please build",
-                }
-            )
-        )
-        self.assertIsNotNone(first._state_store)
-        cast(Any, first._state_store).close()
-
-        restarted = self.adapter()
-        self.assertEqual(restarted._inbound_chat_routes, {})
-        restarted_calls = []
-
-        async def fake_restarted_json(action, payload, *, timeout):
-            restarted_calls.append((action, payload, timeout))
-            if action == "send":
-                return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        restarted._finitechat_json = fake_restarted_json
-        result = asyncio.run(
-            restarted.send(
-                "room-agent-1",
-                "done",
-                metadata={"thread_id": "chat-build-1"},
-            )
-        )
-
-        self.assertTrue(result.success)
-        send_payload = next(call[1] for call in restarted_calls if call[0] == "send")
-        self.assertEqual(send_payload["conversation_id"], "topic-build")
-        self.assertEqual(send_payload["segment_id"], "chat-build-1")
-        # The read-through backfills the in-memory cache for the next lookup.
-        self.assertEqual(
-            restarted._inbound_chat_routes[("room-agent-1", "chat-build-1")],
-            ("topic-build", "chat-build-1"),
-        )
-
-    def test_unversioned_adapter_state_is_adopted_without_losing_data(self):
-        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
-        delivered_key = self.module._adapter_event_key("room-agent-1", 8, "msg-8")
-        with closing(sqlite3.connect(state_path)) as connection, connection:
-            self._create_unversioned_adapter_state(connection)
-            connection.execute(
-                "INSERT INTO inbound_chat_routes "
-                "(room_id, thread_id, conversation_id, segment_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("room-agent-1", "chat-build-1", "topic-build", "chat-build-1", 1.0),
-            )
-            connection.execute(
-                "INSERT INTO delivered_events (event_key, created_at) VALUES (?, ?)",
-                (delivered_key, 1.0),
-            )
-
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        result = asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "reply after upgrade",
-                metadata={"thread_id": "chat-build-1"},
-            )
-        )
-        asyncio.run(
-            adapter._handle_finitechat_event(
-                {
-                    "room_id": "room-agent-1",
-                    "seq": 8,
-                    "message_id": "msg-8",
-                    "conversation_id": "topic-build",
-                    "segment_id": "chat-build-1",
-                    "text": "already handled before upgrade",
-                }
-            )
-        )
-
-        self.assertTrue(result.success)
-        self.assertEqual(adapter.handled_messages, [])
-        self.assertEqual([call[0] for call in calls], ["send", "ack"])
-        cast(Any, adapter._state_store).close()
-        with closing(sqlite3.connect(state_path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertEqual(
-                connection.execute(
-                    "SELECT conversation_id, segment_id FROM inbound_chat_routes "
-                    "WHERE room_id = ? AND thread_id = ?",
-                    ("room-agent-1", "chat-build-1"),
-                ).fetchone(),
-                ("topic-build", "chat-build-1"),
-            )
-            self.assertEqual(
-                connection.execute(
-                    "SELECT event_key FROM delivered_events WHERE event_key = ?",
-                    (delivered_key,),
-                ).fetchone(),
-                (delivered_key,),
-            )
-
-    def test_new_adapter_state_initialization_is_atomic(self):
-        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
-        real_connect = sqlite3.connect
-
-        def fail_second_table_connect(*args, **kwargs):
-            connection = real_connect(*args, **kwargs)
-
-            def deny_delivered_events_table(action, arg1, arg2, database, source):
-                del arg2, database, source
-                if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "delivered_events":
-                    return sqlite3.SQLITE_DENY
-                return sqlite3.SQLITE_OK
-
-            connection.set_authorizer(deny_delivered_events_table)
-            return connection
-
-        with (
-            patch.object(self.module.sqlite3, "connect", fail_second_table_connect),
-            self.assertLogs(level="WARNING"),
-        ):
-            adapter = self.adapter()
-            with self.assertRaises(self.module._AdapterStateError):
-                cast(Any, adapter._state_store).is_delivered("probe")
-
-        with closing(sqlite3.connect(state_path)) as connection:
-            self.assertEqual(
-                connection.execute(
-                    "SELECT name FROM sqlite_schema "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                ).fetchall(),
-                [],
-            )
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 0)
-
-        restarted = self.adapter()
-        self.assertFalse(cast(Any, restarted._state_store).is_delivered("probe"))
-        cast(Any, restarted._state_store).close()
-        with closing(sqlite3.connect(state_path)) as connection:
-            tables = connection.execute(
-                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-            self.assertEqual(
-                {row[0] for row in tables}, {"inbound_chat_routes", "delivered_events"}
-            )
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
-
-    def test_future_adapter_state_is_preserved_and_rejected(self):
-        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
-        with closing(sqlite3.connect(state_path)) as connection, connection:
-            self._create_unversioned_adapter_state(connection)
-            connection.execute(
-                "CREATE TABLE future_adapter_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO future_adapter_metadata (key, value) VALUES ('shape', 'v2')"
-            )
-            connection.execute("PRAGMA user_version = 2")
-        state_before = state_path.read_bytes()
-
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        with self.assertLogs(level="WARNING") as captured:
-            result = asyncio.run(
-                adapter.send(
-                    "room-agent-1",
-                    "do not guess a future route",
-                    metadata={"thread_id": "chat-future"},
-                )
-            )
-
-        self.assertFalse(result.success)
-        self.assertFalse(result.retryable)
-        self.assertEqual(calls, [])
-        self.assertTrue(any("unsupported_schema_version" in line for line in captured.output))
-        cast(Any, adapter._state_store).close()
-        self.assertEqual(state_path.read_bytes(), state_before)
-
-    def test_unversioned_unknown_schema_object_is_not_adopted(self):
-        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
-        with closing(sqlite3.connect(state_path)) as connection, connection:
-            self._create_unversioned_adapter_state(connection)
-            connection.execute(
-                "CREATE TRIGGER future_route_trigger AFTER INSERT ON inbound_chat_routes "
-                "BEGIN DELETE FROM delivered_events; END"
-            )
-        state_before = state_path.read_bytes()
-
-        adapter = self.adapter()
-        with self.assertLogs(level="WARNING") as captured:
-            result = asyncio.run(
-                adapter.send(
-                    "room-agent-1",
-                    "do not execute an unknown trigger",
-                    metadata={"thread_id": "chat-build-1"},
-                )
-            )
-
-        self.assertFalse(result.success)
-        self.assertTrue(any("incompatible_schema" in line for line in captured.output))
-        cast(Any, adapter._state_store).close()
-        self.assertEqual(state_path.read_bytes(), state_before)
-
-    def test_malformed_adapter_state_preserves_explicit_sends(self):
-        state_path = Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE
-        state_path.write_bytes(b"not-a-sqlite-database\x00preserve-me")
-        state_before = state_path.read_bytes()
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-
-        home_result = asyncio.run(adapter.send("room-agent-1", "Home remains available"))
-        exact_result = asyncio.run(
-            adapter.send(
-                "room-agent-1",
-                "exact route remains available",
-                metadata={"conversation_id": "topic-build", "segment_id": "chat-build-1"},
-            )
-        )
-        with self.assertLogs(level="WARNING") as captured:
-            cached_result = asyncio.run(
-                adapter.send(
-                    "room-agent-1",
-                    "cached route fails closed",
-                    metadata={"thread_id": "chat-build-1"},
-                )
-            )
-
-        self.assertTrue(home_result.success)
-        self.assertTrue(exact_result.success)
-        self.assertFalse(cached_result.success)
-        self.assertEqual([call[0] for call in calls], ["send", "send"])
-        self.assertTrue(any("corrupt_database" in line for line in captured.output))
-        cast(Any, adapter._state_store).close()
-        self.assertEqual(state_path.read_bytes(), state_before)
-
-    def test_transient_state_failure_recovers_without_restart(self):
-        real_connect = sqlite3.connect
-        attempts = 0
-
-        def fail_once(*args, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise sqlite3.OperationalError("database is locked")
-            return real_connect(*args, **kwargs)
-
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        event = {
-            "room_id": "room-agent-1",
-            "seq": 7,
-            "message_id": "msg-7",
-            "conversation_id": "topic-build",
-            "segment_id": "chat-build-1",
-            "text": "retry after the cache lock clears",
-        }
-        with (
-            patch.object(self.module.sqlite3, "connect", fail_once),
-            self.assertLogs(level="WARNING"),
-        ):
-            with self.assertRaises(self.module._AdapterStateError) as failure:
-                asyncio.run(adapter._handle_finitechat_event(event))
-            self.assertTrue(failure.exception.retryable)
-            asyncio.run(adapter._handle_finitechat_event(event))
-
-        self.assertEqual(len(adapter.handled_messages), 1)
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-        self.assertGreaterEqual(attempts, 2)
-
-    def test_failed_dedup_write_retries_without_redispatch(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        store = cast(Any, adapter._state_store)
-        real_remember_delivered = store.remember_delivered
-        attempts = 0
-
-        def fail_once(event_key):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise self.module._AdapterStateError(
-                    "temporarily_unavailable",
-                    Path(self.state_home) / self.module.ADAPTER_STATE_DB_FILE,
-                    "database is locked",
-                    retryable=True,
-                )
-            real_remember_delivered(event_key)
-
-        store.remember_delivered = fail_once
-        event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "conversation_id": "topic-build",
-            "segment_id": "chat-build-1",
-            "text": "process once",
-        }
-
-        with self.assertRaises(self.module._AdapterStateError):
-            asyncio.run(adapter._handle_finitechat_event(event))
-        asyncio.run(adapter._handle_finitechat_event(event))
-
-        self.assertEqual(len(adapter.handled_messages), 1)
-        self.assertEqual([call[0] for call in calls].count("ack"), 1)
-        self.assertEqual(adapter._pending_event_acks, {})
-        self.assertEqual(adapter._completed_event_acks, set())
-
-    def test_persisted_dedup_eviction_is_deterministic_when_timestamps_tie(self):
-        store = cast(Any, self.adapter()._state_store)
-        with (
-            patch.object(self.module, "MAX_PERSISTED_DELIVERED_EVENT_KEYS", 3),
-            patch.object(self.module.time, "time", return_value=1.0),
-        ):
-            for event_key in ["one", "two", "three", "four"]:
-                store.remember_delivered(event_key)
-
-        self.assertFalse(store.is_delivered("one"))
-        self.assertTrue(store.is_delivered("two"))
-        self.assertTrue(store.is_delivered("three"))
-        self.assertTrue(store.is_delivered("four"))
-
-    def test_unscoped_fallback_logs_warning_with_route_key(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
-
-        adapter._finitechat_json = fake_json
-        with self.assertLogs(level="WARNING") as captured:
-            asyncio.run(
-                adapter.send(
-                    "room-agent-1",
-                    "reply",
-                    metadata={"thread_id": "unknown-thread"},
-                )
-            )
-
-        send_payload = next(call[1] for call in calls if call[0] == "send")
-        self.assertIsNone(send_payload["conversation_id"])
-        self.assertIsNone(send_payload["segment_id"])
-        self.assertTrue(
-            any(
-                "room-agent-1" in message and "unknown-thread" in message
-                for message in captured.output
-            ),
-            captured.output,
-        )
-
-    def test_unscoped_home_send_without_route_key_stays_silent(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            return self.module._FiniteChatResult(True, {"message_id": "out-1"}, None, False)
-
-        adapter._finitechat_json = fake_json
-        with self.assertNoLogs(level="WARNING"):
-            asyncio.run(adapter.send("room-agent-1", "home update"))
-
-        send_payload = next(call[1] for call in calls if call[0] == "send")
-        self.assertIsNone(send_payload["conversation_id"])
-        self.assertIsNone(send_payload["segment_id"])
-
-    def test_duplicate_redelivery_is_acked_without_second_dispatch(self):
-        adapter = self.adapter()
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        adapter._finitechat_json = fake_json
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-
-        self.assertEqual(len(adapter.handled_messages), 1)
-        self.assertEqual([call[0] for call in calls], ["activity", "ack", "ack"])
-
-    def test_ack_failure_retries_without_dispatching_duplicate(self):
-        adapter = self.adapter()
-        calls = []
-        ack_attempts = 0
-
-        async def fake_json(action, payload, *, timeout):
-            nonlocal ack_attempts
-            calls.append((action, payload, timeout))
-            if action == "ack":
-                ack_attempts += 1
-            if action == "ack" and ack_attempts == 1:
-                return self.module._FiniteChatResult(False, {}, "ack transport busy", True)
-            return self.module._FiniteChatResult(True, {"acked": True}, None, False)
-
-        adapter._finitechat_json = fake_json
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-
-        self.assertEqual(len(adapter.handled_messages), 1)
-        self.assertEqual([call[0] for call in calls], ["activity", "ack", "ack"])
-
-    def test_turn_completion_hook_owns_the_ack(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        handled = self._running_turn(adapter)
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "conversation_id": "topic-build",
-            "segment_id": "chat-build-1",
-            "text": "please build",
-        }
-
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-
-        # Dispatch alone must not ack: the turn is still running.
-        self.assertEqual(len(handled), 1)
-        self.assertEqual([call[0] for call in calls], ["activity"])
-
-        # A redelivery while the turn runs is ignored — no second dispatch,
-        # no ack; the inbox entry stays owned by the running turn.
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        self.assertEqual(len(handled), 1)
-        self.assertEqual([call[0] for call in calls], ["activity"])
-
-        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
-
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-        self.assertEqual(calls[-1][1]["message_id"], "msg-12")
-        event_key = self.module._adapter_event_key("room-agent-1", 12, "msg-12")
-        self.assertIn(event_key, adapter._delivered_event_keys)
-        self.assertTrue(cast(Any, adapter._state_store).is_delivered(event_key))
-        self.assertEqual(adapter._pending_event_acks, {})
-
-    def test_processing_failure_before_completion_leaves_event_unacked(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-
-        async def failing_handle(event):
-            raise RuntimeError("turn crashed")
-
-        adapter.handle_message = failing_handle
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        with self.assertRaises(RuntimeError):
-            asyncio.run(adapter._handle_finitechat_event(raw_event))
-
-        self.assertEqual([call[0] for call in calls], ["activity", "activity"])
-        self.assertEqual(calls[0][1]["action"], "set")
-        self.assertEqual(calls[1][1]["action"], "clear")
-        event_key = self.module._adapter_event_key("room-agent-1", 12, "msg-12")
-        self.assertNotIn(event_key, adapter._delivered_event_keys)
-        self.assertFalse(cast(Any, adapter._state_store).is_delivered(event_key))
-        self.assertEqual(adapter._pending_event_acks, {})
-
-        # The unacked entry's redelivery is processed whole, then acked.
-        handled = self._running_turn(adapter)
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
-        self.assertEqual(len(handled), 1)
-        ack_calls = [call for call in calls if call[0] == "ack"]
-        self.assertEqual(len(ack_calls), 1)
-
-    def test_failed_turn_is_acked_after_the_turn_ran(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        handled = self._running_turn(adapter)
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        self.assertEqual([call[0] for call in calls], ["activity"])
-
-        # The turn ran to completion and delivered an error notice, so the
-        # event was processed. Leaving it unacked would re-run the completed
-        # turn on every inbox redelivery.
-        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.FAILURE))
-
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-        self.assertEqual(calls[-1][1]["message_id"], "msg-12")
-
-    def test_cancelled_turn_stays_unacked_and_redelivery_reprocesses(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        handled = self._running_turn(adapter)
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        asyncio.run(adapter.on_processing_complete(handled[0], ProcessingOutcome.CANCELLED))
-
-        self.assertEqual([call[0] for call in calls], ["activity"])
-        self.assertEqual(adapter._pending_event_acks, {})
-        self.assertEqual(adapter._delivered_event_keys, set())
-
-        # A shutdown-cancelled turn is redelivered by the inbox and processed
-        # whole on the next run.
-        asyncio.run(adapter._handle_finitechat_event(raw_event))
-        self.assertEqual(len(handled), 2)
-
-    def test_persisted_dedup_acks_redelivery_without_reprocessing_after_restart(self):
-        first = self.adapter()
-        first_calls = []
-
-        async def fake_first_json(action, payload, *, timeout):
-            first_calls.append((action, payload, timeout))
-            if action == "ack":
-                # The process dies (or the transport fails) between processing
-                # and the ack landing.
-                return self.module._FiniteChatResult(False, {}, "ack transport busy", True)
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        first._finitechat_json = fake_first_json
-        handled = self._running_turn(first)
-        raw_event = {
-            "room_id": "room-agent-1",
-            "seq": 12,
-            "message_id": "msg-12",
-            "text": "please build",
-        }
-
-        asyncio.run(first._handle_finitechat_event(raw_event))
-        asyncio.run(first.on_processing_complete(handled[0], ProcessingOutcome.SUCCESS))
-
-        # Processed and dedup-persisted, but the ack never landed.
-        self.assertEqual([call[0] for call in first_calls], ["activity", "ack"])
-        cast(Any, first._state_store).close()
-
-        restarted = self.adapter()
-        restarted_calls = []
-        restarted._finitechat_json = self._record_json(restarted_calls)
-        asyncio.run(restarted._handle_finitechat_event(raw_event))
-
-        self.assertEqual(restarted.handled_messages, [])
-        self.assertEqual([call[0] for call in restarted_calls], ["ack"])
-        self.assertEqual(restarted_calls[0][1]["message_id"], "msg-12")
-
     def test_busy_text_waits_unacked_then_admits_in_inbox_order(self):
         adapter = self.adapter()
         calls = []
@@ -1938,10 +1169,15 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 await adapter._handle_finitechat_event(second)
 
             self.assertEqual(adapter.handled_messages, [])
-            self.assertEqual(calls, [])
+            # The head is held in adapter memory; every redelivered head and
+            # every later event is released back to the durable inbox for
+            # redelivery after the head is admitted (no second dispatch, no ack).
+            self.assertTrue(calls)
+            self.assertTrue(all(call[0] == "release" for call in calls))
             self.assertEqual(len(adapter._deferred_admissions), 1)
             self.assertEqual(len(adapter._admission_tasks), 1)
             admission_task = adapter._admission_tasks[session_key]
+            calls.clear()
 
             release.set()
             await owner
@@ -1953,6 +1189,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
             # The second event stayed only in the durable Rust inbox. Its next
             # redelivery becomes the following turn after the head is ACKed.
+            calls.clear()
             await adapter._handle_finitechat_event(second)
 
         asyncio.run(exercise())
@@ -1961,7 +1198,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             [event.text for event in adapter.handled_messages],
             ["queued first", "queued second"],
         )
-        self.assertEqual([call[0] for call in calls], ["activity", "ack", "activity", "ack"])
+        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
         self.assertEqual(calls[-1][1]["message_id"], "msg-22")
 
     def test_deferred_text_survives_adapter_restart_until_admission(self):
@@ -2179,9 +1416,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             asyncio.run(adapter._handle_finitechat_event(raw_event))
 
-        self.assertEqual([call[0] for call in calls], ["activity", "activity"])
+        # A turn that fails before completion clears the typing activity and
+        # releases the leased inbox entry so the sidecar redelivers it whole.
+        self.assertEqual([call[0] for call in calls], ["activity", "activity", "release"])
         self.assertEqual(calls[0][1]["action"], "set")
         self.assertEqual(calls[1][1]["action"], "clear")
+        self.assertEqual(calls[2][1]["message_id"], "msg-12")
 
     def test_room_filter_drops_other_rooms_but_unfiltered_serves_all(self):
         filtered = self.adapter(room_id="room-agent-1")
@@ -2372,7 +1612,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["action"], "clear")
         self.assertEqual(calls[1][1]["conversation_id"], "topic-build")
         self.assertEqual(calls[1][1]["segment_id"], "chat-build-1")
-        self.assertEqual(adapter._active_activity_routes, set())
 
     def test_quiet_turn_refreshes_before_the_fifteen_second_activity_lease(self):
         self.assertLess(
@@ -2419,15 +1658,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 "room-agent-1",
                 metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
             )
-            self.assertEqual(
-                adapter._active_activity_routes,
-                {("room-agent-1", "topic-b", "chat-b")},
-            )
+            # A room-only stop (no metadata) must not guess and clear a
+            # different concurrent chat's activity.
             await adapter.stop_typing("room-agent-1")
-            self.assertEqual(
-                adapter._active_activity_routes,
-                {("room-agent-1", "topic-b", "chat-b")},
-            )
             await adapter.stop_typing(
                 "room-agent-1",
                 metadata={"conversation_id": "topic-b", "thread_id": "chat-b"},
@@ -2447,7 +1680,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 ("clear", "topic-b", "chat-b"),
             ],
         )
-        self.assertEqual(adapter._active_activity_routes, set())
 
     def test_typing_activity_timeout_does_not_stall_or_remember_failed_route(self):
         adapter = self.adapter()
@@ -2469,8 +1701,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             )
         finally:
             module.ACTIVITY_CONTROL_TIMEOUT_SECS = original_timeout
-
-        self.assertEqual(adapter._active_activity_routes, set())
 
     def test_keep_typing_sets_immediately_and_clears_exact_route_on_stop(self):
         adapter = self.adapter()
@@ -2495,7 +1725,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([call[1]["action"] for call in calls], ["set", "clear"])
         self.assertEqual(calls[-1][1]["conversation_id"], "topic-a")
         self.assertEqual(calls[-1][1]["segment_id"], "chat-a")
-        self.assertEqual(adapter._active_activity_routes, set())
 
     def test_keep_typing_clears_unscoped_home_route_without_room_guessing(self):
         adapter = self.adapter()
@@ -2519,41 +1748,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([call[1]["action"] for call in calls], ["set", "clear"])
         self.assertIsNone(calls[-1][1]["conversation_id"])
         self.assertIsNone(calls[-1][1]["segment_id"])
-        self.assertEqual(adapter._active_activity_routes, set())
-
-    def test_keep_typing_honors_pause_and_cancels_without_waiting_for_interval(self):
-        adapter = self.adapter()
-        adapter.activity_refresh_secs = 30
-        calls = []
-        first_set = asyncio.Event()
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append((action, payload, timeout))
-            if payload["action"] == "set":
-                first_set.set()
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        async def exercise():
-            adapter._finitechat_json = fake_json
-            adapter._typing_paused.add("room-agent-1")
-            task = asyncio.create_task(
-                adapter._keep_typing(
-                    "room-agent-1",
-                    metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
-                )
-            )
-            await asyncio.sleep(0.05)
-            self.assertEqual(calls, [])
-            adapter._typing_paused.discard("room-agent-1")
-            task.cancel()
-            await asyncio.wait_for(task, timeout=0.5)
-
-        asyncio.run(exercise())
-
-        self.assertFalse(first_set.is_set())
-        self.assertEqual([call[1]["action"] for call in calls], ["clear"])
-        self.assertEqual(calls[0][1]["conversation_id"], "topic-a")
-        self.assertEqual(calls[0][1]["segment_id"], "chat-a")
 
     def test_poll_loop_uses_short_poll_while_agent_turn_is_active(self):
         adapter = self.adapter()

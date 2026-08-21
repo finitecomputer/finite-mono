@@ -216,6 +216,13 @@ pub struct HermesSendRequestV1 {
     pub conversation_id: Option<ConversationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<ConversationSegmentId>,
+    /// The Hermes thread identity (a segment id or a conversation id) the
+    /// sidecar minted for the originating event. When `conversation_id` and
+    /// `segment_id` are both absent, the sidecar resolves this against its own
+    /// agent store into the concrete route, so the adapter no longer keeps a
+    /// route table. Ignored when an explicit route is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ConversationId>,
     pub text: String,
     pub kind: HermesSendKindV1,
     pub status: HermesMessageStatusV1,
@@ -237,6 +244,11 @@ pub struct HermesEditRequestV1 {
     pub conversation_id: Option<ConversationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<ConversationSegmentId>,
+    /// Optional Hermes thread identity; see `HermesSendRequestV1::thread_id`.
+    /// For an edit the sidecar first looks up the original message's route by
+    /// `(room_id, message_id)`, so route fields are optional overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ConversationId>,
     pub message_id: MessageId,
     pub text: String,
     #[serde(default)]
@@ -253,6 +265,9 @@ pub struct HermesActivityRequestV1 {
     pub conversation_id: Option<ConversationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<ConversationSegmentId>,
+    /// Optional Hermes thread identity; see `HermesSendRequestV1::thread_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ConversationId>,
     pub activity_kind: ActivityKind,
     pub activity_id: Option<ActivityId>,
     pub action: EphemeralActivityActionV1,
@@ -551,6 +566,7 @@ impl HermesSendRequestV1 {
             room_id: chat_id.into(),
             conversation_id,
             segment_id: None,
+            thread_id: None,
             text: content.into(),
             kind,
             status,
@@ -572,6 +588,11 @@ impl HermesSendRequestV1 {
         validate_optional_string(
             "hermes.send.segment_id",
             self.segment_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.send.thread_id",
+            self.thread_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
         validate_string_bytes("hermes.send.text", &self.text, MAX_HERMES_TEXT_BYTES)?;
@@ -610,6 +631,11 @@ impl HermesEditRequestV1 {
             self.segment_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
+        validate_optional_string(
+            "hermes.edit.thread_id",
+            self.thread_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
         validate_message_id(&self.message_id)?;
         validate_string_bytes("hermes.edit.text", &self.text, MAX_HERMES_TEXT_BYTES)?;
         validate_json_value_bytes(
@@ -631,6 +657,7 @@ impl HermesActivityRequestV1 {
             room_id: room_id.into(),
             conversation_id: conversation_id.map(Into::into),
             segment_id: None,
+            thread_id: None,
             activity_kind: FINITECHAT_ACTIVITY_KIND_WORKING.to_string(),
             activity_id: None,
             action,
@@ -651,6 +678,11 @@ impl HermesActivityRequestV1 {
         validate_optional_string(
             "hermes.activity.segment_id",
             self.segment_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.activity.thread_id",
+            self.thread_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
         validate_bytes_non_empty("hermes.activity.kind", self.activity_kind.len())?;
@@ -1127,6 +1159,7 @@ mod tests {
             room_id: "room-agent-1".to_owned(),
             conversation_id: Some("topic-build".to_owned()),
             segment_id: Some("segment-7".to_owned()),
+            thread_id: None,
             message_id: "tool-1".to_owned(),
             text: "cargo test complete".to_owned(),
             kind: HermesSendKindV1::Tool,
@@ -1150,6 +1183,38 @@ mod tests {
         }"#;
         let old: HermesEditRequestV1 = serde_json::from_str(old_json).unwrap();
         assert_eq!(old.kind, HermesSendKindV1::Message);
+    }
+
+    #[test]
+    fn send_request_carries_optional_thread_id_and_defaults_to_none() {
+        // A request that carries only thread_id (no explicit route) validates
+        // and round-trips; the sidecar resolves the route from its store.
+        let with_thread = HermesSendRequestV1 {
+            room_id: "room-agent-1".to_owned(),
+            conversation_id: None,
+            segment_id: None,
+            thread_id: Some("chat-build-1".to_owned()),
+            text: "done".to_owned(),
+            kind: HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            metadata: BTreeMap::new(),
+        };
+        with_thread
+            .validate_limits()
+            .expect("a thread-id-only send is valid");
+        let json = serde_json::to_string(&with_thread).unwrap();
+        let decoded: HermesSendRequestV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.thread_id.as_deref(), Some("chat-build-1"));
+
+        // A request from before thread_id existed decodes with thread_id None.
+        let legacy: HermesSendRequestV1 = serde_json::from_str(
+            r#"{"room_id":"room-agent-1","conversation_id":null,"text":"hi",
+                "kind":"message","status":"complete","reply_to_message_id":null,"metadata":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.thread_id, None);
     }
 
     #[test]
