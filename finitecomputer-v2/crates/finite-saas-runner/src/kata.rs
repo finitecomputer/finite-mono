@@ -716,7 +716,7 @@ impl KataLauncher {
                 return Ok(());
             }
             if started.elapsed() >= self.config.readiness_timeout {
-                return Err(RunnerError::RuntimeLaunch(format!(
+                return Err(RunnerError::RuntimeReadinessTimeout(format!(
                     "Kata runtime /healthz did not become ready within {}s",
                     self.config.readiness_timeout.as_secs()
                 )));
@@ -4273,7 +4273,8 @@ esac
                 requested_by_user_id: "admin-1".to_string(),
                 kind: RuntimeControlKind::Upgrade,
                 target_runtime_artifact_id: Some("artifact-v2".to_string()),
-                status: RuntimeControlRequestStatus::Running,
+                status: RuntimeControlRequestStatus::Launching,
+                failure_stage: None,
                 runner_id: Some("kata-runner".to_string()),
                 lease_token: Some("lease".to_string()),
                 lease_expires_at: None,
