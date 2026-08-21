@@ -340,9 +340,13 @@ test("durable source enrollment retries transport failures and returns only read
     response("ready"),
   ];
   let polls = 0;
+  let targetTicks = 0;
   const progress = [];
   const ready = await waitForSourceEnrollment({
     request,
+    advanceTarget: async () => {
+      targetTicks += 1;
+    },
     pollEnrollment: async () => {
       const result = results[polls++];
       if (result instanceof Error) throw result;
@@ -354,6 +358,11 @@ test("durable source enrollment retries transport failures and returns only read
     pollIntervalMs: 0,
   });
   assert.equal(polls, 4);
+  assert.equal(
+    targetTicks,
+    4,
+    "every source poll is preceded by a target sync/KeyPackage replenishment tick"
+  );
   assert.equal(ready.status, "ready");
   assert.deepEqual(progress, [
     {
