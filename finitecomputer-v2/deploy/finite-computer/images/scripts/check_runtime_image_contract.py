@@ -18,6 +18,7 @@ CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
 PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
+    "COPY finite-mail ./finite-mail",
     "COPY .finite-hermes-nix-store/nix/store /nix/store",
     "ARG HERMES_AGENT_STORE_PATH",
     "ARG HERMES_AGENT_PYTHON_PATH",
