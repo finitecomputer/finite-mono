@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Build, verify, and install a Finite legacy-Hermes migration bundle.
+
+The target installer is deliberately offline. It imports conversation history
+through the target Hermes version, copies only allow-listed user state, and
+hash-fences the newly-created Finite identity and Chat client store.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Iterable
+from pathlib import Path
+
+from legacy_hermes_contract import (
+    SOURCE_EXPORT_BATCH_SIZE as SOURCE_EXPORT_BATCH_SIZE,
+    MigrationError as MigrationError,
+    SourceMetadata as SourceMetadata,
+    _memory_database_fact_count as _memory_database_fact_count,
+    create_manifest as create_manifest,
+    verify_bundle as verify_bundle,
+)
+from legacy_hermes_source import (
+    check_source_writers as check_source_writers,
+    export_source_sessions as export_source_sessions,
+    snapshot_source_memory as snapshot_source_memory,
+)
+from legacy_hermes_target import install_bundle as install_bundle
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    export = subparsers.add_parser(
+        "source-export", help="snapshot and export sessions through legacy Hermes"
+    )
+    export.add_argument("--output", type=Path, required=True)
+    export.add_argument("--source-database", type=Path, required=True)
+
+    memory = subparsers.add_parser(
+        "source-memory-snapshot",
+        help="snapshot the legacy structured memory database through SQLite",
+    )
+    memory.add_argument("--output", type=Path, required=True)
+    memory.add_argument("--source-database", type=Path, required=True)
+
+    writers = subparsers.add_parser(
+        "source-writer-check",
+        help=(
+            "prove no Linux process has a writable file descriptor or memory map "
+            "below the frozen source PVC"
+        ),
+    )
+    writers.add_argument("--source-root", type=Path, required=True)
+    writers.add_argument("--proc-root", type=Path, default=Path("/proc"))
+
+    manifest = subparsers.add_parser(
+        "manifest", help="hash and seal an allow-listed staged bundle"
+    )
+    manifest.add_argument("--bundle", type=Path, required=True)
+    manifest.add_argument("--source-host-id", required=True)
+    manifest.add_argument("--source-machine-id", required=True)
+    manifest.add_argument("--source-owner-email", required=True)
+    manifest.add_argument("--source-hermes-version", required=True)
+    manifest.add_argument("--source-image-reference", required=True)
+    manifest.add_argument("--source-image-manifest-digest", required=True)
+    manifest.add_argument("--source-container-image-id", required=True)
+
+    verify = subparsers.add_parser(
+        "verify", help="verify a sealed bundle without mutation"
+    )
+    verify.add_argument("--bundle", type=Path, required=True)
+
+    install = subparsers.add_parser(
+        "install", help="install into one stopped target /data root"
+    )
+    install.add_argument("--bundle", type=Path, required=True)
+    install.add_argument("--target-root", type=Path, required=True)
+    install.add_argument("--expected-source-machine-id", required=True)
+    install.add_argument("--expected-manifest-sha256", required=True)
+    install.add_argument("--expected-target-identity-sha256", required=True)
+    install.add_argument("--expected-target-chat-client-sha256", required=True)
+    return parser
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = _parser().parse_args(list(argv) if argv is not None else None)
+    try:
+        if args.command == "source-export":
+            result = export_source_sessions(args.output, args.source_database)
+        elif args.command == "source-memory-snapshot":
+            result = snapshot_source_memory(args.output, args.source_database)
+        elif args.command == "source-writer-check":
+            result = check_source_writers(args.source_root, args.proc_root)
+        elif args.command == "manifest":
+            result = create_manifest(
+                args.bundle,
+                SourceMetadata(
+                    host_id=args.source_host_id,
+                    machine_id=args.source_machine_id,
+                    owner_email=args.source_owner_email,
+                    hermes_version=args.source_hermes_version,
+                    image_reference=args.source_image_reference,
+                    image_manifest_digest=args.source_image_manifest_digest,
+                    container_image_id=args.source_container_image_id,
+                ),
+            )
+        elif args.command == "verify":
+            result = verify_bundle(args.bundle)
+        else:
+            result = install_bundle(
+                args.bundle,
+                args.target_root,
+                expected_machine_id=args.expected_source_machine_id,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                expected_identity_sha256=args.expected_target_identity_sha256,
+                expected_chat_client_sha256=args.expected_target_chat_client_sha256,
+            )
+    except MigrationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

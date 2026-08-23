@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="${1:-}"
+case "$command_name" in
+  source-export|source-memory-snapshot)
+    shift
+    ;;
+  *)
+    echo "error: expected source-export or source-memory-snapshot" >&2
+    exit 64
+    ;;
+esac
+
+# The box1 image's `python3` is the mutable user venv. Reuse the immutable
+# `hermes` wrapper environment, but execute only the allow-listed exporter.
+wrapper="$(command -v hermes)"
+setup="$(mktemp)"
+cleanup() {
+  rm -f -- "$setup"
+}
+trap cleanup EXIT
+sed '$d' "$wrapper" >"$setup"
+FINITE_HERMES_MUTABLE_PYTHON= . "$setup"
+
+if [[ -z "${HERMES_PYTHON:-}" || ! -x "$HERMES_PYTHON" ]]; then
+  echo "error: Hermes wrapper did not provide HERMES_PYTHON" >&2
+  exit 1
+fi
+
+exec "$HERMES_PYTHON" /opt/migration/legacy_hermes_migration.py \
+  "$command_name" "$@"

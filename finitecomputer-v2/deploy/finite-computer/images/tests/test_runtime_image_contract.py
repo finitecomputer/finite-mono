@@ -61,6 +61,12 @@ class RuntimeImageContractTests(unittest.TestCase):
     def test_canonical_contract_passes(self) -> None:
         self.assertEqual(self.violations(), [])
 
+    def test_one_shot_migration_tool_is_not_baked_into_runtime_image(self) -> None:
+        dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
+
+        self.assertNotIn("legacy_hermes_migration.py", dockerfile)
+        self.assertNotIn("/opt/legacy-hermes-migration", dockerfile)
+
     def test_second_phala_dockerfile_fails(self) -> None:
         self.write("deploy/phala/Dockerfile", "FROM canonical-but-forked")
         self.assertTrue(
