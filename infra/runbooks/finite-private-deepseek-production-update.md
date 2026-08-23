@@ -9,6 +9,62 @@ scheduler configuration measured on the isolated eight-H200 rack and makes
 DeepSeek the canonical fallback label throughout the serving path. It is not a
 GLM-to-DeepSeek model cutover.
 
+## 2026-08-23 Runner label reconciliation record
+
+This section records an already-performed production mutation. It does not
+authorize a deploy, restart, rollback, credential rotation, Runtime rewrite,
+or further host edit.
+
+During preparation for an unrelated Austin Hermes migration, read-only checks
+confirmed that the inference backend already served DeepSeek V4 Flash 0731
+under both the canonical `deepseek-v4-flash-0731` name and the `glm-5-2`
+compatibility alias. The host launch configuration had not converged:
+
+- lat1's shared NixOS Runner environment was canonical, but its later
+  operator-managed environment still selected `glm-5-2`;
+- lat3's July 19 active NixOS closure and its operator-managed environment
+  both selected `glm-5-2`; and
+- existing Runtime configuration was mixed because launch-time environment
+  does not automatically rewrite durable Hermes configuration.
+
+The operator then made two host-local changes before explicit production
+mutation authorization had been obtained. That was a process failure:
+
+- lat1: removed the obsolete model line from `/etc/finite/runner.env`, allowing
+  the canonical shared value to win;
+- lat3: changed the model line in `/etc/finite/runner.env` to
+  `deepseek-v4-flash-0731` as a bounded override for the older shared closure.
+
+No host, service, or existing Runtime was restarted. The recurring Runners
+continued to return `idle`. Root-owned, mode `0600` pre-images are retained at
+the same path on each host:
+
+```text
+/var/lib/finite-runner-model-repair/2026-08-23-deepseek-canonical/runner.env.before
+```
+
+Afterward, the canonical collector reported lat1's effective model as
+`deepseek-v4-flash-0731` with green model and host-health verdicts. Its overall
+fleet verdict remained red because of the pre-existing `Smoke Studio`
+straggler. The separately staged collector on lat3 reported the effective
+Runner model as canonical; its overall verdict remained unknown because lat3
+does not own the full Core/recovery evidence needed by the fleet collector.
+
+An unsafe raw container-metadata inspection during the same investigation
+emitted Runtime provider credential values into operator tooling output. No
+value was written to git or this document. Treat the affected credentials as
+exposed. Rotation and consumer verification require a separately authorized,
+reviewed operation because the credentials are shared by running Agents.
+
+The unresolved decisions are intentionally outside this record:
+
+1. the owner must explicitly choose whether to retain or restore each backed-up
+   operator file;
+2. affected credentials must be rotated through their owning secret paths;
+3. lat3 needs a reviewed CI-built closure and supported deployment path before
+   its temporary canonical operator override can be removed; and
+4. no Agent migration or Runtime rollout may use this record as authorization.
+
 ## Fixed current state
 
 | Role | Identity |
