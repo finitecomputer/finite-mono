@@ -75,6 +75,16 @@ durable identity is usable, the Finite Chat bridge is healthy, and the
 skill, and version validation happens once while building the image; it is not
 repeated every 30 seconds as part of runtime liveness.
 
+Readiness evidence is boot-scoped and liveness-gated: `finite-agentd` clears
+the previous boot's bridge/agentd status caches before spawning their writers,
+and `/healthz` only honors an `agentd/status.json` whose heartbeat is still
+being rewritten (one-second tick; a frozen file means the supervisor is dead,
+so the runtime is not ready no matter how green the contents look). The body's
+top-level `ready` is the same verdict as the HTTP status code, and a not-ready
+body names the cause in `ready_reason` — one of `bootstrap_failed`,
+`agentd_status_stale`, `agentd_not_running`, `bridge_not_connected`,
+`identity_not_ready`, or `starting`.
+
 On a genuinely fresh Agent Home, the gateway launcher atomically seeds the
 image baseline into the durable managed-skills directory and exposes that path
 to Hermes with `skills.external_dirs`. A restart or image upgrade never
