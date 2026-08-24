@@ -22,6 +22,7 @@ jobs:
     outputs:
       mutation_enabled: ${{ steps.manifest.outputs.mutation_enabled }}
       source_sha: ${{ steps.plan-inputs.outputs.source_sha }}
+      ci_source_sha: ${{ steps.plan-inputs.outputs.ci_source_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +44,10 @@ jobs:
           else
             base_sha="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
           fi
+          python3 scripts/production_deploy.py ci-source \
+            --source "$source_sha" \
+            --push-before "$base_sha" \
+            --github-output "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
 
@@ -67,17 +72,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.plan-inputs.outputs.source_sha }}
+          CI_SOURCE_SHA: ${{ steps.plan-inputs.outputs.ci_source_sha }}
+          CI_SOURCE_REASON: ${{ steps.plan-inputs.outputs.ci_source_reason }}
         run: |
           set -euo pipefail
+          echo "Deployed source SHA: $SOURCE_SHA"
+          echo "CI source SHA: $CI_SOURCE_SHA ($CI_SOURCE_REASON)"
           conclusion="$(
             gh run list \
               --workflow ci.yml \
-              --commit "$SOURCE_SHA" \
+              --commit "$CI_SOURCE_SHA" \
               --json conclusion,status \
               --jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length'
           )"
           if [[ "$conclusion" == "0" ]]; then
-            echo "CI gate has not completed successfully for $SOURCE_SHA" >&2
+            echo "CI gate has not completed successfully for $CI_SOURCE_SHA" >&2
             exit 1
           fi
 
