@@ -4,7 +4,9 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-08-18.1, source fffebe49ca0aa14d47f00b33ff8ae1af79f437fe.
+    # 2026-08-20.1, pinned 2026-08-19 (stop-button confirmation, #583).
+    # This line is the dashboard's deployment record; there is no ledger to
+    # update alongside it (infra/deployment-changelog.md holds narrative only).
     image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:2089a3d7aa2e1a590b430d4ebec0405e1854aaa5b75e4ad5c4627a5779b0bd64";
 
     # Host networking: the dashboard must reach core on the HOST loopback

@@ -29,17 +29,19 @@ Gatekeeper assessment.
 ## PRECONDITIONS
 
 - The release commit is on `main` and CI is green.
-- You know which fielded versions exist: read the component's `[field.*]`
-  block in `compat/matrix.toml` before choosing the version.
+- You know which fielded versions exist: `gh release list --repo
+  finitecomputer/finite-mono` (or `git tag -l '<component>/v*'`) before
+  choosing the version. The tags are the only record of what shipped.
 
 ## STEPS
 
-1. Pick the version `vX.Y.Z` (semver against the previous entry in
-   `compat/matrix.toml`).
-2. In the same PR as any final release changes, update `compat/matrix.toml`:
-   append the new version to the component's `released` list (create the
-   list entry for fbrain's first release) and adjust `notes` if the
-   server-compatibility story changed. Merge to `main`.
+1. Pick the version `vX.Y.Z` (semver against the latest existing
+   `<component>/v*` tag).
+2. If the release changes the server-compatibility story (a client the server
+   must keep accepting, a protocol change, a deprecation), record that promise
+   in `infra/deployment-changelog.md` in the same PR as the final release
+   changes. A release that changes nothing about compatibility needs no
+   record beyond its tag. Merge to `main`.
 3. Tag the merge commit on `main` and push:
 
    ```sh
@@ -102,4 +104,5 @@ alias.
 
    Deleting the versioned release does NOT fix the alias — the alias assets
    are copies. Always re-point the alias explicitly.
-2. Update `compat/matrix.toml` to remove the withdrawn version.
+2. Note the withdrawal in `infra/deployment-changelog.md` so nobody treats
+   the deleted version as fielded.

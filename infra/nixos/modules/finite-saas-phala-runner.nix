@@ -39,6 +39,9 @@ in
       FC_RUNNER_MAX_SANDBOXES = "1";
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID = "wks_YKRQqRea";
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG = "finite";
+      # This is the effective pin for the Phala lane: phala-runner.env holds
+      # only credentials, so changing this value is a Phala Runtime rollout,
+      # not a records edit. It is independent of the Kata fleet's pin.
       FC_RUNNER_RUNTIME_ARTIFACT_ID = "finite-agent-runtime-2026-07-22.1";
       FC_RUNNER_RUNTIME_ENV_JSON = builtins.toJSON {
         FINITE_SITES_API = "https://api.finite.chat";

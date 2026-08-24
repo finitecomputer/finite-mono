@@ -21,6 +21,11 @@ cost a mid-incident detour. Three precise checks over infra/runbooks/*.md:
    infra/hosts/*/systemd unit files, or the documented legacy set below.
    Globs (`finite-*`) and binary-name mentions (e.g. finitesitesd) outside
    systemctl/journalctl arguments are not unit references and stay unchecked.
+4. Retired ledgers stay retired. `compat/matrix.toml` was a hand-maintained
+   deployment ledger that nothing read and that drifted from the pins that
+   run (2026-08-21 ownership audit, O7); the runbooks now point at release
+   tags, Core's runtime-artifact table, the NixOS closure, and
+   infra/deployment-changelog.md. Any runbook mention of the file fails.
 """
 
 from __future__ import annotations
@@ -66,6 +71,8 @@ SYSTEMCTL = re.compile(
     r"((?:\s+--?[\w=.-]+)*)(.*)"
 )
 UNIT_TOKEN = re.compile(r"^[a-zA-Z][a-zA-Z0-9@:._*+-]*$")
+
+RETIRED_LEDGER = re.compile(r"\bmatrix\.toml\b")
 
 
 def runbooks() -> list[Path]:
@@ -266,8 +273,21 @@ def check_units() -> list[str]:
     return failures
 
 
+def check_retired_ledgers() -> list[str]:
+    failures = []
+    for path in runbooks():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if RETIRED_LEDGER.search(line):
+                failures.append(
+                    f"{path.relative_to(ROOT)}:{lineno}: names the retired compat"
+                    " matrix; point at the source of truth or"
+                    " infra/deployment-changelog.md instead"
+                )
+    return failures
+
+
 def main() -> None:
-    failures = check_tables() + check_migrations() + check_units()
+    failures = check_tables() + check_migrations() + check_units() + check_retired_ledgers()
     if failures:
         raise SystemExit("runbook facts drifted from repo authorities:\n" + "\n".join(failures))
     print("runbook facts contract: ok")

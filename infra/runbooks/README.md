@@ -53,11 +53,21 @@ not been exercised yet are marked `TODO:` with what must be learned.
 
 Two rules apply to **every** release and promotion, no exceptions:
 
-1. **Every release updates `compat/matrix.toml` in the same PR/commit.**
-   The matrix records what is already out in the field (installed CLIs,
-   pinned runtime images, deployed servers). Stranding a fielded artifact
-   must be a deliberate, reviewed act — an edit to that file — never an
-   accident. Each runbook below has this as an explicit step.
+1. **Every release and promotion edits exactly one source of truth.** What
+   is out in the field is read from where it is pinned, never from a copy:
+   release tags and the rolling alias releases for the CLIs and the Electron
+   app; Core's promoted runtime-artifact record plus
+   `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata
+   host for the Agent Runtime image (existing Agents keep their launch-time
+   image); the NixOS closure — `infra/nixos/modules/dashboard.nix` for the
+   dashboard digest — for everything on lat1. Stranding a fielded artifact
+   must be a deliberate, reviewed act in that source, never an accident.
+   Anything the source cannot express (why a version shipped, when a fleet
+   roll completed, a live compatibility promise) goes in
+   [`../deployment-changelog.md`](../deployment-changelog.md). There is no
+   hand-maintained ledger to keep in sync; the old one was retired on
+   2026-08-21 and `just runbook-facts-contract` fails any runbook that
+   reinstates it.
 
 2. **Rung-ladder: local proof → Docker proof → Kata → Phala/Tinfoil.**
    Nothing is promoted to a confidential-compute lane without a recorded
