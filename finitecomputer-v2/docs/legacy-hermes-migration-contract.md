@@ -124,9 +124,13 @@ state, old `.finite` state, venvs, binaries, logs, caches, and raw databases
 exist in `source-home.tar` but receive no active target mapping. The archive and
 all user-authored files are sensitive and remain root-only. The structured
 memory file used for conversion is a frozen SQLite backup-API snapshot, not a
-live database copy. Cron definitions and Hermes helper scripts are copied only
-under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler never
-reads that path.
+live database copy. Because box1 is mounted read-only and SQLite WAL readers
+may need a writable directory, the exporter first copies the frozen database,
+WAL, and shared-memory files into private scratch storage beside the output.
+It opens only that scratch set through SQLite, creates the backup-API snapshot,
+and removes the scratch set. Cron definitions and Hermes helper scripts are
+copied only under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler
+never reads that path.
 
 Legacy message fields named `path` or ending in `_path` are rewritten only when
 they point into the admitted workspace, dev, or uploads roots. Cache-backed

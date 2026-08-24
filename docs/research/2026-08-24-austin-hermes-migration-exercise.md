@@ -46,6 +46,8 @@ No other bot may be stopped, restarted, migrated, or changed.
 - 2026-08-24T20:37:41Z: restarted Austin on the same image with zero container restarts. The Recovery Set freeze lasted 13 minutes 44 seconds.
 - 2026-08-24T21:05:14Z: restored the Recovery Set into a new empty box1 scratch directory. The restored byte count matched the source and both trees produced the same 230,854-entry inventory hash.
 - 2026-08-24T21:13:52Z: the updated classifier inventoried all 230,854 restored entries with zero blocked state. The 19 generated external symlinks were preserved inertly under `rebuild` or `quarantine`.
+- 2026-08-24T21:16:16Z: Sites and integrations inventory completed. Austin had no published legacy Sites and six detected integration classes; all remained inactive and no secret values were emitted.
+- 2026-08-24T21:16:42Z: the first session export failed before output because SQLite could not open the frozen WAL database directly from a read-only bind mount. The exporter now stages the frozen database/WAL/shared-memory set in private writable scratch before invoking SQLite's backup API.
 
 ## Gates
 
@@ -106,6 +108,10 @@ No other bot may be stopped, restarted, migrated, or changed.
 - Short `nerdctl --rm` proof containers can emit a cleanup-timeout warning
   after their command succeeds. Verification must check the container is gone
   rather than treating that warning alone as a migration failure.
+- A frozen WAL database may still require a writable directory when SQLite
+  opens it. Mounting the source read-only is correct; the tool must copy the
+  frozen database and sidecars to private scratch, then use SQLite's backup API
+  from that writable copy.
 
 ## Retro notes
 
