@@ -45,6 +45,7 @@ No other bot may be stopped, restarted, migrated, or changed.
 - 2026-08-24T20:37:18Z: sealed the complete 23.16-GB source home into a 10.35-GB compressed Recovery Set on the independent encrypted Mac.
 - 2026-08-24T20:37:41Z: restarted Austin on the same image with zero container restarts. The Recovery Set freeze lasted 13 minutes 44 seconds.
 - 2026-08-24T21:05:14Z: restored the Recovery Set into a new empty box1 scratch directory. The restored byte count matched the source and both trees produced the same 230,854-entry inventory hash.
+- 2026-08-24T21:13:52Z: the updated classifier inventoried all 230,854 restored entries with zero blocked state. The 19 generated external symlinks were preserved inertly under `rebuild` or `quarantine`.
 
 ## Gates
 
@@ -99,6 +100,12 @@ No other bot may be stopped, restarted, migrated, or changed.
   paths. They are safe to preserve as inert metadata but must be automatically
   classified as `rebuild` or `quarantine`, never activated or sent to an owner
   for per-file decisions.
+- A successful inventory printed its complete 18-MB evidence document to the
+  terminal. The CLI now prints only status and aggregate counts; exact paths
+  and hashes remain in the mode-0600 inventory file.
+- Short `nerdctl --rm` proof containers can emit a cleanup-timeout warning
+  after their command succeeds. Verification must check the container is gone
+  rather than treating that warning alone as a migration failure.
 
 ## Retro notes
 

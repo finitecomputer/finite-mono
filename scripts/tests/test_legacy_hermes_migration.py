@@ -687,7 +687,10 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
-        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual(printed["status"], "complete")
+        self.assertNotIn("entries", printed)
+        self.assertNotIn("custom-data/ledger.txt", stdout.getvalue())
 
     def test_source_volume_inventory_blocks_symlinks_that_escape_the_source(
         self,

@@ -130,6 +130,17 @@ def main(argv: Iterable[str] | None = None) -> int:
                     f"source inventory has {blocked} structurally blocked entries; "
                     f"review {args.output}"
                 )
+            result = {
+                key: result[key]
+                for key in (
+                    "schema",
+                    "source_root",
+                    "status",
+                    "directories",
+                    "classifications",
+                    "blocked_roots",
+                )
+            }
         elif args.command == "source-sites-inventory":
             result = inventory_source_sites(
                 args.output,
