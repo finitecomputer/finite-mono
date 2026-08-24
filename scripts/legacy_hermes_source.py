@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import sqlite3
 import stat
 from contextlib import closing
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from legacy_hermes_contract import (
+    INTEGRATIONS_INVENTORY_SCHEMA,
+    SITES_INVENTORY_SCHEMA,
     SOURCE_EXPORT_BATCH_SIZE,
     SOURCE_INVENTORY_SCHEMA,
     SUPPORTED_SOURCE_HERMES_VERSION,
@@ -64,6 +67,26 @@ SOURCE_REBUILD_ROOTS = (
     Path(".npm-global"),
     Path(".rustup"),
     Path("dev/reap-video/venv"),
+)
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_INTEGRATION_POLICIES = {
+    "telegram": "controlled-transfer-after-rehearsal",
+    "signal": "controlled-transfer-after-rehearsal",
+    "google-workspace": "fresh-authorization-required",
+    "finitebrain": "fresh-authorization-required",
+    "model-provider-credentials": "target-managed-not-copied",
+    "other-environment-config": "preserve-disabled-until-supported-setup",
+}
+_MODEL_PROVIDER_PREFIXES = (
+    "ANTHROPIC_",
+    "DEEPSEEK_",
+    "GEMINI_",
+    "MISTRAL_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "TOGETHER_",
+    "XAI_",
+    "ZAI_",
 )
 
 
@@ -423,6 +446,370 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
         "classifications": classifications,
         "entries": entries,
         "blocked_roots": blocked_roots,
+    }
+    _write_private_json(output, result)
+    return result
+
+
+def inventory_source_sites(
+    output: Path,
+    control_plane_export: Path,
+    source_inventory_path: Path,
+    *,
+    expected_machine_id: str,
+) -> dict[str, Any]:
+    """Bind authoritative legacy Sites records to preserved source paths."""
+    output = Path(output)
+    control_plane_export = Path(control_plane_export)
+    source_inventory_path = Path(source_inventory_path)
+    if output.exists() or output.is_symlink():
+        raise MigrationError(f"refusing to overwrite Sites inventory: {output}")
+    if not expected_machine_id.strip():
+        raise MigrationError("expected Sites machine id is required")
+
+    try:
+        control_plane = json.loads(control_plane_export.read_text(encoding="utf-8"))
+        source_inventory = json.loads(source_inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"could not read Sites inventory input: {exc}") from exc
+    if not isinstance(control_plane, dict):
+        raise MigrationError("published endpoint export must be an object")
+    if control_plane.get("machineId") != expected_machine_id:
+        raise MigrationError("published endpoint export machine id mismatch")
+    endpoints = control_plane.get("endpoints")
+    if not isinstance(endpoints, list):
+        raise MigrationError("published endpoint export has no endpoint list")
+    if (
+        not isinstance(source_inventory, dict)
+        or source_inventory.get("schema") != SOURCE_INVENTORY_SCHEMA
+        or source_inventory.get("status") != "complete"
+    ):
+        raise MigrationError("source volume inventory is incomplete or invalid")
+    source_entries = source_inventory.get("entries")
+    if not isinstance(source_entries, list):
+        raise MigrationError("source volume inventory entries are missing")
+    source_paths = {
+        entry.get("path")
+        for entry in source_entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+
+    rendered: list[dict[str, Any]] = []
+    seen_hostnames: set[str] = set()
+    source_paths_required = 0
+    source_paths_present = 0
+    required_strings = (
+        "hostname",
+        "label",
+        "status",
+        "desired_process_state",
+        "created_at",
+        "updated_at",
+    )
+    allowed_fields = {
+        "hostname",
+        "label",
+        "target_port",
+        "status",
+        "run_command",
+        "run_cwd",
+        "desired_process_state",
+        "auth",
+        "created_at",
+        "updated_at",
+    }
+    allowed_auth_fields = {"mode", "owner_email", "emails", "org_domain"}
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            raise MigrationError("published endpoint record must be an object")
+        if set(endpoint) - allowed_fields:
+            raise MigrationError("published endpoint record has unknown fields")
+        for field in required_strings:
+            if not isinstance(endpoint.get(field), str):
+                raise MigrationError(f"published endpoint {field} must be a string")
+        hostname = endpoint["hostname"].strip()
+        if not hostname or hostname in seen_hostnames:
+            raise MigrationError("published endpoint hostnames must be unique")
+        seen_hostnames.add(hostname)
+        auth = endpoint.get("auth")
+        if not isinstance(auth, dict) or not isinstance(auth.get("mode"), str):
+            raise MigrationError("published endpoint auth record is invalid")
+        if set(auth) - allowed_auth_fields:
+            raise MigrationError("published endpoint auth has unknown fields")
+        target_port = endpoint.get("target_port")
+        if target_port is not None and (
+            not isinstance(target_port, int)
+            or isinstance(target_port, bool)
+            or not 1 <= target_port <= 65535
+        ):
+            raise MigrationError("published endpoint target_port is invalid")
+        run_command = endpoint.get("run_command")
+        run_cwd = endpoint.get("run_cwd")
+        if run_command is not None and not isinstance(run_command, str):
+            raise MigrationError("published endpoint run_command is invalid")
+        if run_cwd is not None and not isinstance(run_cwd, str):
+            raise MigrationError("published endpoint run_cwd is invalid")
+        if bool(run_command) != bool(run_cwd):
+            raise MigrationError(
+                "published endpoint run_command and run_cwd must appear together"
+            )
+
+        source = {"relative_path": None, "status": "not-required"}
+        if run_cwd:
+            source_paths_required += 1
+            source_home = Path("/home/node")
+            cwd = Path(run_cwd)
+            try:
+                relative = cwd.relative_to(source_home)
+            except ValueError as exc:
+                raise MigrationError(
+                    f"published site source is outside /home/node: {hostname}"
+                ) from exc
+            relative_path = relative.as_posix()
+            present = relative_path == "." or relative_path in source_paths
+            if not present:
+                raise MigrationError(
+                    f"published site source is missing from snapshot: {hostname}"
+                )
+            source_paths_present += 1
+            source = {
+                "relative_path": relative_path,
+                "status": "present-in-source-snapshot",
+            }
+        rendered.append({**endpoint, "source": source})
+
+    rendered.sort(key=lambda endpoint: endpoint["hostname"])
+    result = {
+        "schema": SITES_INVENTORY_SCHEMA,
+        "machine_id": expected_machine_id,
+        "status": "complete",
+        "endpoint_count": len(rendered),
+        "source_paths_required": source_paths_required,
+        "source_paths_present": source_paths_present,
+        "activation_policy": "manifest-only-not-republished",
+        "endpoints": rendered,
+    }
+    _write_private_json(output, result)
+    return result
+
+
+def _configured_env_names(env_path: Path) -> list[str]:
+    if not env_path.exists():
+        return []
+    if not env_path.is_file() or env_path.is_symlink():
+        raise MigrationError("legacy Hermes .env must be a regular file")
+    names: set[str] = set()
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MigrationError(f"could not read legacy Hermes .env: {exc}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped.removeprefix("export ").lstrip()
+        if "=" not in stripped:
+            raise MigrationError(
+                f"legacy Hermes .env line {line_number} is not an assignment"
+            )
+        name, value = stripped.split("=", 1)
+        name = name.strip()
+        if not _ENV_NAME.fullmatch(name):
+            raise MigrationError(
+                f"legacy Hermes .env line {line_number} has an invalid name"
+            )
+        normalized_value = value.strip()
+        if (
+            len(normalized_value) >= 2
+            and normalized_value[0] == normalized_value[-1]
+            and normalized_value[0] in {'"', "'"}
+        ):
+            normalized_value = normalized_value[1:-1]
+        if normalized_value:
+            names.add(name)
+    return sorted(names)
+
+
+def _integration_for_env_name(name: str, platform_names: set[str]) -> str:
+    if name.startswith("TELEGRAM_"):
+        return "telegram"
+    if name.startswith("SIGNAL_"):
+        return "signal"
+    if name.startswith(("GOOGLE_WORKSPACE_", "GMAIL_")):
+        return "google-workspace"
+    if name.startswith(("FINITE_BRAIN_", "FBRAIN_")):
+        return "finitebrain"
+    if name.startswith(_MODEL_PROVIDER_PREFIXES):
+        return "model-provider-credentials"
+    for platform in platform_names:
+        prefix = platform.upper().replace("-", "_") + "_"
+        if name.startswith(prefix):
+            return platform.replace("_", "-")
+    return "other-environment-config"
+
+
+def _configured_yaml_platforms(path: Path) -> dict[str, bool | None]:
+    """Read only the simple platforms mapping emitted by Hermes v0.14."""
+    if not path.exists():
+        return {}
+    if not path.is_file() or path.is_symlink():
+        raise MigrationError("legacy Hermes config.yaml must be a regular file")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MigrationError(
+            f"could not read legacy Hermes config.yaml: {exc}"
+        ) from exc
+    if any("\t" in line[: len(line) - len(line.lstrip())] for line in lines):
+        raise MigrationError(
+            "legacy Hermes config.yaml uses unsupported tab indentation"
+        )
+    platforms: dict[str, bool | None] = {}
+    in_platforms = False
+    current: str | None = None
+    for line in lines:
+        content = line.split("#", 1)[0].rstrip()
+        if not content:
+            continue
+        indent = len(content) - len(content.lstrip(" "))
+        stripped = content.strip()
+        if indent == 0:
+            in_platforms = stripped == "platforms:"
+            current = None
+            continue
+        if not in_platforms:
+            continue
+        if indent == 2:
+            match = re.fullmatch(r"([A-Za-z0-9_-]+):", stripped)
+            if match is None:
+                raise MigrationError(
+                    "legacy Hermes platforms config uses an unsupported shape"
+                )
+            current = match.group(1).lower()
+            if current in platforms:
+                raise MigrationError(f"duplicate legacy Hermes platform: {current}")
+            platforms[current] = None
+            continue
+        if indent >= 4 and current is not None and stripped.startswith("enabled:"):
+            raw_enabled = stripped.split(":", 1)[1].strip().lower()
+            if raw_enabled not in {"true", "false"}:
+                raise MigrationError(
+                    f"legacy Hermes platform enabled flag is invalid: {current}"
+                )
+            platforms[current] = raw_enabled == "true"
+    return platforms
+
+
+def inventory_source_integrations(
+    output: Path,
+    source_root: Path,
+    source_inventory_path: Path,
+) -> dict[str, Any]:
+    """Inventory external connections without serializing credential values."""
+    output = Path(output)
+    source_root = Path(source_root)
+    source_inventory_path = Path(source_inventory_path)
+    if output.exists() or output.is_symlink():
+        raise MigrationError(f"refusing to overwrite integrations inventory: {output}")
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise MigrationError(f"source root must be a real directory: {source_root}")
+    try:
+        source_inventory = json.loads(source_inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"could not read source volume inventory: {exc}") from exc
+    if (
+        not isinstance(source_inventory, dict)
+        or source_inventory.get("schema") != SOURCE_INVENTORY_SCHEMA
+        or source_inventory.get("status") != "complete"
+    ):
+        raise MigrationError("source volume inventory is incomplete or invalid")
+    if source_inventory.get("source_root") != str(source_root.resolve()):
+        raise MigrationError("source root does not match source volume inventory")
+    source_entries = source_inventory.get("entries")
+    if not isinstance(source_entries, list):
+        raise MigrationError("source volume inventory entries are missing")
+    source_paths = {
+        entry.get("path")
+        for entry in source_entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+
+    config_path = source_root / ".hermes/config.yaml"
+    platform_enabled = _configured_yaml_platforms(config_path)
+    platform_names = set(platform_enabled)
+
+    evidence: dict[str, dict[str, Any]] = {}
+
+    def record(
+        name: str,
+        *,
+        configured_key: str | None = None,
+        evidence_path: str | None = None,
+        source_enabled: bool | None = None,
+    ) -> None:
+        item = evidence.setdefault(
+            name,
+            {
+                "name": name,
+                "configured_keys": set(),
+                "evidence_paths": set(),
+                "source_enabled": None,
+            },
+        )
+        if configured_key is not None:
+            item["configured_keys"].add(configured_key)
+        if evidence_path is not None:
+            item["evidence_paths"].add(evidence_path)
+        if source_enabled is not None:
+            item["source_enabled"] = source_enabled
+
+    env_path = source_root / ".hermes/.env"
+    for env_name in _configured_env_names(env_path):
+        name = _integration_for_env_name(env_name, platform_names)
+        record(name, configured_key=env_name, evidence_path=".hermes/.env")
+    for platform in sorted(platform_names):
+        name = platform.replace("_", "-")
+        record(
+            name,
+            evidence_path=f".hermes/config.yaml#platforms.{platform}",
+            source_enabled=platform_enabled[platform],
+        )
+    if ".hermes/google_token.json" in source_paths or any(
+        path == ".hermes/gws" or path.startswith(".hermes/gws/")
+        for path in source_paths
+    ):
+        if ".hermes/google_token.json" in source_paths:
+            record("google-workspace", evidence_path=".hermes/google_token.json")
+        if any(
+            path == ".hermes/gws" or path.startswith(".hermes/gws/")
+            for path in source_paths
+        ):
+            record("google-workspace", evidence_path=".hermes/gws")
+    if any(path == ".brain" or path.startswith(".brain/") for path in source_paths):
+        record("finitebrain", evidence_path=".brain")
+
+    integrations = []
+    for name, item in sorted(evidence.items()):
+        policy = _INTEGRATION_POLICIES.get(
+            name, "preserve-disabled-until-supported-setup"
+        )
+        integrations.append(
+            {
+                "name": name,
+                "configured_keys": sorted(item["configured_keys"]),
+                "evidence_paths": sorted(item["evidence_paths"]),
+                "source_enabled": item["source_enabled"],
+                "migration_policy": policy,
+                "target_state": "inactive",
+            }
+        )
+    result = {
+        "schema": INTEGRATIONS_INVENTORY_SCHEMA,
+        "status": "complete",
+        "activation_policy": "inventory-only-no-secret-values-or-activation",
+        "integration_count": len(integrations),
+        "integrations": integrations,
     }
     _write_private_json(output, result)
     return result

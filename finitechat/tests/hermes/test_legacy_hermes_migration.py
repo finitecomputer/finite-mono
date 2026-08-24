@@ -54,10 +54,12 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
             self.assertEqual(evidence["sessions"]["sessions"], 1)
             self.assertEqual(evidence["sessions"]["messages"], 2)
             self.assertEqual(evidence["memory"]["facts"], 1)
+            self.assertEqual(evidence["sites"]["endpoint_count"], 1)
+            self.assertEqual(evidence["integrations"]["integration_count"], 1)
             self.assertEqual(importlib.metadata.version("hermes-agent"), "0.20.0")
 
             bundle = root / "bundle"
-            migration.create_manifest(
+            manifest = migration.create_manifest(
                 bundle,
                 migration.SourceMetadata(
                     host_id="box1",
@@ -70,6 +72,8 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
                     source_inventory_sha256=evidence["source_inventory_sha256"],
                 ),
             )
+            self.assertEqual(manifest["sites"]["endpoint_count"], 1)
+            self.assertEqual(manifest["integrations"]["integration_count"], 1)
 
             target = root / "target"
             (target / "agent/identity").mkdir(parents=True)

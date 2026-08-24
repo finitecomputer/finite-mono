@@ -18,6 +18,8 @@ from typing import Any
 
 SCHEMA = "finite.legacy-hermes-migration.v2"
 SOURCE_INVENTORY_SCHEMA = "finite.legacy-hermes-source-inventory.v2"
+SITES_INVENTORY_SCHEMA = "finite.legacy-hermes-sites.v1"
+INTEGRATIONS_INVENTORY_SCHEMA = "finite.legacy-hermes-integrations.v1"
 SUPPORTED_SOURCE_HERMES_VERSION = "0.14.0"
 SUPPORTED_TARGET_HERMES_VERSION = "0.20.0"
 SOURCE_EXPORT_BATCH_SIZE = 1_000
@@ -59,6 +61,14 @@ LEGACY_HERMES_MEDIA_CACHE_ROOTS = (
     "/home/node/.hermes/image_cache/",
     "~/.hermes/audio_cache/",
     "~/.hermes/image_cache/",
+)
+INTEGRATION_MIGRATION_POLICIES = frozenset(
+    {
+        "controlled-transfer-after-rehearsal",
+        "fresh-authorization-required",
+        "target-managed-not-copied",
+        "preserve-disabled-until-supported-setup",
+    }
 )
 
 
@@ -733,6 +743,235 @@ def _source_snapshot_summary(bundle: Path, inventory: dict[str, Any]) -> dict[st
     }
 
 
+def _read_root_only_json(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise MigrationError(f"{label} is missing or not a regular file")
+    if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise MigrationError(f"{label} must be mode 0600")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"could not read {label}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise MigrationError(f"{label} must contain an object")
+    return value
+
+
+def _sites_summary(
+    bundle: Path, expected_machine_id: str, source_inventory: dict[str, Any]
+) -> dict[str, Any]:
+    path = bundle / "sites.json"
+    sites = _read_root_only_json(path, "Sites inventory")
+    if sites.get("schema") != SITES_INVENTORY_SCHEMA:
+        raise MigrationError(f"Sites inventory schema must be {SITES_INVENTORY_SCHEMA}")
+    if sites.get("machine_id") != expected_machine_id:
+        raise MigrationError("Sites inventory machine id mismatch")
+    if sites.get("status") != "complete":
+        raise MigrationError("Sites inventory is incomplete")
+    endpoints = sites.get("endpoints")
+    if not isinstance(endpoints, list):
+        raise MigrationError("Sites inventory endpoints are missing")
+    hostnames: list[str] = []
+    inventory_paths = {
+        entry["path"]
+        for entry in source_inventory["entries"]
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    present = 0
+    required = 0
+    endpoint_fields = {
+        "hostname",
+        "label",
+        "target_port",
+        "status",
+        "run_command",
+        "run_cwd",
+        "desired_process_state",
+        "auth",
+        "created_at",
+        "updated_at",
+        "source",
+    }
+    auth_fields = {"mode", "owner_email", "emails", "org_domain"}
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict) or set(endpoint) - endpoint_fields:
+            raise MigrationError("Sites inventory endpoint record is invalid")
+        hostname = endpoint.get("hostname")
+        if not isinstance(hostname, str) or not hostname:
+            raise MigrationError("Sites inventory endpoint hostname is invalid")
+        hostnames.append(hostname)
+        auth = endpoint.get("auth")
+        if (
+            not isinstance(auth, dict)
+            or set(auth) - auth_fields
+            or not isinstance(auth.get("mode"), str)
+        ):
+            raise MigrationError("Sites inventory endpoint auth is invalid")
+        for field in (
+            "label",
+            "status",
+            "desired_process_state",
+            "created_at",
+            "updated_at",
+        ):
+            if not isinstance(endpoint.get(field), str):
+                raise MigrationError(f"Sites inventory endpoint {field} is invalid")
+        target_port = endpoint.get("target_port")
+        if target_port is not None and (
+            not isinstance(target_port, int)
+            or isinstance(target_port, bool)
+            or not 1 <= target_port <= 65535
+        ):
+            raise MigrationError("Sites inventory endpoint target port is invalid")
+        run_command = endpoint.get("run_command")
+        run_cwd = endpoint.get("run_cwd")
+        if run_command is not None and not isinstance(run_command, str):
+            raise MigrationError("Sites inventory run command is invalid")
+        if run_cwd is not None and not isinstance(run_cwd, str):
+            raise MigrationError("Sites inventory run cwd is invalid")
+        if bool(run_command) != bool(run_cwd):
+            raise MigrationError("Sites inventory run command and cwd disagree")
+        source = endpoint.get("source")
+        if not isinstance(source, dict) or set(source) != {"relative_path", "status"}:
+            raise MigrationError("Sites inventory source evidence is invalid")
+        source_status = source.get("status")
+        relative_path = source.get("relative_path")
+        if run_cwd:
+            try:
+                expected_relative = Path(run_cwd).relative_to("/home/node").as_posix()
+            except ValueError as exc:
+                raise MigrationError(
+                    "Sites inventory source path is outside /home/node"
+                ) from exc
+            if (
+                source_status != "present-in-source-snapshot"
+                or relative_path != expected_relative
+            ):
+                raise MigrationError(
+                    "Sites inventory source evidence does not match run_cwd"
+                )
+            if expected_relative != "." and expected_relative not in inventory_paths:
+                raise MigrationError(
+                    "Sites inventory source is missing from source snapshot"
+                )
+            if not isinstance(relative_path, str) or not relative_path:
+                raise MigrationError("Sites inventory source path is invalid")
+            required += 1
+            present += 1
+        elif source_status == "not-required":
+            if relative_path is not None or run_command:
+                raise MigrationError("Sites inventory source path is invalid")
+        else:
+            raise MigrationError("Sites inventory source status is invalid")
+    if hostnames != sorted(set(hostnames)):
+        raise MigrationError("Sites inventory endpoints must be unique and sorted")
+    if sites.get("endpoint_count") != len(endpoints):
+        raise MigrationError("Sites inventory endpoint count mismatch")
+    if sites.get("source_paths_required") != required:
+        raise MigrationError("Sites inventory required source count mismatch")
+    if sites.get("source_paths_present") != present:
+        raise MigrationError("Sites inventory present source count mismatch")
+    if sites.get("activation_policy") != "manifest-only-not-republished":
+        raise MigrationError("Sites inventory activation policy is invalid")
+    return {
+        "sha256": _sha256(path),
+        "endpoint_count": len(endpoints),
+        "source_paths_required": required,
+        "source_paths_present": present,
+        "activation_policy": sites["activation_policy"],
+        "status": "complete",
+    }
+
+
+def _integrations_summary(
+    bundle: Path, source_inventory: dict[str, Any]
+) -> dict[str, Any]:
+    path = bundle / "integrations.json"
+    inventory = _read_root_only_json(path, "Integrations inventory")
+    if inventory.get("schema") != INTEGRATIONS_INVENTORY_SCHEMA:
+        raise MigrationError(
+            f"Integrations inventory schema must be {INTEGRATIONS_INVENTORY_SCHEMA}"
+        )
+    if inventory.get("status") != "complete":
+        raise MigrationError("Integrations inventory is incomplete")
+    if (
+        inventory.get("activation_policy")
+        != "inventory-only-no-secret-values-or-activation"
+    ):
+        raise MigrationError("Integrations inventory activation policy is invalid")
+    integrations = inventory.get("integrations")
+    if not isinstance(integrations, list):
+        raise MigrationError("Integrations inventory records are missing")
+    names: list[str] = []
+    inventory_paths = {
+        entry["path"]
+        for entry in source_inventory["entries"]
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    policy_counts = {policy: 0 for policy in sorted(INTEGRATION_MIGRATION_POLICIES)}
+    expected_fields = {
+        "name",
+        "configured_keys",
+        "evidence_paths",
+        "source_enabled",
+        "migration_policy",
+        "target_state",
+    }
+    for integration in integrations:
+        if not isinstance(integration, dict) or set(integration) != expected_fields:
+            raise MigrationError("Integrations inventory record is invalid")
+        name = integration.get("name")
+        if not isinstance(name, str) or not name:
+            raise MigrationError("Integrations inventory name is invalid")
+        names.append(name)
+        configured_keys = integration.get("configured_keys")
+        if (
+            not isinstance(configured_keys, list)
+            or configured_keys != sorted(set(configured_keys))
+            or any(
+                not isinstance(key, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
+                for key in configured_keys
+            )
+        ):
+            raise MigrationError("Integrations inventory configured keys are invalid")
+        evidence_paths = integration.get("evidence_paths")
+        if (
+            not isinstance(evidence_paths, list)
+            or evidence_paths != sorted(set(evidence_paths))
+            or any(not isinstance(item, str) or not item for item in evidence_paths)
+        ):
+            raise MigrationError("Integrations inventory evidence paths are invalid")
+        for evidence_path in evidence_paths:
+            filesystem_path = evidence_path.split("#", 1)[0]
+            if not any(
+                path == filesystem_path or path.startswith(filesystem_path + "/")
+                for path in inventory_paths
+            ):
+                raise MigrationError(
+                    "Integrations inventory evidence is missing from source snapshot"
+                )
+        if integration.get("source_enabled") not in {True, False, None}:
+            raise MigrationError("Integrations inventory enabled state is invalid")
+        policy = integration.get("migration_policy")
+        if policy not in INTEGRATION_MIGRATION_POLICIES:
+            raise MigrationError("Integrations inventory migration policy is invalid")
+        policy_counts[policy] += 1
+        if integration.get("target_state") != "inactive":
+            raise MigrationError("Integrations inventory target state must be inactive")
+    if names != sorted(set(names)):
+        raise MigrationError("Integrations inventory records must be unique and sorted")
+    if inventory.get("integration_count") != len(integrations):
+        raise MigrationError("Integrations inventory count mismatch")
+    return {
+        "sha256": _sha256(path),
+        "integration_count": len(integrations),
+        "policy_counts": policy_counts,
+        "activation_policy": inventory["activation_policy"],
+        "status": "complete",
+    }
+
+
 def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
     """Bind a complete source snapshot and compatible active payload."""
     bundle = Path(bundle)
@@ -743,6 +982,8 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
         raise MigrationError("source volume inventory sha256 mismatch")
     inventory = _read_source_inventory(bundle)
     source_snapshot = _source_snapshot_summary(bundle, inventory)
+    sites = _sites_summary(bundle, source.machine_id, inventory)
+    integrations = _integrations_summary(bundle, inventory)
     files = _walk_payload_entries(payload)
     session_path = payload / "sessions.jsonl"
     session_index, message_count = _session_index(session_path)
@@ -778,6 +1019,8 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
         "source": asdict(source),
         "source_inventory": source_inventory,
         "source_snapshot": source_snapshot,
+        "sites": sites,
+        "integrations": integrations,
         "files": records,
         "sessions": {
             "count": len(session_index),
@@ -826,6 +1069,12 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     source_snapshot = _source_snapshot_summary(bundle, inventory)
     if manifest.get("source_snapshot") != source_snapshot:
         raise MigrationError("source-home snapshot summary mismatch")
+    sites = _sites_summary(bundle, source.machine_id, inventory)
+    if manifest.get("sites") != sites:
+        raise MigrationError("Sites summary mismatch")
+    integrations = _integrations_summary(bundle, inventory)
+    if manifest.get("integrations") != integrations:
+        raise MigrationError("Integrations summary mismatch")
     files = _walk_payload_entries(bundle / "payload")
     actual_paths = [path.relative_to(bundle / "payload").as_posix() for path in files]
     records = manifest.get("files")

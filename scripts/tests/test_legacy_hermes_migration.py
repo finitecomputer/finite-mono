@@ -18,6 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "scripts" / "legacy_hermes_migration.py"
 RUNBOOK = ROOT / "infra" / "runbooks" / "legacy-hermes-box1-to-lat3.md"
+SOURCE_LAUNCHER = ROOT / "scripts" / "legacy-hermes-source"
 sys.path.insert(0, str(MODULE.parent))
 SPEC = importlib.util.spec_from_file_location("legacy_hermes_migration", MODULE)
 assert SPEC is not None and SPEC.loader is not None
@@ -160,6 +161,9 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             connection.commit()
         source_home = self.root / "manifest-source-home"
         (source_home / "workspace").mkdir(parents=True)
+        (source_home / "dev/published-site").mkdir(parents=True)
+        (source_home / ".hermes").mkdir()
+        (source_home / ".brain").mkdir()
         (source_home / ".finite").mkdir()
         (source_home / "custom-data").mkdir()
         (source_home / "workspace/notes.md").write_text("workspace\n", encoding="utf-8")
@@ -169,8 +173,71 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         (source_home / "custom-data/ledger.txt").write_text(
             "unknown but durable\n", encoding="utf-8"
         )
+        (source_home / "dev/published-site/index.html").write_text(
+            "Austin site\n", encoding="utf-8"
+        )
+        (source_home / ".hermes/.env").write_text(
+            "TELEGRAM_BOT_TOKEN=synthetic-telegram-secret\n"
+            "TELEGRAM_ALLOWED_USERS=synthetic-user-id\n"
+            "SIGNAL_HTTP_URL=http://signal.invalid\n"
+            "SIGNAL_ACCOUNT=synthetic-signal-account\n"
+            "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/home/node/.hermes/google_token.json\n"
+            "CUSTOM_SAAS_TOKEN=synthetic-custom-secret\n",
+            encoding="utf-8",
+        )
+        (source_home / ".hermes/config.yaml").write_text(
+            "platforms:\n"
+            "  telegram:\n"
+            "    enabled: true\n"
+            "  custom_chat:\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+        (source_home / ".hermes/google_token.json").write_text(
+            '{"token":"synthetic-google-secret"}\n', encoding="utf-8"
+        )
+        (source_home / ".brain/agent.json").write_text(
+            '{"identity":"synthetic-brain-identity"}\n', encoding="utf-8"
+        )
         migration.inventory_source_volume(
             self.bundle / "source-volume-inventory.json", source_home
+        )
+        self.published_endpoints = self.root / "default-published-endpoints.json"
+        self.published_endpoints.write_text(
+            json.dumps(
+                {
+                    "machineId": "austin-finite",
+                    "endpoints": [
+                        {
+                            "hostname": "austin-site.finite.computer",
+                            "label": "Austin Site",
+                            "target_port": 3000,
+                            "status": "published",
+                            "run_command": "python3 -m http.server 3000",
+                            "run_cwd": "/home/node/dev/published-site",
+                            "desired_process_state": "running",
+                            "auth": {
+                                "mode": "self",
+                                "owner_email": "austin@finite.vip",
+                            },
+                            "created_at": "2026-07-01T00:00:00Z",
+                            "updated_at": "2026-08-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        migration.inventory_source_sites(
+            self.bundle / "sites.json",
+            self.published_endpoints,
+            self.bundle / "source-volume-inventory.json",
+            expected_machine_id="austin-finite",
+        )
+        migration.inventory_source_integrations(
+            self.bundle / "integrations.json",
+            source_home,
+            self.bundle / "source-volume-inventory.json",
         )
         with tarfile.open(self.payload / "source-home.tar", "w") as archive:
             archive.add(source_home, arcname=".", recursive=True)
@@ -216,6 +283,171 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             connection.commit()
         return target
 
+    def test_sites_inventory_binds_authoritative_records_to_preserved_source(
+        self,
+    ) -> None:
+        control_plane_export = self.root / "published-endpoints.json"
+        control_plane_export.write_text(
+            json.dumps(
+                {
+                    "machineId": "austin-finite",
+                    "endpoints": [
+                        {
+                            "hostname": "austin-site.finite.computer",
+                            "label": "Austin Site",
+                            "target_port": 3000,
+                            "status": "published",
+                            "run_command": "python3 -m http.server 3000",
+                            "run_cwd": "/home/node/dev/published-site",
+                            "desired_process_state": "running",
+                            "auth": {
+                                "mode": "self",
+                                "owner_email": "austin@finite.vip",
+                            },
+                            "created_at": "2026-07-01T00:00:00Z",
+                            "updated_at": "2026-08-01T00:00:00Z",
+                        },
+                        {
+                            "hostname": "reserved.finite.computer",
+                            "label": "Reserved",
+                            "status": "reserved",
+                            "desired_process_state": "external",
+                            "auth": {"mode": "self"},
+                            "created_at": "2026-07-01T00:00:00Z",
+                            "updated_at": "2026-07-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = self.bundle / "sites-roundtrip.json"
+
+        result = migration.inventory_source_sites(
+            output,
+            control_plane_export,
+            self.bundle / "source-volume-inventory.json",
+            expected_machine_id="austin-finite",
+        )
+
+        self.assertEqual(result["schema"], "finite.legacy-hermes-sites.v1")
+        self.assertEqual(result["machine_id"], "austin-finite")
+        self.assertEqual(result["endpoint_count"], 2)
+        self.assertEqual(result["source_paths_required"], 1)
+        self.assertEqual(result["source_paths_present"], 1)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(
+            result["endpoints"][0]["source"],
+            {
+                "relative_path": "dev/published-site",
+                "status": "present-in-source-snapshot",
+            },
+        )
+        self.assertEqual(
+            result["endpoints"][1]["source"],
+            {"relative_path": None, "status": "not-required"},
+        )
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+        export = json.loads(control_plane_export.read_text(encoding="utf-8"))
+        export["endpoints"][0]["run_cwd"] = "/home/node/dev/missing-site"
+        control_plane_export.write_text(json.dumps(export), encoding="utf-8")
+        (self.bundle / "sites-missing.json").unlink(missing_ok=True)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "published site source is missing"
+        ):
+            migration.inventory_source_sites(
+                self.bundle / "sites-missing.json",
+                control_plane_export,
+                self.bundle / "source-volume-inventory.json",
+                expected_machine_id="austin-finite",
+            )
+
+    def test_integrations_inventory_records_policy_without_secret_values(self) -> None:
+        output = self.bundle / "integrations-roundtrip.json"
+
+        result = migration.inventory_source_integrations(
+            output,
+            self.root / "manifest-source-home",
+            self.bundle / "source-volume-inventory.json",
+        )
+
+        self.assertEqual(result["schema"], "finite.legacy-hermes-integrations.v1")
+        self.assertEqual(result["status"], "complete")
+        integrations = {item["name"]: item for item in result["integrations"]}
+        self.assertEqual(
+            integrations["telegram"]["migration_policy"],
+            "controlled-transfer-after-rehearsal",
+        )
+        self.assertEqual(
+            integrations["signal"]["migration_policy"],
+            "controlled-transfer-after-rehearsal",
+        )
+        self.assertEqual(
+            integrations["google-workspace"]["migration_policy"],
+            "fresh-authorization-required",
+        )
+        self.assertEqual(
+            integrations["finitebrain"]["migration_policy"],
+            "fresh-authorization-required",
+        )
+        self.assertEqual(
+            integrations["custom-chat"]["migration_policy"],
+            "preserve-disabled-until-supported-setup",
+        )
+        self.assertEqual(
+            integrations["other-environment-config"]["configured_keys"],
+            ["CUSTOM_SAAS_TOKEN"],
+        )
+        rendered = json.dumps(result, sort_keys=True)
+        for secret in (
+            "synthetic-telegram-secret",
+            "synthetic-user-id",
+            "synthetic-signal-account",
+            "synthetic-custom-secret",
+            "synthetic-google-secret",
+            "synthetic-brain-identity",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_sites_and_integrations_are_available_through_the_operator_cli(
+        self,
+    ) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            sites_exit = migration.main(
+                [
+                    "source-sites-inventory",
+                    "--published-endpoints",
+                    str(self.published_endpoints),
+                    "--source-volume-inventory",
+                    str(self.bundle / "source-volume-inventory.json"),
+                    "--expected-machine-id",
+                    "austin-finite",
+                    "--output",
+                    str(self.bundle / "sites-cli.json"),
+                ]
+            )
+        self.assertEqual(sites_exit, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            integrations_exit = migration.main(
+                [
+                    "source-integrations-inventory",
+                    "--source-root",
+                    str(self.root / "manifest-source-home"),
+                    "--source-volume-inventory",
+                    str(self.bundle / "source-volume-inventory.json"),
+                    "--output",
+                    str(self.bundle / "integrations-cli.json"),
+                ]
+            )
+        self.assertEqual(integrations_exit, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+
     def test_manifest_is_versioned_hashed_and_reproducibly_verified(self) -> None:
         manifest = self.build_manifest()
 
@@ -224,6 +456,13 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertEqual(manifest["cron"]["count"], 1)
         self.assertEqual(manifest["cron"]["target_state"], "review-only-not-active")
         self.assertEqual(manifest["memory"]["fact_count"], 1)
+        self.assertEqual(manifest["sites"]["endpoint_count"], 1)
+        self.assertEqual(manifest["sites"]["source_paths_present"], 1)
+        self.assertEqual(manifest["integrations"]["integration_count"], 6)
+        self.assertEqual(
+            manifest["integrations"]["activation_policy"],
+            "inventory-only-no-secret-values-or-activation",
+        )
         self.assertEqual(
             manifest["source_inventory"]["sha256"],
             self.metadata().source_inventory_sha256,
@@ -248,6 +487,48 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         memory.write_text("Tamper memory\n", encoding="utf-8")
         with self.assertRaisesRegex(migration.MigrationError, "sha256 mismatch"):
             migration.verify_bundle(self.bundle)
+
+    def test_manifest_requires_untampered_sites_and_integrations_inventories(
+        self,
+    ) -> None:
+        self.build_manifest()
+
+        sites = self.bundle / "sites.json"
+        sites.write_text(sites.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        with self.assertRaisesRegex(migration.MigrationError, "Sites summary mismatch"):
+            migration.verify_bundle(self.bundle)
+
+        sites.unlink()
+        with self.assertRaisesRegex(
+            migration.MigrationError, "Sites inventory is missing"
+        ):
+            self.build_manifest()
+
+    def test_manifest_rechecks_site_source_evidence_against_the_volume(self) -> None:
+        sites_path = self.bundle / "sites.json"
+        sites = json.loads(sites_path.read_text(encoding="utf-8"))
+        sites["endpoints"][0]["source"]["relative_path"] = "custom-data"
+        sites_path.write_text(json.dumps(sites), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "Sites inventory source evidence does not match run_cwd",
+        ):
+            self.build_manifest()
+
+    def test_manifest_rechecks_integration_evidence_against_the_volume(self) -> None:
+        integrations_path = self.bundle / "integrations.json"
+        integrations = json.loads(integrations_path.read_text(encoding="utf-8"))
+        integrations["integrations"][0]["evidence_paths"] = [
+            ".hermes/missing-credential.json"
+        ]
+        integrations_path.write_text(json.dumps(integrations), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "Integrations inventory evidence is missing from source snapshot",
+        ):
+            self.build_manifest()
 
     def test_manifest_binds_every_inventory_entry_to_the_source_home_snapshot(
         self,
@@ -315,6 +596,8 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("legacy_hermes_source.py", runbook)
         self.assertIn("legacy_hermes_target.py", runbook)
         self.assertIn("source-volume-inventory", runbook)
+        self.assertIn("source-sites-inventory", runbook)
+        self.assertIn("source-integrations-inventory", runbook)
         self.assertIn("--source-volume-inventory-sha256", runbook)
         self.assertIn("readOnlyRootFilesystem == true", runbook)
         self.assertIn("source-home.tar", runbook)
@@ -328,6 +611,10 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertNotIn("Publish and prove the migration image", runbook)
         self.assertNotIn("legacy-hermes-source-export", runbook)
         self.assertNotIn("legacy-hermes-source-memory", runbook)
+
+        launcher = SOURCE_LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn("source-sites-inventory", launcher)
+        self.assertIn("source-integrations-inventory", launcher)
 
     def test_source_volume_inventory_preserves_unknown_safe_data_automatically(
         self,
@@ -601,6 +888,8 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         )
         self.assertEqual(receipt["sessions"]["imported"], 2)
         self.assertEqual(receipt["source_inventory"], manifest["source_inventory"])
+        self.assertEqual(receipt["sites"], manifest["sites"])
+        self.assertEqual(receipt["integrations"], manifest["integrations"])
         self.assertEqual(receipt["compatibility"], manifest["compatibility"])
         self.assertEqual(receipt["cron"]["count"], 1)
         self.assertEqual(receipt["cron"]["target_state"], "review-only-not-active")

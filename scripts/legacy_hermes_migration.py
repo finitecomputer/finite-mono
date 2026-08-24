@@ -26,6 +26,8 @@ from legacy_hermes_contract import (
 from legacy_hermes_source import (
     check_source_writers as check_source_writers,
     export_source_sessions as export_source_sessions,
+    inventory_source_integrations as inventory_source_integrations,
+    inventory_source_sites as inventory_source_sites,
     inventory_source_volume as inventory_source_volume,
     snapshot_source_memory as snapshot_source_memory,
 )
@@ -55,6 +57,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     inventory.add_argument("--source-root", type=Path, required=True)
     inventory.add_argument("--output", type=Path, required=True)
+
+    sites = subparsers.add_parser(
+        "source-sites-inventory",
+        help="bind authoritative legacy Sites records to preserved source paths",
+    )
+    sites.add_argument("--published-endpoints", type=Path, required=True)
+    sites.add_argument("--source-volume-inventory", type=Path, required=True)
+    sites.add_argument("--expected-machine-id", required=True)
+    sites.add_argument("--output", type=Path, required=True)
+
+    integrations = subparsers.add_parser(
+        "source-integrations-inventory",
+        help="record configured integrations and migration policy without secrets",
+    )
+    integrations.add_argument("--source-root", type=Path, required=True)
+    integrations.add_argument("--source-volume-inventory", type=Path, required=True)
+    integrations.add_argument("--output", type=Path, required=True)
 
     writers = subparsers.add_parser(
         "source-writer-check",
@@ -111,6 +130,19 @@ def main(argv: Iterable[str] | None = None) -> int:
                     f"source inventory has {blocked} structurally blocked entries; "
                     f"review {args.output}"
                 )
+        elif args.command == "source-sites-inventory":
+            result = inventory_source_sites(
+                args.output,
+                args.published_endpoints,
+                args.source_volume_inventory,
+                expected_machine_id=args.expected_machine_id,
+            )
+        elif args.command == "source-integrations-inventory":
+            result = inventory_source_integrations(
+                args.output,
+                args.source_root,
+                args.source_volume_inventory,
+            )
         elif args.command == "source-writer-check":
             result = check_source_writers(args.source_root, args.proc_root)
         elif args.command == "manifest":
