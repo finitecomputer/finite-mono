@@ -7,9 +7,10 @@ use finite_saas_core::{
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeLifecycleStage,
-    RuntimePlacement, RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecV1, RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeHealthReportAck,
+    RuntimeHealthReportRequest, RuntimeLifecycleStage, RuntimePlacement, RuntimeResourceClass,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -28,6 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod apple_container;
+pub mod health_reports;
 mod kata;
 pub mod lifecycle_probe;
 pub mod phala;
@@ -35,6 +37,7 @@ mod phala_inventory;
 pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
+pub use health_reports::HealthReportConfig;
 pub use kata::{
     KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
 };
@@ -415,6 +418,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
+    health_reports: Option<HealthReportConfig>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -444,7 +448,16 @@ where
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
+            health_reports: None,
         })
+    }
+
+    /// Enable the standing readiness ferry: a throttled per-runtime poll of
+    /// the guest `/contact`, reported to Core. Best-effort telemetry; it never
+    /// gates or slows lifecycle work.
+    pub fn with_health_reports(mut self, config: Option<HealthReportConfig>) -> Self {
+        self.health_reports = config;
+        self
     }
 
     pub fn with_agent_identity_authority(
@@ -491,6 +504,12 @@ where
 
     pub fn run_once(&mut self) -> Result<RunOnceOutcome, RunnerError> {
         self.launcher.validate_ready()?;
+        // Best-effort, throttled per runtime: standing health telemetry must
+        // never fail or slow the lease cycle beyond its own bounded HTTP
+        // timeouts.
+        if let Some(config) = self.health_reports.clone() {
+            health_reports::forward_due_reports(&mut self.queue, &config);
+        }
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
@@ -588,48 +607,67 @@ where
                     },
                 );
                 let launch_result = match launch_result {
-                    Ok(_) => match if lease.request.relocation.is_some() {
+                    Ok(_) => match if let Some(relocation) = lease.request.relocation.as_ref() {
                         // The relocation launch already proved that the
                         // restored state exposes the existing Agent
                         // Principal. Rebinding it after Core switches the
                         // Runtime host would add a fallible post-commit
-                        // step to the relocation boundary.
-                        Ok(())
+                        // step to the relocation boundary. The retained
+                        // principal still pins standing health reports.
+                        Ok(Some(relocation.v1().expected_agent_npub.clone()))
                     } else {
                         self.bind_agent_identity(&lease, &facts)
                     } {
-                        Ok(()) => self.queue.complete_agent_creation(
-                            &request_id,
-                            CompleteAgentCreationRequestInput {
-                                request_id: request_id.clone(),
-                                runner_id: self.runner_id.clone(),
-                                lease_token: lease_token.clone(),
-                                source_host_id: facts.source_host_id.clone(),
-                                source_machine_id: facts.source_machine_id.clone(),
-                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                state_schema_version: facts.state_schema_version.clone(),
-                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                contact_endpoint: facts.contact_endpoint.clone(),
-                                display_name: facts.display_name.clone(),
-                                hostname: facts.hostname.clone(),
-                                runtime_host: facts.runtime_host.clone(),
-                                runtime_status: Some(RuntimeSummaryStatus::Online),
-                                active_inference_profile: facts.active_inference_profile.clone(),
-                                hermes_available: facts.hermes_available,
-                                published_app_urls: facts.published_app_urls.clone(),
-                                runtime_capabilities: Some(runtime_capabilities),
-                                now: None,
-                            },
-                        ),
+                        Ok(launch_verified_npub) => self
+                            .queue
+                            .complete_agent_creation(
+                                &request_id,
+                                CompleteAgentCreationRequestInput {
+                                    request_id: request_id.clone(),
+                                    runner_id: self.runner_id.clone(),
+                                    lease_token: lease_token.clone(),
+                                    source_host_id: facts.source_host_id.clone(),
+                                    source_machine_id: facts.source_machine_id.clone(),
+                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                    state_schema_version: facts.state_schema_version.clone(),
+                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                    contact_endpoint: facts.contact_endpoint.clone(),
+                                    display_name: facts.display_name.clone(),
+                                    hostname: facts.hostname.clone(),
+                                    runtime_host: facts.runtime_host.clone(),
+                                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                                    active_inference_profile: facts
+                                        .active_inference_profile
+                                        .clone(),
+                                    hermes_available: facts.hermes_available,
+                                    published_app_urls: facts.published_app_urls.clone(),
+                                    runtime_capabilities: Some(runtime_capabilities),
+                                    now: None,
+                                },
+                            )
+                            .map(|completed| (completed, launch_verified_npub)),
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok(completed) => Ok(RunOnceOutcome::Launched {
-                        request_id,
-                        runtime_id: completed.request.agent_runtime_id,
-                    }),
+                    Ok((completed, launch_verified_npub)) => {
+                        if let Some(config) = &self.health_reports
+                            && let Some(runtime_id) = completed.request.agent_runtime_id.as_deref()
+                        {
+                            health_reports::record_target(
+                                config,
+                                runtime_id,
+                                &facts.source_machine_id,
+                                facts.contact_endpoint.as_deref(),
+                                launch_verified_npub.as_deref(),
+                            );
+                        }
+                        Ok(RunOnceOutcome::Launched {
+                            request_id,
+                            runtime_id: completed.request.agent_runtime_id,
+                        })
+                    }
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -679,13 +717,17 @@ where
         }
     }
 
+    /// Verify and bind the launched runtime's Agent Principal, returning the
+    /// verified npub so callers can pin standing health reports to it.
+    /// `Ok(None)` when this managed agent has no email to bind (nothing was
+    /// verified).
     fn bind_agent_identity(
         &self,
         lease: &AgentCreationLease,
         facts: &RuntimeLaunchFacts,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<Option<String>, RunnerError> {
         let Some(agent_email) = lease.project.agent_email.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let config = self.agent_identity_authority.as_ref().ok_or_else(|| {
             RunnerError::AgentIdentityBinding(
@@ -749,7 +791,7 @@ where
                 "Identity Authority returned a mismatched binding".to_string(),
             ));
         }
-        Ok(())
+        Ok(Some(agent_npub.to_string()))
     }
 
     fn run_runtime_control(
@@ -908,6 +950,35 @@ where
                         now: None,
                     },
                 )?;
+                // Keep the standing-health registry aligned with the lifecycle
+                // outcome: a deliberately offline runtime is deregistered, and
+                // an upgrade moves the entry to the new contact endpoint
+                // (restart and recover preserve it — Kata asserts the
+                // persisted endpoint is unchanged and Phala restarts the same
+                // CVM).
+                if let Some(config) = &self.health_reports {
+                    match kind {
+                        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
+                            health_reports::remove_target(config, &completed.agent_runtime_id);
+                        }
+                        RuntimeControlKind::Upgrade => {
+                            if let Some(facts) = upgrade_facts.as_ref()
+                                && let Some(contact_endpoint) = facts
+                                    .published_app_urls
+                                    .iter()
+                                    .find(|url| url.ends_with("/contact"))
+                            {
+                                health_reports::refresh_target_endpoint(
+                                    config,
+                                    &completed.agent_runtime_id,
+                                    contact_endpoint,
+                                );
+                            }
+                        }
+                        RuntimeControlKind::Restart
+                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {}
+                    }
+                }
                 Ok(runtime_control_success_outcome(
                     kind,
                     request_id,
@@ -1124,6 +1195,13 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: FailAgentCreationRequestInput,
     ) -> Result<AgentCreationRequest, RunnerError>;
+
+    /// Forward one runtime's standing health report to Core. Outbound-only
+    /// telemetry; failures lose the report, never lifecycle work.
+    fn report_runtime_health(
+        &mut self,
+        input: RuntimeHealthReportRequest,
+    ) -> Result<RuntimeHealthReportAck, RunnerError>;
 }
 
 pub trait ProviderOperationJournal {
@@ -2208,6 +2286,13 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             &format!("/api/core/v1/agent-creation-requests/{}/fail", request_id),
             &input,
         )
+    }
+
+    fn report_runtime_health(
+        &mut self,
+        input: RuntimeHealthReportRequest,
+    ) -> Result<RuntimeHealthReportAck, RunnerError> {
+        self.post_json("/api/core/v1/runtime-health-reports", &input)
     }
 }
 
@@ -4534,6 +4619,82 @@ mod tests {
     }
 
     #[test]
+    fn run_once_registers_a_standing_health_report_target_after_launch() {
+        let registry = tempfile::tempdir().unwrap();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        }));
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        // The email-less sample agent verifies no principal at launch, so the
+        // entry pins on the first contact answer (documented legacy fallback).
+        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(registry.path().join("runtime-from-core.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.contact_endpoint, "http://oslo-host-1/contact");
+        assert_eq!(entry.source_machine_id, "finite-agent_123");
+        assert_eq!(entry.agent_npub, None);
+    }
+
+    #[test]
+    fn run_once_deregisters_the_health_target_when_stop_completes() {
+        let registry = tempfile::tempdir().unwrap();
+        let config = HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        };
+        health_reports::record_target(
+            &config,
+            "runtime_123",
+            "oslo-agent-001",
+            // Nothing listens here; the pre-stop poll reports unreachable and
+            // the completion still deregisters the target.
+            Some("http://127.0.0.1:9/contact"),
+            None,
+        );
+        assert!(registry.path().join("runtime_123.json").exists());
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(config));
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeStopped {
+                request_id: runtime_control.request.id.clone(),
+                runtime_id: runtime_control.runtime.id.clone(),
+            }
+        );
+        assert!(
+            !registry.path().join("runtime_123.json").exists(),
+            "a deliberately offline runtime must not be polled forever"
+        );
+    }
+
+    #[test]
     fn run_once_binds_canonical_agent_email_before_completion() {
         use std::sync::mpsc;
 
@@ -6012,6 +6173,7 @@ mod tests {
         provider_operation_transitions: Vec<RecordProviderOperationTransitionRequest>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
+        health_reports: Vec<RuntimeHealthReportRequest>,
     }
 
     impl FakeQueue {
@@ -6033,6 +6195,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -6054,6 +6217,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -6075,6 +6239,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -6206,6 +6371,18 @@ mod tests {
         ) -> Result<AgentCreationRequest, RunnerError> {
             self.failed.push(input);
             Ok(sample_lease("agent_request_123").request)
+        }
+
+        fn report_runtime_health(
+            &mut self,
+            input: RuntimeHealthReportRequest,
+        ) -> Result<RuntimeHealthReportAck, RunnerError> {
+            let ack = RuntimeHealthReportAck {
+                agent_runtime_id: input.agent_runtime_id.clone(),
+                recorded_at: "2026-08-24T12:00:00Z".to_string(),
+            };
+            self.health_reports.push(input);
+            Ok(ack)
         }
     }
 
