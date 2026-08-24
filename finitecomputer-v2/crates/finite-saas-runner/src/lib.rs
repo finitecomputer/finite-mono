@@ -46,6 +46,7 @@ pub use phala::{PhalaConfig, PhalaLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
+const IDENTITY_BINDING_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
@@ -344,12 +345,54 @@ pub enum RunOnceOutcome {
     },
 }
 
-fn identity_transport_error(error: ureq::Error) -> RunnerError {
+fn identity_request_error(context: &str, error: ureq::Error) -> RunnerError {
     let message = match error {
-        ureq::Error::Status(status, _) => format!("Identity Authority returned HTTP {status}"),
-        ureq::Error::Transport(error) => format!("Identity Authority transport error: {error}"),
+        ureq::Error::Status(status, _) => format!("{context} returned HTTP {status}"),
+        ureq::Error::Transport(error) => format!("{context} transport error: {error}"),
     };
     RunnerError::AgentIdentityBinding(message)
+}
+
+fn is_transient_identity_request_error(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Status(status, _) => (500..=599).contains(status),
+        ureq::Error::Transport(_) => true,
+    }
+}
+
+fn retry_identity_request<F>(
+    timeout: Duration,
+    context: &str,
+    mut request: F,
+) -> Result<ureq::Response, RunnerError>
+where
+    F: FnMut(&ureq::Agent) -> Result<ureq::Response, ureq::Error>,
+{
+    let started_at = Instant::now();
+    loop {
+        let elapsed = started_at.elapsed();
+        let remaining = timeout.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return Err(RunnerError::AgentIdentityBinding(format!(
+                "{context} did not become available within {}s",
+                timeout.as_secs()
+            )));
+        }
+        let agent = ureq::AgentBuilder::new().timeout(remaining).build();
+        match request(&agent) {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if is_transient_identity_request_error(&error)
+                    && started_at.elapsed() < timeout =>
+            {
+                thread::sleep(
+                    IDENTITY_BINDING_RETRY_INTERVAL
+                        .min(timeout.saturating_sub(started_at.elapsed())),
+                );
+            }
+            Err(error) => return Err(identity_request_error(context, error)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -652,12 +695,13 @@ where
                     "runtime did not publish a valid contact endpoint".to_string(),
                 )
             })?;
-        let agent = ureq::AgentBuilder::new().timeout(config.timeout).build();
-        let contact: serde_json::Value = agent
-            .get(contact_endpoint)
-            .set("Accept", "application/json")
-            .call()
-            .map_err(identity_transport_error)?
+        let contact: serde_json::Value =
+            retry_identity_request(config.timeout, "Runtime contact endpoint", |agent| {
+                agent
+                    .get(contact_endpoint)
+                    .set("Accept", "application/json")
+                    .call()
+            })?
             .into_json()
             .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
         let agent_npub = contact
@@ -670,18 +714,20 @@ where
                     "runtime contact document has no Agent Principal".to_string(),
                 )
             })?;
-        let response: serde_json::Value = agent
-            .post(&format!(
-                "{}/api/v1/operator/agent-email-bindings",
-                config.base_url
-            ))
-            .set("Accept", "application/json")
-            .set("X-Finite-Operator-Token", &config.operator_token)
-            .send_json(serde_json::json!({
-                "email": agent_email,
-                "agent_npub": agent_npub,
-            }))
-            .map_err(identity_transport_error)?
+        let binding_endpoint = format!("{}/api/v1/operator/agent-email-bindings", config.base_url);
+        // The Authority guarantees that an exact retry is idempotent and never
+        // reassigns an Agent Email to a different principal.
+        let response: serde_json::Value =
+            retry_identity_request(config.timeout, "Identity Authority", |agent| {
+                agent
+                    .post(&binding_endpoint)
+                    .set("Accept", "application/json")
+                    .set("X-Finite-Operator-Token", &config.operator_token)
+                    .send_json(serde_json::json!({
+                        "email": agent_email,
+                        "agent_npub": agent_npub,
+                    }))
+            })?
             .into_json()
             .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
         if response.get("email").and_then(serde_json::Value::as_str) != Some(agent_email)
@@ -4499,6 +4545,193 @@ mod tests {
         assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
         assert_eq!(runner.queue.completed.len(), 1);
         assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_retries_transient_runtime_contact_failure_before_identity_binding() {
+        use std::sync::mpsc;
+
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut unavailable_contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut unavailable_contact);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut unavailable_contact,
+                503,
+                &serde_json::json!({ "ready": false }).to_string(),
+            );
+
+            let (mut ready_contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut ready_contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut ready_contact, 200, &body);
+
+            let (mut identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            sent.send(request).unwrap();
+            let body = serde_json::json!({
+                "email": "oslo-agent@finite.vip",
+                "agent_npub": AGENT_NPUB,
+                "nip05": "oslo-agent@finite.vip",
+            })
+            .to_string();
+            write_http_json(&mut identity, 200, &body);
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.completed.len(), 1);
+        assert!(runner.queue.failed.is_empty());
+        assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_retries_transient_identity_authority_failure_before_completion() {
+        use std::sync::mpsc;
+
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut contact, 200, &body);
+
+            let (mut unavailable_identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut unavailable_identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            write_http_json(
+                &mut unavailable_identity,
+                503,
+                &serde_json::json!({ "error": "temporarily unavailable" }).to_string(),
+            );
+
+            let (mut ready_identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut ready_identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            sent.send(request).unwrap();
+            let body = serde_json::json!({
+                "email": "oslo-agent@finite.vip",
+                "agent_npub": AGENT_NPUB,
+                "nip05": "oslo-agent@finite.vip",
+            })
+            .to_string();
+            write_http_json(&mut ready_identity, 200, &body);
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.completed.len(), 1);
+        assert!(runner.queue.failed.is_empty());
+        assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_does_not_retry_identity_authority_client_errors() {
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut contact, 200, &body);
+
+            let (mut identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            write_http_json(
+                &mut identity,
+                409,
+                &serde_json::json!({ "error": "binding conflict" }).to_string(),
+            );
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::LaunchFailed {
+                request_id: "agent_request_123".to_string(),
+                failure_message:
+                    "Agent Identity binding failed: Identity Authority returned HTTP 409"
+                        .to_string(),
+            }
+        );
+        assert!(runner.queue.completed.is_empty());
+        assert_eq!(runner.queue.failed.len(), 1);
         server.join().unwrap();
     }
 
