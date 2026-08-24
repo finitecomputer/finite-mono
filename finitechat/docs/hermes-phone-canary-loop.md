@@ -213,69 +213,53 @@ preflight because it starts `finitechat hermes serve`, runs
 throwaway client. It is still not the phone canary because it uses a CLI user
 and local loopback server by default.
 
-## Layer 2: Remote Docker Runtime
+## Layer 2: Docker Runtime
 
-Purpose: prove the real Linux runtime shape before provider deployment. CI image
-proof now belongs to the mono Depot workflows. This layer remains a manual
-remote-Docker canary for a deliberately selected x86 Docker host.
+Purpose: prove the real Linux runtime shape before provider deployment.
+
+There is exactly one Agent Runtime image definition:
+`finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile`, built by
+`finitecomputer-v2/scripts/build_runtime_image.py` (engines: `docker`,
+`depot`, `apple-container`). The former `containers/agent/Dockerfile` test
+fixture, `scripts/hermes-sidecar-docker-smoke.sh`, and
+`scripts/hermes-remote-docker-canary.py` were deleted in ownership audit O12:
+they proved an image nobody shipped and depended on the removed invite/PIN
+admission commands.
+
+Layer 2 proof is therefore the canonical-image Docker smoke:
+
+```sh
+../finitecomputer-v2/scripts/build_runtime_image.py \
+  --engine docker --image-ref finite-agent-runtime:local
+scripts/hermes-durable-home-docker-smoke.py --image finite-agent-runtime:local
+```
+
+In CI the same pair runs in `.github/workflows/hermes-runtime-smoke.yml`
+(build once with Depot, then smoke the loaded image), and the publication
+workflow `.github/workflows/runtime-image.yml` runs the durable smoke against
+the exact image ID it pushes. A pre-built tag from that workflow
+(`ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...`) can be passed to
+`--image` instead of building locally.
 
 Required preflight:
 
 1. The local phone report for the source branch is green.
-2. The Docker image is built from `containers/agent/Dockerfile`.
-3. The image starts the same entrypoint intended for hosted providers:
-   `/opt/agent-entrypoint.sh` -> `/opt/run_hermes_gateway.sh`.
-4. The runtime reports `FINITE_AGENT_RUNTIME real_hermes_gateway=true`.
-5. The container health endpoint reports the agent npub.
-6. The Docker smoke proves gateway admission before backup and after restore.
+2. The image is the canonical runtime image (built as above or a published
+   `agent-runtime` digest), starting `/opt/agent-entrypoint.sh` ->
+   `finite-agentd serve`.
+3. The container health endpoint reports the agent npub.
+4. The durable smoke proves Welcome-first room admission and a real model
+   reply before and after a compute restart on the same durable volume.
 
-Lower-level restore smoke:
+This remains a container hardening gate, not Agent Runtime Recovery
+Readiness: the application-consistent snapshot barrier, independently
+recoverable key authority, and Core-owned service-consistent empty-target
+restore stay unproved.
 
-```sh
-scripts/hermes-sidecar-docker-smoke.sh
-```
-
-Human-handoff remote Docker canary:
-
-```sh
-scripts/hermes-remote-docker-canary.py \
-  --docker-host "$FINITECHAT_REMOTE_DOCKER_HOST" \
-  --keep-running
-```
-
-The script no longer defaults to `finite-lat-2`; pass an explicit
-`--docker-host` or set `FINITECHAT_REMOTE_DOCKER_HOST`. It builds the runtime
-image on that remote Docker daemon, starts the container against
-`https://chat.finite.computer`, proves invite admission and a real Hermes
-model reply, stops the container so the entrypoint writes a restic backup,
-wipes the full `/data` recovery-root volume, restores into a fresh volume,
-proves a `/data/workspace` probe survived, proves the same user can still chat,
-proves a fresh user can still join, and only then prints a human invite URL.
-The restored container is left running only with
-`--keep-running`; otherwise the script cleans up the remote container and
-volumes after writing the report.
-
-This remains a container hardening canary, not Agent Runtime Recovery
-Readiness. Its reports explicitly keep the application-consistent snapshot
-barrier, independently recoverable key authority, and Core-owned
-service-consistent empty-target restore unproved.
-
-For a remote Docker canary, the wrapper should produce the same report shape as
-the local phone canary plus image metadata:
-
-- image id and digest;
-- runtime env names used;
-- server URL used by the agent;
-- restic backend, repository, tag, and snapshot id when restore is enabled;
-- recovery scope rooted at `/data`, including the workspace probe, plus the
-  three explicit unproved Recovery Set properties above;
-- before/after admission probe results;
-- optional human phone chat event ids if Paul tests against this remote agent.
-
-Promotion rule: a remote Docker run can hand an invite to Paul only if the
-same container has already passed the admission probe and the report includes
-the exact image id/digest. If the image is rebuilt after the probe, the probe
-must be rerun.
+Promotion rule: a Docker run can hand an invite to a human only if the same
+container has already passed the admission probe and the report includes the
+exact image id/digest. If the image is rebuilt after the probe, the probe must
+be rerun.
 
 ## Layer 3: Hosted Runtime Provider
 
