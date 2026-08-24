@@ -168,12 +168,16 @@ ssh lat3 "echo '$MIGRATION_TOOL_SHA256  $MIGRATION_TOOL_DIR/tool.tar' \
     | sudo sha256sum --check && \
   sudo tar -C '$MIGRATION_TOOL_DIR' --strip-components=1 -xpf \
     '$MIGRATION_TOOL_DIR/tool.tar' && \
-  sudo chmod 0500 '$MIGRATION_TOOL_DIR'/legacy-hermes-source \
-    '$MIGRATION_TOOL_DIR'/legacy_hermes_*.py"
+  sudo chmod 0500 \
+    '$MIGRATION_TOOL_DIR/legacy-hermes-source' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_migration.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_contract.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_source.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_target.py'"
 
 sudo nerdctl --namespace finite run --rm --network none \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py --help
@@ -247,8 +251,12 @@ ssh box1 "echo '$MIGRATION_TOOL_SHA256  <BOX1_STAGE>/tool.tar' \
   sudo install -d -m 0700 '<BOX1_STAGE>/tool' && \
   sudo tar -C '<BOX1_STAGE>/tool' --strip-components=1 -xpf \
     '<BOX1_STAGE>/tool.tar' && \
-  sudo chmod 0500 '<BOX1_STAGE>/tool'/legacy-hermes-source \
-    '<BOX1_STAGE>/tool'/legacy_hermes_*.py"
+  sudo chmod 0500 \
+    '<BOX1_STAGE>/tool/legacy-hermes-source' \
+    '<BOX1_STAGE>/tool/legacy_hermes_migration.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_contract.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_source.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_target.py'"
 ```
 
 Immediately before export, require the local source tag to resolve to the
@@ -269,6 +277,11 @@ content hashes; it never embeds file contents. Known compatible paths are
 `quarantine`. Known generated state is `rebuild`. Every other safe path
 defaults to `preserve`. The command exits nonzero only for structurally unsafe
 or unreadable entries.
+
+External symlinks below known generated or quarantined roots are recorded as
+inert metadata and keep those dispositions. They are not followed or copied
+into active target state. An external symlink in an active or otherwise
+unclassified path remains structurally blocked.
 
 ```sh
 SOURCE_IMAGE_REFERENCE='docker.io/library/fc-agent-runtime:main'
@@ -394,8 +407,9 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sites.json integrations.json" \
 Do not add an exclusion to the complete source snapshot. `--hard-dereference`
 stores hard-linked file content independently; it does not follow symlinks.
 Never add `--dereference`. If the inventory or manifest finds a special file,
-unreadable entry, escaping symlink, missing path, or digest mismatch, stop and
-fix the fleet policy or source condition in review. Credentials, old identity,
+unreadable entry, an escaping link outside known generated or quarantined
+state, a missing path, or a digest mismatch, stop and fix the fleet policy or
+source condition in review. Credentials, old identity,
 cron output, raw databases, venvs, logs, and caches are present only inside the
 root-only `source-home.tar`; they never receive active target mappings.
 
@@ -404,9 +418,9 @@ existing target image:
 
 ```sh
 sudo nerdctl --namespace finite run --rm --network none \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:rw' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py manifest \
@@ -424,9 +438,9 @@ sudo nerdctl --namespace finite run --rm --network none \
     "$SOURCE_VOLUME_INVENTORY_SHA256"
 
 sudo nerdctl --namespace finite run --rm --network none --read-only \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:ro' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration,ro' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py verify --bundle /migration
@@ -479,10 +493,10 @@ read-only; only the exact target `/data` is writable:
 
 ```sh
 sudo nerdctl --namespace finite run --rm --network none --read-only \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:ro' \
-  --mount 'type=bind,src=<TARGET_DATA>,dst=/data,options=rbind:rw' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration,ro' \
+  --mount 'type=bind,src=<TARGET_DATA>,dst=/data' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py install \

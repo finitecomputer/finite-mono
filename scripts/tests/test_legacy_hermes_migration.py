@@ -605,7 +605,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("zero structurally blocked entries", runbook)
         self.assertNotIn("Austin explicitly chooses", runbook)
         self.assertNotIn("owner decisions", runbook)
-        self.assertIn("dst=/opt/migration,options=rbind:ro", runbook)
+        self.assertIn("dst=/opt/migration,ro", runbook)
         self.assertIn("TARGET_RUNTIME_IMAGE", runbook)
         self.assertNotIn("MIGRATION_IMAGE", runbook)
         self.assertNotIn("Publish and prove the migration image", runbook)
@@ -719,6 +719,36 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 1)
         self.assertIn("structurally blocked entries", stderr.getvalue())
+
+    def test_source_volume_inventory_rebuilds_generated_external_symlinks(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        generated_links = {
+            ".config/pulse/austin-finite-0-runtime": "/tmp/pulse-runtime",
+            ".hermes/venv/bin/python": "/nix/store/legacy-python/bin/python",
+            ".local/uv-tools/ruff/bin/python": "/nix/store/legacy-ruff/bin/python",
+            "dev/reap-video/venv/bin/python": "/nix/store/legacy-python/bin/python",
+        }
+        for relative, target in generated_links.items():
+            candidate = source / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.symlink_to(target)
+
+        result = migration.inventory_source_volume(
+            self.root / "generated-links-inventory.json", source
+        )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["classifications"]["blocked"]["entries"], 0)
+        self.assertEqual(result["classifications"]["rebuild"]["symlinks"], 4)
+        dispositions = {
+            entry["path"]: entry["disposition"] for entry in result["entries"]
+        }
+        self.assertEqual(
+            {path: dispositions[path] for path in generated_links},
+            {path: "rebuild" for path in generated_links},
+        )
 
     def test_source_volume_inventory_fails_cleanly_on_unreadable_data(self) -> None:
         source = self.root / "source-home"

@@ -62,6 +62,8 @@ SOURCE_REBUILD_ROOTS = (
     Path(".bun"),
     Path(".cache"),
     Path(".cargo"),
+    Path(".config/pulse"),
+    Path(".hermes/venv"),
     Path(".local"),
     Path(".npm"),
     Path(".npm-global"),
@@ -370,10 +372,12 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
                 ) from exc
             relative = candidate.relative_to(resolved_source)
             classification = _source_inventory_classification(relative)
-            if not (candidate.is_symlink() or candidate.is_file()):
-                classification = "blocked"
-            elif candidate.is_symlink() and not _source_symlink_is_contained(
-                candidate, resolved_source, os.readlink(candidate)
+            if not (candidate.is_symlink() or candidate.is_file()) or (
+                candidate.is_symlink()
+                and not _source_symlink_is_contained(
+                    candidate, resolved_source, os.readlink(candidate)
+                )
+                and classification not in {"quarantine", "rebuild"}
             ):
                 classification = "blocked"
             summary = classifications[classification]
