@@ -13,13 +13,40 @@ from typing import Any
 
 from legacy_hermes_contract import (
     SOURCE_EXPORT_BATCH_SIZE,
+    SOURCE_INVENTORY_SCHEMA,
     SUPPORTED_SOURCE_HERMES_VERSION,
     MigrationError,
     _copy_sqlite,
     _fsync_directory,
     _memory_database_fact_count,
     _sha256,
+    _write_private_json,
 )
+
+SOURCE_BUNDLE_ROOTS = (
+    Path(".hermes/memories"),
+    Path(".hermes/skills"),
+    Path(".hermes/scripts"),
+    Path(".hermes/cron/jobs.json"),
+    Path("workspace"),
+    Path("dev"),
+    Path("uploads"),
+)
+SOURCE_CONVERTED_FILES = (
+    Path(".hermes/state.db"),
+    Path(".hermes/state.db-wal"),
+    Path(".hermes/state.db-shm"),
+    Path(".hermes/memory_store.db"),
+    Path(".hermes/memory_store.db-wal"),
+    Path(".hermes/memory_store.db-shm"),
+)
+SOURCE_ARCHIVE_ONLY_ROOTS = (
+    Path(".brain"),
+    Path(".finite"),
+    Path(".hermes/audio_cache"),
+    Path(".hermes/image_cache"),
+)
+SOURCE_REBUILD_ROOTS = (Path("dev/reap-video/venv"),)
 
 
 def _require_source_hermes_version() -> None:
@@ -157,6 +184,142 @@ def snapshot_source_memory(output: Path, source_database: Path) -> dict[str, Any
         "bytes": output.stat().st_size,
         "sha256": _sha256(output),
     }
+
+
+def _is_below(relative: Path, root: Path) -> bool:
+    return relative == root or relative.is_relative_to(root)
+
+
+def _source_inventory_classification(relative: Path) -> str:
+    if any(_is_below(relative, root) for root in SOURCE_REBUILD_ROOTS):
+        return "rebuild"
+    if any(_is_below(relative, root) for root in SOURCE_BUNDLE_ROOTS):
+        return "bundle"
+    if relative in SOURCE_CONVERTED_FILES:
+        return "converted"
+    if any(_is_below(relative, root) for root in SOURCE_ARCHIVE_ONLY_ROOTS):
+        return "archive-only"
+    return "unresolved"
+
+
+def _unresolved_inventory_root(relative: Path) -> Path:
+    parts = relative.parts
+    if parts and parts[0] == ".hermes" and len(parts) > 1:
+        return Path(*parts[:2])
+    return Path(parts[0])
+
+
+def _empty_inventory_summary() -> dict[str, int]:
+    return {
+        "entries": 0,
+        "regular_files": 0,
+        "bytes": 0,
+        "symlinks": 0,
+        "special_files": 0,
+    }
+
+
+def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
+    """Inventory every non-directory entry on the legacy /home/node volume."""
+    output = Path(output)
+    source_root = Path(source_root)
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise MigrationError(f"source root must be a real directory: {source_root}")
+    if output.exists() or output.is_symlink():
+        raise MigrationError(f"refusing to overwrite source inventory: {output}")
+    resolved_source = source_root.resolve()
+    try:
+        output.parent.resolve().relative_to(resolved_source)
+    except ValueError:
+        pass
+    else:
+        raise MigrationError(
+            "source inventory output must be outside the source volume"
+        )
+
+    classifications = {
+        name: _empty_inventory_summary()
+        for name in ("bundle", "converted", "archive-only", "rebuild", "unresolved")
+    }
+    unresolved: dict[str, dict[str, int]] = {}
+    directory_count = 0
+
+    def on_walk_error(error: OSError) -> None:
+        raise MigrationError(f"could not inventory source volume: {error}") from error
+
+    for directory, dirnames, filenames in os.walk(
+        resolved_source,
+        topdown=True,
+        followlinks=False,
+        onerror=on_walk_error,
+    ):
+        directory_path = Path(directory)
+        dirnames.sort()
+        filenames.sort()
+        directory_count += sum(
+            not (directory_path / name).is_symlink() for name in dirnames
+        )
+        directory_symlinks = [
+            directory_path / name
+            for name in dirnames
+            if (directory_path / name).is_symlink()
+        ]
+        dirnames[:] = [
+            name for name in dirnames if not (directory_path / name).is_symlink()
+        ]
+        for candidate in directory_symlinks + [
+            directory_path / name for name in filenames
+        ]:
+            try:
+                info = candidate.lstat()
+            except OSError as exc:
+                raise MigrationError(
+                    f"could not inspect source entry: {candidate}"
+                ) from exc
+            relative = candidate.relative_to(resolved_source)
+            classification = _source_inventory_classification(relative)
+            if not (candidate.is_symlink() or candidate.is_file()):
+                classification = "unresolved"
+            summary = classifications[classification]
+            summary["entries"] += 1
+            if candidate.is_symlink():
+                summary["symlinks"] += 1
+            elif candidate.is_file():
+                summary["regular_files"] += 1
+                summary["bytes"] += info.st_size
+            else:
+                summary["special_files"] += 1
+            if classification == "unresolved":
+                root = _unresolved_inventory_root(relative).as_posix()
+                root_summary = unresolved.setdefault(root, _empty_inventory_summary())
+                root_summary["entries"] += 1
+                if candidate.is_symlink():
+                    root_summary["symlinks"] += 1
+                elif candidate.is_file():
+                    root_summary["regular_files"] += 1
+                    root_summary["bytes"] += info.st_size
+                else:
+                    root_summary["special_files"] += 1
+
+    unresolved_roots = [
+        {"path": path, **summary} for path, summary in sorted(unresolved.items())
+    ]
+    result = {
+        "schema": SOURCE_INVENTORY_SCHEMA,
+        "source_root": str(resolved_source),
+        "status": "complete" if not unresolved_roots else "review-required",
+        "policy": {
+            "bundle": [path.as_posix() for path in SOURCE_BUNDLE_ROOTS],
+            "converted": [path.as_posix() for path in SOURCE_CONVERTED_FILES],
+            "archive-only": [path.as_posix() for path in SOURCE_ARCHIVE_ONLY_ROOTS],
+            "rebuild": [path.as_posix() for path in SOURCE_REBUILD_ROOTS],
+        },
+        "directories": directory_count,
+        "classifications": classifications,
+        "unresolved_roots": unresolved_roots,
+    }
+    _write_private_json(output, result)
+    return result
 
 
 def check_source_writers(

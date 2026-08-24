@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCHEMA = "finite.legacy-hermes-migration.v1"
+SOURCE_INVENTORY_SCHEMA = "finite.legacy-hermes-source-inventory.v1"
 SUPPORTED_SOURCE_HERMES_VERSION = "0.14.0"
 SUPPORTED_TARGET_HERMES_VERSION = "0.20.0"
 SOURCE_EXPORT_BATCH_SIZE = 1_000
@@ -62,6 +63,7 @@ class SourceMetadata:
     image_reference: str
     image_manifest_digest: str
     container_image_id: str
+    source_inventory_sha256: str
 
     def validate(self) -> None:
         for field, value in asdict(self).items():
@@ -77,6 +79,7 @@ class SourceMetadata:
                 int(digest.removeprefix("sha256:"), 16)
             except ValueError as exc:
                 raise MigrationError(f"source {field} is not hexadecimal") from exc
+        _validate_sha256(self.source_inventory_sha256, "source_inventory_sha256")
         if self.hermes_version != SUPPORTED_SOURCE_HERMES_VERSION:
             raise MigrationError(
                 "source Hermes version must be "
@@ -454,11 +457,49 @@ def _memory_summary(payload: Path) -> dict[str, Any]:
     }
 
 
+def _source_inventory_summary(bundle: Path) -> dict[str, Any]:
+    inventory_path = bundle / "source-volume-inventory.json"
+    if not inventory_path.is_file() or inventory_path.is_symlink():
+        raise MigrationError(
+            "bundle source-volume-inventory.json is missing or not a regular file"
+        )
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"could not read source volume inventory: {exc}") from exc
+    if (
+        not isinstance(inventory, dict)
+        or inventory.get("schema") != SOURCE_INVENTORY_SCHEMA
+    ):
+        raise MigrationError(
+            f"source volume inventory schema must be {SOURCE_INVENTORY_SCHEMA}"
+        )
+    classifications = inventory.get("classifications")
+    if not isinstance(classifications, dict):
+        raise MigrationError("source volume inventory classifications are missing")
+    unresolved = classifications.get("unresolved")
+    if (
+        inventory.get("status") != "complete"
+        or not isinstance(unresolved, dict)
+        or unresolved.get("entries") != 0
+        or inventory.get("unresolved_roots") != []
+    ):
+        raise MigrationError("source volume inventory still has unresolved entries")
+    return {
+        "schema": SOURCE_INVENTORY_SCHEMA,
+        "sha256": _sha256(inventory_path),
+        "classifications": classifications,
+    }
+
+
 def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
     """Hash an already-staged allow-listed payload and write manifest.json."""
     bundle = Path(bundle)
     payload = bundle / "payload"
     source.validate()
+    source_inventory = _source_inventory_summary(bundle)
+    if source_inventory["sha256"] != source.source_inventory_sha256:
+        raise MigrationError("source volume inventory sha256 mismatch")
     files = _walk_payload_entries(payload)
     session_path = payload / "sessions.jsonl"
     session_index, message_count = _session_index(session_path)
@@ -492,6 +533,7 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "source": asdict(source),
+        "source_inventory": source_inventory,
         "files": records,
         "sessions": {
             "count": len(session_index),
@@ -531,6 +573,11 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     except (KeyError, TypeError) as exc:
         raise MigrationError("bundle source metadata is invalid") from exc
     source.validate()
+    source_inventory = _source_inventory_summary(bundle)
+    if source_inventory["sha256"] != source.source_inventory_sha256:
+        raise MigrationError("source volume inventory sha256 mismatch")
+    if manifest.get("source_inventory") != source_inventory:
+        raise MigrationError("source volume inventory summary mismatch")
     files = _walk_payload_entries(bundle / "payload")
     actual_paths = [path.relative_to(bundle / "payload").as_posix() for path in files]
     records = manifest.get("files")

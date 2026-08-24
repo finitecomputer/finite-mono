@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -94,12 +95,20 @@ def main() -> int:
 
     session_result = migration.export_source_sessions(payload / "sessions.jsonl", source_state)
     memory_result = migration.snapshot_source_memory(payload / "memory_store.db", source_memory)
+    source_home = root / "source-home"
+    (source_home / "workspace").mkdir(parents=True)
+    (source_home / "workspace/README.md").write_text("legacy workspace\n", encoding="utf-8")
+    source_inventory = root / "bundle/source-volume-inventory.json"
+    migration.inventory_source_volume(source_inventory, source_home)
     print(
         json.dumps(
             {
                 "hermes_version": actual_version,
                 "sessions": session_result,
                 "memory": memory_result,
+                "source_inventory_sha256": hashlib.sha256(
+                    source_inventory.read_bytes()
+                ).hexdigest(),
             },
             sort_keys=True,
         )

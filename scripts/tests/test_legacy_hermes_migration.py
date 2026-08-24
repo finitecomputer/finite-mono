@@ -157,6 +157,12 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
             connection.execute("INSERT INTO facts VALUES (1, 'Austin fact')")
             connection.commit()
+        source_home = self.root / "manifest-source-home"
+        (source_home / "workspace").mkdir(parents=True)
+        (source_home / "workspace/notes.md").write_text("workspace\n", encoding="utf-8")
+        migration.inventory_source_volume(
+            self.bundle / "source-volume-inventory.json", source_home
+        )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -170,6 +176,9 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             image_reference="docker.io/library/fc-agent-runtime:main",
             image_manifest_digest="sha256:" + "a" * 64,
             container_image_id="sha256:" + "b" * 64,
+            source_inventory_sha256=hashlib.sha256(
+                (self.bundle / "source-volume-inventory.json").read_bytes()
+            ).hexdigest(),
         )
 
     def build_manifest(self) -> dict:
@@ -203,6 +212,10 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertEqual(manifest["cron"]["count"], 1)
         self.assertEqual(manifest["cron"]["target_state"], "review-only-not-active")
         self.assertEqual(manifest["memory"]["fact_count"], 1)
+        self.assertEqual(
+            manifest["source_inventory"]["sha256"],
+            self.metadata().source_inventory_sha256,
+        )
         self.assertEqual(
             manifest["compatibility"]["session_paths"],
             {
@@ -242,12 +255,115 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("legacy_hermes_contract.py", runbook)
         self.assertIn("legacy_hermes_source.py", runbook)
         self.assertIn("legacy_hermes_target.py", runbook)
+        self.assertIn("source-volume-inventory", runbook)
+        self.assertIn("--source-volume-inventory-sha256", runbook)
+        self.assertIn("readOnlyRootFilesystem == true", runbook)
+        self.assertIn("zero unresolved entries", runbook)
         self.assertIn("dst=/opt/migration,options=rbind:ro", runbook)
         self.assertIn("TARGET_RUNTIME_IMAGE", runbook)
         self.assertNotIn("MIGRATION_IMAGE", runbook)
         self.assertNotIn("Publish and prove the migration image", runbook)
         self.assertNotIn("legacy-hermes-source-export", runbook)
         self.assertNotIn("legacy-hermes-source-memory", runbook)
+
+    def test_source_volume_inventory_requires_a_disposition_for_every_file(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        (source / ".hermes/memories").mkdir(parents=True)
+        (source / ".hermes/audio_cache").mkdir(parents=True)
+        (source / ".brain/finite-mono").mkdir(parents=True)
+        (source / "workspace").mkdir()
+        (source / "dev/reap-video/venv/bin").mkdir(parents=True)
+        (source / "custom-data").mkdir()
+        (source / ".hermes/memories/MEMORY.md").write_text("memory\n", encoding="utf-8")
+        (source / ".hermes/state.db").write_bytes(b"legacy sessions")
+        (source / ".hermes/audio_cache/voice.ogg").write_bytes(b"voice")
+        (source / ".brain/finite-mono/README.md").write_text(
+            "brain checkout\n", encoding="utf-8"
+        )
+        (source / "workspace/notes.md").write_text("notes\n", encoding="utf-8")
+        (source / "dev/reap-video/venv/bin/python").write_text(
+            "generated\n", encoding="utf-8"
+        )
+        (source / "custom-data/ledger.txt").write_text(
+            "must not be missed\n", encoding="utf-8"
+        )
+
+        inventory_path = self.root / "source-volume-inventory.json"
+        result = migration.inventory_source_volume(inventory_path, source)
+
+        self.assertEqual(result["schema"], "finite.legacy-hermes-source-inventory.v1")
+        self.assertEqual(result["status"], "review-required")
+        self.assertEqual(result["classifications"]["bundle"]["regular_files"], 2)
+        self.assertEqual(result["classifications"]["converted"]["regular_files"], 1)
+        self.assertEqual(result["classifications"]["archive-only"]["regular_files"], 2)
+        self.assertEqual(result["classifications"]["rebuild"]["regular_files"], 1)
+        self.assertEqual(result["classifications"]["unresolved"]["regular_files"], 1)
+        self.assertEqual(
+            [entry["path"] for entry in result["unresolved_roots"]],
+            ["custom-data"],
+        )
+        self.assertEqual(inventory_path.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("must not be missed", inventory_path.read_text())
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            exit_code = migration.main(
+                [
+                    "source-volume-inventory",
+                    "--source-root",
+                    str(source),
+                    "--output",
+                    str(self.root / "second-inventory.json"),
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("unresolved source entries", stderr.getvalue())
+
+        (source / "custom-data/ledger.txt").unlink()
+        (source / "custom-data").rmdir()
+        complete = migration.inventory_source_volume(
+            self.root / "complete-inventory.json", source
+        )
+        self.assertEqual(complete["status"], "complete")
+        self.assertEqual(complete["classifications"]["unresolved"]["entries"], 0)
+
+    def test_manifest_rejects_an_unresolved_or_rewritten_source_inventory(
+        self,
+    ) -> None:
+        inventory_path = self.bundle / "source-volume-inventory.json"
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        inventory["status"] = "review-required"
+        inventory["classifications"]["unresolved"]["entries"] = 1
+        inventory["unresolved_roots"] = [
+            {
+                "path": "surprise-data",
+                "entries": 1,
+                "regular_files": 1,
+                "bytes": 12,
+                "symlinks": 0,
+                "special_files": 0,
+            }
+        ]
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            migration.MigrationError, "still has unresolved entries"
+        ):
+            self.build_manifest()
+
+        inventory["status"] = "complete"
+        inventory["classifications"]["unresolved"]["entries"] = 0
+        inventory["unresolved_roots"] = []
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+        self.build_manifest()
+        inventory["directories"] += 1
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+        with self.assertRaisesRegex(
+            migration.MigrationError, "source volume inventory sha256 mismatch"
+        ):
+            migration.verify_bundle(self.bundle)
 
     def test_manifest_rejects_unknown_paths_and_symlinks(self) -> None:
         (self.payload / "hermes/.env").write_text("TOKEN=secret\n", encoding="utf-8")
@@ -331,6 +447,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             ),
         )
         self.assertEqual(receipt["sessions"]["imported"], 2)
+        self.assertEqual(receipt["source_inventory"], manifest["source_inventory"])
         self.assertEqual(receipt["compatibility"], manifest["compatibility"])
         self.assertEqual(receipt["cron"]["count"], 1)
         self.assertEqual(receipt["cron"]["target_state"], "review-only-not-active")

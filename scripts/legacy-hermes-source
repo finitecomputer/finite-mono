@@ -3,11 +3,11 @@ set -euo pipefail
 
 command_name="${1:-}"
 case "$command_name" in
-  source-export|source-memory-snapshot)
+  source-export|source-memory-snapshot|source-volume-inventory)
     shift
     ;;
   *)
-    echo "error: expected source-export or source-memory-snapshot" >&2
+    echo "error: expected source-export, source-memory-snapshot, or source-volume-inventory" >&2
     exit 64
     ;;
 esac

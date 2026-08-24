@@ -308,6 +308,7 @@ def install_bundle(
         receipt: dict[str, Any] = {
             "schema": SCHEMA,
             "source": manifest["source"],
+            "source_inventory": manifest["source_inventory"],
             "manifest_sha256": manifest_sha256,
             "sessions": sessions_result,
             "cron": manifest["cron"],

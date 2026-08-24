@@ -25,6 +25,7 @@ from legacy_hermes_contract import (
 from legacy_hermes_source import (
     check_source_writers as check_source_writers,
     export_source_sessions as export_source_sessions,
+    inventory_source_volume as inventory_source_volume,
     snapshot_source_memory as snapshot_source_memory,
 )
 from legacy_hermes_target import install_bundle as install_bundle
@@ -47,6 +48,13 @@ def _parser() -> argparse.ArgumentParser:
     memory.add_argument("--output", type=Path, required=True)
     memory.add_argument("--source-database", type=Path, required=True)
 
+    inventory = subparsers.add_parser(
+        "source-volume-inventory",
+        help="classify every file on the legacy /home/node volume",
+    )
+    inventory.add_argument("--source-root", type=Path, required=True)
+    inventory.add_argument("--output", type=Path, required=True)
+
     writers = subparsers.add_parser(
         "source-writer-check",
         help=(
@@ -68,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     manifest.add_argument("--source-image-reference", required=True)
     manifest.add_argument("--source-image-manifest-digest", required=True)
     manifest.add_argument("--source-container-image-id", required=True)
+    manifest.add_argument("--source-volume-inventory-sha256", required=True)
 
     verify = subparsers.add_parser(
         "verify", help="verify a sealed bundle without mutation"
@@ -93,6 +102,14 @@ def main(argv: Iterable[str] | None = None) -> int:
             result = export_source_sessions(args.output, args.source_database)
         elif args.command == "source-memory-snapshot":
             result = snapshot_source_memory(args.output, args.source_database)
+        elif args.command == "source-volume-inventory":
+            result = inventory_source_volume(args.output, args.source_root)
+            unresolved = result["classifications"]["unresolved"]["entries"]
+            if unresolved:
+                raise MigrationError(
+                    f"source inventory has {unresolved} unresolved source entries; "
+                    f"review {args.output}"
+                )
         elif args.command == "source-writer-check":
             result = check_source_writers(args.source_root, args.proc_root)
         elif args.command == "manifest":
@@ -106,6 +123,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                     image_reference=args.source_image_reference,
                     image_manifest_digest=args.source_image_manifest_digest,
                     container_image_id=args.source_container_image_id,
+                    source_inventory_sha256=args.source_volume_inventory_sha256,
                 ),
             )
         elif args.command == "verify":

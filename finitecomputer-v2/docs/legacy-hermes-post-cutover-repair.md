@@ -14,6 +14,7 @@ references; it does not change migration identity or import more state.
 | `/home/node/.brain/finite-mono/...` | Fresh `fbrain open` Working Tree; never copy the old Agent State or identity |
 | `~/dev/llm-wiki/...` and other source-only paths | Review individually; map only after the target location exists |
 | `/home/node/.hermes/*_cache/...` session media | Archive-only in the frozen source Recovery Set during the canary |
+| any path named by the source-volume inventory | Follow its reviewed `bundle`, `converted`, `archive-only`, or `rebuild` disposition; never invent a target path during cutover |
 
 ## Repair order
 
@@ -27,10 +28,13 @@ references; it does not change migration identity or import more state.
 4. Search imported `MEMORY.md`, `USER.md`, review-only jobs, and review-only
    skills for `/home/node`, `~/dev`, and `.brain` references. Use the map above
    only where the destination is proven.
-5. Compare each review-only skill name with the Runtime's Managed Skills
+5. Compare those references with the sealed source-volume inventory. Stop if a
+   live reference points to a path whose disposition was archive-only or
+   rebuild and no target replacement exists.
+6. Compare each review-only skill name with the Runtime's Managed Skills
    Baseline. Retire stale Finite-managed copies. Promote a user-owned skill only
    after its tools and paths pass on the target.
-6. Review each scheduled job's paths, Brain dependency, delivery route, and
+7. Review each scheduled job's paths, Brain dependency, delivery route, and
    credential need. Recreate it paused, then activate and verify one job at a
    time under separate approval.
 

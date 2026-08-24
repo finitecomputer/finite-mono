@@ -66,6 +66,7 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
                     image_reference="docker.io/library/fc-agent-runtime:main",
                     image_manifest_digest="sha256:" + "a" * 64,
                     container_image_id="sha256:" + "b" * 64,
+                    source_inventory_sha256=evidence["source_inventory_sha256"],
                 ),
             )
 
