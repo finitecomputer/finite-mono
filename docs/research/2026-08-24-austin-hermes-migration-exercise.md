@@ -57,6 +57,7 @@ No other bot may be stopped, restarted, migrated, or changed.
 - 2026-08-24T21:49:11Z: the second import completed in 4 minutes 9 seconds. The receipt records 2,851 sessions, 89,358 messages, 89 facts, 15 review-only scheduled jobs, zero active Sites, and six inactive integration classes. The protected identity and Chat hashes were unchanged.
 - 2026-08-24T21:50:12Z: Hermes v0.20 opened the imported databases through its public APIs and reported 2,851 sessions and 89 facts; SQLite integrity was `ok`. The active legacy-skills directory was empty and no active cron file existed.
 - 2026-08-24T21:51:02Z: restored the exact installed `source-home.tar` into another empty directory in 21 seconds. All 230,854 entries matched the isolated source restore.
+- 2026-08-24T21:57:47Z: classified all 18 session paths that remain unmapped in active state. Six are old Hermes-internal references; twelve are root-level or malformed legacy strings. None is cache-only media, and the complete source home remains in the verified archive. No owner decision is required.
 
 ## Gates
 
