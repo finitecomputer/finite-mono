@@ -151,7 +151,12 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
          else 'unlinked'
        end as link_state,
        control.kind as control_kind,
-       control.status as control_status
+       control.status as control_status,
+       ar.host_facts ->> 'runtime_status' as runtime_status,
+       core_rfc3339(ar.health_reported_at) as health_reported_at,
+       ar.health_ready,
+       ar.health_reason,
+       ar.health_report_interval_seconds
   from agent_runtimes ar
   left join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
   left join projects p on p.id = ar.project_id
@@ -171,6 +176,18 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
 LIFECYCLE_PROBE_BINARY = "/run/current-system/sw/bin/finite-saas-runner"
 LIFECYCLE_PROBE_SCHEMA = "finite.lifecycle-probe.v1"
 LIFECYCLE_VERDICTS = ("operable", "degraded", "inoperable", "unknown")
+
+# Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice 3).
+# These constants mirror Core's project_runtime_health exactly: a runtime is
+# "ready" only while a fresh report says ready; a fresh ready=false report is
+# "not_ready" with its reason; no report or a report older than 3x the poll
+# cadence is the named "unknown" state, so a runtime that died overnight never
+# displays a frozen last-known ready. Do not drift from the Core projection.
+HEALTH_DEFAULT_INTERVAL_SECONDS = 60
+HEALTH_MIN_INTERVAL_SECONDS = 5
+HEALTH_MAX_INTERVAL_SECONDS = 3600
+HEALTH_STALE_MULTIPLIER = 3
+HEALTH_STATES = ("ready", "not_ready", "unknown")
 
 SYSTEMD_PROPERTIES = (
     "LoadState",
@@ -316,6 +333,11 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "link_state",
                 "control_kind",
                 "control_status",
+                "runtime_status",
+                "health_reported_at",
+                "health_ready",
+                "health_reason",
+                "health_report_interval_seconds",
             ],
         ),
     ]
@@ -829,6 +851,24 @@ def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
             if group.get("control_status"):
                 row["control_kind"] = group["control_kind"]
                 row["control_status"] = group["control_status"]
+            # Optional standing-health projection inputs, mirroring the health
+            # columns of RUNTIME_DETAILS_QUERY. A group carrying any health
+            # field defaults runtime_status to online (production rows always
+            # carry host_facts.runtime_status); override it explicitly to model
+            # an intentionally offline runtime.
+            health_keys = (
+                "health_reported_at",
+                "health_ready",
+                "health_reason",
+                "health_report_interval_seconds",
+            )
+            if group.get("runtime_status"):
+                row["runtime_status"] = group["runtime_status"]
+            if any(group.get(key) is not None for key in health_keys):
+                row.setdefault("runtime_status", "online")
+                for key in health_keys:
+                    if group.get(key) is not None:
+                        row[key] = group[key]
             raw["core"].setdefault("runtimes", []).append(row)
     return raw
 
@@ -860,6 +900,54 @@ def target_runtime_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] |
     )
 
 
+def health_ready_value(raw: Any) -> bool | None:
+    """The CSV path yields t/f strings; fixtures yield JSON booleans."""
+    if raw in (True, "t", "true"):
+        return True
+    if raw in (False, "f", "false"):
+        return False
+    return None
+
+
+def project_runtime_health(row: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Project one runtime's standing readiness from the latest stored report.
+
+    Mirrors Core's `project_runtime_health` (finite-saas-core): reports only
+    speak for runtimes Core considers online, freshness is measured from the
+    report's Core-recorded time, and the deadline is 3x the reporter's poll
+    cadence. Keep the named states (`ready`/`not_ready`/`unknown`) aligned;
+    the fixture tests pin both surfaces agreeing.
+    """
+    reported_at = parse_time(row.get("health_reported_at"))
+    ready = health_ready_value(row.get("health_ready"))
+    age_seconds = (
+        int((now - reported_at).total_seconds()) if reported_at is not None else None
+    )
+    status = "unknown"
+    if (
+        row.get("runtime_status") == "online"
+        and reported_at is not None
+        and ready is not None
+    ):
+        try:
+            interval = int(
+                row.get("health_report_interval_seconds") or HEALTH_DEFAULT_INTERVAL_SECONDS
+            )
+        except (TypeError, ValueError):
+            interval = HEALTH_DEFAULT_INTERVAL_SECONDS
+        interval = min(
+            max(interval, HEALTH_MIN_INTERVAL_SECONDS), HEALTH_MAX_INTERVAL_SECONDS
+        )
+        if age_seconds is not None and age_seconds <= interval * HEALTH_STALE_MULTIPLIER:
+            status = "ready" if ready else "not_ready"
+    return {
+        "status": status,
+        "reason": row.get("health_reason") or None,
+        "reported_at": row.get("health_reported_at") or None,
+        "age_seconds": age_seconds,
+    }
+
+
 def build_fleet(
     core: dict[str, Any] | None,
     now: datetime,
@@ -886,6 +974,9 @@ def build_fleet(
             "project_id": row["project_id"],
             "agent_name": row["agent_name"],
             "version_label": row["version_label"],
+            # Core-recorded summary status; the health projection below only
+            # answers for `online` runtimes.
+            "runtime_status": row.get("runtime_status"),
         }
         # The canonical runtime-control lifecycle state, projected straight
         # from Core's one-active request row; never re-derived locally.
@@ -894,6 +985,9 @@ def build_fleet(
                 "kind": row["control_kind"],
                 "status": row["control_status"],
             }
+        # Runner-ferried standing readiness: the named ready/not_ready/unknown
+        # projection of the latest health report, mirrored from Core.
+        entry["health"] = project_runtime_health(row, now)
         lifecycle = probe_agents.get(row["agent_runtime_id"])
         if lifecycle is not None:
             # App health (version above) and lifecycle-control health are
@@ -908,7 +1002,22 @@ def build_fleet(
         active = groups["active"]
         stragglers = [row for row in active if row["version_label"] != target_version]
         on_target = len(active) - len(stragglers)
-        status = "red" if stragglers else ("unknown" if groups["unlinked"] else "green")
+        # Standing readiness rolls up only over runtimes expected to report
+        # (Core-recorded online, active link): an intentionally offline agent
+        # is displayed with its projected state but never counted against the
+        # host. A fresh not_ready report turns the host red; stale or missing
+        # reports read unknown.
+        health_tracked = [row for row in active if row.get("runtime_status") == "online"]
+        health_ready = [row for row in health_tracked if row["health"]["status"] == "ready"]
+        health_not_ready = [
+            row for row in health_tracked if row["health"]["status"] == "not_ready"
+        ]
+        health_unknown = [row for row in health_tracked if row["health"]["status"] == "unknown"]
+        status = (
+            "red"
+            if stragglers or health_not_ready
+            else ("unknown" if groups["unlinked"] or health_unknown else "green")
+        )
         section_statuses.append(status)
         lifecycle_probed = [row for row in active if "lifecycle" in row]
         lifecycle_attention = [
@@ -930,6 +1039,10 @@ def build_fleet(
                 "lifecycle_probed_count": len(lifecycle_probed),
                 "lifecycle_attention": lifecycle_attention,
                 "control_active": control_active,
+                "health_ready_count": len(health_ready),
+                "health_tracked_count": len(health_tracked),
+                "health_not_ready": health_not_ready,
+                "health_unknown": health_unknown,
             }
         )
 
@@ -1428,6 +1541,12 @@ def render_human(report: dict[str, Any]) -> str:
             if probed:
                 attention = len(host.get("lifecycle_attention", []))
                 host_line += f"; lifecycle {probed - attention}/{probed} operable"
+            tracked = host.get("health_tracked_count", 0)
+            if tracked:
+                host_line += (
+                    f"; health {host['health_ready_count']}/{tracked} ready"
+                    f" ({len(host.get('health_unknown', []))} unknown)"
+                )
             lines.append(host_line)
             for runtime in host["stragglers"]:
                 lines.append(
@@ -1451,6 +1570,24 @@ def render_human(report: dict[str, Any]) -> str:
                 lines.append(
                     f"    CONTROL {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
                     f"{control['kind']} {control['status']}"
+                )
+            for runtime in host.get("health_not_ready", []):
+                health = runtime["health"]
+                reason = health.get("reason") or "no reason recorded"
+                lines.append(
+                    f"    HEALTH {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
+                    f"not_ready ({reason})"
+                )
+            for runtime in host.get("health_unknown", []):
+                health = runtime["health"]
+                last = (
+                    f"last report {human_age(health['age_seconds'])} ago"
+                    if health.get("age_seconds") is not None
+                    else "never reported"
+                )
+                lines.append(
+                    f"    HEALTH-UNKNOWN {runtime['agent_name']} "
+                    f"[{runtime['agent_runtime_id']}]: no fresh report ({last})"
                 )
     else:
         lines.append(f"  {fleet.get('error', 'unavailable')}")

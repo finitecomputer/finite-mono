@@ -261,6 +261,18 @@ export type CoreAdminRuntimeOverview = {
    * every Dashboard control must treat absence as support for no operations.
    */
   runtime_capabilities?: CoreRuntimeCapabilities | null;
+  /**
+   * Runner-ferried standing readiness, projected by Core at read time.
+   * Additive: older Core responses omit it, and `unknown` means "no fresh
+   * report" rather than a failed runtime. Never a frozen last-known ready.
+   */
+  runtime_health?: {
+    status: "ready" | "not_ready" | "unknown";
+    reason?: string | null;
+    reported_at?: string | null;
+    observed_at?: string | null;
+    agent_npub?: string | null;
+  } | null;
 };
 
 export type CoreAdminRuntimesResult = CoreBridgeStatus & {

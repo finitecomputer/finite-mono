@@ -72,3 +72,10 @@ not yet have this closed telemetry client and the current credential is not
 injected through every Runner before launch. Those routes are not permission to
 add feature commands. The first slice may use provider health while this pipe
 is completed, but it must not claim RMP conformance until the tests above pass.
+
+Interim transport (2026-08-24): until the in-image RMP client exists, the
+Runner ferries the generic health leg — a throttled per-runtime read of the
+guest `/contact` posted to Core as standing readiness reports (see
+`runtime-control-contract.md`, "Standing Readiness Reports"). It is
+outbound-only, npub-pinned, and adds no inbound path; it does not by itself
+claim RMP v1 conformance.

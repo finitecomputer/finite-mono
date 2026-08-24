@@ -121,6 +121,48 @@ any non-terminal state → failed (always with a named failure_stage)
 - Dashboard and `scripts/finite-status` project these states directly; no
   surface re-derives operation state locally.
 
+## Standing Readiness Reports
+
+The lifecycle machine records operations; it says nothing about a runtime that
+dies at 3am with no operation in flight (the frozen-`succeeded` gap). Closing
+that is runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
+3; migration `0022_runtime_health_reports.sql`):
+
+- The Runner holds an on-disk registry of poll targets — written when a launch
+  or cold relocation completes, moved to the new contact endpoint when an
+  upgrade completes, removed when a stop/destroy completes. Each entry is
+  pinned to the launch-verified Agent Principal npub where the launch path
+  verifies identity (and to the retained principal for relocations); entries
+  without a launch pin lock onto the first presented principal and enforce it
+  thereafter. A response presenting any other principal is dropped: ports are
+  reallocated across stops, and a squatter's health must never wear this
+  runtime's name.
+- Once per poll interval per runtime (default 60s), the Runner reads the
+  guest's bounded `/contact` document and posts one
+  `POST /api/core/v1/runtime-health-reports` report. The endpoint is
+  runner-authed; the source host comes from the credential, never the body, so
+  a runner can only report for runtimes on its own host.
+- **Transport failure is reported, not skipped.** When nobody answers, the
+  Runner posts `ready: false` with reason `unreachable`, so a dead runtime
+  reads `not_ready` immediately. Staleness then means exactly one thing — the
+  Runner stopped reporting — and reads `unknown`. The two failure classes stay
+  distinguishable.
+- Core stores only the latest report on the runtime row and projects at read
+  time (no sweeper, no history table): `ready` iff the latest report says
+  ready and is fresher than 3x the reported poll cadence; a fresh `not_ready`
+  surfaces its reason; no/stale report — or a runtime Core does not consider
+  `online` — is the named `unknown` state. Freshness is measured from Core's
+  receive clock, so runner clock skew cannot extend it.
+- The projection lands in the admin runtime overview
+  (`AdminRuntimeOverview.runtime_health`) and in `scripts/finite-status`,
+  which rolls a fresh `not_ready` up to red and stale/missing reports to
+  unknown over online, active-linked runtimes only.
+- This is outbound-only generic health telemetry under the Runtime Management
+  Pipe v1 boundary: no inbound command path, no desired state, and a Core
+  outage never interrupts a healthy guest. The runner ferries because the
+  runtime image does not yet host the RMP client; the wire shape is the
+  contract's health leg either way.
+
 ## Runtime Operations
 
 These are Core-to-Runner lifecycle operations. They never arrive through the
