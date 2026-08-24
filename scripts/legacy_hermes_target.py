@@ -309,6 +309,7 @@ def install_bundle(
             "schema": SCHEMA,
             "source": manifest["source"],
             "source_inventory": manifest["source_inventory"],
+            "source_snapshot": manifest["source_snapshot"],
             "manifest_sha256": manifest_sha256,
             "sessions": sessions_result,
             "cron": manifest["cron"],

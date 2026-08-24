@@ -9,18 +9,23 @@ import os
 import re
 import sqlite3
 import stat
+import tarfile
 import tempfile
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-SCHEMA = "finite.legacy-hermes-migration.v1"
-SOURCE_INVENTORY_SCHEMA = "finite.legacy-hermes-source-inventory.v1"
+SCHEMA = "finite.legacy-hermes-migration.v2"
+SOURCE_INVENTORY_SCHEMA = "finite.legacy-hermes-source-inventory.v2"
 SUPPORTED_SOURCE_HERMES_VERSION = "0.14.0"
 SUPPORTED_TARGET_HERMES_VERSION = "0.20.0"
 SOURCE_EXPORT_BATCH_SIZE = 1_000
-RECEIPT_RELATIVE_PATH = Path("migration/legacy-hermes-v1/receipt.json")
+RECEIPT_RELATIVE_PATH = Path("migration/legacy-hermes-v2/receipt.json")
+SOURCE_SNAPSHOT_RELATIVE_PATH = PurePosixPath("source-home.tar")
+SOURCE_SNAPSHOT_TARGET = PurePosixPath(
+    "migration/legacy-hermes-v2/preserved/source-home.tar"
+)
 PROTECTED_RELATIVE_PATHS = (
     Path("agent/identity/identity.json"),
     Path("agent/client.sqlite3"),
@@ -33,15 +38,22 @@ ALLOWED_PAYLOAD_ROOTS = (
     PurePosixPath("home/dev"),
     PurePosixPath("home/uploads"),
 )
-ARCHIVED_ONLY = (
-    "Hermes .env, auth.json, Google/OAuth tokens, and provider credentials",
-    "Hermes config and gateway/platform routing state",
-    "cron execution output and runtime process state",
-    "legacy .finite and platform client state",
-    "Hermes-managed venvs, binaries, logs, caches, and raw session/auxiliary SQLite files",
-    "legacy session media that exists only in Hermes cache paths",
-    "the legacy local Finite Brain working tree; the target must reauthorize and sync",
-)
+PRESERVED_INERT = {
+    "default": "every non-activated source entry remains in source-home.tar",
+    "quarantined": [
+        "Hermes .env, auth.json, Google/OAuth tokens, and provider credentials",
+        "Hermes config and gateway/platform routing state",
+        "cron execution output and runtime process state",
+        "legacy .finite and platform client state",
+        "the legacy local Finite Brain working tree and identity",
+    ],
+    "rebuilt_not_activated": [
+        "Hermes-managed venvs, binaries, package/tool caches, and generated state",
+    ],
+    "preserved_not_activated": [
+        "Hermes logs, raw session/auxiliary SQLite files, and cache-backed media",
+    ],
+}
 LEGACY_HERMES_MEDIA_CACHE_ROOTS = (
     "/home/node/.hermes/audio_cache/",
     "/home/node/.hermes/image_cache/",
@@ -139,6 +151,7 @@ def _allowed_payload_file(relative: PurePosixPath) -> bool:
         PurePosixPath("sessions.jsonl"),
         PurePosixPath("memory_store.db"),
         PurePosixPath("hermes/cron/jobs.json"),
+        SOURCE_SNAPSHOT_RELATIVE_PATH,
     ):
         return True
     return any(relative.is_relative_to(root) for root in ALLOWED_PAYLOAD_ROOTS)
@@ -288,7 +301,7 @@ def _is_legacy_cache_media_path(value: str) -> bool:
 def _rewrite_message_paths(value: Any) -> tuple[Any, dict[str, int]]:
     counts = {
         "rewritable_count": 0,
-        "cache_media_archive_only_count": 0,
+        "cache_media_preserved_count": 0,
         "unmapped_source_path_count": 0,
     }
 
@@ -299,7 +312,7 @@ def _rewrite_message_paths(value: Any) -> tuple[Any, dict[str, int]]:
             counts["rewritable_count"] += 1
             return prefix + rewritten
         if _is_legacy_cache_media_path(path):
-            counts["cache_media_archive_only_count"] += 1
+            counts["cache_media_preserved_count"] += 1
         elif path.startswith(("/home/node/", "~/")):
             counts["unmapped_source_path_count"] += 1
         return match.group(0)
@@ -320,7 +333,7 @@ def _rewrite_message_paths(value: Any) -> tuple[Any, dict[str, int]]:
             counts["rewritable_count"] += 1
             return rewritten
         if _is_legacy_cache_media_path(candidate):
-            counts["cache_media_archive_only_count"] += 1
+            counts["cache_media_preserved_count"] += 1
         elif candidate.startswith(("/home/node/", "~/")):
             counts["unmapped_source_path_count"] += 1
         return candidate
@@ -330,20 +343,20 @@ def _rewrite_message_paths(value: Any) -> tuple[Any, dict[str, int]]:
 
 def _session_path_summary(path: Path) -> dict[str, Any]:
     rewritable_count = 0
-    cache_media_archive_only_count = 0
+    cache_media_preserved_count = 0
     unmapped_source_path_count = 0
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             session = json.loads(line)
             _, counts = _rewrite_message_paths(session.get("messages") or [])
             rewritable_count += counts["rewritable_count"]
-            cache_media_archive_only_count += counts["cache_media_archive_only_count"]
+            cache_media_preserved_count += counts["cache_media_preserved_count"]
             unmapped_source_path_count += counts["unmapped_source_path_count"]
     return {
         "rewritable_count": rewritable_count,
-        "cache_media_archive_only_count": cache_media_archive_only_count,
+        "cache_media_preserved_count": cache_media_preserved_count,
         "unmapped_source_path_count": unmapped_source_path_count,
-        "archive_only_policy": "retained-in-source-recovery-set",
+        "preservation_policy": "retained-in-sealed-source-home",
     }
 
 
@@ -353,15 +366,17 @@ def _target_for_payload(relative: PurePosixPath) -> PurePosixPath | None:
         PurePosixPath("memory_store.db"),
     ):
         return None
+    if relative == SOURCE_SNAPSHOT_RELATIVE_PATH:
+        return SOURCE_SNAPSHOT_TARGET
     mappings = (
         (PurePosixPath("hermes/memories"), PurePosixPath("agent/hermes-home/memories")),
         (
             PurePosixPath("hermes/skills"),
-            PurePosixPath("migration/legacy-hermes-v1/review-only/skills"),
+            PurePosixPath("migration/legacy-hermes-v2/review-only/skills"),
         ),
         (
             PurePosixPath("hermes/scripts"),
-            PurePosixPath("migration/legacy-hermes-v1/review-only/scripts"),
+            PurePosixPath("migration/legacy-hermes-v2/review-only/scripts"),
         ),
         (
             PurePosixPath("home/workspace"),
@@ -374,7 +389,7 @@ def _target_for_payload(relative: PurePosixPath) -> PurePosixPath | None:
         if relative.is_relative_to(source_root):
             return target_root / relative.relative_to(source_root)
     if relative == PurePosixPath("hermes/cron/jobs.json"):
-        return PurePosixPath("migration/legacy-hermes-v1/review-only/cron/jobs.json")
+        return PurePosixPath("migration/legacy-hermes-v2/review-only/cron/jobs.json")
     raise MigrationError(f"payload path has no target mapping: {relative}")
 
 
@@ -457,12 +472,14 @@ def _memory_summary(payload: Path) -> dict[str, Any]:
     }
 
 
-def _source_inventory_summary(bundle: Path) -> dict[str, Any]:
+def _read_source_inventory(bundle: Path) -> dict[str, Any]:
     inventory_path = bundle / "source-volume-inventory.json"
     if not inventory_path.is_file() or inventory_path.is_symlink():
         raise MigrationError(
             "bundle source-volume-inventory.json is missing or not a regular file"
         )
+    if stat.S_IMODE(inventory_path.stat().st_mode) != 0o600:
+        raise MigrationError("source volume inventory must be mode 0600")
     try:
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -477,29 +494,255 @@ def _source_inventory_summary(bundle: Path) -> dict[str, Any]:
     classifications = inventory.get("classifications")
     if not isinstance(classifications, dict):
         raise MigrationError("source volume inventory classifications are missing")
-    unresolved = classifications.get("unresolved")
+    blocked = classifications.get("blocked")
     if (
         inventory.get("status") != "complete"
-        or not isinstance(unresolved, dict)
-        or unresolved.get("entries") != 0
-        or inventory.get("unresolved_roots") != []
+        or not isinstance(blocked, dict)
+        or blocked.get("entries") != 0
+        or inventory.get("blocked_roots") != []
     ):
-        raise MigrationError("source volume inventory still has unresolved entries")
+        raise MigrationError("source volume inventory has structurally blocked entries")
+    entries = inventory.get("entries")
+    if not isinstance(entries, list) or any(
+        not isinstance(entry, dict) for entry in entries
+    ):
+        raise MigrationError("source volume inventory entries are missing")
+    paths: list[str] = []
+    for entry in entries:
+        path = entry.get("path")
+        kind = entry.get("kind")
+        mode = entry.get("mode")
+        size = entry.get("size")
+        sha256 = entry.get("sha256")
+        link_target = entry.get("link_target")
+        if not isinstance(path, str):
+            raise MigrationError("source volume inventory entry metadata is invalid")
+        relative = PurePosixPath(path)
+        if (
+            not path
+            or relative.is_absolute()
+            or relative.as_posix() != path
+            or any(part in ("", ".", "..") for part in relative.parts)
+        ):
+            raise MigrationError("source volume inventory entry metadata is invalid")
+        if kind == "directory":
+            metadata_is_valid = (
+                type(size) is int
+                and size == 0
+                and type(mode) is int
+                and 0 <= mode <= 0o7777
+                and sha256 is None
+                and link_target is None
+            )
+        elif kind == "file":
+            metadata_is_valid = (
+                type(size) is int
+                and size >= 0
+                and type(mode) is int
+                and 0 <= mode <= 0o7777
+                and isinstance(sha256, str)
+                and re.fullmatch(r"[0-9a-f]{64}", sha256) is not None
+                and link_target is None
+            )
+        elif kind == "symlink":
+            metadata_is_valid = (
+                type(size) is int
+                and size >= 0
+                and mode is None
+                and isinstance(sha256, str)
+                and re.fullmatch(r"[0-9a-f]{64}", sha256) is not None
+                and isinstance(link_target, str)
+                and size == len(link_target.encode("utf-8"))
+            )
+        else:
+            metadata_is_valid = False
+        if not metadata_is_valid:
+            raise MigrationError("source volume inventory entry metadata is invalid")
+        paths.append(path)
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise MigrationError("source volume inventory paths are not unique and sorted")
+    dispositions = (
+        "activate",
+        "converted",
+        "preserve",
+        "quarantine",
+        "rebuild",
+        "blocked",
+    )
+    recomputed = {
+        disposition: {
+            "entries": 0,
+            "directories": 0,
+            "regular_files": 0,
+            "bytes": 0,
+            "symlinks": 0,
+            "special_files": 0,
+        }
+        for disposition in dispositions
+    }
+    for entry in entries:
+        disposition = entry.get("disposition")
+        kind = entry.get("kind")
+        if disposition not in recomputed:
+            raise MigrationError("source volume inventory entry is invalid")
+        summary = recomputed[disposition]
+        summary["entries"] += 1
+        if kind == "directory":
+            summary["directories"] += 1
+        elif kind == "file":
+            summary["regular_files"] += 1
+            size = entry.get("size")
+            if type(size) is not int or size < 0:
+                raise MigrationError("source volume inventory file size is invalid")
+            summary["bytes"] += size
+        else:
+            summary["symlinks"] += 1
+    if classifications != recomputed:
+        raise MigrationError(
+            "source volume inventory classification summary does not match entries"
+        )
+    if inventory.get("directories") != sum(
+        summary["directories"] for summary in recomputed.values()
+    ):
+        raise MigrationError("source volume inventory directory count mismatch")
+    policy = inventory.get("policy")
+    if not isinstance(policy, dict) or policy.get("default") != "preserve":
+        raise MigrationError("source volume inventory default policy must preserve")
+    return inventory
+
+
+def _source_inventory_summary(bundle: Path) -> dict[str, Any]:
+    inventory_path = bundle / "source-volume-inventory.json"
+    inventory = _read_source_inventory(bundle)
     return {
         "schema": SOURCE_INVENTORY_SCHEMA,
         "sha256": _sha256(inventory_path),
-        "classifications": classifications,
+        "classifications": inventory["classifications"],
+        "entry_count": len(inventory["entries"]),
+        "directory_count": inventory.get("directories"),
+    }
+
+
+def _normalized_tar_member_path(name: str) -> str | None:
+    while name.startswith("./"):
+        name = name[2:]
+    if name in ("", "."):
+        return None
+    relative = PurePosixPath(name)
+    if relative.is_absolute() or any(
+        part in ("", ".", "..") for part in relative.parts
+    ):
+        raise MigrationError(f"source-home snapshot has unsafe path: {name}")
+    return relative.as_posix()
+
+
+def _tar_stream_sha256(handle: Any) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_snapshot_summary(bundle: Path, inventory: dict[str, Any]) -> dict[str, Any]:
+    archive_path = bundle / "payload" / Path(SOURCE_SNAPSHOT_RELATIVE_PATH.as_posix())
+    if not archive_path.is_file() or archive_path.is_symlink():
+        raise MigrationError("payload/source-home.tar must be a regular file")
+    if stat.S_IMODE(archive_path.stat().st_mode) != 0o600:
+        raise MigrationError("source-home snapshot must be mode 0600")
+    expected = {entry["path"]: entry for entry in inventory["entries"]}
+    observed: dict[str, dict[str, Any]] = {}
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            for member in archive:
+                path = _normalized_tar_member_path(member.name)
+                if path is None:
+                    continue
+                if path in observed:
+                    raise MigrationError(
+                        f"source-home snapshot contains duplicate path: {path}"
+                    )
+                if member.isdir():
+                    record = {
+                        "path": path,
+                        "kind": "directory",
+                        "size": 0,
+                        "mode": member.mode,
+                        "sha256": None,
+                        "link_target": None,
+                    }
+                elif member.isfile():
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise MigrationError(
+                            f"source-home snapshot file cannot be read: {path}"
+                        )
+                    record = {
+                        "path": path,
+                        "kind": "file",
+                        "size": member.size,
+                        "mode": member.mode,
+                        "sha256": _tar_stream_sha256(extracted),
+                        "link_target": None,
+                    }
+                elif member.issym():
+                    record = {
+                        "path": path,
+                        "kind": "symlink",
+                        "size": len(member.linkname.encode("utf-8")),
+                        "mode": None,
+                        "sha256": hashlib.sha256(
+                            member.linkname.encode("utf-8")
+                        ).hexdigest(),
+                        "link_target": member.linkname,
+                    }
+                else:
+                    raise MigrationError(
+                        f"source-home snapshot contains unsupported entry: {path}"
+                    )
+                observed[path] = record
+    except (tarfile.TarError, OSError) as exc:
+        raise MigrationError(f"could not verify source-home snapshot: {exc}") from exc
+
+    comparable_expected = {
+        path: {
+            "path": path,
+            "kind": entry.get("kind"),
+            "size": entry.get("size"),
+            "mode": entry.get("mode"),
+            "sha256": entry.get("sha256"),
+            "link_target": entry.get("link_target"),
+        }
+        for path, entry in expected.items()
+    }
+    if observed != comparable_expected:
+        missing = sorted(set(expected) - set(observed))
+        unexpected = sorted(set(observed) - set(expected))
+        detail = f"missing={missing[:5]} unexpected={unexpected[:5]}"
+        raise MigrationError(
+            f"source-home snapshot does not match inventory ({detail})"
+        )
+    return {
+        "path": SOURCE_SNAPSHOT_RELATIVE_PATH.as_posix(),
+        "target": SOURCE_SNAPSHOT_TARGET.as_posix(),
+        "sha256": _sha256(archive_path),
+        "bytes": archive_path.stat().st_size,
+        "entry_count": len(observed),
+        "default_disposition": "preserve",
+        "activation_policy": "explicit-compatible-paths-only",
+        "status": "complete",
     }
 
 
 def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
-    """Hash an already-staged allow-listed payload and write manifest.json."""
+    """Bind a complete source snapshot and compatible active payload."""
     bundle = Path(bundle)
     payload = bundle / "payload"
     source.validate()
     source_inventory = _source_inventory_summary(bundle)
     if source_inventory["sha256"] != source.source_inventory_sha256:
         raise MigrationError("source volume inventory sha256 mismatch")
+    inventory = _read_source_inventory(bundle)
+    source_snapshot = _source_snapshot_summary(bundle, inventory)
     files = _walk_payload_entries(payload)
     session_path = payload / "sessions.jsonl"
     session_index, message_count = _session_index(session_path)
@@ -534,6 +777,7 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
         "schema": SCHEMA,
         "source": asdict(source),
         "source_inventory": source_inventory,
+        "source_snapshot": source_snapshot,
         "files": records,
         "sessions": {
             "count": len(session_index),
@@ -550,14 +794,14 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
         "protected_target_state": [
             path.as_posix() for path in PROTECTED_RELATIVE_PATHS
         ],
-        "archived_only": list(ARCHIVED_ONLY),
+        "preserved_inert": PRESERVED_INERT,
     }
     _write_private_json(bundle / "manifest.json", manifest)
     return manifest
 
 
 def verify_bundle(bundle: Path) -> dict[str, Any]:
-    """Verify schema, allow-list, metadata, sizes, and every payload digest."""
+    """Verify source completeness, target mappings, metadata, and every digest."""
     bundle = Path(bundle)
     manifest_path = bundle / "manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
@@ -578,6 +822,10 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         raise MigrationError("source volume inventory sha256 mismatch")
     if manifest.get("source_inventory") != source_inventory:
         raise MigrationError("source volume inventory summary mismatch")
+    inventory = _read_source_inventory(bundle)
+    source_snapshot = _source_snapshot_summary(bundle, inventory)
+    if manifest.get("source_snapshot") != source_snapshot:
+        raise MigrationError("source-home snapshot summary mismatch")
     files = _walk_payload_entries(bundle / "payload")
     actual_paths = [path.relative_to(bundle / "payload").as_posix() for path in files]
     records = manifest.get("files")
@@ -644,8 +892,8 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         path.as_posix() for path in PROTECTED_RELATIVE_PATHS
     ]:
         raise MigrationError("protected target state contract mismatch")
-    if manifest.get("archived_only") != list(ARCHIVED_ONLY):
-        raise MigrationError("archived-only contract mismatch")
+    if manifest.get("preserved_inert") != PRESERVED_INERT:
+        raise MigrationError("preserved-inert contract mismatch")
     return manifest
 
 

@@ -9,6 +9,7 @@ import importlib.metadata
 import importlib.util
 import json
 import sys
+import tarfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -97,9 +98,18 @@ def main() -> int:
     memory_result = migration.snapshot_source_memory(payload / "memory_store.db", source_memory)
     source_home = root / "source-home"
     (source_home / "workspace").mkdir(parents=True)
+    (source_home / "custom-data").mkdir()
+    (source_home / ".finite").mkdir()
     (source_home / "workspace/README.md").write_text("legacy workspace\n", encoding="utf-8")
+    (source_home / "custom-data/ledger.txt").write_text(
+        "unknown durable source data\n", encoding="utf-8"
+    )
+    (source_home / ".finite/device.key").write_text("legacy platform identity\n", encoding="utf-8")
     source_inventory = root / "bundle/source-volume-inventory.json"
     migration.inventory_source_volume(source_inventory, source_home)
+    with tarfile.open(payload / "source-home.tar", "w") as archive:
+        archive.add(source_home, arcname=".", recursive=True)
+    (payload / "source-home.tar").chmod(0o600)
     print(
         json.dumps(
             {

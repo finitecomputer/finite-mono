@@ -1,9 +1,10 @@
 # Legacy Hermes migration contract
 
 This bridge moves one box1 Hermes bot into a newly created v2 Runtime. It
-preserves user-authored Hermes history, memories, skills, and files. It does
-not copy the box1 machine identity, known credential stores, gateway ownership,
-or process state.
+transfers a sealed, hash-verified copy of the entire durable `/home/node` and
+materializes only compatible state into active target paths. No owner decides
+the fate of individual files. Old machine identity, credentials, gateway
+ownership, and process state remain present in the sealed snapshot but inert.
 
 Use [the runbook](../../infra/runbooks/legacy-hermes-box1-to-lat3.md) for the
 operator procedure. `scripts/legacy-hermes-migration` is the executable
@@ -36,37 +37,37 @@ read-only. The `home` PVC is mounted at `/home/node`; `/tmp` and `/run` are
 ephemeral. This matters because Austin could have written durable files
 anywhere below `/home/node`, not only in the directories Hermes normally uses.
 
-The exporter inventories every non-directory entry on the frozen PVC before it
-builds the bundle. Each entry must have one reviewed disposition:
+The exporter inventories every directory, regular file, and symlink on the
+frozen PVC before it builds the bundle. The fleet policy assigns every entry a
+deterministic disposition:
 
 | Disposition | Meaning |
 | --- | --- |
-| `bundle` | copied into the sealed bundle |
+| `activate` | copied into a compatible active or review-only target path |
 | `converted` | rebuilt through the Hermes session or memory API |
-| `archive-only` | retained in the source Recovery Set, not made live on lat3 |
-| `rebuild` | generated output that is deliberately recreated later |
-| `unresolved` | migration stops until the PR and runbook assign a disposition |
+| `preserve` | retained in the sealed source snapshot but not activated |
+| `quarantine` | identity, credentials, or executable behavior retained but inactive |
+| `rebuild` | generated state retained in the snapshot and recreated for active use |
+| `blocked` | unreadable or structurally unsafe state that stops migration |
 
-The inventory contains paths, types, sizes, and counts, not file contents. It
-is mode `0600`, stays root-only, and is hashed into the migration manifest.
-Rehearsal and cutover both require zero unresolved entries. The operator also
-rechecks the live pod's read-only root and `/home/node` mount. If the deployed
-pod has another writable durable mount, the migration stops because this
-contract does not cover it.
+The inventory contains paths, types, modes, sizes, symlink targets, content
+hashes, dispositions, and counts, not file contents. It is mode `0600`, stays
+root-only, and is hashed into the migration manifest. Unknown safe paths
+default to `preserve`. Rehearsal and cutover require zero `blocked` entries.
+They do not require per-user classification.
 
-Known generated state is named rather than hidden behind a broad "logs and
-caches" label. Hermes transcript logs under `.hermes/sessions/`, cron output,
-Hermes logs and media caches, and the observed package/tool caches are
-archive-only. The inventory still stops on every other path. In particular,
-top-level files, ad hoc directories, and date-named dumps do not become
-archive-only merely because they look temporary.
+The operator also rechecks the live pod's read-only root and `/home/node`
+mount. Another writable durable mount, a special file, unreadable data, an
+escaping symlink, a concurrent writer, or an integrity mismatch stops the
+migration because the lossless contract cannot be proven.
 
 ## Bundle boundary
 
-`finite.legacy-hermes-migration.v1` admits only:
+`finite.legacy-hermes-migration.v2` contains:
 
 | Source | Target | Behavior |
 | --- | --- | --- |
+| complete `source-home.tar` | `/data/migration/legacy-hermes-v2/preserved/source-home.tar` | Every safe source entry preserved, mode `0600`, never extracted into active state automatically |
 | Hermes session JSONL | rebuilt target `state.db` | Imported through target Hermes; live gateway routing, handoff, and activity state reset; structured paths into admitted roots rewritten |
 | structured memory SQLite API snapshot | rebuilt target `memory_store.db` | Opened and vector-rebuilt through target Hermes; a non-empty fresh target fails closed |
 | `memories/` | active Hermes memories | File collision fails closed |
@@ -76,40 +77,38 @@ archive-only merely because they look temporary.
 | `dev/` | `/data/workspace/legacy-box1/dev` | Preserved without colliding with v2 workspace state |
 | `uploads/` | `/data/workspace/legacy-box1/uploads` | Preserved without colliding with v2 workspace state |
 
-Every admitted file, mode, and contained workspace symlink is manifested and
-hashed. The source-volume inventory accounts for everything outside this
-allow-list.
-Symlinks in active Hermes state or symlinks escaping their admitted source root
-are rejected. Session working-directory paths under the three box1 roots are
-rewritten to their v2 locations.
+The manifest proves that every inventory entry appears in `source-home.tar`
+with matching type, mode, size, symlink target, and content hash. It also hashes
+the complete archive. Active Hermes files are independently manifested and
+hashed. Symlinks escaping `/home/node` or an active source root are rejected.
+Session working-directory paths under the three active roots are rewritten to
+their v2 locations.
 
 The manifest records the source image reference, its containerd manifest
 digest, and the running container image ID separately. Operators must prove all
 three before export; a mutable tag by itself is not source provenance.
 
 Known credential stores, Hermes config, gateway/platform state, cron execution
-state, old `.finite` state, venvs, binaries, logs, caches, and raw
-session/auxiliary SQLite files remain in the frozen source recovery archive.
-Admitted user-authored files and scripts are still sensitive and may themselves
-contain secrets. The structured memory file in the bundle is a frozen SQLite
-backup-API snapshot, not a live database copy. Cron definitions and their
-Hermes helper scripts are copied only under
-`/data/migration/legacy-hermes-v1/review-only/`; the scheduler never reads that
-path. Reauthorization and per-job cron recreation are separate, explicit work.
+state, old `.finite` state, venvs, binaries, logs, caches, and raw databases
+exist in `source-home.tar` but receive no active target mapping. The archive and
+all user-authored files are sensitive and remain root-only. The structured
+memory file used for conversion is a frozen SQLite backup-API snapshot, not a
+live database copy. Cron definitions and Hermes helper scripts are copied only
+under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler never
+reads that path.
 
 Legacy message fields named `path` or ending in `_path` are rewritten only when
 they point into the admitted workspace, dev, or uploads roots. Cache-backed
-audio and image paths below the legacy Hermes home remain in the frozen
-Recovery Set. The manifest and receipt count those cache-media references
+audio and image paths below the legacy Hermes home remain in the sealed source
+snapshot. The manifest and receipt count those cache-media references
 separately from other unmapped legacy paths without embedding message content
 in either evidence file. The first canary must sample an old session containing
-media and record that its attachment is intentionally archive-only unless a
-separately reviewed media bridge is added.
+media and prove that its attachment is preserved even though it is not active.
 
-The source Finite Brain Working Tree and its identity state are not bundle
-inputs. The new Agent Principal must receive its own Email Access Delegation
-and Folder Key Grants, then open and sync a fresh Working Tree. Imported memory
-documents are not rewritten as prose; operators use the
+The source Finite Brain Working Tree and identity state are preserved inside
+`source-home.tar` but never activated. The new Agent Principal must receive its
+own Email Access Delegation and Folder Key Grants, then open and sync a fresh
+Working Tree. Imported memory documents are not rewritten as prose; operators use the
 [post-cutover repair brief](legacy-hermes-post-cutover-repair.md) to find and
 repair stale source paths.
 
@@ -120,7 +119,8 @@ repair stale source paths.
 2. Freeze box1 and keep its PVC plus off-host archive intact.
 3. Prove no host process retains a writable file descriptor or writable memory
    map below the frozen PVC, inventory the whole PVC, export sessions from a
-   SQLite API snapshot, and seal the allow-listed bundle plus the inventory.
+   SQLite API snapshot, and seal the complete source snapshot, active inputs,
+   and inventory.
 4. Stop the target through Core.
 5. Run the importer once, offline, against the exact target durable root.
 6. Restart through Core and verify the same target Agent Principal, Chat round
@@ -132,8 +132,8 @@ The importer builds new v0.20 session and structured-memory databases beside
 the active files, rebuilds memory vectors through v0.20, checkpoints both
 WALs, runs SQLite `quick_check`, and swaps only after every source session and
 memory fact imports.
-The target's pre-import database and a receipt remain under
-`/data/migration/legacy-hermes-v1/`. A failed import removes files it created
+The target's pre-import database, complete source snapshot, and receipt remain
+under `/data/migration/legacy-hermes-v2/`. A failed import removes files it created
 and restores the prior database. The receipt repeats the source-volume
 inventory summary and hash so post-cutover checks do not depend on an
 operator's memory of the bundle.
@@ -164,7 +164,7 @@ importer and prove that gateway ownership is not retained. A different source
 or target version requires a new tested pair; editing the manifest version in
 place is forbidden.
 
-Delete this bridge after every admitted legacy bot has a successful receipt,
+Delete this bridge after every legacy bot has a successful receipt,
 its observation window has closed, and each frozen source Recovery Set has
 either been retained under policy or decommissioned by separate approval.
 
@@ -173,13 +173,13 @@ either been retained under policy or decommissioned by separate approval.
 - the receipt matches the approved manifest and exact source machine;
 - the target identity and Chat client hashes match their pre-import values;
 - imported session/message counts match the bundle;
-- the manifest binds a complete source-volume inventory with zero unresolved
-  entries;
+- the manifest binds a complete source-volume inventory and matching
+  `source-home.tar` with zero structurally blocked entries;
 - the target passes Chat, memory, review-only skill, and workspace
   verification;
 - cron definitions exist only in the review-only area during the canary;
 - legacy skills exist only in the review-only area during the canary;
-- cache-backed legacy media has an explicit archive-only count, other unmapped
+- cache-backed legacy media has an explicit preserved count, other unmapped
   source paths have a separate count, and the sampled media outcome is recorded;
 - Brain access is reauthorized and synced without copying legacy identity
   state;

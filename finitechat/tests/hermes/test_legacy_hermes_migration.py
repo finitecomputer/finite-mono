@@ -10,6 +10,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,9 +128,19 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
             self.assertFalse((target / "agent/hermes-home/skills").exists())
             self.assertTrue(
                 target.joinpath(
-                    "migration/legacy-hermes-v1/review-only/skills/legacy-finite/SKILL.md"
+                    "migration/legacy-hermes-v2/review-only/skills/legacy-finite/SKILL.md"
                 ).is_file()
             )
+            preserved = target.joinpath("migration/legacy-hermes-v2/preserved/source-home.tar")
+            with tarfile.open(preserved, "r:") as archive:
+                preserved_paths = {
+                    member.name.removeprefix("./")
+                    for member in archive
+                    if member.name not in ("", ".")
+                }
+            self.assertIn("custom-data/ledger.txt", preserved_paths)
+            self.assertIn(".finite/device.key", preserved_paths)
+            self.assertFalse((target / ".finite").exists())
             target_memory = MemoryStore(db_path=target / "agent/hermes-home/memory_store.db")
             try:
                 facts = target_memory.list_facts(limit=100)

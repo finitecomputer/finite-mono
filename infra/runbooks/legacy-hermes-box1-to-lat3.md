@@ -1,8 +1,9 @@
 # Migrate one box1 Hermes bot to lat3
 
-This procedure creates a normal v2 Agent on lat3, imports one allow-listed
-legacy bundle while both sides are single-writer safe, and leaves box1 frozen
-for rollback. It never converts a box1 identity into a v2 identity.
+This procedure creates a normal v2 Agent on lat3, converts compatible Hermes
+state, and transfers a sealed copy of the complete legacy `/home/node` while
+both sides are single-writer safe. It leaves box1 frozen for rollback and
+never converts a box1 identity into a v2 identity.
 
 The first canary is Austin. Do not substitute another bot into the Austin
 commands. Repeat the generic procedure later with a new evidence sheet and
@@ -32,22 +33,23 @@ Fresh read-only inventory on 2026-08-22 established:
 | target Hermes | `0.20.0` |
 | durable source mount | the `home-austin-finite-0` PVC mounted at `/home/node` |
 | non-PVC runtime storage | read-only root filesystem; `/tmp` and `/run` are ephemeral `emptyDir` mounts |
-| admitted file trees before session export | 67,003 regular files / 58 symlinks / about 5.9 GB in the first inventory; Austin later observed 67,001 / 57 while live, so the frozen manifest is authoritative |
-| whole-volume inventory | TODO(real-data rehearsal): record the root-only inventory hash, every disposition, and zero unresolved entries |
-| known owner decisions | TODO(real-data rehearsal): disposition the observed top-level files, `wiki/`, `Downloads/`, `signal/`, `ascii_frames/`, `.blogwatcher-cli/`, and the two date-named dumps; FiKnight counted 11 top-level files, but the frozen inventory is authoritative and names are not dispositions |
+| active file trees before session export | 67,003 regular files / 58 symlinks / about 5.9 GB in the first inventory; Austin later observed 67,001 / 57 while live, so the frozen manifest is authoritative |
+| complete source-home snapshot | TODO(real-data rehearsal): record the root-only inventory hash, `source-home.tar` hash and size, every automatic disposition, and zero structurally blocked entries |
+| unknown source data | automatically preserved inside `source-home.tar`; no owner classifies individual files |
 | legacy session database input | about 3.0 GB and 2,761 sessions in Austin's live self-audit; JSONL size and frozen counts are learned during export |
-| transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; retain archive-only and verify during rehearsal whether any conversation is absent from the API export |
+| transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; preserve in `source-home.tar` and verify during rehearsal whether any conversation is absent from the API export |
 | structured memory | 80 facts in a 648 KiB SQLite file |
 | cron | 12 enabled definitions; preserve review-only and activate none during canary |
 
 Re-read every value before mutation. A name match is not authority. Stop if
 the PVC UID/path, image digest, owner, or Hermes version changed.
 
-The first Austin inventory found 61 workspace symlinks. Three were inside the
-archived `dev/reap-video/venv`; that 13 MB venv is explicitly excluded and can
-be rebuilt. The other 58 stayed within their admitted workspace/dev/upload
-root. The later live count drifted by one, so the frozen scan is authoritative.
-A new escape is a hard stop, not an instruction to add `--dereference`.
+The first Austin inventory found 61 workspace symlinks. Three were inside
+`dev/reap-video/venv`; the active target rebuilds that 13 MB environment, but
+the complete source snapshot still preserves it. The other 58 stayed within
+their active workspace/dev/upload root. The later live count drifted by one,
+so the frozen scan is authoritative. A new escape is a hard stop, not an
+instruction to add `--dereference`.
 
 The old Runtime could put durable data anywhere below `/home/node`. The three
 admitted workspace roots are not proof that nothing else matters. Rehearsal
@@ -57,14 +59,14 @@ is complete. The pod's root filesystem is declared read-only, so files outside
 ephemeral `/tmp` and `/run` mounts. Step 3 rechecks that live storage shape. A
 new writable mount is a hard stop.
 
-FiKnight's read-only 2026-08-24 self-audit proved this is not theoretical. It
-found user-authored top-level files, five top-level directories outside the
-allow-list, and two unexplained date-named files totaling about 861 MB. The
-inventory must report them as unresolved until Austin explicitly chooses
-`bundle`, `archive-only`, or `rebuild` for each item. Do not inspect file
-contents merely to make the migration gate green. `.hermes/sessions/`, cron
-output, Hermes logs and caches, and observed package/tool caches are named
-archive-only classes; their counts remain part of the retained evidence.
+FiKnight's read-only 2026-08-24 self-audit found user-authored top-level files,
+five top-level directories outside the old active-path list, and two
+date-named files totaling about 861 MB. They require no owner decision:
+unknown safe paths default to `preserve` and are sealed into `source-home.tar`.
+Known identities and executable behavior are `quarantine`; known generated
+state is `rebuild`; both remain present in the snapshot but inactive. Only a
+special file, unreadable entry, escaping symlink, concurrent writer, or
+integrity mismatch blocks migration.
 
 The 2026-08-22 lat3 readiness snapshot showed 30 running sandboxes against the
 declared limit of 32 and 1.6 TiB free on `/data`. These values are not a
@@ -90,16 +92,15 @@ reservation; re-check them immediately before target creation.
   an empty scratch target. Record the archive name without recording keys.
 - The exact reviewed tools completed a real-data rehearsal against an isolated
   restore of Austin's Recovery Set. Record its manifest hash, counts, duration,
-  source-volume inventory hash, path dispositions, media-path result, and
-  cleanup outcome. The inventory must cover the entire restored `/home/node`
-  tree and report zero unresolved entries. A synthetic test is not this gate.
+  source-volume inventory hash, source-home snapshot hash, automatic
+  dispositions, media-path result, and cleanup outcome. The inventory and
+  snapshot must cover the entire restored `/home/node` tree and report zero
+  structurally blocked entries. A synthetic test is not this gate.
 - The owner has explicitly authorized target creation and the later cutover
   outage. These are separate from authorization to decommission box1.
-- Austin is the first Hermes canary by owner decision. The earlier Brain note
-  `topics/finite-mono/raw/notes/2026-07-23-investigate-legacy-migration-019f8f27.md`
-  names `paul-finite-2`; that was a prior plan and is superseded for this
-  migration. Correct the Brain page as context maintenance, not as a rehearsal
-  gate. The reviewed PR and this runbook do not grant execution authority.
+- Austin is the first Hermes canary. Older canary-order notes are superseded
+  and should be corrected as context maintenance, not as a rehearsal gate.
+  The reviewed PR and this runbook do not grant execution authority.
   Code review, target creation, source freeze, import, channel re-pairing,
   behavior restoration, and decommission remain separate approvals.
 - lat3 has one free 4-vCPU/8-GiB Runtime slot and free disk of at least three
@@ -108,16 +109,18 @@ reservation; re-check them immediately before target creation.
   `PROJECT_ID`, `RUNTIME_ID`, `MACHINE_ID`, `DURABLE_STATE_ID`, artifact,
   schema, host, `/data` path, and target Agent `npub`. Its structured-memory
   store must contain zero facts; the importer refuses a non-empty store.
-- Known box1 credential stores and active gateway state will not be copied.
-  Treat admitted user-authored files and scripts as potentially sensitive.
-  Cron definitions, helper scripts, and legacy skills will be retained in
-  review-only target paths; none will be activated by this canary.
-- Hermes cache-only audio and image media stays in the frozen Recovery Set.
+- Known box1 credential stores, old identities, and active gateway state are
+  preserved only inside the root-only source snapshot. They are never copied
+  into active target paths. Treat the entire snapshot and all user-authored
+  files as sensitive. Cron definitions, helper scripts, and legacy skills are
+  also retained in review-only target paths; none is activated by this canary.
+- Hermes cache-only audio and image media stays in the sealed source snapshot.
   Identify one old conversation containing media for step 8, or explicitly
   record that the frozen export contains none. Paths into admitted uploads,
   workspace, and dev trees are rewritten; cache-only paths are not.
-- The legacy local FiniteBrain working tree and its identity are not admitted.
-  Plan a fresh Agent Principal delegation, Folder Key Grant, and sync using
+- The legacy local FiniteBrain working tree and identity are preserved in the
+  sealed snapshot but never activated. Plan a fresh Agent Principal
+  delegation, Folder Key Grant, and sync using
   [the post-cutover repair brief](../../finitecomputer-v2/docs/legacy-hermes-post-cutover-repair.md).
 
 Abort on any mismatch. Do not delete source compute, PVC data, backup data, or
@@ -251,11 +254,13 @@ ssh box1 "sudo python3 '<BOX1_STAGE>/tool/legacy_hermes_migration.py' \
   source-writer-check --source-root '<SOURCE_PV_PATH>'"
 ```
 
-Inventory every file on the PVC before selecting bundle inputs. The command
-writes no file contents. It exits nonzero after writing the root-only evidence
-file if any path lacks a reviewed disposition. During rehearsal, an unresolved
-path means the policy, tests, and this evidence sheet must return to review.
-During cutover, any unresolved path is a hard stop.
+Inventory every entry on the PVC before staging the bundle. The root-only
+inventory records paths, kinds, modes, sizes, link targets, dispositions, and
+content hashes; it never embeds file contents. Known compatible paths are
+`activate` or `converted`. Known identity and executable state is
+`quarantine`. Known generated state is `rebuild`. Every other safe path
+defaults to `preserve`. The command exits nonzero only for structurally unsafe
+or unreadable entries.
 
 ```sh
 SOURCE_IMAGE_REFERENCE='docker.io/library/fc-agent-runtime:main'
@@ -305,12 +310,13 @@ through Hermes v0.14. The memory snapshot also uses SQLite's backup API and
 must report 80 facts. Retain the inventory hash and both export commands'
 counts, byte counts, and SHA-256 output.
 
-### 5. Stage only the admitted bundle
+### 5. Stage the complete snapshot and active bundle
 
 Run these commands from the trusted operator workstation. Fill only the two
-target paths; the Austin source values are deliberately concrete. The streams
-preserve modes and symlinks without following them, and the sole exclusion is
-the archived venv identified above.
+target paths; the Austin source values are deliberately concrete. The first
+stream captures all of `/home/node` without following symlinks. The remaining
+streams stage the subset that the importer converts or places into active and
+review-only target paths.
 
 ```sh
 SOURCE_PV_PATH='/var/lib/rancher/k3s/storage/pvc-96716337-df1e-4b28-9692-0263d4672085_austin-finite_home-austin-finite-0'
@@ -320,6 +326,10 @@ SOURCE_VOLUME_INVENTORY_SHA256='<SOURCE_VOLUME_INVENTORY_SHA256>'
 
 ssh lat3 "sudo install -d -m 0700 \
   '$BUNDLE/payload/hermes' '$BUNDLE/payload/home'"
+ssh box1 "sudo tar --sort=name --numeric-owner --format=pax \
+  --hard-dereference --one-file-system --acls --xattrs \
+  -C '$SOURCE_PV_PATH' -cpf - ." \
+  | ssh lat3 "sudo sh -c 'umask 077; cat >\"$BUNDLE/payload/source-home.tar\"'"
 ssh box1 "sudo tar -C '$SOURCE_PV_PATH/.hermes' -cpf - \
   memories skills cron/jobs.json scripts" \
   | ssh lat3 "sudo tar -C '$BUNDLE/payload/hermes' -xpf -"
@@ -334,14 +344,13 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - source-volume-inventory.json" \
   | ssh lat3 "sudo tar -C '$BUNDLE' -xpf -"
 ```
 
-Do not add another exclusion during cutover. If the manifest rejects a new
-special file or escaping symlink, stop and amend the evidence sheet under
-review. Never add `--dereference`. Do not stage top-level `.env`, `auth.json`,
-config, tokens, cron output, `.finite`, raw session/auxiliary SQLite,
-Hermes-managed venvs, logs, or caches. They remain inside the frozen Recovery
-Set; user project dependencies, cron definitions, the structured-memory
-snapshot, and files inside the admitted roots remain sensitive bundle data and
-stay root-only.
+Do not add an exclusion to the complete source snapshot. `--hard-dereference`
+stores hard-linked file content independently; it does not follow symlinks.
+Never add `--dereference`. If the inventory or manifest finds a special file,
+unreadable entry, escaping symlink, missing path, or digest mismatch, stop and
+fix the fleet policy or source condition in review. Credentials, old identity,
+cron output, raw databases, venvs, logs, and caches are present only inside the
+root-only `source-home.tar`; they never receive active target mappings.
 
 Seal and verify the bundle with the reviewed tool mounted read-only into the
 existing target image:
@@ -378,14 +387,14 @@ sudo nerdctl --namespace finite run --rm --network none --read-only \
 sudo sha256sum '<BUNDLE>/manifest.json'
 ```
 
-Record `MANIFEST_SHA256` and bundle size. Compare the manifest session/message
-counts and 80 memory facts with step 4. Review every `archived_only` class and
-the compatibility summary. The manifest's source-inventory hash must match the
-reviewed step 4 evidence, and the inventory must have zero unresolved entries.
-It must also say legacy skills are review-only, the Brain working tree must be
-freshly authorized and synced, and how many session paths were rewritten, how
-many cache-media paths remain archive-only, and how many other legacy paths
-remain unmapped.
+Record `MANIFEST_SHA256`, bundle size, and the `source_snapshot` summary.
+Compare the manifest session/message counts and 80 memory facts with step 4.
+The manifest must prove that every inventory entry exists in `source-home.tar`
+with matching type, mode, size, symlink target, and content hash. It must have
+zero structurally blocked entries. It must also say legacy skills are
+review-only, the Brain working tree must be freshly authorized and synced,
+and how many session paths were rewritten, preserved as cache media, or remain
+unmapped in active state.
 
 ### 6. Stop the target through Core
 
@@ -436,7 +445,7 @@ sudo nerdctl --namespace finite run --rm --network none --read-only \
 ```
 
 Require a receipt at
-`<TARGET_DATA>/migration/legacy-hermes-v1/receipt.json`. Its status must be
+`<TARGET_DATA>/migration/legacy-hermes-v2/receipt.json`. Its status must be
 `installed-offline-awaiting-runtime-verification`; its manifest hash and
 source machine must match approval; its protected hashes must match step 6.
 
@@ -457,16 +466,19 @@ recovery archives through a minimum 24-hour observation window.
   and Agent `npub` recorded in step 2.
 - The target identity and Chat client SHA-256 values are unchanged.
 - The receipt session/message counts equal the sealed manifest.
-- The manifest binds the reviewed whole-volume inventory, and that inventory
-  accounts for every non-directory entry on the source PVC with zero
-  unresolved entries.
+- The manifest binds the whole-volume inventory and `source-home.tar`. Every
+  source entry appears in the sealed snapshot with matching metadata and hash,
+  and the inventory has zero structurally blocked entries.
+- The installed snapshot exists at
+  `/data/migration/legacy-hermes-v2/preserved/source-home.tar`, is mode `0600`,
+  matches the manifest hash, and restores into an empty scratch directory.
 - A sampled old Hermes conversation is present but does not own a Telegram,
   webhook, or other live gateway route. For the preselected media sample, an
   admitted file path resolves under `/data/workspace/legacy-box1`; a
-  cache-only media path is explicitly recorded as archive-only and is not
-  presented as migrated.
+  cache-only media path is explicitly recorded as preserved in the sealed
+  snapshot and is not presented as active.
 - Austin's imported memories are visible. Legacy skills exist only under
-  `/data/migration/legacy-hermes-v1/review-only/skills`; none shadow or merge
+  `/data/migration/legacy-hermes-v2/review-only/skills`; none shadow or merge
   into the active managed skill tree.
 - The receipt and rebuilt memory store contain 80 structured facts.
 - The receipt records 12 source cron jobs, and no job exists in the active
@@ -476,8 +488,8 @@ recovery archives through a minimum 24-hour observation window.
 - The manifest and receipt contain no write target for the target's managed
   Hermes configuration, active skills, identity, or Chat state. Protected
   identity and Chat hashes still match step 6.
-- Brain access is recorded as pending fresh target authorization and sync; no
-  source Brain identity or working tree was copied.
+- Brain access is recorded as pending fresh target authorization and sync. The
+  source Brain working tree and identity exist only inside `source-home.tar`.
 - A new Finite Chat message receives exactly one target reply.
 - box1 has zero Austin pods; its PVC and off-host archive remain intact.
 - No other box1 or lat3 bot restarted or changed artifact.

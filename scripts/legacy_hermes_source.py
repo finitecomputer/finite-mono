@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import os
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from legacy_hermes_contract import (
     _write_private_json,
 )
 
-SOURCE_BUNDLE_ROOTS = (
+SOURCE_ACTIVATE_ROOTS = (
     Path(".hermes/memories"),
     Path(".hermes/skills"),
     Path(".hermes/scripts"),
@@ -40,25 +42,29 @@ SOURCE_CONVERTED_FILES = (
     Path(".hermes/memory_store.db-wal"),
     Path(".hermes/memory_store.db-shm"),
 )
-SOURCE_ARCHIVE_ONLY_ROOTS = (
+SOURCE_QUARANTINE_ROOTS = (
     Path(".brain"),
     Path(".finite"),
+    Path(".codex"),
+    Path(".hermes/cron"),
+    Path(".hermes/.env"),
+    Path(".hermes/auth.json"),
+    Path(".hermes/config.json"),
+    Path(".hermes/config.yaml"),
+    Path(".hermes/credentials"),
+    Path(".hermes/tokens"),
+)
+SOURCE_REBUILD_ROOTS = (
     Path(".agent-browser"),
     Path(".bun"),
     Path(".cache"),
     Path(".cargo"),
-    Path(".codex"),
     Path(".local"),
     Path(".npm"),
     Path(".npm-global"),
     Path(".rustup"),
-    Path(".hermes/audio_cache"),
-    Path(".hermes/cron"),
-    Path(".hermes/image_cache"),
-    Path(".hermes/logs"),
-    Path(".hermes/sessions"),
+    Path("dev/reap-video/venv"),
 )
-SOURCE_REBUILD_ROOTS = (Path("dev/reap-video/venv"),)
 
 
 def _require_source_hermes_version() -> None:
@@ -205,16 +211,16 @@ def _is_below(relative: Path, root: Path) -> bool:
 def _source_inventory_classification(relative: Path) -> str:
     if any(_is_below(relative, root) for root in SOURCE_REBUILD_ROOTS):
         return "rebuild"
-    if any(_is_below(relative, root) for root in SOURCE_BUNDLE_ROOTS):
-        return "bundle"
+    if any(_is_below(relative, root) for root in SOURCE_ACTIVATE_ROOTS):
+        return "activate"
     if relative in SOURCE_CONVERTED_FILES:
         return "converted"
-    if any(_is_below(relative, root) for root in SOURCE_ARCHIVE_ONLY_ROOTS):
-        return "archive-only"
-    return "unresolved"
+    if any(_is_below(relative, root) for root in SOURCE_QUARANTINE_ROOTS):
+        return "quarantine"
+    return "preserve"
 
 
-def _unresolved_inventory_root(relative: Path) -> Path:
+def _blocked_inventory_root(relative: Path) -> Path:
     parts = relative.parts
     if parts and parts[0] == ".hermes" and len(parts) > 1:
         return Path(*parts[:2])
@@ -224,6 +230,7 @@ def _unresolved_inventory_root(relative: Path) -> Path:
 def _empty_inventory_summary() -> dict[str, int]:
     return {
         "entries": 0,
+        "directories": 0,
         "regular_files": 0,
         "bytes": 0,
         "symlinks": 0,
@@ -231,8 +238,29 @@ def _empty_inventory_summary() -> dict[str, int]:
     }
 
 
+def _source_symlink_is_contained(
+    candidate: Path, source_root: Path, link_target: str
+) -> bool:
+    target = Path(link_target)
+    legacy_home = Path("/home/node")
+    if target.is_absolute():
+        try:
+            relative = target.relative_to(legacy_home)
+        except ValueError:
+            resolved = target.resolve(strict=False)
+        else:
+            resolved = (source_root / relative).resolve(strict=False)
+    else:
+        resolved = (candidate.parent / target).resolve(strict=False)
+    try:
+        resolved.relative_to(source_root)
+    except ValueError:
+        return False
+    return True
+
+
 def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
-    """Inventory every non-directory entry on the legacy /home/node volume."""
+    """Inventory every durable directory, regular file, and symlink."""
     output = Path(output)
     source_root = Path(source_root)
     if not source_root.is_dir() or source_root.is_symlink():
@@ -251,9 +279,17 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
 
     classifications = {
         name: _empty_inventory_summary()
-        for name in ("bundle", "converted", "archive-only", "rebuild", "unresolved")
+        for name in (
+            "activate",
+            "converted",
+            "preserve",
+            "quarantine",
+            "rebuild",
+            "blocked",
+        )
     }
-    unresolved: dict[str, dict[str, int]] = {}
+    blocked: dict[str, dict[str, int]] = {}
+    entries: list[dict[str, Any]] = []
     directory_count = 0
 
     def on_walk_error(error: OSError) -> None:
@@ -268,9 +304,30 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
         directory_path = Path(directory)
         dirnames.sort()
         filenames.sort()
-        directory_count += sum(
-            not (directory_path / name).is_symlink() for name in dirnames
-        )
+        real_directories = [
+            directory_path / name
+            for name in dirnames
+            if not (directory_path / name).is_symlink()
+        ]
+        directory_count += len(real_directories)
+        for candidate in real_directories:
+            info = candidate.lstat()
+            relative = candidate.relative_to(resolved_source)
+            classification = _source_inventory_classification(relative)
+            summary = classifications[classification]
+            summary["entries"] += 1
+            summary["directories"] += 1
+            entries.append(
+                {
+                    "path": relative.as_posix(),
+                    "disposition": classification,
+                    "kind": "directory",
+                    "size": 0,
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "sha256": None,
+                    "link_target": None,
+                }
+            )
         directory_symlinks = [
             directory_path / name
             for name in dirnames
@@ -291,19 +348,53 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
             relative = candidate.relative_to(resolved_source)
             classification = _source_inventory_classification(relative)
             if not (candidate.is_symlink() or candidate.is_file()):
-                classification = "unresolved"
+                classification = "blocked"
+            elif candidate.is_symlink() and not _source_symlink_is_contained(
+                candidate, resolved_source, os.readlink(candidate)
+            ):
+                classification = "blocked"
             summary = classifications[classification]
             summary["entries"] += 1
             if candidate.is_symlink():
                 summary["symlinks"] += 1
+                link_target = os.readlink(candidate)
+                entry_size = len(link_target.encode("utf-8"))
+                entry_sha256 = hashlib.sha256(link_target.encode("utf-8")).hexdigest()
+                entry_kind = "symlink"
             elif candidate.is_file():
                 summary["regular_files"] += 1
                 summary["bytes"] += info.st_size
+                link_target = None
+                entry_size = info.st_size
+                try:
+                    entry_sha256 = _sha256(candidate)
+                except OSError as exc:
+                    raise MigrationError(
+                        "could not hash source entry: " + relative.as_posix()
+                    ) from exc
+                entry_kind = "file"
             else:
                 summary["special_files"] += 1
-            if classification == "unresolved":
-                root = _unresolved_inventory_root(relative).as_posix()
-                root_summary = unresolved.setdefault(root, _empty_inventory_summary())
+                link_target = None
+                entry_size = info.st_size
+                entry_sha256 = None
+                entry_kind = "special"
+            entries.append(
+                {
+                    "path": relative.as_posix(),
+                    "disposition": classification,
+                    "kind": entry_kind,
+                    "size": entry_size,
+                    "mode": None
+                    if entry_kind == "symlink"
+                    else stat.S_IMODE(info.st_mode),
+                    "sha256": entry_sha256,
+                    "link_target": link_target,
+                }
+            )
+            if classification == "blocked":
+                root = _blocked_inventory_root(relative).as_posix()
+                root_summary = blocked.setdefault(root, _empty_inventory_summary())
                 root_summary["entries"] += 1
                 if candidate.is_symlink():
                     root_summary["symlinks"] += 1
@@ -313,22 +404,25 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
                 else:
                     root_summary["special_files"] += 1
 
-    unresolved_roots = [
-        {"path": path, **summary} for path, summary in sorted(unresolved.items())
+    blocked_roots = [
+        {"path": path, **summary} for path, summary in sorted(blocked.items())
     ]
+    entries.sort(key=lambda entry: entry["path"])
     result = {
         "schema": SOURCE_INVENTORY_SCHEMA,
         "source_root": str(resolved_source),
-        "status": "complete" if not unresolved_roots else "review-required",
+        "status": "complete" if not blocked_roots else "blocked",
         "policy": {
-            "bundle": [path.as_posix() for path in SOURCE_BUNDLE_ROOTS],
+            "activate": [path.as_posix() for path in SOURCE_ACTIVATE_ROOTS],
             "converted": [path.as_posix() for path in SOURCE_CONVERTED_FILES],
-            "archive-only": [path.as_posix() for path in SOURCE_ARCHIVE_ONLY_ROOTS],
+            "quarantine": [path.as_posix() for path in SOURCE_QUARANTINE_ROOTS],
             "rebuild": [path.as_posix() for path in SOURCE_REBUILD_ROOTS],
+            "default": "preserve",
         },
         "directories": directory_count,
         "classifications": classifications,
-        "unresolved_roots": unresolved_roots,
+        "entries": entries,
+        "blocked_roots": blocked_roots,
     }
     _write_private_json(output, result)
     return result

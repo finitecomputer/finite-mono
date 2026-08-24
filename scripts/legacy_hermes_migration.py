@@ -2,8 +2,9 @@
 """Build, verify, and install a Finite legacy-Hermes migration bundle.
 
 The target installer is deliberately offline. It imports conversation history
-through the target Hermes version, copies only allow-listed user state, and
-hash-fences the newly-created Finite identity and Chat client store.
+through the target Hermes version, preserves the complete source home in an
+inert sealed archive, activates only compatible state, and hash-fences the
+newly-created Finite identity and Chat client store.
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     writers.add_argument("--proc-root", type=Path, default=Path("/proc"))
 
     manifest = subparsers.add_parser(
-        "manifest", help="hash and seal an allow-listed staged bundle"
+        "manifest", help="hash and seal complete preserved and active source state"
     )
     manifest.add_argument("--bundle", type=Path, required=True)
     manifest.add_argument("--source-host-id", required=True)
@@ -104,10 +105,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             result = snapshot_source_memory(args.output, args.source_database)
         elif args.command == "source-volume-inventory":
             result = inventory_source_volume(args.output, args.source_root)
-            unresolved = result["classifications"]["unresolved"]["entries"]
-            if unresolved:
+            blocked = result["classifications"]["blocked"]["entries"]
+            if blocked:
                 raise MigrationError(
-                    f"source inventory has {unresolved} unresolved source entries; "
+                    f"source inventory has {blocked} structurally blocked entries; "
                     f"review {args.output}"
                 )
         elif args.command == "source-writer-check":
