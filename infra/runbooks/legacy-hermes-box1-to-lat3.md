@@ -40,6 +40,8 @@ Fresh read-only inventory on 2026-08-22 established:
 | transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; preserve in `source-home.tar` and verify during rehearsal whether any conversation is absent from the API export |
 | structured memory | 80 facts in a 648 KiB SQLite file |
 | cron | 12 enabled definitions; preserve review-only and activate none during canary |
+| legacy Sites | TODO(real-data rehearsal): record every authoritative published or reserved endpoint and prove each local source path is in the snapshot; republish none during import |
+| external integrations | TODO(real-data rehearsal): record each detected connection and automatic migration policy without recording credential values |
 
 Re-read every value before mutation. A name match is not authority. Stop if
 the PVC UID/path, image digest, owner, or Hermes version changed.
@@ -96,6 +98,11 @@ reservation; re-check them immediately before target creation.
   dispositions, media-path result, and cleanup outcome. The inventory and
   snapshot must cover the entire restored `/home/node` tree and report zero
   structurally blocked entries. A synthetic test is not this gate.
+- The rehearsal produced `sites.json` from the authoritative legacy control
+  plane and proved every local Site source path exists in the source snapshot.
+  It also produced `integrations.json`, containing configuration names and
+  migration policies but no secret values. Neither command republishes a Site
+  or activates an integration.
 - The owner has explicitly authorized target creation and the later cutover
   outage. These are separate from authorization to decommission box1.
 - Austin is the first Hermes canary. Older canary-order notes are superseded
@@ -226,9 +233,10 @@ remain single-writer safe.
 
 Create a root-only box1 staging directory outside the PVC. Transfer the exact
 tool archive approved in step 1; do not copy a checkout or secret file. Verify
-its hash before extracting. The single source launcher accepts only the volume
-inventory and two export commands. It reuses the source image's immutable
-Hermes wrapper environment instead of the mutable user venv.
+its hash before extracting. The single source launcher accepts only the volume,
+Sites, and integrations inventories plus the two database export commands. It
+reuses the source image's immutable Hermes wrapper environment instead of the
+mutable user venv.
 
 ```sh
 ssh box1 "sudo install -d -m 0700 '<BOX1_STAGE>'"
@@ -282,6 +290,37 @@ sudo ctr --namespace k8s.io run --rm \
 sudo chmod 0600 '<BOX1_STAGE>/source-volume-inventory.json'
 sudo sha256sum '<BOX1_STAGE>/source-volume-inventory.json'
 
+sudo sh -c 'umask 077; \
+  /run/current-system/sw/bin/finited \
+  --workspace-root /etc/nixos/workspaces/ovh-fc-1 \
+  --control-plane-root /var/lib/finitecomputer \
+  list-published-endpoints \
+  --payload '"'"'{"machineId":"austin-finite"}'"'"' \
+  > <BOX1_STAGE>/published-endpoints.json'
+
+sudo ctr --namespace k8s.io run --rm \
+  --user 0:0 \
+  --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
+  --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
+  --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
+  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-sites-inventory' \
+  /opt/migration/legacy-hermes-source source-sites-inventory \
+  --published-endpoints /migration/published-endpoints.json \
+  --source-volume-inventory /migration/source-volume-inventory.json \
+  --expected-machine-id austin-finite \
+  --output /migration/sites.json
+
+sudo ctr --namespace k8s.io run --rm \
+  --user 0:0 \
+  --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
+  --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
+  --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
+  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-integrations-inventory' \
+  /opt/migration/legacy-hermes-source source-integrations-inventory \
+  --source-root /source \
+  --source-volume-inventory /migration/source-volume-inventory.json \
+  --output /migration/integrations.json
+
 sudo ctr --namespace k8s.io run --rm \
   --user 0:0 \
   --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
@@ -305,10 +344,16 @@ sudo ctr --namespace k8s.io run --rm \
   --output /migration/memory_store.db
 ```
 
-The exporter first uses SQLite's backup API, then reads the scratch database
-through Hermes v0.14. The memory snapshot also uses SQLite's backup API and
-must report 80 facts. Retain the inventory hash and both export commands'
-counts, byte counts, and SHA-256 output.
+The Sites command reads only the control-plane export and source-volume
+inventory. It fails if a locally run Site points outside `/home/node` or its
+source is missing. The integrations command reads configuration without
+executing it and emits names and policies only. Inspect both root-only files;
+they must contain no credential values.
+
+The session exporter first uses SQLite's backup API, then reads the scratch
+database through Hermes v0.14. The memory snapshot also uses SQLite's backup
+API and must report 80 facts. Retain the inventory hash and both export
+commands' counts, byte counts, and SHA-256 output.
 
 ### 5. Stage the complete snapshot and active bundle
 
@@ -341,6 +386,8 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sessions.jsonl" \
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - memory_store.db" \
   | ssh lat3 "sudo tar -C '$BUNDLE/payload' -xpf -"
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - source-volume-inventory.json" \
+  | ssh lat3 "sudo tar -C '$BUNDLE' -xpf -"
+ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sites.json integrations.json" \
   | ssh lat3 "sudo tar -C '$BUNDLE' -xpf -"
 ```
 
@@ -395,6 +442,9 @@ zero structurally blocked entries. It must also say legacy skills are
 review-only, the Brain working tree must be freshly authorized and synced,
 and how many session paths were rewritten, preserved as cache media, or remain
 unmapped in active state.
+It must also bind the complete Sites and integrations inventories. Require all
+local Site source paths present, no automatic republication, every integration
+assigned a policy, no secret values, and every integration inactive.
 
 ### 6. Stop the target through Core
 
@@ -466,6 +516,13 @@ recovery archives through a minimum 24-hour observation window.
   and Agent `npub` recorded in step 2.
 - The target identity and Chat client SHA-256 values are unchanged.
 - The receipt session/message counts equal the sealed manifest.
+- The receipt Sites summary equals the manifest. Every legacy endpoint is
+  listed, every local source path is preserved, and no Site was republished by
+  the importer.
+- The receipt integrations summary equals the manifest. Telegram and Signal
+  remain transfer candidates, Google Workspace and Brain require fresh
+  authorization, target-managed model credentials are not copied, and every
+  other detected connection remains preserved but disabled.
 - The manifest binds the whole-volume inventory and `source-home.tar`. Every
   source entry appears in the sealed snapshot with matching metadata and hash,
   and the inventory has zero structurally blocked entries.

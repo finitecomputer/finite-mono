@@ -56,6 +56,30 @@ root-only, and is hashed into the migration manifest. Unknown safe paths
 default to `preserve`. Rehearsal and cutover require zero `blocked` entries.
 They do not require per-user classification.
 
+Sites and external connections have separate inventories because neither can
+be reconstructed from file names alone. The Sites inventory comes from the
+legacy control plane's authoritative published-endpoint records. For every
+endpoint with a local run command, it proves that `run_cwd` is below
+`/home/node` and present in the complete source inventory. Reserved or
+externally managed endpoints remain listed without inventing a source path.
+The migration records these Sites but does not republish them.
+
+The integrations inventory reads the frozen Hermes configuration without
+executing it. It records configured environment-variable names, platform
+names, and known credential locations, but never their values. Each detected
+connection receives one deterministic policy:
+
+- Telegram and Signal are eligible for controlled transfer only after the
+  rehearsal proves the target flow.
+- Google Workspace and FiniteBrain require fresh target authorization.
+- Model-provider credentials are replaced by target-managed configuration.
+- Anything else remains preserved and disabled until a supported target setup
+  exists.
+
+Unknown integrations do not require an owner to classify their files and do
+not disappear. Their state stays in `source-home.tar`; only activation waits.
+Both inventories are root-only files hashed into the manifest and receipt.
+
 The operator also rechecks the live pod's read-only root and `/home/node`
 mount. Another writable durable mount, a special file, unreadable data, an
 escaping symlink, a concurrent writer, or an integrity mismatch stops the
@@ -68,6 +92,8 @@ migration because the lossless contract cannot be proven.
 | Source | Target | Behavior |
 | --- | --- | --- |
 | complete `source-home.tar` | `/data/migration/legacy-hermes-v2/preserved/source-home.tar` | Every safe source entry preserved, mode `0600`, never extracted into active state automatically |
+| authoritative Sites inventory | migration manifest and receipt | Every published or reserved endpoint recorded; local source paths proven present; nothing republished automatically |
+| secret-free integrations inventory | migration manifest and receipt | Every detected connection assigned a transfer, reauthorization, target-managed, or preserve-disabled policy; nothing activated automatically |
 | Hermes session JSONL | rebuilt target `state.db` | Imported through target Hermes; live gateway routing, handoff, and activity state reset; structured paths into admitted roots rewritten |
 | structured memory SQLite API snapshot | rebuilt target `memory_store.db` | Opened and vector-rebuilt through target Hermes; a non-empty fresh target fails closed |
 | `memories/` | active Hermes memories | File collision fails closed |
@@ -119,8 +145,8 @@ repair stale source paths.
 2. Freeze box1 and keep its PVC plus off-host archive intact.
 3. Prove no host process retains a writable file descriptor or writable memory
    map below the frozen PVC, inventory the whole PVC, export sessions from a
-   SQLite API snapshot, and seal the complete source snapshot, active inputs,
-   and inventory.
+   SQLite API snapshot, export authoritative Sites and secret-free integration
+   inventories, and seal the complete source snapshot and active inputs.
 4. Stop the target through Core.
 5. Run the importer once, offline, against the exact target durable root.
 6. Restart through Core and verify the same target Agent Principal, Chat round
@@ -134,9 +160,9 @@ WALs, runs SQLite `quick_check`, and swaps only after every source session and
 memory fact imports.
 The target's pre-import database, complete source snapshot, and receipt remain
 under `/data/migration/legacy-hermes-v2/`. A failed import removes files it created
-and restores the prior database. The receipt repeats the source-volume
-inventory summary and hash so post-cutover checks do not depend on an
-operator's memory of the bundle.
+and restores the prior database. The receipt repeats the source-volume,
+Sites, and integrations summaries and hashes so post-cutover checks do not
+depend on an operator's memory of the bundle.
 
 ## Writers and readers
 
@@ -175,6 +201,11 @@ either been retained under policy or decommissioned by separate approval.
 - imported session/message counts match the bundle;
 - the manifest binds a complete source-volume inventory and matching
   `source-home.tar` with zero structurally blocked entries;
+- every authoritative legacy Site is recorded, and every local Site source
+  path is present in the complete snapshot;
+- every detected integration has a deterministic migration policy, the
+  inventory contains no secret values, and every target integration remains
+  inactive during import;
 - the target passes Chat, memory, review-only skill, and workspace
   verification;
 - cron definitions exist only in the review-only area during the canary;
