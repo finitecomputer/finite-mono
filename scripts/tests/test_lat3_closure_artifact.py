@@ -100,6 +100,16 @@ class Lat3ClosureArtifactTests(unittest.TestCase):
             source[:success],
         )
 
+    def test_extra_units_require_explicit_cli_approval(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        self.assertIn("--allow-unit", source)
+        self.assertIn("approved_extra_units", source)
+        self.assertIn("invalid explicitly approved unit", source)
+        self.assertNotIn(
+            "alloy.service|dbus-broker.service|systemd-tmpfiles-resetup.service",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

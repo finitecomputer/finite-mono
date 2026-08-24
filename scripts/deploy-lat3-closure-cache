@@ -5,22 +5,54 @@ set -euo pipefail
 
 LAT3="${FINITE_LAT3_TARGET:-root@207.188.7.157}"
 mode="prepare"
+mode_seen=0
+artifact_dir=""
+approved_extra_units=()
 
 usage() {
-  echo "usage: $0 [--validate-only|--prepare|--activate] <lat3-closure-artifact-dir>" >&2
+  echo "usage: $0 [--validate-only|--prepare|--activate] [--allow-unit UNIT]... <lat3-closure-artifact-dir>" >&2
 }
 
-if [[ $# -ne 2 ]]; then
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --validate-only|--prepare|--activate)
+      if [[ "$mode_seen" == 1 ]]; then
+        echo "choose exactly one rollout mode" >&2
+        usage
+        exit 64
+      fi
+      mode_seen=1
+      case "$1" in
+        --validate-only) mode="validate" ;;
+        --prepare) mode="prepare" ;;
+        --activate) mode="activate" ;;
+      esac
+      ;;
+    --allow-unit)
+      shift
+      if [[ $# -eq 0 || ! "$1" =~ ^[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)$ ]]; then
+        echo "invalid explicitly approved unit" >&2
+        usage
+        exit 64
+      fi
+      approved_extra_units+=("$1")
+      ;;
+    -*) usage; exit 64 ;;
+    *)
+      if [[ -n "$artifact_dir" ]]; then
+        usage
+        exit 64
+      fi
+      artifact_dir="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$artifact_dir" ]]; then
   usage
   exit 64
 fi
-case "$1" in
-  --validate-only) mode="validate" ;;
-  --prepare) mode="prepare" ;;
-  --activate) mode="activate" ;;
-  *) usage; exit 64 ;;
-esac
-artifact_dir="$2"
 
 if [[ ! -d "$artifact_dir" ]]; then
   echo "artifact directory does not exist: $artifact_dir" >&2
@@ -87,6 +119,9 @@ git merge-base --is-ancestor "$REV" origin/main || {
 echo "==> validated finite-lat-3 closure artifact"
 echo "    rev=$REV"
 echo "    system=$SYSTEM"
+if [[ ${#approved_extra_units[@]} -gt 0 ]]; then
+  printf '    explicitly-approved-unit=%s\n' "${approved_extra_units[@]}"
+fi
 if [[ "$mode" == "validate" ]]; then
   exit 0
 fi
@@ -108,10 +143,29 @@ ssh -o BatchMode=yes "$LAT3" \
 cat "$dry_output_file"
 
 # A Runner-only rollout may relink the one-shot worker and refresh its static
-# version metric. Any other unit change broadens the mutation boundary.
-unexpected_units="$({
+# version metric. Every other named unit requires an explicit CLI approval for
+# this attempt; the default remains fail closed.
+unexpected_units=""
+while IFS= read -r unit; do
+  case "$unit" in
+    finite-saas-runner.service|finite-saas-runner.timer|finite-component-version-metrics.service)
+      continue
+      ;;
+  esac
+  approved=0
+  for approved_unit in "${approved_extra_units[@]}"; do
+    if [[ "$unit" == "$approved_unit" ]]; then
+      approved=1
+      break
+    fi
+  done
+  if [[ "$approved" == 0 ]]; then
+    unexpected_units+="${unit}"$'\n'
+  fi
+done < <({
   grep -Eo '[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)' "$dry_output_file" || true
-} | sort -u | grep -Ev '^(finite-saas-runner\.(service|timer)|finite-component-version-metrics\.service)$' || true)"
+} | sort -u)
+unexpected_units="${unexpected_units%$'\n'}"
 if [[ -n "$unexpected_units" ]]; then
   echo "refusing Runner-only rollout: dry activation names unexpected units:" >&2
   printf '%s\n' "$unexpected_units" >&2
