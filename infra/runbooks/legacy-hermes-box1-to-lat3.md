@@ -95,15 +95,13 @@ reservation; re-check them immediately before target creation.
   tree and report zero unresolved entries. A synthetic test is not this gate.
 - The owner has explicitly authorized target creation and the later cutover
   outage. These are separate from authorization to decommission box1.
-- Before rehearsal, the Finite Mono Brain records whether Austin replaces
-  `paul-finite-2` as the first Hermes canary. The current Brain note
+- Austin is the first Hermes canary by owner decision. The earlier Brain note
   `topics/finite-mono/raw/notes/2026-07-23-investigate-legacy-migration-019f8f27.md`
-  still names `paul-finite-2` and puts Telegram pairing readiness ahead of a
-  production-paired Agent. If Austin goes first, Austin and Paul must
-  explicitly accept that Telegram/Signal re-pairing risk. The reviewed PR and
-  this runbook define the bounded procedure; they do not grant execution
-  authority. Code review, target creation, source freeze, import, behavior
-  restoration, and decommission remain separate approvals.
+  names `paul-finite-2`; that was a prior plan and is superseded for this
+  migration. Correct the Brain page as context maintenance, not as a rehearsal
+  gate. The reviewed PR and this runbook do not grant execution authority.
+  Code review, target creation, source freeze, import, channel re-pairing,
+  behavior restoration, and decommission remain separate approvals.
 - lat3 has one free 4-vCPU/8-GiB Runtime slot and free disk of at least three
   times the sealed bundle size plus 10 GiB.
 - The target is a fresh Runtime under the exact verified Austin account. Record
