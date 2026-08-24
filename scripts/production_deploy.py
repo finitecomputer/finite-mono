@@ -21,6 +21,7 @@ DEFAULT_MANIFEST = ROOT / "infra" / "deployments" / "production.toml"
 PLAN_SCHEMA = "finite.production-deploy-plan.v1"
 RECORD_SCHEMA = "finite.production-deploy-record.v1"
 RISKY_PATH_POLICY = "lat1-v1"
+ZERO_SHA = "0" * 40
 ALLOWED_CLASSIFICATIONS = {"ordinary", "schema-change", "forward-only"}
 ALLOWED_MANIFEST_KEYS = {
     "environment",
@@ -121,6 +122,47 @@ def resolve_rev(rev: str) -> str:
     if len(resolved) != 40 or any(char not in "0123456789abcdef" for char in resolved):
         raise DeployConfigError(f"revision did not resolve to a full SHA: {rev}")
     return resolved
+
+
+def commit_parents(rev: str) -> list[str]:
+    raw = run_git(["rev-list", "--parents", "-n", "1", rev])
+    parts = raw.split()
+    if not parts or parts[0] != rev:
+        raise DeployConfigError(f"could not inspect commit parents for {rev}")
+    return parts[1:]
+
+
+def tree_sha(rev: str) -> str:
+    return run_git(["rev-parse", f"{rev}^{{tree}}"])
+
+
+def resolve_ci_source(source: str, push_before: str | None) -> dict[str, str]:
+    source_sha = resolve_rev(source)
+    before_sha = (
+        resolve_rev(push_before)
+        if push_before and push_before != ZERO_SHA
+        else None
+    )
+    parents = commit_parents(source_sha)
+
+    if before_sha and len(parents) == 2 and parents[0] == before_sha:
+        ci_source_sha = parents[1]
+        if tree_sha(source_sha) != tree_sha(ci_source_sha):
+            raise DeployConfigError(
+                "production merge commit tree does not match its promoted "
+                "source parent"
+            )
+        return {
+            "source_sha": source_sha,
+            "ci_source_sha": ci_source_sha,
+            "ci_source_reason": "production-merge-second-parent",
+        }
+
+    return {
+        "source_sha": source_sha,
+        "ci_source_sha": source_sha,
+        "ci_source_reason": "source-sha",
+    }
 
 
 def changed_paths(base: str, head: str) -> list[str]:
@@ -306,6 +348,19 @@ def command_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_ci_source(args: argparse.Namespace) -> int:
+    resolution = resolve_ci_source(args.source, args.push_before)
+    if args.output:
+        write_json(args.output, resolution)
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as output:
+            output.write(f"ci_source_sha={resolution['ci_source_sha']}\n")
+            output.write(f"ci_source_reason={resolution['ci_source_reason']}\n")
+    if not args.output and not args.github_output:
+        print(resolution["ci_source_sha"])
+    return 0
+
+
 def command_record(args: argparse.Namespace) -> int:
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     if plan.get("schema") != PLAN_SCHEMA:
@@ -336,6 +391,13 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--summary", type=Path)
     plan.set_defaults(func=command_plan)
+
+    ci_source = subcommands.add_parser("ci-source")
+    ci_source.add_argument("--source", required=True)
+    ci_source.add_argument("--push-before")
+    ci_source.add_argument("--output", type=Path)
+    ci_source.add_argument("--github-output", type=Path)
+    ci_source.set_defaults(func=command_ci_source)
 
     record = subcommands.add_parser("record")
     record.add_argument("--plan", type=Path, required=True)

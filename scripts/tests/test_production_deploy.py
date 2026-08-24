@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import production_deploy
 
@@ -78,6 +79,63 @@ class ProductionDeployTests(unittest.TestCase):
             ["finitechat/crates/finitechat-server/src/store/schema.rs"]
         )
         production_deploy.validate_classification(manifest, risky)
+
+    def test_ci_source_uses_source_sha_for_non_production_merge(self) -> None:
+        source = "a" * 40
+        with (
+            patch.object(production_deploy, "resolve_rev", side_effect=lambda rev: rev),
+            patch.object(production_deploy, "commit_parents", return_value=["b" * 40]),
+        ):
+            resolved = production_deploy.resolve_ci_source(source, "c" * 40)
+        self.assertEqual(resolved["source_sha"], source)
+        self.assertEqual(resolved["ci_source_sha"], source)
+        self.assertEqual(resolved["ci_source_reason"], "source-sha")
+
+    def test_ci_source_uses_second_parent_for_production_merge(self) -> None:
+        source = "a" * 40
+        production_base = "b" * 40
+        promoted_source = "c" * 40
+        tree_by_rev = {source: "tree", promoted_source: "tree"}
+        with (
+            patch.object(production_deploy, "resolve_rev", side_effect=lambda rev: rev),
+            patch.object(
+                production_deploy,
+                "commit_parents",
+                return_value=[production_base, promoted_source],
+            ),
+            patch.object(
+                production_deploy,
+                "tree_sha",
+                side_effect=lambda rev: tree_by_rev[rev],
+            ),
+        ):
+            resolved = production_deploy.resolve_ci_source(source, production_base)
+        self.assertEqual(resolved["source_sha"], source)
+        self.assertEqual(resolved["ci_source_sha"], promoted_source)
+        self.assertEqual(
+            resolved["ci_source_reason"], "production-merge-second-parent"
+        )
+
+    def test_ci_source_rejects_merge_commit_with_unmatched_tree(self) -> None:
+        source = "a" * 40
+        production_base = "b" * 40
+        promoted_source = "c" * 40
+        tree_by_rev = {source: "merge-tree", promoted_source: "promoted-tree"}
+        with (
+            patch.object(production_deploy, "resolve_rev", side_effect=lambda rev: rev),
+            patch.object(
+                production_deploy,
+                "commit_parents",
+                return_value=[production_base, promoted_source],
+            ),
+            patch.object(
+                production_deploy,
+                "tree_sha",
+                side_effect=lambda rev: tree_by_rev[rev],
+            ),
+        ):
+            with self.assertRaisesRegex(production_deploy.DeployConfigError, "tree"):
+                production_deploy.resolve_ci_source(source, production_base)
 
     def test_record_is_minimal_and_generated_from_plan(self) -> None:
         plan = {
