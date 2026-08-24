@@ -272,6 +272,9 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         source = self.root / "source-home"
         (source / ".hermes/memories").mkdir(parents=True)
         (source / ".hermes/audio_cache").mkdir(parents=True)
+        (source / ".hermes/cron/outputs/job-1").mkdir(parents=True)
+        (source / ".hermes/sessions").mkdir(parents=True)
+        (source / ".codex").mkdir()
         (source / ".brain/finite-mono").mkdir(parents=True)
         (source / "workspace").mkdir()
         (source / "dev/reap-video/venv/bin").mkdir(parents=True)
@@ -279,6 +282,13 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         (source / ".hermes/memories/MEMORY.md").write_text("memory\n", encoding="utf-8")
         (source / ".hermes/state.db").write_bytes(b"legacy sessions")
         (source / ".hermes/audio_cache/voice.ogg").write_bytes(b"voice")
+        (source / ".hermes/cron/outputs/job-1/result.txt").write_text(
+            "generated cron output\n", encoding="utf-8"
+        )
+        (source / ".hermes/sessions/session.jsonl").write_text(
+            "transcript log\n", encoding="utf-8"
+        )
+        (source / ".codex/cache.json").write_text("generated\n", encoding="utf-8")
         (source / ".brain/finite-mono/README.md").write_text(
             "brain checkout\n", encoding="utf-8"
         )
@@ -297,7 +307,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "review-required")
         self.assertEqual(result["classifications"]["bundle"]["regular_files"], 2)
         self.assertEqual(result["classifications"]["converted"]["regular_files"], 1)
-        self.assertEqual(result["classifications"]["archive-only"]["regular_files"], 2)
+        self.assertEqual(result["classifications"]["archive-only"]["regular_files"], 5)
         self.assertEqual(result["classifications"]["rebuild"]["regular_files"], 1)
         self.assertEqual(result["classifications"]["unresolved"]["regular_files"], 1)
         self.assertEqual(

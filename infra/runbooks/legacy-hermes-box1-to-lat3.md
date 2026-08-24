@@ -34,7 +34,9 @@ Fresh read-only inventory on 2026-08-22 established:
 | non-PVC runtime storage | read-only root filesystem; `/tmp` and `/run` are ephemeral `emptyDir` mounts |
 | admitted file trees before session export | 67,003 regular files / 58 symlinks / about 5.9 GB in the first inventory; Austin later observed 67,001 / 57 while live, so the frozen manifest is authoritative |
 | whole-volume inventory | TODO(real-data rehearsal): record the root-only inventory hash, every disposition, and zero unresolved entries |
+| known owner decisions | TODO(real-data rehearsal): disposition the observed top-level files, `wiki/`, `Downloads/`, `signal/`, `ascii_frames/`, `.blogwatcher-cli/`, and the two date-named dumps; FiKnight counted 11 top-level files, but the frozen inventory is authoritative and names are not dispositions |
 | legacy session database input | about 3.0 GB and 2,761 sessions in Austin's live self-audit; JSONL size and frozen counts are learned during export |
+| transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; retain archive-only and verify during rehearsal whether any conversation is absent from the API export |
 | structured memory | 80 facts in a 648 KiB SQLite file |
 | cron | 12 enabled definitions; preserve review-only and activate none during canary |
 
@@ -54,6 +56,15 @@ is complete. The pod's root filesystem is declared read-only, so files outside
 `/home/node` can only come from the immutable image, read-only mounts, or the
 ephemeral `/tmp` and `/run` mounts. Step 3 rechecks that live storage shape. A
 new writable mount is a hard stop.
+
+FiKnight's read-only 2026-08-24 self-audit proved this is not theoretical. It
+found user-authored top-level files, five top-level directories outside the
+allow-list, and two unexplained date-named files totaling about 861 MB. The
+inventory must report them as unresolved until Austin explicitly chooses
+`bundle`, `archive-only`, or `rebuild` for each item. Do not inspect file
+contents merely to make the migration gate green. `.hermes/sessions/`, cron
+output, Hermes logs and caches, and observed package/tool caches are named
+archive-only classes; their counts remain part of the retained evidence.
 
 The 2026-08-22 lat3 readiness snapshot showed 30 running sandboxes against the
 declared limit of 32 and 1.6 TiB free on `/data`. These values are not a
@@ -84,10 +95,15 @@ reservation; re-check them immediately before target creation.
   tree and report zero unresolved entries. A synthetic test is not this gate.
 - The owner has explicitly authorized target creation and the later cutover
   outage. These are separate from authorization to decommission box1.
-- Austin is the owner-approved first canary for this migration path. The
-  reviewed PR and this runbook define the bounded procedure; they do not grant
-  execution authority. Code review, target creation, source freeze, import,
-  behavior restoration, and decommission remain separate approvals.
+- Before rehearsal, the Finite Mono Brain records whether Austin replaces
+  `paul-finite-2` as the first Hermes canary. The current Brain note
+  `topics/finite-mono/raw/notes/2026-07-23-investigate-legacy-migration-019f8f27.md`
+  still names `paul-finite-2` and puts Telegram pairing readiness ahead of a
+  production-paired Agent. If Austin goes first, Austin and Paul must
+  explicitly accept that Telegram/Signal re-pairing risk. The reviewed PR and
+  this runbook define the bounded procedure; they do not grant execution
+  authority. Code review, target creation, source freeze, import, behavior
+  restoration, and decommission remain separate approvals.
 - lat3 has one free 4-vCPU/8-GiB Runtime slot and free disk of at least three
   times the sealed bundle size plus 10 GiB.
 - The target is a fresh Runtime under the exact verified Austin account. Record

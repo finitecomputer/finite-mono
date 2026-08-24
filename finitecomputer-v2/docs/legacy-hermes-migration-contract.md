@@ -54,6 +54,13 @@ rechecks the live pod's read-only root and `/home/node` mount. If the deployed
 pod has another writable durable mount, the migration stops because this
 contract does not cover it.
 
+Known generated state is named rather than hidden behind a broad "logs and
+caches" label. Hermes transcript logs under `.hermes/sessions/`, cron output,
+Hermes logs and media caches, and the observed package/tool caches are
+archive-only. The inventory still stops on every other path. In particular,
+top-level files, ad hoc directories, and date-named dumps do not become
+archive-only merely because they look temporary.
+
 ## Bundle boundary
 
 `finite.legacy-hermes-migration.v1` admits only:

@@ -43,8 +43,20 @@ SOURCE_CONVERTED_FILES = (
 SOURCE_ARCHIVE_ONLY_ROOTS = (
     Path(".brain"),
     Path(".finite"),
+    Path(".agent-browser"),
+    Path(".bun"),
+    Path(".cache"),
+    Path(".cargo"),
+    Path(".codex"),
+    Path(".local"),
+    Path(".npm"),
+    Path(".npm-global"),
+    Path(".rustup"),
     Path(".hermes/audio_cache"),
+    Path(".hermes/cron"),
     Path(".hermes/image_cache"),
+    Path(".hermes/logs"),
+    Path(".hermes/sessions"),
 )
 SOURCE_REBUILD_ROOTS = (Path("dev/reap-video/venv"),)
 
