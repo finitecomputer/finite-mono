@@ -86,6 +86,7 @@ def check_caddy() -> None:
     caddy = read(UBUNTU / "Caddyfile")
     require_contains(caddy, "monitoring.finite.computer", "Caddyfile")
     require_contains(caddy, "metrics-ingest.finite.computer", "Caddyfile")
+    require_contains(caddy, "admin unix//run/finite-monitoring-caddy/admin.sock", "Caddyfile")
     require_contains(caddy, "reverse_proxy 127.0.0.1:3000", "Grafana route")
     require_contains(caddy, "path /api/v1/write", "Prometheus remote-write route")
     require_contains(caddy, "path /loki/api/v1/push", "Loki push route")
@@ -166,14 +167,19 @@ def check_systemd() -> None:
         ],
         "finite-monitoring-caddy.service": [
             "User=finite-monitoring",
+            "EnvironmentFile=/etc/finite/monitoring/caddy.env",
+            "RuntimeDirectory=finite-monitoring-caddy",
+            "ExecStart=/opt/finite-monitoring/bin/caddy run --config /etc/finite/monitoring/Caddyfile --adapter caddyfile",
+            "ExecReload=/opt/finite-monitoring/bin/caddy reload --config /etc/finite/monitoring/Caddyfile --adapter caddyfile --address unix//run/finite-monitoring-caddy/admin.sock --force",
             "CAP_NET_BIND_SERVICE",
-            "--envfile /etc/finite/monitoring/caddy.env",
         ],
     }
     for unit_name, needles in expected_units.items():
         unit = read(UBUNTU / "systemd" / unit_name)
         require_contains(unit, "Restart=on-failure", unit_name)
         require_contains(unit, "NoNewPrivileges=true", unit_name)
+        if unit_name == "finite-monitoring-caddy.service":
+            require("--envfile" not in unit, "Caddy reload must use systemd EnvironmentFile, not unsupported --envfile")
         for needle in needles:
             require_contains(unit, needle, unit_name)
 

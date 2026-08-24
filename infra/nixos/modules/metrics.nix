@@ -94,6 +94,15 @@ let
     }
   '';
   staticMetrics = pkgs.writeText "finite-version-static.prom" cfg.staticVersionMetrics;
+  latMonitoringSecretsCheck = pkgs.writeShellApplication {
+    name = "check-lat-monitoring-secrets";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gawk
+      pkgs.gnugrep
+    ];
+    text = builtins.readFile ../scripts/check-lat-monitoring-secrets;
+  };
   runtimeMetrics =
     pkgs.runCommand "finite-runtime-metrics" { nativeBuildInputs = [ pkgs.makeWrapper ]; }
       ''
@@ -249,6 +258,11 @@ in
             Persistent = true;
           };
         };
+      })
+      (lib.mkIf (cfg.journalLogUnits != [ ]) {
+        system.activationScripts.finite-lat-monitoring-secrets.text = ''
+          ${latMonitoringSecretsCheck}/bin/check-lat-monitoring-secrets
+        '';
       })
     ]
   );

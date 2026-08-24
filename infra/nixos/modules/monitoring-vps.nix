@@ -267,7 +267,7 @@ in
   services.caddy = {
     enable = true;
     globalConfig = ''
-      admin off
+      admin unix//run/caddy/admin.sock
       email ops@finite.computer
     '';
     virtualHosts = {
@@ -308,7 +308,11 @@ in
     };
   };
 
-  systemd.services.caddy.serviceConfig.EnvironmentFile = [ caddyEnvironmentFile ];
+  systemd.services.caddy.serviceConfig = {
+    EnvironmentFile = [ caddyEnvironmentFile ];
+    RuntimeDirectory = lib.mkDefault "caddy";
+    RuntimeDirectoryMode = lib.mkDefault "0750";
+  };
 
   systemd.tmpfiles.rules = [
     "d /etc/finite/monitoring 0700 root root - -"

@@ -93,9 +93,9 @@ The routine deploy path is:
    prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
    the exact `SYSTEM` path in a transient systemd unit, and verifies
    `/run/current-system` equals that path. For revisions that include LAT
-   journald shipping, the deploy script first runs the values-redacting
-   `infra/nixos/scripts/check-lat-monitoring-secrets` preflight on lat1 so a
-   missing `/etc/finite/logs-write.env` blocks before activation.
+   journald shipping, both the deploy script and the NixOS activation run the
+   values-redacting `infra/nixos/scripts/check-lat-monitoring-secrets` preflight
+   so a missing `/etc/finite/logs-write.env` blocks before Alloy restarts.
 
 Do not build production closures on the Mac, clawland, lat1, or lat2. There is
 no lat2 fallback deploy path. Rollback remains
@@ -147,8 +147,9 @@ The complete custody and operator-copy gate is
 [`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
 
 The current monitoring MVP still uses host-local env files rather than SOPS.
-Before any manual LAT activation that includes Alloy log shipping, run the
-narrow monitoring preflight against the target host:
+NixOS activation runs the narrow monitoring preflight automatically when Alloy
+log shipping is configured. To check earlier, run the same values-redacting
+preflight against the target host:
 
 ```sh
 ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets

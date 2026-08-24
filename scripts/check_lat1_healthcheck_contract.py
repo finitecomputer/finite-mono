@@ -207,6 +207,12 @@ def main() -> None:
             "Alloy credentials should be declared on the systemd service so "
             "metrics and logs can use separate environment files"
         )
+    activation_preflight = nix_eval(
+        "system.activationScripts.finite-lat-monitoring-secrets.text",
+        raw=True,
+    )
+    if "check-lat-monitoring-secrets" not in activation_preflight:
+        raise SystemExit("LAT monitoring secrets must be checked during activation")
 
     recovery, recovery_metrics, recovery_leftovers, recovery_curl_count = run_synthetic(
         script, recover_after_first_pass=True
