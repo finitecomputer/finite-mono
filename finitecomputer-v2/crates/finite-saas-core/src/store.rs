@@ -27,10 +27,12 @@ use crate::{
     FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
     LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
-    OffboardingPhase, Project, ProjectMembershipRole, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OffboardingPhase, Project, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+    RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
     RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
@@ -39,33 +41,35 @@ use crate::{
     RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
     RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1,
-    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
-    agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope,
+    RuntimeRelocationV1, RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult, StoreErrorDetail,
+    StoredRuntimeHealth, SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt,
+    UpsertRuntimeArtifactInput, agent_creation_entitlement_id_for,
+    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
+    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
     parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
     parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
     parse_runtime_control_kind, parse_runtime_control_request_status,
     parse_runtime_lifecycle_stage, parse_runtime_resource_class, parse_time,
-    parse_user_link_status, project_room_membership_id_for, project_runtime_link_id_for,
-    provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
-    runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_lifecycle, runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
-    runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    parse_user_link_status, project_room_membership_id_for, project_runtime_health,
+    project_runtime_link_id_for, provider_operation_allows_generic_failure,
+    provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
+    runtime_artifact_reference_is_immutable_oci, runtime_lifecycle, runtime_operation_spec_v1,
+    runtime_spec_secret_references, runtime_spec_v1, runtime_upgrade_contact_endpoint,
+    runtime_upgrade_prelease_rejection_is_terminal, source_import_key, trim_to_option,
+    valid_agent_npub, valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
@@ -776,6 +780,14 @@ impl CoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await
+    }
+
+    pub async fn record_runtime_health_report(
+        &self,
+        input: RecordRuntimeHealthReportInput,
+    ) -> CoreResult<RuntimeHealthReportAck> {
+        let client = self.connection().await?;
+        postgres_record_runtime_health_report(&**client, input).await
     }
 
     pub async fn admin_archive_unrecoverable_runtime(
@@ -6752,6 +6764,7 @@ async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<Admin
 where
     C: GenericClient + Sync,
 {
+    let now = current_time_iso()?;
     let rows = client
         .query(
             "SELECT runtime.id AS agent_runtime_id, runtime.project_id, runtime.source_host_id,
@@ -6762,6 +6775,12 @@ where
                     owner.normalized_email AS owner_email,
                     artifact.version_label AS runtime_artifact_version_label,
                     runtime.runtime_capabilities,
+                    core_rfc3339(runtime.health_reported_at) AS health_reported_at,
+                    core_rfc3339(runtime.health_observed_at) AS health_observed_at,
+                    runtime.health_ready,
+                    runtime.health_reason,
+                    runtime.health_report_interval_seconds,
+                    runtime.health_reporting_npub,
                     EXISTS (
                       SELECT 1 FROM project_runtime_links link
                       WHERE link.agent_runtime_id = runtime.id AND link.active
@@ -6798,6 +6817,20 @@ where
                 })
                 .transpose()?;
             let project_display_name: Option<String> = row.get("project_display_name");
+            let runtime_health = project_runtime_health(
+                host_facts.runtime_status,
+                &StoredRuntimeHealth {
+                    reported_at: row.get("health_reported_at"),
+                    observed_at: row.get("health_observed_at"),
+                    ready: row.get("health_ready"),
+                    reason: row.get("health_reason"),
+                    report_interval_seconds: row
+                        .get::<_, Option<i32>>("health_report_interval_seconds")
+                        .map(i64::from),
+                    reporting_npub: row.get("health_reporting_npub"),
+                },
+                &now,
+            )?;
             Ok(AdminRuntimeOverview {
                 project_id: row.get("project_id"),
                 project_display_name: project_display_name
@@ -6823,9 +6856,86 @@ where
                     .as_ref()
                     .map(|capabilities| *capabilities.v1()),
                 offboarding_phase,
+                runtime_health,
             })
         })
         .collect()
+}
+
+/// Record one runner-ferried standing-readiness report on the runtime row.
+/// The source host comes from the runner credential and scopes the UPDATE, so
+/// a body naming another host's runtime (or an unknown runtime) misses every
+/// row and fails closed as not-found without leaking cross-host existence.
+async fn postgres_record_runtime_health_report<C>(
+    client: &C,
+    input: RecordRuntimeHealthReportInput,
+) -> CoreResult<RuntimeHealthReportAck>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.clone().unwrap_or(current_time_iso()?);
+    let agent_runtime_id =
+        trim_to_option(Some(&input.agent_runtime_id)).ok_or(CoreError::MissingAgentRuntimeId)?;
+    let source_host_id =
+        trim_to_option(Some(&input.source_host_id)).ok_or(CoreError::MissingSourceHostId)?;
+    let reason = trim_to_option(input.reason.as_deref());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS)
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    // The observation time is runner-clock evidence; it must still parse.
+    parse_time(&input.observed_at)?;
+    let agent_npub = trim_to_option(input.agent_npub.as_deref());
+    if agent_npub
+        .as_ref()
+        .is_some_and(|value| !valid_agent_npub(value))
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = input.report_interval_seconds;
+    if interval_seconds.is_some_and(|value| {
+        !(RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS..=RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS)
+            .contains(&value)
+    }) {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = interval_seconds
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| CoreError::InvalidRuntimeHealthReport)?;
+    let row = client
+        .query_opt(
+            "UPDATE agent_runtimes
+             SET health_reported_at = $3::text::timestamptz,
+                 health_observed_at = $4::text::timestamptz,
+                 health_ready = $5,
+                 health_reason = $6,
+                 health_report_interval_seconds = $7,
+                 health_reporting_npub = $8
+             WHERE id = $1 AND source_host_id = $2
+             RETURNING id",
+            &[
+                &agent_runtime_id,
+                &source_host_id,
+                &now,
+                &input.observed_at,
+                &input.ready,
+                &reason,
+                &interval_seconds,
+                &agent_npub,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    let Some(row) = row else {
+        return Err(CoreError::ProjectRuntimeNotFound);
+    };
+    Ok(RuntimeHealthReportAck {
+        agent_runtime_id: row.get("id"),
+        recorded_at: now,
+    })
 }
 
 /// Find-or-create a PENDING user by natural key (email). Mirrors
@@ -11559,6 +11669,244 @@ mod tests {
                             && event.target_id == runtime_id
                     })
             );
+        })
+        .await;
+    }
+
+    /// Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
+    /// 3): a report writes the runtime row's latest-report columns scoped to
+    /// the runner credential's host, and the admin overview projects
+    /// ready / not_ready(+reason) / unknown(stale) at read time — no sweeper.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_record_scope_and_project() {
+        with_isolated_postgres(|store| async move {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string();
+            let host = format!("health-report-host-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-08-24T12:00:00Z").await;
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: format!("artifact-health-report-{run}"),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:health-report@sha256:{}",
+                        "7".repeat(64)
+                    ),
+                    version_label: "health-report-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("health-report-owner-{run}@finite.vip"),
+                    workos_user_id: format!("workos_health_report_owner_{run}"),
+                    display_name: "Health Report Agent".to_string(),
+                    launch_code,
+                    idempotency_key: format!("health-report-{run}"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-health-{run}"),
+                    source_host_id: None,
+                    lease_token: format!("lease-health-{run}"),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("health report request should lease");
+            assert_eq!(lease.request.id, created.request.id);
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-health-{run}"),
+                    lease_token: format!("lease-health-{run}"),
+                    source_host_id: host.clone(),
+                    source_machine_id: format!("health-report-agent-{run}"),
+                    runtime_artifact_id: Some(format!("artifact-health-report-{run}")),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Health Report Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some("http://127.0.0.1:41001".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            async fn overview_health(
+                store: &CoreStore,
+                runtime_id: &str,
+            ) -> crate::RuntimeHealthProjection {
+                store
+                    .admin_runtime_overviews()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|overview| overview.agent_runtime_id == runtime_id)
+                    .unwrap()
+                    .runtime_health
+            }
+            let report =
+                |ready: bool, reason: Option<&str>, observed_at: &str, now: Option<&str>| {
+                    RecordRuntimeHealthReportInput {
+                        source_host_id: host.clone(),
+                        agent_runtime_id: runtime_id.clone(),
+                        ready,
+                        reason: reason.map(str::to_string),
+                        observed_at: observed_at.to_string(),
+                        agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                        report_interval_seconds: Some(60),
+                        now: now.map(str::to_string),
+                    }
+                };
+
+            // No report yet: the named unknown state, never a frozen ready.
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+            assert_eq!(health.reported_at, None);
+
+            // A fresh ready report projects ready with the pinned npub as
+            // anti-squat evidence.
+            let ack = store
+                .record_runtime_health_report(report(true, None, "2026-08-24T11:59:00Z", None))
+                .await
+                .unwrap();
+            assert_eq!(ack.agent_runtime_id, runtime_id);
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Ready);
+            assert_eq!(
+                health.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str())
+            );
+
+            // A fresh not-ready report surfaces its reason.
+            store
+                .record_runtime_health_report(report(
+                    false,
+                    Some("model endpoint 503"),
+                    "2026-08-24T12:00:00Z",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::NotReady);
+            assert_eq!(health.reason.as_deref(), Some("model endpoint 503"));
+
+            // A report recorded long ago (runner stopped reporting) crosses
+            // the 3x cadence deadline and projects unknown again.
+            store
+                .record_runtime_health_report(report(
+                    true,
+                    None,
+                    "2020-01-01T00:00:00Z",
+                    Some("2020-01-01T00:00:00Z"),
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+
+            // Scope: the credential's host guards the write. Another host's
+            // runtime id and an unknown id both fail closed as not-found.
+            let wrong_host = RecordRuntimeHealthReportInput {
+                source_host_id: format!("other-host-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(wrong_host).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+            let unknown_runtime = RecordRuntimeHealthReportInput {
+                agent_runtime_id: format!("runtime-missing-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(unknown_runtime).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+
+            // Bounded fields reject out-of-shape reports.
+            let bad_npub = RecordRuntimeHealthReportInput {
+                agent_npub: Some("not-an-npub".to_string()),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_npub).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_interval = RecordRuntimeHealthReportInput {
+                report_interval_seconds: Some(86_400),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_interval).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let long_reason = RecordRuntimeHealthReportInput {
+                reason: Some("x".repeat(crate::MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS + 1)),
+                ..report(false, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(long_reason).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_observed = RecordRuntimeHealthReportInput {
+                observed_at: "not-a-time".to_string(),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_observed).await,
+                Err(CoreError::InvalidTimestamp)
+            ));
+        })
+        .await;
+    }
+
+    /// The migration runs inside CORE_SCHEMA_SQL at every Core startup, so
+    /// reapplying it against an already-migrated database must be a no-op.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_migration_reapplies_cleanly() {
+        with_isolated_postgres(|db| async move {
+            let (raw, connection) = tokio_postgres::connect(&db.url, NoTls).await.unwrap();
+            let handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            handle.abort();
         })
         .await;
     }

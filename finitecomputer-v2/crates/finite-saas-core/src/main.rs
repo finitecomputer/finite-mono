@@ -1659,7 +1659,8 @@ fn optional_positive_u64(name: &str, default: u64) -> Result<u64> {
 mod tests {
     use super::*;
     use finite_saas_core::{
-        CoreError, RuntimeCapabilitiesV1, RuntimeControlKind, RuntimeSummaryStatus,
+        CoreError, RuntimeCapabilitiesV1, RuntimeControlKind, RuntimeHealthProjection,
+        RuntimeHealthStatus, RuntimeSummaryStatus,
     };
     use std::sync::Mutex;
 
@@ -1818,6 +1819,13 @@ mod tests {
                 runtime_retirement: false,
             }),
             offboarding_phase: None,
+            runtime_health: RuntimeHealthProjection {
+                status: RuntimeHealthStatus::Unknown,
+                reason: None,
+                reported_at: None,
+                observed_at: None,
+                agent_npub: None,
+            },
         }
     }
 

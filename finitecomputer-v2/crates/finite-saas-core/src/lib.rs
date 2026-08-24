@@ -63,7 +63,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0020_runtime_offboarding_phases.sql"),
     "\n",
-    include_str!("../migrations/0021_runtime_lifecycle.sql")
+    include_str!("../migrations/0021_runtime_lifecycle.sql"),
+    "\n",
+    include_str!("../migrations/0022_runtime_health_reports.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -671,6 +673,10 @@ pub enum CoreError {
     InvalidAgentProfilePictureUrl,
     #[error("runtime contact endpoint is invalid")]
     InvalidRuntimeContactEndpoint,
+    #[error("agent runtime id is required")]
+    MissingAgentRuntimeId,
+    #[error("runtime health report is invalid or out of bounds")]
+    InvalidRuntimeHealthReport,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
     #[error("provider operation correlation id is required or invalid")]
@@ -1065,6 +1071,96 @@ impl AgentRuntime {
             .as_ref()
             .is_some_and(|capabilities| capabilities.supports(kind))
     }
+}
+
+/// Standing runtime readiness, ferried by the Runner (2026-08 audit synthesis,
+/// H1 slice 3): the Runner polls each live Runtime's `/contact` on a bounded
+/// cadence and posts one report per Runtime to Core. Core stores only the
+/// latest report on the runtime row (migration 0022) and projects readiness
+/// at read time — there is no history table and no background sweeper.
+pub const RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS: i64 = 60;
+pub const RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS: i64 = 5;
+pub const RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS: i64 = 3600;
+/// A report older than this many poll intervals is stale: the projection then
+/// reads `unknown` ("the runner stopped reporting"), never a frozen `ready`.
+pub const RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER: i64 = 3;
+pub const MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS: usize = 512;
+
+wire_enum! {
+/// Read-time projection of one runtime's standing readiness. `ready` requires
+/// a fresh report saying ready; `not_ready` is a fresh report saying not
+/// ready (with the reported reason); `unknown` is no report, a stale report,
+/// or a runtime Core does not consider online.
+    RuntimeHealthStatus {
+    Ready => "ready",
+    NotReady => "not_ready",
+    Unknown => "unknown",
+    }
+    parse: parse_runtime_health_status
+}
+
+/// The latest stored runner-ferried health report, as read back from the
+/// runtime row. Every field is `None` until the runner's standing poller
+/// first reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredRuntimeHealth {
+    pub reported_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub ready: Option<bool>,
+    pub reason: Option<String>,
+    pub report_interval_seconds: Option<i64>,
+    pub reporting_npub: Option<String>,
+}
+
+/// One runtime's standing readiness as projected at read time. The raw report
+/// fields always ride along as evidence; `status` is the only derived fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeHealthProjection {
+    pub status: RuntimeHealthStatus,
+    pub reason: Option<String>,
+    pub reported_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub agent_npub: Option<String>,
+}
+
+/// Project standing readiness from the latest stored report. Reports only
+/// speak for runtimes Core considers `online`; an intentionally offline
+/// runtime carries no standing readiness claim and projects `unknown`.
+/// Freshness is measured from `reported_at` (Core's receive clock), never the
+/// runner's `observed_at`, so runner clock skew cannot extend freshness.
+pub fn project_runtime_health(
+    runtime_status: RuntimeSummaryStatus,
+    health: &StoredRuntimeHealth,
+    now: &str,
+) -> CoreResult<RuntimeHealthProjection> {
+    let status = if runtime_status != RuntimeSummaryStatus::Online {
+        RuntimeHealthStatus::Unknown
+    } else if let (Some(ready), Some(reported_at)) = (health.ready, health.reported_at.as_deref()) {
+        let interval_seconds = health
+            .report_interval_seconds
+            .unwrap_or(RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS)
+            .clamp(
+                RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
+                RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+            );
+        let age = parse_time(now)? - parse_time(reported_at)?;
+        if age > Duration::seconds(interval_seconds * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER) {
+            RuntimeHealthStatus::Unknown
+        } else if ready {
+            RuntimeHealthStatus::Ready
+        } else {
+            RuntimeHealthStatus::NotReady
+        }
+    } else {
+        RuntimeHealthStatus::Unknown
+    };
+    Ok(RuntimeHealthProjection {
+        status,
+        reason: health.reason.clone(),
+        reported_at: health.reported_at.clone(),
+        observed_at: health.observed_at.clone(),
+        agent_npub: health.reporting_npub.clone(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1822,6 +1918,10 @@ pub struct AdminRuntimeOverview {
     pub runtime_capabilities: Option<RuntimeCapabilitiesV1>,
     #[serde(default)]
     pub offboarding_phase: Option<OffboardingPhase>,
+    /// Runner-ferried standing readiness, projected at read time. `unknown`
+    /// until the runner's standing poller first reports (and whenever reports
+    /// go stale), so this never displays a frozen last-known `ready`.
+    pub runtime_health: RuntimeHealthProjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2493,6 +2593,53 @@ pub struct FailAgentCreationRequestInput {
 pub struct CancelAgentCreationRequestInput {
     pub request_id: String,
     pub now: Option<String>,
+}
+
+/// The runner's wire request for `POST /api/core/v1/runtime-health-reports`.
+/// The source host comes from the runner credential, never from the body, so
+/// a runner can only report for runtimes on its own host; a body naming a
+/// runtime outside the credential's scope is rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthReportRequest {
+    pub agent_runtime_id: String,
+    pub ready: bool,
+    /// Bounded not-ready reason: the guest's `/contact` error or the runner's
+    /// `unreachable` marker for a transport failure.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the runner read `/contact` (runner clock; evidence only).
+    pub observed_at: String,
+    /// The Agent Principal npub the runner pinned and observed; the
+    /// anti-port-squat cross-check evidence.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
+    /// The runner's poll cadence; the read-time projection declares staleness
+    /// after `RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER` intervals.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
+    #[serde(default)]
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordRuntimeHealthReportInput {
+    pub source_host_id: String,
+    pub agent_runtime_id: String,
+    pub ready: bool,
+    pub reason: Option<String>,
+    pub observed_at: String,
+    pub agent_npub: Option<String>,
+    pub report_interval_seconds: Option<i64>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthReportAck {
+    pub agent_runtime_id: String,
+    pub recorded_at: String,
 }
 
 impl std::str::FromStr for RuntimeArtifactKind {
@@ -3749,6 +3896,82 @@ mod tests {
         }
     }
 
+    fn stored_health(ready: bool, reported_at: &str, interval_seconds: i64) -> StoredRuntimeHealth {
+        StoredRuntimeHealth {
+            reported_at: Some(reported_at.to_string()),
+            observed_at: Some(reported_at.to_string()),
+            ready: Some(ready),
+            reason: None,
+            report_interval_seconds: Some(interval_seconds),
+            reporting_npub: None,
+        }
+    }
+
+    #[test]
+    fn runtime_health_projection_is_ready_only_for_a_fresh_ready_report() {
+        let now = "2026-08-24T12:00:00Z";
+        let fresh = stored_health(true, "2026-08-24T11:59:00Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &fresh, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // A not-ready report stays not_ready inside the freshness window, and
+        // its reason rides along.
+        let mut not_ready = stored_health(false, "2026-08-24T11:59:00Z", 60);
+        not_ready.reason = Some("unreachable".to_string());
+        let projected =
+            project_runtime_health(RuntimeSummaryStatus::Online, &not_ready, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::NotReady);
+        assert_eq!(projected.reason.as_deref(), Some("unreachable"));
+    }
+
+    #[test]
+    fn runtime_health_projection_names_stale_and_missing_reports_unknown() {
+        let now = "2026-08-24T12:00:00Z";
+        // 181s old at a 60s cadence is past the 3x staleness deadline: the
+        // "died at 3am, shows ready forever" gap closes as `unknown`.
+        let stale = stored_health(true, "2026-08-24T11:56:59Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &stale, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+
+        // Just inside the deadline still projects the report.
+        let edge = stored_health(true, "2026-08-24T11:57:00Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &edge, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // A slower reporter gets its own deadline: 10m cadence, 20m old is
+        // fresh for it but would be stale at the default cadence.
+        let slow = stored_health(true, "2026-08-24T11:40:00Z", 600);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &slow, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // No report at all is unknown.
+        let projected = project_runtime_health(
+            RuntimeSummaryStatus::Online,
+            &StoredRuntimeHealth::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+    }
+
+    #[test]
+    fn runtime_health_projection_only_answers_for_online_runtimes() {
+        let now = "2026-08-24T12:00:00Z";
+        let fresh = stored_health(true, "2026-08-24T11:59:30Z", 60);
+        for status in [
+            RuntimeSummaryStatus::Offline,
+            RuntimeSummaryStatus::Stale,
+            RuntimeSummaryStatus::Unknown,
+        ] {
+            let projected = project_runtime_health(status, &fresh, now).unwrap();
+            assert_eq!(
+                projected.status,
+                RuntimeHealthStatus::Unknown,
+                "an intentionally not-online runtime carries no standing readiness claim"
+            );
+        }
+    }
+
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
     /// variant list, so the three cannot drift by construction. This keeps
     /// checking them because the guarantee depends on serde's `rename`
@@ -3800,6 +4023,13 @@ mod tests {
             OffboardingPhase::ComputeRemoved,
             OffboardingPhase::LinkDeactivated,
             OffboardingPhase::Archived,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_health_status,
+            RuntimeHealthStatus::Ready,
+            RuntimeHealthStatus::NotReady,
+            RuntimeHealthStatus::Unknown,
         );
 
         assert_wire_encodings_agree!(parse_runtime_artifact_kind, RuntimeArtifactKind::OciImage);
