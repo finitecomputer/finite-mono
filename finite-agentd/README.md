@@ -99,10 +99,12 @@ closed. This is not the broader customer-admission authority that ADR 0003
 still requires.
 
 Durable ledger reopening, pending-command resume, and terminal-result replay
-are covered locally. The remaining production evidence gaps are a live
-lat1-plus-Kata composition gate, real child-death/signal/orphan coverage for
-the supervisor, and off-host restore of the same Agent Device, ledger, and
-retained data onto an empty target. Local Hermes CI runs the encrypted bridge
-flow, but its wrapper can still synthesize the passing report artifact when the
-richer in-test report hook is absent; that report is not independent
-live-runtime evidence.
+are covered locally, as are the supervisor's child signal-drain and post-exit
+orphan sweep (the runtime image has no `kill` binary; signalling is in-process
+via rustix and each supervised child leads its own process group). The
+remaining production evidence gaps are a live lat1-plus-Kata composition gate
+and off-host restore of the same Agent Device, ledger, and retained data onto
+an empty target. Local Hermes CI runs the encrypted bridge flow, but its
+wrapper can still synthesize the passing report artifact when the richer
+in-test report hook is absent; that report is not independent live-runtime
+evidence.
