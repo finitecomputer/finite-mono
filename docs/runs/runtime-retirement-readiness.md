@@ -315,6 +315,31 @@ is still visible, and its credentials are still live. Neither
 exists) nor a fresh `runtime-retire-exact` (whose destroy retries wedge on the
 absent container) can complete that boundary.
 
+The Runtime record now carries one forward-only `offboarding_phase` —
+`retirement_requested → receipt_verified → compute_removed → link_deactivated
+→ archived` (terminal) — written in the same transaction as the side effect it
+records. The phase is the single owner of "which step am I on":
+
+- Requesting a destroy (owner or operator path) records `retirement_requested`.
+- Destroy completion stores the verified receipt and crosses
+  `receipt_verified`, `compute_removed`, `link_deactivated`, and `archived` in
+  one transaction; the runner's completion is the compute-removed record.
+- Once a verified receipt exists, no path enqueues a fresh destroy: a new
+  request id's retirement archive can never exist, so the old uncapped retry
+  wedge is unrepresentable. `runtime-retire-exact` instead fails fast with the
+  recorded phase and the resume command below — a missing container at
+  `receipt_verified` or `compute_removed` is an expected resume point, not an
+  error.
+- `runtime-artifact-rollout --all` classifies any Runtime with a non-terminal
+  phase out of the plan with an `offboarding_<phase>` skip reason, so a
+  half-retired Runtime can no longer be planned or wedge the canary gate.
+
+Existing rows map to a phase once, derived from the durable facts a
+pre-phase-machine Core recorded (receipt presence, active destroy request,
+link state); the migration backfill is guarded so re-applying the schema never
+rewrites a recorded phase. Purge User Data stays the separate retention-gated
+path (ADR 0001) and is not a phase.
+
 Once the operator has independently confirmed that canonical compute for the
 exact Runtime is absent, `finite-saas-core runtime-offboard-retired-exact`
 completes the offboarding. The Core transaction fails closed unless the exact
