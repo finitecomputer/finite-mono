@@ -464,6 +464,8 @@ jobs:
         run: nix develop --command just finite-private-deepseek-contract
       - name: lat1 existing-Runtime rollout contract
         run: nix develop --command just lat1-rollout-contract
+      - name: lat3 Runner-only closure rollout contract
+        run: nix develop --command just lat3-runner-rollout-contract
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
       - name: Kata Runner host anti-drift contract

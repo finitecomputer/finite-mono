@@ -45,20 +45,19 @@ lines.
 ## finite-lat-3 storage canary
 
 `nixosConfigurations.finite-lat-3` is the pinned NixOS 26.05 storage-qualified
-Runner candidate at `207.188.7.157`. Its host-specific definition is
+Runner host at `207.188.7.157`. Its host-specific definition is
 `hosts/finite-lat-3/`: two exact-size RAID1 arrays, two independently mounted
 removable-path ESPs, ext4 project quotas on `/data`, a 64-GiB swapfile with
 bounded zswap, stable disk/partition/filesystem identities, and fail-closed
 storage health checks. The bootloader wrapper refuses an update unless both
 expected FAT ESPs are mounted read-write with their exact PARTUUIDs.
 
-It was installed and storage-qualified on 2026-07-20. The current generation
-adds Kata/containerd and a timer-disabled Runner configured for a drained
-private-path proof. It is not customer capacity or a Recovery Authority until
-the synthetic handoff passes. The authoritative sequence and dated evidence are in
-`docs/runs/finite-lat-capacity-and-redundancy.md`. Production lat1 closure
-builds use the `Lat1 NixOS Closure` workflow; lat2's services and storage are
-unchanged.
+It was installed and storage-qualified on 2026-07-20. Kata/containerd and the
+Runner now provide customer capacity. It is still not a Recovery Authority:
+RAID preserves availability through one disk failure but does not provide an
+independent backup. The authoritative sequence and dated evidence are in
+`docs/runs/finite-lat-capacity-and-redundancy.md`. Lat2's services and storage
+are unchanged.
 
 ## Deploy story
 
@@ -96,6 +95,38 @@ The routine deploy path is:
    journald shipping, both the deploy script and the NixOS activation run the
    values-redacting `infra/nixos/scripts/check-lat-monitoring-secrets` preflight
    so a missing `/etc/finite/logs-write.env` blocks before Alloy restarts.
+
+For a finite-lat-3 Runner change, use the separate `Lat3 NixOS Closure`
+workflow. It builds only
+`nixosConfigurations.finite-lat-3.config.system.build.toplevel`; it does not
+package a disk installer and cannot deploy by itself. Download the exact
+`lat3-nixos-closure-REV` artifact, then run:
+
+```sh
+just deploy-lat3-closure ARTIFACT_DIR --validate-only
+just deploy-lat3-closure ARTIFACT_DIR --prepare
+```
+
+`--prepare` validates the main-branch revision, copies the prebuilt closure,
+checks lat3's monitoring-secret names and modes, and runs NixOS dry activation.
+It refuses any named unit change outside the Runner timer/service and the
+static component-version metric. It does not change the system profile or stop
+the Runner.
+
+After reviewing the dry-activation output and immediately re-running
+`scripts/finite-status --json`, cross the explicit mutation boundary with:
+
+```sh
+just deploy-lat3-closure ARTIFACT_DIR --activate
+```
+
+Activation stops only the Runner timer, waits for an in-flight one-shot to
+finish, switches the exact system profile, and starts the timer again. Existing
+Kata sandboxes stay owned by containerd. The helper proves that containerd and
+systemd-networkd kept their PIDs and restores the previous profile and closure
+if any activation or verification step fails. Run `scripts/finite-status
+--json` again immediately afterward. Do not continue an Agent launch unless
+the post-rollout status and Runner artifact evidence are green.
 
 Do not build production closures on the Mac, clawland, lat1, or lat2. There is
 no lat2 fallback deploy path. Rollback remains
