@@ -48,6 +48,15 @@ No other bot may be stopped, restarted, migrated, or changed.
 - 2026-08-24T21:13:52Z: the updated classifier inventoried all 230,854 restored entries with zero blocked state. The 19 generated external symlinks were preserved inertly under `rebuild` or `quarantine`.
 - 2026-08-24T21:16:16Z: Sites and integrations inventory completed. Austin had no published legacy Sites and six detected integration classes; all remained inactive and no secret values were emitted.
 - 2026-08-24T21:16:42Z: the first session export failed before output because SQLite could not open the frozen WAL database directly from a read-only bind mount. The exporter now stages the frozen database/WAL/shared-memory set in private writable scratch before invoking SQLite's backup API.
+- 2026-08-24T21:21:55Z: the repaired v0.14 export completed in 8 seconds with 2,851 sessions, 89,358 messages, and 89 structured-memory facts. The old 2,761-session and 80-fact planning observations were stale and are no longer hard-coded as gates.
+- 2026-08-24T21:36:14Z: sealed the 30-GB rehearsal bundle. Its manifest binds all 230,854 source entries, the complete source-home archive, 2,851 sessions, 89,358 messages, 89 facts, 15 scheduled jobs, zero published Sites, and six inactive integration classes.
+- 2026-08-24T21:39:00Z: verified every bundle hash inside the exact networkless Hermes v0.20 target image in 84 seconds.
+- 2026-08-24T21:41:22Z: created a genuine fresh scratch target with the exact target image and proved its 594-KB rollback archive restores into an empty directory with identical identity and Chat hashes.
+- 2026-08-24T21:43:08Z: the first full import failed safely after 90 seconds with SQLite `disk I/O error`. The importer removed its partial transaction and preserved the fresh target's identity, Chat store, zero-session database, and zero-fact memory store. A container probe proved the read-only root also made `/tmp` read-only.
+- 2026-08-24T21:45:02Z: restored the pristine scratch target archive and retried with a private, bounded `/tmp` tmpfs. No migration state was repaired by hand.
+- 2026-08-24T21:49:11Z: the second import completed in 4 minutes 9 seconds. The receipt records 2,851 sessions, 89,358 messages, 89 facts, 15 review-only scheduled jobs, zero active Sites, and six inactive integration classes. The protected identity and Chat hashes were unchanged.
+- 2026-08-24T21:50:12Z: Hermes v0.20 opened the imported databases through its public APIs and reported 2,851 sessions and 89 facts; SQLite integrity was `ok`. The active legacy-skills directory was empty and no active cron file existed.
+- 2026-08-24T21:51:02Z: restored the exact installed `source-home.tar` into another empty directory in 21 seconds. All 230,854 entries matched the isolated source restore.
 
 ## Gates
 
@@ -55,9 +64,9 @@ No other bot may be stopped, restarted, migrated, or changed.
 - [x] Full CI is green for the merged code.
 - [x] Independent Austin Recovery Set is current and hash-verified.
 - [x] Recovery Set restores into an empty isolated target.
-- [ ] Full real-data rehearsal passes with zero blocked source entries.
-- [ ] Sites and integrations inventories are complete and secret-free.
-- [ ] Target image, Hermes version, model, capacity, and fleet status pass.
+- [x] Full real-data rehearsal passes with zero blocked source entries.
+- [x] Sites and integrations inventories are complete and secret-free.
+- [x] Target image, Hermes version, model, capacity, and Austin-relevant fleet status pass.
 - [ ] Fresh Austin target is created and identified.
 - [ ] Source freeze and no-writer proof pass.
 - [ ] Offline import and post-restart verification pass.
@@ -112,6 +121,22 @@ No other bot may be stopped, restarted, migrated, or changed.
   opens it. Mounting the source read-only is correct; the tool must copy the
   frozen database and sidecars to private scratch, then use SQLite's backup API
   from that writable copy.
+- Session and memory counts drift while the source is active. The runbook must
+  bind verification to counts from the frozen export, not an earlier audit.
+- A root-only artifact can appear absent to an unprivileged preflight check.
+  Existence and metadata checks must run with the same privilege as staging.
+- The manifest and verifier each wrote the complete 26-MB manifest to stdout.
+  Operator commands should capture that output and print a concise result.
+- A read-only container root also makes `/tmp` read-only. Large SQLite imports
+  need a private, bounded tmpfs even when `/data` is the only durable writable
+  mount.
+- Finite Chat's `app state` command is intentionally read-only and will not
+  create a missing client database. A fresh scratch target needs a harmless
+  local writer transition such as `app stop`; a real Core-created target does
+  this through normal initialization.
+- Opening Hermes through its public API requires a writable database directory
+  even for verification. Keep the container networkless and the durable
+  scratch root writable rather than mounting `/data` read-only.
 
 ## Retro notes
 

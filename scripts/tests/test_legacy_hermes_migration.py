@@ -606,6 +606,13 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertNotIn("Austin explicitly chooses", runbook)
         self.assertNotIn("owner decisions", runbook)
         self.assertIn("dst=/opt/migration,ro", runbook)
+        install_section = runbook.split(
+            "### 7. Install offline into the exact target", maxsplit=1
+        )[1].split("### 8. Restart and verify", maxsplit=1)[0]
+        self.assertIn(
+            "--tmpfs '/tmp:rw,nosuid,nodev,noexec,size=4294967296'",
+            install_section,
+        )
         self.assertIn("TARGET_RUNTIME_IMAGE", runbook)
         self.assertNotIn("MIGRATION_IMAGE", runbook)
         self.assertNotIn("Publish and prove the migration image", runbook)
