@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+system_target="nixosConfigurations.finite-lat-3.config.system.build.toplevel"
+
+usage() {
+  echo "usage: $0 <exact-40-hex-mono-rev> <output-dir>" >&2
+}
+
+if [[ $# -ne 2 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
+  usage
+  exit 64
+fi
+
+rev="$1"
+out_dir="$2"
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+head_rev="$(git rev-parse HEAD)"
+if [[ "$head_rev" != "$rev" ]]; then
+  echo "refusing to package $rev from checkout at $head_rev" >&2
+  exit 65
+fi
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "refusing to package a dirty checkout" >&2
+  exit 65
+fi
+
+current_system="$(nix eval --option builders '' --impure --raw --expr builtins.currentSystem)"
+if [[ "$current_system" != "x86_64-linux" ]]; then
+  echo "refusing to build on system ${current_system}: expected x86_64-linux" >&2
+  exit 69
+fi
+
+mkdir -p "$out_dir"
+out_dir="$(cd "$out_dir" && pwd -P)"
+rm -rf "$out_dir/nix-cache" "$out_dir/system" \
+  "$out_dir/manifest.json" "$out_dir/store-paths.txt" "$out_dir/closure-size.txt"
+cache_dir="$out_dir/nix-cache"
+mkdir -p "$cache_dir"
+
+system_path="$(nix build \
+  --option builders '' \
+  --option max-jobs auto \
+  --print-build-logs \
+  --out-link "$out_dir/system" \
+  --print-out-paths \
+  ".#${system_target}")"
+
+if [[ ! "$system_path" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-3-[^/[:space:]]+$ ]]; then
+  echo "unexpected system output path: ${system_path}" >&2
+  exit 70
+fi
+if [[ ! -x "$system_path/bin/switch-to-configuration" ]]; then
+  echo "system output lacks switch-to-configuration: ${system_path}" >&2
+  exit 70
+fi
+if [[ "$(readlink -f "$out_dir/system")" != "$system_path" ]]; then
+  echo "out-link ${out_dir}/system does not resolve to ${system_path}" >&2
+  exit 70
+fi
+
+nix path-info --recursive "$system_path" > "$out_dir/store-paths.txt"
+nix path-info --closure-size "$system_path" > "$out_dir/closure-size.txt"
+nix copy --option builders '' --to "file://$cache_dir" "$system_path"
+
+created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+python3 - "$out_dir/manifest.json" <<PY
+import json
+import os
+import sys
+
+manifest = {
+    "schema": "finite.lat3.nixos-closure.v1",
+    "host": "finite-lat-3",
+    "repository": "finitecomputer/finite-mono",
+    "rev": "$rev",
+    "builder_system": "$current_system",
+    "system": "$system_path",
+    "cache": "nix-cache",
+    "created_utc": "$created_utc",
+}
+for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL"):
+    value = os.environ.get(key)
+    if value:
+        manifest[key.lower()] = value
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(manifest, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+
+printf 'SYSTEM=%s\n' "$system_path"
+printf 'MANIFEST=%s\n' "$out_dir/manifest.json"

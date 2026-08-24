@@ -60,6 +60,10 @@ chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/repor
 deploy-lat1-closure artifact_dir *args:
     just nixos deploy-lat1-closure "$@"
 
+[positional-arguments]
+deploy-lat3-closure artifact_dir *args:
+    just nixos deploy-lat3-closure "$@"
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 
@@ -93,6 +97,9 @@ lat1-secret-bootstrap-contract:
 lat2-runner-guardrails-contract:
     just nixos lat2-runner-guardrails-contract
 
+lat3-runner-rollout-contract:
+    just nixos lat3-runner-rollout-contract
+
 litestream-recovery-contract:
     just infra litestream-recovery-contract
 
@@ -101,6 +108,9 @@ monitoring-nixos-contract:
 
 nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     just nixos nixos-build-lat1-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+nixos-build-lat3-closure rev out_dir="target/lat3-nixos-closure":
+    just nixos nixos-build-lat3-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
 runbook-facts-contract:
     just infra runbook-facts-contract
