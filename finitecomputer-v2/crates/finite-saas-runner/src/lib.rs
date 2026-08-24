@@ -2944,6 +2944,11 @@ fn wait_for_http_json_ready(
     interval: Duration,
 ) -> Result<(), RunnerError> {
     let started = Instant::now();
+    // The runtime names its not-ready cause (truthful-readiness N+1); carry
+    // the last seen one into the timeout failure so the lifecycle record
+    // says WHY readiness never came. Images before that change simply omit
+    // the field.
+    let mut last_ready_reason: Option<String> = None;
     loop {
         let last_error = match ureq::get(url)
             .timeout(interval.max(Duration::from_millis(250)))
@@ -2958,6 +2963,12 @@ fn wait_for_http_json_ready(
                     {
                         return Ok(());
                     }
+                    if let Some(reason) = value
+                        .get("ready_reason")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        last_ready_reason = Some(reason.to_owned());
+                    }
                     value
                         .get("error")
                         .and_then(serde_json::Value::as_str)
@@ -2970,13 +2981,23 @@ fn wait_for_http_json_ready(
                 let body = response
                     .into_string()
                     .unwrap_or_else(|_| "<unreadable response body>".to_string());
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body)
+                    && let Some(reason) = value
+                        .get("ready_reason")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    last_ready_reason = Some(reason.to_owned());
+                }
                 format!("HTTP {status}: {body}")
             }
             Err(error) => error.to_string(),
         };
         if started.elapsed() >= timeout {
+            let reason = last_ready_reason
+                .map(|reason| format!("; last ready_reason: {reason}"))
+                .unwrap_or_default();
             return Err(RunnerError::RuntimeReadinessTimeout(format!(
-                "{name} did not become ready within {}s: {last_error}",
+                "{name} did not become ready within {}s: {last_error}{reason}",
                 timeout.as_secs()
             )));
         }
@@ -4826,6 +4847,54 @@ mod tests {
             body.len()
         )
         .unwrap();
+    }
+
+    #[test]
+    fn readiness_timeout_carries_the_runtime_ready_reason() {
+        // The runtime names its not-ready cause on 503 bodies; the timeout
+        // failure must carry it so the lifecycle record says why readiness
+        // never came.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let server = std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                // The wake connect after the call lands here once stop is set.
+                if stop_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = read_http_request(&mut stream);
+                write_http_json(
+                    &mut stream,
+                    503,
+                    r#"{"ready":false,"ready_reason":"bridge_not_connected"}"#,
+                );
+            }
+        });
+
+        let error = wait_for_http_json_ready(
+            &format!("http://{address}/healthz"),
+            "Test runtime /healthz",
+            Duration::from_millis(300),
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        server.join().unwrap();
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, RunnerError::RuntimeReadinessTimeout(_)),
+            "unexpected error variant: {message}"
+        );
+        assert!(
+            message.contains("last ready_reason: bridge_not_connected"),
+            "timeout must name the runtime's ready_reason, got: {message}"
+        );
     }
 
     #[test]
