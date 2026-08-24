@@ -82,8 +82,11 @@ Both inventories are root-only files hashed into the manifest and receipt.
 
 The operator also rechecks the live pod's read-only root and `/home/node`
 mount. Another writable durable mount, a special file, unreadable data, an
-escaping symlink, a concurrent writer, or an integrity mismatch stops the
-migration because the lossless contract cannot be proven.
+escaping symlink in active or otherwise unclassified state, a concurrent
+writer, or an integrity mismatch stops the migration because the lossless
+contract cannot be proven. External symlinks below known generated or
+quarantined roots are retained as inert link metadata in the sealed snapshot
+and assigned `rebuild` or `quarantine`; they are never followed or activated.
 
 ## Bundle boundary
 
@@ -106,7 +109,9 @@ migration because the lossless contract cannot be proven.
 The manifest proves that every inventory entry appears in `source-home.tar`
 with matching type, mode, size, symlink target, and content hash. It also hashes
 the complete archive. Active Hermes files are independently manifested and
-hashed. Symlinks escaping `/home/node` or an active source root are rejected.
+hashed. Symlinks escaping an active source root are rejected. Escaping links
+in known generated or quarantined roots remain inert in the sealed source
+snapshot and are recreated only through a supported target flow.
 Session working-directory paths under the three active roots are rewritten to
 their v2 locations.
 
@@ -119,9 +124,13 @@ state, old `.finite` state, venvs, binaries, logs, caches, and raw databases
 exist in `source-home.tar` but receive no active target mapping. The archive and
 all user-authored files are sensitive and remain root-only. The structured
 memory file used for conversion is a frozen SQLite backup-API snapshot, not a
-live database copy. Cron definitions and Hermes helper scripts are copied only
-under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler never
-reads that path.
+live database copy. Because box1 is mounted read-only and SQLite WAL readers
+may need a writable directory, the exporter first copies the frozen database,
+WAL, and shared-memory files into private scratch storage beside the output.
+It opens only that scratch set through SQLite, creates the backup-API snapshot,
+and removes the scratch set. Cron definitions and Hermes helper scripts are
+copied only under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler
+never reads that path.
 
 Legacy message fields named `path` or ending in `_path` are rewritten only when
 they point into the admitted workspace, dev, or uploads roots. Cache-backed

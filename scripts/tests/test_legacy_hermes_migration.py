@@ -605,7 +605,14 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("zero structurally blocked entries", runbook)
         self.assertNotIn("Austin explicitly chooses", runbook)
         self.assertNotIn("owner decisions", runbook)
-        self.assertIn("dst=/opt/migration,options=rbind:ro", runbook)
+        self.assertIn("dst=/opt/migration,ro", runbook)
+        install_section = runbook.split(
+            "### 7. Install offline into the exact target", maxsplit=1
+        )[1].split("### 8. Restart and verify", maxsplit=1)[0]
+        self.assertIn(
+            "--tmpfs '/tmp:rw,nosuid,nodev,noexec,size=4294967296'",
+            install_section,
+        )
         self.assertIn("TARGET_RUNTIME_IMAGE", runbook)
         self.assertNotIn("MIGRATION_IMAGE", runbook)
         self.assertNotIn("Publish and prove the migration image", runbook)
@@ -687,7 +694,10 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
-        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual(printed["status"], "complete")
+        self.assertNotIn("entries", printed)
+        self.assertNotIn("custom-data/ledger.txt", stdout.getvalue())
 
     def test_source_volume_inventory_blocks_symlinks_that_escape_the_source(
         self,
@@ -719,6 +729,36 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 1)
         self.assertIn("structurally blocked entries", stderr.getvalue())
+
+    def test_source_volume_inventory_rebuilds_generated_external_symlinks(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        generated_links = {
+            ".config/pulse/austin-finite-0-runtime": "/tmp/pulse-runtime",
+            ".hermes/venv/bin/python": "/nix/store/legacy-python/bin/python",
+            ".local/uv-tools/ruff/bin/python": "/nix/store/legacy-ruff/bin/python",
+            "dev/reap-video/venv/bin/python": "/nix/store/legacy-python/bin/python",
+        }
+        for relative, target in generated_links.items():
+            candidate = source / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.symlink_to(target)
+
+        result = migration.inventory_source_volume(
+            self.root / "generated-links-inventory.json", source
+        )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["classifications"]["blocked"]["entries"], 0)
+        self.assertEqual(result["classifications"]["rebuild"]["symlinks"], 4)
+        dispositions = {
+            entry["path"]: entry["disposition"] for entry in result["entries"]
+        }
+        self.assertEqual(
+            {path: dispositions[path] for path in generated_links},
+            {path: "rebuild" for path in generated_links},
+        )
 
     def test_source_volume_inventory_fails_cleanly_on_unreadable_data(self) -> None:
         source = self.root / "source-home"
@@ -1110,14 +1150,23 @@ class LegacyHermesMigrationTests(unittest.TestCase):
     def test_source_export_uses_a_sqlite_snapshot_and_streams_every_session(
         self,
     ) -> None:
-        source_db = self.root / "legacy-state.db"
-        with closing(sqlite3.connect(source_db)) as connection:
-            connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, body TEXT)")
-            connection.executemany(
-                "INSERT INTO sessions VALUES (?, ?)",
-                [("one", "first"), ("two", "second")],
-            )
-            connection.commit()
+        source_dir = self.root / "read-only-source"
+        source_dir.mkdir()
+        source_db = source_dir / "legacy-state.db"
+        source_connection = sqlite3.connect(source_db)
+        source_connection.execute("PRAGMA journal_mode=WAL")
+        source_connection.execute("PRAGMA wal_autocheckpoint=0")
+        source_connection.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, body TEXT)"
+        )
+        source_connection.executemany(
+            "INSERT INTO sessions VALUES (?, ?)",
+            [("one", "first"), ("two", "second")],
+        )
+        source_connection.commit()
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(source_db) + suffix).chmod(0o444)
+        source_dir.chmod(0o555)
 
         class LegacySessionDB:
             def __init__(self, db_path: Path):
@@ -1151,11 +1200,43 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         old_module = sys.modules.get("hermes_state")
         sys.modules["hermes_state"] = types.SimpleNamespace(SessionDB=LegacySessionDB)
         output = self.root / "sessions.jsonl"
-        source_before = hashlib.sha256(source_db.read_bytes()).hexdigest()
+        source_hashes_before = {
+            suffix: hashlib.sha256(
+                Path(str(source_db) + suffix).read_bytes()
+            ).hexdigest()
+            for suffix in ("", "-wal", "-shm")
+        }
+        original_connect = sqlite3.connect
+
+        def reject_direct_readonly_wal_open(database, *args, **kwargs):
+            if database == f"file:{source_db}?mode=ro":
+                raise sqlite3.OperationalError("read-only WAL mount")
+            return original_connect(database, *args, **kwargs)
+
         try:
-            with mock.patch("importlib.metadata.version", return_value="0.14.0"):
+            with (
+                mock.patch("importlib.metadata.version", return_value="0.14.0"),
+                mock.patch.object(
+                    sqlite3, "connect", side_effect=reject_direct_readonly_wal_open
+                ),
+            ):
                 result = migration.export_source_sessions(output, source_db)
+            self.assertEqual(
+                {
+                    suffix: hashlib.sha256(
+                        Path(str(source_db) + suffix).read_bytes()
+                    ).hexdigest()
+                    for suffix in ("", "-wal", "-shm")
+                },
+                source_hashes_before,
+            )
         finally:
+            source_dir.chmod(0o755)
+            for suffix in ("", "-wal", "-shm"):
+                candidate = Path(str(source_db) + suffix)
+                if candidate.exists():
+                    candidate.chmod(0o644)
+            source_connection.close()
             if old_module is None:
                 sys.modules.pop("hermes_state", None)
             else:
@@ -1163,9 +1244,6 @@ class LegacyHermesMigrationTests(unittest.TestCase):
 
         self.assertEqual(result["sessions"], 2)
         self.assertEqual(result["messages"], 2)
-        self.assertEqual(
-            hashlib.sha256(source_db.read_bytes()).hexdigest(), source_before
-        )
         self.assertEqual(
             [json.loads(line)["id"] for line in output.read_text().splitlines()],
             ["one", "two"],

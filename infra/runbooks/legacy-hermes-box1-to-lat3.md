@@ -34,14 +34,14 @@ Fresh read-only inventory on 2026-08-22 established:
 | durable source mount | the `home-austin-finite-0` PVC mounted at `/home/node` |
 | non-PVC runtime storage | read-only root filesystem; `/tmp` and `/run` are ephemeral `emptyDir` mounts |
 | active file trees before session export | 67,003 regular files / 58 symlinks / about 5.9 GB in the first inventory; Austin later observed 67,001 / 57 while live, so the frozen manifest is authoritative |
-| complete source-home snapshot | TODO(real-data rehearsal): record the root-only inventory hash, `source-home.tar` hash and size, every automatic disposition, and zero structurally blocked entries |
+| complete source-home snapshot | rehearsal sealed 230,854 entries into a 24,795,740,160-byte `source-home.tar`; the manifest recorded every automatic disposition and zero structurally blocked entries |
 | unknown source data | automatically preserved inside `source-home.tar`; no owner classifies individual files |
-| legacy session database input | about 3.0 GB and 2,761 sessions in Austin's live self-audit; JSONL size and frozen counts are learned during export |
+| legacy session database input | about 3.0 GB in the planning snapshot; authoritative session, message, and JSONL counts are learned from each frozen export |
 | transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; preserve in `source-home.tar` and verify during rehearsal whether any conversation is absent from the API export |
-| structured memory | 80 facts in a 648 KiB SQLite file |
-| cron | 12 enabled definitions; preserve review-only and activate none during canary |
-| legacy Sites | TODO(real-data rehearsal): record every authoritative published or reserved endpoint and prove each local source path is in the snapshot; republish none during import |
-| external integrations | TODO(real-data rehearsal): record each detected connection and automatic migration policy without recording credential values |
+| structured memory | rehearsal exported 89 facts from a 995,328-byte SQLite snapshot; each cutover still uses its frozen count |
+| cron | rehearsal found 15 enabled definitions; preserve every definition review-only and activate none during canary; each cutover still uses its frozen count |
+| legacy Sites | rehearsal found zero authoritative published or reserved endpoints; each cutover inventories them again and republishes none during import |
+| external integrations | rehearsal found six connection classes, all inactive; each cutover inventories names and policy without credential values |
 
 Re-read every value before mutation. A name match is not authority. Stop if
 the PVC UID/path, image digest, owner, or Hermes version changed.
@@ -168,12 +168,16 @@ ssh lat3 "echo '$MIGRATION_TOOL_SHA256  $MIGRATION_TOOL_DIR/tool.tar' \
     | sudo sha256sum --check && \
   sudo tar -C '$MIGRATION_TOOL_DIR' --strip-components=1 -xpf \
     '$MIGRATION_TOOL_DIR/tool.tar' && \
-  sudo chmod 0500 '$MIGRATION_TOOL_DIR'/legacy-hermes-source \
-    '$MIGRATION_TOOL_DIR'/legacy_hermes_*.py"
+  sudo chmod 0500 \
+    '$MIGRATION_TOOL_DIR/legacy-hermes-source' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_migration.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_contract.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_source.py' \
+    '$MIGRATION_TOOL_DIR/legacy_hermes_target.py'"
 
 sudo nerdctl --namespace finite run --rm --network none \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py --help
@@ -247,8 +251,12 @@ ssh box1 "echo '$MIGRATION_TOOL_SHA256  <BOX1_STAGE>/tool.tar' \
   sudo install -d -m 0700 '<BOX1_STAGE>/tool' && \
   sudo tar -C '<BOX1_STAGE>/tool' --strip-components=1 -xpf \
     '<BOX1_STAGE>/tool.tar' && \
-  sudo chmod 0500 '<BOX1_STAGE>/tool'/legacy-hermes-source \
-    '<BOX1_STAGE>/tool'/legacy_hermes_*.py"
+  sudo chmod 0500 \
+    '<BOX1_STAGE>/tool/legacy-hermes-source' \
+    '<BOX1_STAGE>/tool/legacy_hermes_migration.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_contract.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_source.py' \
+    '<BOX1_STAGE>/tool/legacy_hermes_target.py'"
 ```
 
 Immediately before export, require the local source tag to resolve to the
@@ -269,6 +277,11 @@ content hashes; it never embeds file contents. Known compatible paths are
 `quarantine`. Known generated state is `rebuild`. Every other safe path
 defaults to `preserve`. The command exits nonzero only for structurally unsafe
 or unreadable entries.
+
+External symlinks below known generated or quarantined roots are recorded as
+inert metadata and keep those dispositions. They are not followed or copied
+into active target state. An external symlink in an active or otherwise
+unclassified path remains structurally blocked.
 
 ```sh
 SOURCE_IMAGE_REFERENCE='docker.io/library/fc-agent-runtime:main'
@@ -352,7 +365,7 @@ they must contain no credential values.
 
 The session exporter first uses SQLite's backup API, then reads the scratch
 database through Hermes v0.14. The memory snapshot also uses SQLite's backup
-API and must report 80 facts. Retain the inventory hash and both export
+API. Retain the inventory hash and both export
 commands' counts, byte counts, and SHA-256 output.
 
 ### 5. Stage the complete snapshot and active bundle
@@ -394,8 +407,9 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sites.json integrations.json" \
 Do not add an exclusion to the complete source snapshot. `--hard-dereference`
 stores hard-linked file content independently; it does not follow symlinks.
 Never add `--dereference`. If the inventory or manifest finds a special file,
-unreadable entry, escaping symlink, missing path, or digest mismatch, stop and
-fix the fleet policy or source condition in review. Credentials, old identity,
+unreadable entry, an escaping link outside known generated or quarantined
+state, a missing path, or a digest mismatch, stop and fix the fleet policy or
+source condition in review. Credentials, old identity,
 cron output, raw databases, venvs, logs, and caches are present only inside the
 root-only `source-home.tar`; they never receive active target mappings.
 
@@ -404,9 +418,9 @@ existing target image:
 
 ```sh
 sudo nerdctl --namespace finite run --rm --network none \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:rw' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py manifest \
@@ -424,9 +438,9 @@ sudo nerdctl --namespace finite run --rm --network none \
     "$SOURCE_VOLUME_INVENTORY_SHA256"
 
 sudo nerdctl --namespace finite run --rm --network none --read-only \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:ro' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration,ro' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py verify --bundle /migration
@@ -435,7 +449,7 @@ sudo sha256sum '<BUNDLE>/manifest.json'
 ```
 
 Record `MANIFEST_SHA256`, bundle size, and the `source_snapshot` summary.
-Compare the manifest session/message counts and 80 memory facts with step 4.
+Compare the manifest session, message, and memory-fact counts with step 4.
 The manifest must prove that every inventory entry exists in `source-home.tar`
 with matching type, mode, size, symlink target, and content hash. It must have
 zero structurally blocked entries. It must also say legacy skills are
@@ -475,14 +489,18 @@ it.
 ### 7. Install offline into the exact target
 
 Run one networkless importer against the stopped target. The bundle is
-read-only; only the exact target `/data` is writable:
+read-only; only the exact target `/data` and a private, bounded `/tmp` tmpfs
+are writable. The tmpfs is required because SQLite can spill temporary work
+during a large session import; without it, the read-only container root causes
+a late `disk I/O error` even though `/data` remains healthy:
 
 ```sh
 sudo nerdctl --namespace finite run --rm --network none --read-only \
-  --mount 'type=bind,src=<BUNDLE>,dst=/migration,options=rbind:ro' \
-  --mount 'type=bind,src=<TARGET_DATA>,dst=/data,options=rbind:rw' \
+  --tmpfs '/tmp:rw,nosuid,nodev,noexec,size=4294967296' \
+  --mount 'type=bind,src=<BUNDLE>,dst=/migration,ro' \
+  --mount 'type=bind,src=<TARGET_DATA>,dst=/data' \
   --mount \
-    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,options=rbind:ro' \
+    'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
   /opt/migration/legacy_hermes_migration.py install \
@@ -537,8 +555,10 @@ recovery archives through a minimum 24-hour observation window.
 - Austin's imported memories are visible. Legacy skills exist only under
   `/data/migration/legacy-hermes-v2/review-only/skills`; none shadow or merge
   into the active managed skill tree.
-- The receipt and rebuilt memory store contain 80 structured facts.
-- The receipt records 12 source cron jobs, and no job exists in the active
+- The receipt and rebuilt memory store contain exactly the fact count sealed
+  in the frozen manifest.
+- The receipt records exactly the source cron-job count sealed in the frozen
+  manifest, and no job exists in the active
   target cron path; the review copy is under the migration receipt directory.
 - Files exist under `/data/workspace/legacy-box1/{workspace,dev,uploads}` and a
   sample of manifested hashes and contained symlinks matches.
@@ -558,8 +578,8 @@ and outcomes; record no token, key, message content, or secret value.
 
 ## Post-canary promotion
 
-The data canary is complete without activating Austin's 12 scheduled jobs or
-old external credentials. Restoring those behaviors is a later production
+The data canary is complete without activating Austin's source scheduled jobs
+or old external credentials. Restoring those behaviors is a later production
 change, not a reason to weaken this import boundary.
 
 After the observation window, follow

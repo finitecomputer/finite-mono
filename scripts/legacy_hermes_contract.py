@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import tarfile
@@ -1170,10 +1171,26 @@ def _copy_sqlite(source: Path, target: Path) -> None:
     if not source.exists():
         sqlite3.connect(target).close()
         return
-    source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
-    target_connection = sqlite3.connect(target)
-    try:
-        source_connection.backup(target_connection)
-    finally:
-        target_connection.close()
-        source_connection.close()
+    if source.is_symlink() or not source.is_file():
+        raise MigrationError(f"SQLite source is missing or unsafe: {source}")
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target.name}.source-", dir=target.parent
+    ) as scratch_name:
+        staged_source = Path(scratch_name) / source.name
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(source) + suffix)
+            if candidate.is_symlink():
+                raise MigrationError(f"SQLite sidecar is unsafe: {candidate}")
+            if not candidate.exists():
+                continue
+            if not candidate.is_file():
+                raise MigrationError(f"SQLite sidecar is unsafe: {candidate}")
+            shutil.copyfile(candidate, Path(str(staged_source) + suffix))
+
+        source_connection = sqlite3.connect(staged_source)
+        target_connection = sqlite3.connect(target)
+        try:
+            source_connection.backup(target_connection)
+        finally:
+            target_connection.close()
+            source_connection.close()
