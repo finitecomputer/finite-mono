@@ -1,5 +1,7 @@
 import { sealData, unsealData } from "iron-session";
 
+import { dashboardBaseUrl } from "@/lib/dashboard-base-url";
+
 export const GOOGLE_WORKSPACE_SCOPES = [
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/spreadsheets",
@@ -55,10 +57,6 @@ export function googleWorkspaceOAuthConfig(
   };
 }
 
-/**
- * Resolve browser-facing redirects from configured public origin rather than
- * Next's loopback request URL behind Caddy/host networking.
- */
 export function googleWorkspaceDashboardUrl(
   path: string,
   requestUrl: string,
@@ -106,25 +104,4 @@ export async function unsealGoogleWorkspaceState(
 function oauthStatePassword(env: Record<string, string | undefined>) {
   const password = env.WORKOS_COOKIE_PASSWORD?.trim();
   return password && password.length >= 32 ? password : null;
-}
-
-function dashboardBaseUrl(requestUrl: string, env: Record<string, string | undefined>) {
-  for (const candidate of [
-    env.FC_DASHBOARD_PUBLIC_URL,
-    env.NEXT_PUBLIC_APP_URL,
-    env.FC_DASHBOARD_BASE_URL,
-    env.NEXT_PUBLIC_WORKOS_REDIRECT_URI,
-    requestUrl,
-  ]) {
-    if (!candidate?.trim()) continue;
-    try {
-      const parsed = new URL(candidate);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        return parsed.origin;
-      }
-    } catch {
-      // Try the next configured public URL.
-    }
-  }
-  throw new Error("Dashboard URL is unavailable.");
 }
