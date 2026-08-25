@@ -34,7 +34,7 @@ a rewritten manifest presented after approval, fails before import.
 
 The box1 source is a k3s pod, not a full persistent VM. Its root filesystem is
 read-only. The `home` PVC is mounted at `/home/node`; `/tmp` and `/run` are
-ephemeral. This matters because Austin could have written durable files
+ephemeral. This matters because a legacy Runtime could have written durable files
 anywhere below `/home/node`, not only in the directories Hermes normally uses.
 
 The exporter inventories every directory, regular file, and symlink on the
@@ -123,12 +123,17 @@ Known credential stores, Hermes config, gateway/platform state, cron execution
 state, old `.finite` state, venvs, binaries, logs, caches, and raw databases
 exist in `source-home.tar` but receive no active target mapping. The archive and
 all user-authored files are sensitive and remain root-only. The structured
-memory file used for conversion is a frozen SQLite backup-API snapshot, not a
-live database copy. Because box1 is mounted read-only and SQLite WAL readers
-may need a writable directory, the exporter first copies the frozen database,
-WAL, and shared-memory files into private scratch storage beside the output.
-It opens only that scratch set through SQLite, creates the backup-API snapshot,
-and removes the scratch set. Cron definitions and Hermes helper scripts are
+memory file used for conversion is a frozen SQLite snapshot, not a live
+database copy. The normal path uses SQLite's backup API. A legacy file whose
+first 40 SQLite header bytes are damaged may use the bounded recovery path only
+when exactly one standard page size exposes the expected `facts` table and
+`integrity_check` reports no damage beyond orphaned pages. SQLite then rewrites
+that private scratch copy with `VACUUM INTO`; the resulting snapshot must pass
+`quick_check`. Any other header or integrity result fails closed. Because box1
+is mounted read-only and SQLite WAL readers may need a writable directory, the
+exporter copies the frozen database, WAL, and shared-memory files into private
+scratch storage beside the output. It never repairs the source file and removes
+the scratch set afterward. Cron definitions and Hermes helper scripts are
 copied only under `/data/migration/legacy-hermes-v2/review-only/`; the scheduler
 never reads that path.
 

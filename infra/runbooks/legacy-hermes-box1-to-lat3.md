@@ -5,53 +5,63 @@ state, and transfers a sealed copy of the complete legacy `/home/node` while
 both sides are single-writer safe. It leaves box1 frozen for rollback and
 never converts a box1 identity into a v2 identity.
 
-The first canary is Austin. Do not substitute another bot into the Austin
-commands. Repeat the generic procedure later with a new evidence sheet and
-approval.
+Create a private evidence sheet for each migration. Keep owner names, account
+emails, bot names, production identifiers, hashes, timelines, and detailed
+exercise journals in the organization Brain or a mode-0700 operator evidence
+directory. Do not commit them to this public repository.
 
-TODO(first production exercise): retain Austin's actual export, transfer,
-import, and verification durations plus session/message counts. Remove this
-note only after the 24-hour observation window closes successfully.
+This generic procedure recommends a minimum 24-hour observation window. A
+shorter owner-approved canary window is a per-migration decision and does not
+change the default.
 
-## Austin evidence sheet
+## Private evidence sheet
 
-Fresh read-only inventory on 2026-08-22 established:
+Resolve and record every source value before mutation:
 
 | Field | Approved source value |
 | --- | --- |
 | source host | `box1` |
-| machine / namespace / owner | `austin-finite` |
-| owner email | `austin@finite.vip` |
-| StatefulSet pod | `austin-finite-0` |
-| PVC | `home-austin-finite-0` |
-| PV | `pvc-96716337-df1e-4b28-9692-0263d4672085` |
-| PV path | `/var/lib/rancher/k3s/storage/pvc-96716337-df1e-4b28-9692-0263d4672085_austin-finite_home-austin-finite-0` |
+| machine / namespace | `<SOURCE_MACHINE_ID>` / `<SOURCE_NAMESPACE>` |
+| verified owner account | `<SOURCE_OWNER_EMAIL>` |
+| StatefulSet / pod | `<SOURCE_STATEFULSET>` / `<SOURCE_POD>` |
+| PVC | `<SOURCE_PVC>` |
+| PV | `<SOURCE_PV>` |
+| PV path | `<SOURCE_PV_PATH>` |
 | source Hermes | `0.14.0` |
-| source image reference | `docker.io/library/fc-agent-runtime:main` |
-| source manifest digest | `sha256:d6e7b42a8044fbfee94edbce0884a3900678c580a23ea792f2d8aa8c2a5276f5` |
-| source container image ID | `sha256:6f2efdb34f4ea2cccbbe50e5dec5c49f11b766970a693f99bb7bf0cf02dd90db` |
+| source image reference | `<SOURCE_IMAGE_REFERENCE>` |
+| source manifest digest | `<SOURCE_IMAGE_MANIFEST_DIGEST>` |
+| source container image ID | `<SOURCE_CONTAINER_IMAGE_ID>` |
 | target Hermes | `0.20.0` |
-| durable source mount | the `home-austin-finite-0` PVC mounted at `/home/node` |
+| durable source mount | `<SOURCE_PVC>` mounted at `/home/node` |
 | non-PVC runtime storage | read-only root filesystem; `/tmp` and `/run` are ephemeral `emptyDir` mounts |
-| active file trees before session export | 67,003 regular files / 58 symlinks / about 5.9 GB in the first inventory; Austin later observed 67,001 / 57 while live, so the frozen manifest is authoritative |
-| complete source-home snapshot | rehearsal sealed 230,854 entries into a 24,795,740,160-byte `source-home.tar`; the manifest recorded every automatic disposition and zero structurally blocked entries |
+| complete source-home snapshot | frozen entry count, byte count, inventory hash, archive hash, and zero structurally blocked entries |
 | unknown source data | automatically preserved inside `source-home.tar`; no owner classifies individual files |
-| legacy session database input | about 3.0 GB in the planning snapshot; authoritative session, message, and JSONL counts are learned from each frozen export |
-| transcript logs | `.hermes/sessions/` was about 1.3 GB with 3,800 JSONL files in the 2026-08-24 self-audit; preserve in `source-home.tar` and verify during rehearsal whether any conversation is absent from the API export |
-| structured memory | rehearsal exported 89 facts from a 995,328-byte SQLite snapshot; each cutover still uses its frozen count |
-| cron | rehearsal found 15 enabled definitions; preserve every definition review-only and activate none during canary; each cutover still uses its frozen count |
-| legacy Sites | rehearsal found zero authoritative published or reserved endpoints; each cutover inventories them again and republishes none during import |
-| external integrations | rehearsal found six connection classes, all inactive; each cutover inventories names and policy without credential values |
+| Hermes data | frozen session, message, transcript, and structured-memory counts and hashes |
+| executable behavior | frozen skill and scheduled-job counts; preserve review-only and activate none during import |
+| legacy Sites | authoritative endpoint records, route cross-check, and required source paths; publish none during import |
+| external integrations | configuration names and migration policies without credential values; activate none during import |
 
 Re-read every value before mutation. A name match is not authority. Stop if
 the PVC UID/path, image digest, owner, or Hermes version changed.
 
-The first Austin inventory found 61 workspace symlinks. Three were inside
-`dev/reap-video/venv`; the active target rebuilds that 13 MB environment, but
-the complete source snapshot still preserves it. The other 58 stayed within
-their active workspace/dev/upload root. The later live count drifted by one,
-so the frozen scan is authoritative. A new escape is a hard stop, not an
-instruction to add `--dereference`.
+For legacy version evidence, run only `hermes --version` inside the source
+container. Do not run `hermes-agent --version`: the legacy entry point does
+not support that flag and treats it as a normal Agent prompt, which can make a
+provider request and write session/debug files to the user's PVC. If this has
+already happened, stop and quarantine only the generated files after explicit
+approval while the source is writer-free. Prove both Hermes databases stayed
+unchanged.
+
+Do not interpret an empty legacy `publishedEndpoints` export as proof that the
+bot has no Sites. Compare it with the bot namespace's live Traefik routes,
+Services, listeners, and preserved source paths. Resolve any disagreement into
+one reviewed, values-free endpoint input before rehearsal; unknown ownership,
+authentication, desired state, or source fails closed.
+
+Inventory every symlink. Links contained within an admitted data root may be
+preserved. Links from generated or quarantined trees remain inert metadata.
+Any new escaping symlink in an active or unclassified path is a hard stop, not
+an instruction to add `--dereference`.
 
 The old Runtime could put durable data anywhere below `/home/node`. The three
 admitted workspace roots are not proof that nothing else matters. Rehearsal
@@ -61,18 +71,16 @@ is complete. The pod's root filesystem is declared read-only, so files outside
 ephemeral `/tmp` and `/run` mounts. Step 3 rechecks that live storage shape. A
 new writable mount is a hard stop.
 
-FiKnight's read-only 2026-08-24 self-audit found user-authored top-level files,
-five top-level directories outside the old active-path list, and two
-date-named files totaling about 861 MB. They require no owner decision:
-unknown safe paths default to `preserve` and are sealed into `source-home.tar`.
+User-authored files may exist outside the old active-path list. They require no
+owner decision: unknown safe paths default to `preserve` and are sealed into
+`source-home.tar`.
 Known identities and executable behavior are `quarantine`; known generated
 state is `rebuild`; both remain present in the snapshot but inactive. Only a
 special file, unreadable entry, escaping symlink, concurrent writer, or
 integrity mismatch blocks migration.
 
-The 2026-08-22 lat3 readiness snapshot showed 30 running sandboxes against the
-declared limit of 32 and 1.6 TiB free on `/data`. These values are not a
-reservation; re-check them immediately before target creation.
+Record lat3 capacity immediately before target creation. A prior readiness
+snapshot is not a reservation.
 
 ## Preconditions
 
@@ -80,7 +88,7 @@ reservation; re-check them immediately before target creation.
   v0.14-export-to-v0.20-import compatibility test.
 - Before capturing the rehearsal Recovery Set, the values-free storage check
   in step 3 passed against the live source pod. It proved a read-only root,
-  the Austin PVC at `/home/node`, and no other writable durable mount. Repeat
+  the source PVC at `/home/node`, and no other writable durable mount. Repeat
   the check immediately before cutover.
 - The intended target uses an already published, digest-pinned canonical
   Runtime image whose durable smoke proves Hermes v0.20. This migration does
@@ -93,7 +101,7 @@ reservation; re-check them immediately before target creation.
 - A fresh box1 off-host backup completed, and the Recovery Set can restore to
   an empty scratch target. Record the archive name without recording keys.
 - The exact reviewed tools completed a real-data rehearsal against an isolated
-  restore of Austin's Recovery Set. Record its manifest hash, counts, duration,
+  restore of the source Recovery Set. Record its manifest hash, counts, duration,
   source-volume inventory hash, source-home snapshot hash, automatic
   dispositions, media-path result, and cleanup outcome. The inventory and
   snapshot must cover the entire restored `/home/node` tree and report zero
@@ -105,14 +113,13 @@ reservation; re-check them immediately before target creation.
   or activates an integration.
 - The owner has explicitly authorized target creation and the later cutover
   outage. These are separate from authorization to decommission box1.
-- Austin is the first Hermes canary. Older canary-order notes are superseded
-  and should be corrected as context maintenance, not as a rehearsal gate.
+- The private evidence sheet names the authorized canary and current order.
   The reviewed PR and this runbook do not grant execution authority.
   Code review, target creation, source freeze, import, channel re-pairing,
   behavior restoration, and decommission remain separate approvals.
 - lat3 has one free 4-vCPU/8-GiB Runtime slot and free disk of at least three
   times the sealed bundle size plus 10 GiB.
-- The target is a fresh Runtime under the exact verified Austin account. Record
+- The target is a fresh Runtime under the exact verified owner account. Record
   `PROJECT_ID`, `RUNTIME_ID`, `MACHINE_ID`, `DURABLE_STATE_ID`, artifact,
   schema, host, `/data` path, and target Agent `npub`. Its structured-memory
   store must contain zero facts; the importer refuses a non-empty store.
@@ -183,15 +190,15 @@ sudo nerdctl --namespace finite run --rm --network none \
   /opt/migration/legacy_hermes_migration.py --help
 ```
 
-### 2. Create and identify the Austin target
+### 2. Create and identify the source target
 
-Create one normal Agent while signed in as `austin@finite.vip`. Confirm Core
+Create one normal Agent while signed in as `<SOURCE_OWNER_EMAIL>`. Confirm Core
 placed it on `finite-lat-3`. Send one Finite Chat round trip and record the
 target Agent `npub`. Do not take a live filesystem archive or treat a hash of a
 running SQLite database as the rollback boundary; step 6 does that after the
 typed stop.
 
-### 3. Freeze Austin on box1
+### 3. Freeze the source bot on box1
 
 Start the outage only after a go/no-go review of steps 1–2. Scale the exact
 StatefulSet to zero through k3s. Immediately before scaling, re-prove the
@@ -201,7 +208,7 @@ ephemeral writable mounts at `/tmp` and `/run`:
 
 ```sh
 ssh box1 "sudo k3s kubectl get pod \
-  --namespace austin-finite austin-finite-0 -o json | jq -e '
+  --namespace <SOURCE_NAMESPACE> <SOURCE_POD> -o json | jq -e '
     (.spec.containers[] | select(.name == \"runtime\")) as \$runtime |
     \$runtime.securityContext.readOnlyRootFilesystem == true and
     ([\$runtime.volumeMounts[] |
@@ -212,22 +219,22 @@ ssh box1 "sudo k3s kubectl get pod \
       length) == 1 and
     ([.spec.volumes[] |
       select(.name == \"home\" and
-        .persistentVolumeClaim.claimName == \"home-austin-finite-0\")] |
+        .persistentVolumeClaim.claimName == \"<SOURCE_PVC>\")] |
       length) == 1 and
     ([.spec.volumes[] |
       select((.name == \"tmp\" or .name == \"run\") and has(\"emptyDir\"))] |
       length) == 2
   ' >/dev/null"
 test "$(ssh box1 sudo k3s kubectl get pod \
-  --namespace austin-finite austin-finite-0 \
+  --namespace <SOURCE_NAMESPACE> <SOURCE_POD> \
   -o jsonpath='{.status.containerStatuses[0].imageID}')" \
-  = 'sha256:6f2efdb34f4ea2cccbbe50e5dec5c49f11b766970a693f99bb7bf0cf02dd90db'
+  = '<SOURCE_CONTAINER_IMAGE_ID>'
 ssh box1 sudo k3s kubectl scale \
-  --namespace austin-finite statefulset/austin-finite --replicas=0
+  --namespace <SOURCE_NAMESPACE> statefulset/<SOURCE_STATEFULSET> --replicas=0
 ssh box1 sudo k3s kubectl wait \
-  --namespace austin-finite --for=delete pod/austin-finite-0 --timeout=120s
+  --namespace <SOURCE_NAMESPACE> --for=delete pod/<SOURCE_POD> --timeout=120s
 ssh box1 sudo k3s kubectl get pvc \
-  --namespace austin-finite home-austin-finite-0 -o wide
+  --namespace <SOURCE_NAMESPACE> <SOURCE_PVC> -o wide
 ```
 
 Do not manually restart box1 after this point. It is the rollback copy and must
@@ -285,7 +292,7 @@ unclassified path remains structurally blocked.
 
 ```sh
 SOURCE_IMAGE_REFERENCE='docker.io/library/fc-agent-runtime:main'
-SOURCE_IMAGE_MANIFEST_DIGEST='sha256:d6e7b42a8044fbfee94edbce0884a3900678c580a23ea792f2d8aa8c2a5276f5'
+SOURCE_IMAGE_MANIFEST_DIGEST='<SOURCE_IMAGE_MANIFEST_DIGEST>'
 
 test "$(sudo ctr --namespace k8s.io images ls \
   "name==$SOURCE_IMAGE_REFERENCE" | awk 'NR == 2 { print $3 }')" \
@@ -296,7 +303,7 @@ sudo ctr --namespace k8s.io run --rm \
   --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
   --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
   --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
-  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-volume-inventory' \
+  "$SOURCE_IMAGE_REFERENCE" 'legacy-hermes-volume-inventory' \
   /opt/migration/legacy-hermes-source source-volume-inventory \
   --source-root /source \
   --output /migration/source-volume-inventory.json
@@ -306,9 +313,9 @@ sudo sha256sum '<BOX1_STAGE>/source-volume-inventory.json'
 sudo sh -c 'umask 077; \
   /run/current-system/sw/bin/finited \
   --workspace-root /etc/nixos/workspaces/ovh-fc-1 \
-  --control-plane-root /var/lib/finitecomputer \
+  --control-plane-root /var/lib/finitecomputer/control-plane \
   list-published-endpoints \
-  --payload '"'"'{"machineId":"austin-finite"}'"'"' \
+  --payload '"'"'{"machineId":"<SOURCE_MACHINE_ID>"}'"'"' \
   > <BOX1_STAGE>/published-endpoints.json'
 
 sudo ctr --namespace k8s.io run --rm \
@@ -316,11 +323,11 @@ sudo ctr --namespace k8s.io run --rm \
   --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
   --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
   --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
-  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-sites-inventory' \
+  "$SOURCE_IMAGE_REFERENCE" 'legacy-hermes-sites-inventory' \
   /opt/migration/legacy-hermes-source source-sites-inventory \
   --published-endpoints /migration/published-endpoints.json \
   --source-volume-inventory /migration/source-volume-inventory.json \
-  --expected-machine-id austin-finite \
+  --expected-machine-id <SOURCE_MACHINE_ID> \
   --output /migration/sites.json
 
 sudo ctr --namespace k8s.io run --rm \
@@ -328,7 +335,7 @@ sudo ctr --namespace k8s.io run --rm \
   --mount 'type=bind,src=<SOURCE_PV_PATH>,dst=/source,options=rbind:ro' \
   --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
   --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
-  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-integrations-inventory' \
+  "$SOURCE_IMAGE_REFERENCE" 'legacy-hermes-integrations-inventory' \
   /opt/migration/legacy-hermes-source source-integrations-inventory \
   --source-root /source \
   --source-volume-inventory /migration/source-volume-inventory.json \
@@ -340,7 +347,7 @@ sudo ctr --namespace k8s.io run --rm \
   --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
   --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
   --env HERMES_HOME=/source/.hermes \
-  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-export' \
+  "$SOURCE_IMAGE_REFERENCE" 'legacy-hermes-export' \
   /opt/migration/legacy-hermes-source source-export \
   --source-database /source/.hermes/state.db \
   --output /migration/sessions.jsonl
@@ -351,33 +358,41 @@ sudo ctr --namespace k8s.io run --rm \
   --mount 'type=bind,src=<BOX1_STAGE>,dst=/migration,options=rbind:rw' \
   --mount 'type=bind,src=<BOX1_STAGE>/tool,dst=/opt/migration,options=rbind:ro' \
   --env HERMES_HOME=/source/.hermes \
-  "$SOURCE_IMAGE_REFERENCE" 'austin-hermes-memory-export' \
+  "$SOURCE_IMAGE_REFERENCE" 'legacy-hermes-memory-export' \
   /opt/migration/legacy-hermes-source source-memory-snapshot \
   --source-database /source/.hermes/memory_store.db \
   --output /migration/memory_store.db
 ```
 
-The Sites command reads only the control-plane export and source-volume
-inventory. It fails if a locally run Site points outside `/home/node` or its
-source is missing. The integrations command reads configuration without
-executing it and emits names and policies only. Inspect both root-only files;
-they must contain no credential values.
+The Sites command reads only the authoritative control-plane export and
+source-volume inventory. Before continuing, compare its endpoint count with
+the read-only rehearsal inventory. If rehearsal found one or more endpoints
+but the frozen export returns zero, stop: a wrong control-plane root can
+produce a valid-looking empty response. The command also fails if a locally
+run Site points outside `/home/node` or its source is missing. The integrations
+command reads configuration without executing it and emits names and policies
+only. Inspect both root-only files; they must contain no credential values.
 
 The session exporter first uses SQLite's backup API, then reads the scratch
-database through Hermes v0.14. The memory snapshot also uses SQLite's backup
-API. Retain the inventory hash and both export
+database through Hermes v0.14. Structured memory normally uses the same backup
+path. If its first 40 SQLite header bytes are damaged, the exporter may rebuild
+a private copy only when one page layout exposes the expected facts table and
+the remaining integrity result contains orphaned pages and nothing else. The
+source stays unchanged, SQLite rewrites the recovered copy, and the final
+snapshot must pass `quick_check`. Record the command's `recovery` field; any
+other result is a hard stop. Retain the inventory hash and both export
 commands' counts, byte counts, and SHA-256 output.
 
 ### 5. Stage the complete snapshot and active bundle
 
 Run these commands from the trusted operator workstation. Fill only the two
-target paths; the Austin source values are deliberately concrete. The first
+target paths; the source values are deliberately concrete. The first
 stream captures all of `/home/node` without following symlinks. The remaining
 streams stage the subset that the importer converts or places into active and
 review-only target paths.
 
 ```sh
-SOURCE_PV_PATH='/var/lib/rancher/k3s/storage/pvc-96716337-df1e-4b28-9692-0263d4672085_austin-finite_home-austin-finite-0'
+SOURCE_PV_PATH='<SOURCE_PV_PATH>'
 BOX1_STAGE='<BOX1_STAGE>'
 BUNDLE='<LAT3_BUNDLE>'
 SOURCE_VOLUME_INVENTORY_SHA256='<SOURCE_VOLUME_INVENTORY_SHA256>'
@@ -386,8 +401,13 @@ ssh lat3 "sudo install -d -m 0700 \
   '$BUNDLE/payload/hermes' '$BUNDLE/payload/home'"
 ssh box1 "sudo tar --sort=name --numeric-owner --format=pax \
   --hard-dereference --one-file-system --acls --xattrs \
-  -C '$SOURCE_PV_PATH' -cpf - ." \
-  | ssh lat3 "sudo sh -c 'umask 077; cat >\"$BUNDLE/payload/source-home.tar\"'"
+  -C '$SOURCE_PV_PATH' -cpf - . \
+  | zstd -T0 -3 -c" \
+  | ssh lat3 "sudo sh -c 'umask 077; cat >\"$BUNDLE/payload/source-home.tar.zst\"'"
+ssh lat3 "sudo sha256sum '$BUNDLE/payload/source-home.tar.zst'"
+ssh lat3 "sudo sh -c 'umask 077; zstd -T0 -d -c \
+  \"$BUNDLE/payload/source-home.tar.zst\" \
+  >\"$BUNDLE/payload/source-home.tar\"'"
 ssh box1 "sudo tar -C '$SOURCE_PV_PATH/.hermes' -cpf - \
   memories skills cron/jobs.json scripts" \
   | ssh lat3 "sudo tar -C '$BUNDLE/payload/hermes' -xpf -"
@@ -403,6 +423,11 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - source-volume-inventory.json" \
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sites.json integrations.json" \
   | ssh lat3 "sudo tar -C '$BUNDLE' -xpf -"
 ```
+
+Record the compressed archive's SHA-256 before decompression and retain it
+until the bundle passes independent verification. The manifest still binds
+the uncompressed `source-home.tar`. Compress before transport; an uncompressed
+whole-home transfer can turn a short cutover into a multi-hour outage.
 
 Do not add an exclusion to the complete source snapshot. `--hard-dereference`
 stores hard-linked file content independently; it does not follow symlinks.
@@ -426,14 +451,14 @@ sudo nerdctl --namespace finite run --rm --network none \
   /opt/migration/legacy_hermes_migration.py manifest \
   --bundle /migration \
   --source-host-id box1 \
-  --source-machine-id austin-finite \
-  --source-owner-email austin@finite.vip \
+  --source-machine-id <SOURCE_MACHINE_ID> \
+  --source-owner-email <SOURCE_OWNER_EMAIL> \
   --source-hermes-version 0.14.0 \
   --source-image-reference 'docker.io/library/fc-agent-runtime:main' \
   --source-image-manifest-digest \
-    'sha256:d6e7b42a8044fbfee94edbce0884a3900678c580a23ea792f2d8aa8c2a5276f5' \
+    '<SOURCE_IMAGE_MANIFEST_DIGEST>' \
   --source-container-image-id \
-    'sha256:6f2efdb34f4ea2cccbbe50e5dec5c49f11b766970a693f99bb7bf0cf02dd90db' \
+    '<SOURCE_CONTAINER_IMAGE_ID>' \
   --source-volume-inventory-sha256 \
     "$SOURCE_VOLUME_INVENTORY_SHA256"
 
@@ -462,7 +487,7 @@ assigned a policy, no secret values, and every integration inactive.
 
 ### 6. Stop the target through Core
 
-As Austin, submit the typed stop request for the exact `PROJECT_ID`:
+As the verified owner, submit the typed stop request for the exact `PROJECT_ID`:
 
 ```text
 POST /api/core/v1/me/projects/<PROJECT_ID>/runtime/stop
@@ -506,7 +531,7 @@ sudo nerdctl --namespace finite run --rm --network none --read-only \
   /opt/migration/legacy_hermes_migration.py install \
   --bundle /migration \
   --target-root /data \
-  --expected-source-machine-id austin-finite \
+  --expected-source-machine-id <SOURCE_MACHINE_ID> \
   --expected-manifest-sha256 '<MANIFEST_SHA256>' \
   --expected-target-identity-sha256 '<TARGET_IDENTITY_SHA256>' \
   --expected-target-chat-client-sha256 '<TARGET_CHAT_CLIENT_SHA256>'
@@ -519,11 +544,16 @@ source machine must match approval; its protected hashes must match step 6.
 
 ### 8. Restart and verify
 
-As Austin, submit the typed restart request:
+As the verified owner, submit the typed restart request:
 
 ```text
 POST /api/core/v1/me/projects/<PROJECT_ID>/runtime/restart
 ```
+
+Submit it once. Record the control-request ID and wait for Core and Runner to
+reach a terminal result. A stale dashboard button is not evidence that the
+request failed. Do not submit another restart while the first request is
+pending or while the Runtime is still converging.
 
 Require every verification check below. Keep box1 at zero replicas and keep both
 recovery archives through a minimum 24-hour observation window.
@@ -552,7 +582,7 @@ recovery archives through a minimum 24-hour observation window.
   admitted file path resolves under `/data/workspace/legacy-box1`; a
   cache-only media path is explicitly recorded as preserved in the sealed
   snapshot and is not presented as active.
-- Austin's imported memories are visible. Legacy skills exist only under
+- the source bot's imported memories are visible. Legacy skills exist only under
   `/data/migration/legacy-hermes-v2/review-only/skills`; none shadow or merge
   into the active managed skill tree.
 - The receipt and rebuilt memory store contain exactly the fact count sealed
@@ -568,34 +598,135 @@ recovery archives through a minimum 24-hour observation window.
 - Brain access is recorded as pending fresh target authorization and sync. The
   source Brain working tree and identity exist only inside `source-home.tar`.
 - A new Finite Chat message receives exactly one target reply.
-- box1 has zero Austin pods; its PVC and off-host archive remain intact.
+- box1 has zero source-bot pods; its PVC and off-host archive remain intact.
 - No other box1 or lat3 bot restarted or changed artifact.
 - `scripts/finite-status --json` is retained and green.
+
+Use a fresh Chat for the acceptance message. If a pre-cutover turn resumes
+after restart, use Hermes `/stop` before sending the probe. A large interrupted
+session can take minutes while a fresh Chat replies in seconds, so stale-session
+latency is not a useful availability measurement.
+
+Runtime health and channel health are separate gates. Re-anchor the observation
+window to the last successful post-restart proof across every restored channel.
+Signal may need one watchdog interval plus Hermes reconnect backoff after a
+Runtime restart. Measure and record that interval before starting observation.
+
+Do not use `nerdctl exec`, `ctr task exec`, or another live in-VM shell for
+post-cutover verification, even for a small read-only status command. Canary
+exercises reproduced stale Kata task state with both a heavy verifier and a
+small stdin-based configuration probe. The networkless rehearsal already opened the
+imported databases through Hermes v0.20, and the offline receipt binds the
+frozen counts and protected hashes. Use external Core, Runner, containerd,
+health, and Chat evidence while the Runtime is live. If durable-file inspection
+is required, stop the Runtime through Core first and inspect through a separate
+networkless scratch container.
+
+When host evidence is necessary, request only the fields under review. For
+example, use `nerdctl inspect --format` for the artifact label and `/data`
+mount. Never retain or paste raw `nerdctl inspect` output; it includes the
+Runtime's injected environment.
+
+If Core reports a failed restart while the host shows `Unknown`, stop. Do not
+click Restart again and do not restart containerd. Record the exact control
+request and collect source-bot-only task, shim, VM, mount, and open-file evidence.
+Per-container cleanup is a break-glass repair with its own evidence and
+approval, not a normal migration step.
 
 Complete the receipt status in the retained operator evidence, not by editing
 the receipt inside `/data`. Record IDs, digests, hashes, counts, timestamps,
 and outcomes; record no token, key, message content, or secret value.
 
-## Post-canary promotion
+## Restore executable behavior
 
-The data canary is complete without activating Austin's source scheduled jobs
-or old external credentials. Restoring those behaviors is a later production
-change, not a reason to weaken this import boundary.
+The data import and behavior restoration are separate approval phases. That
+separation protects target identity and external ownership; it does not require
+an owner to decide the fate of every file, skill, or job.
 
-After the observation window, follow
-[the post-cutover repair brief](../../finitecomputer-v2/docs/legacy-hermes-post-cutover-repair.md).
-Authorize and sync a fresh FiniteBrain working tree, repair stale absolute
-paths, and compare each quarantined legacy skill against the managed target
-baseline before promoting or recreating it one at a time.
+Build one hash-bound behavior bundle from the frozen inventory and source
+`jobs.json`, not through a live Agent turn. Test it
+networkless against a restored target archive in the exact production image.
+The converter must apply these rules automatically:
 
-Build a private disposition sheet for each review-only job: retire, recreate
-paused, or replace. Review its schedule, delivery target, tool access, helper
-script, and rewritten working directory. Reauthorize only the credentials
-still required through the target's normal secret path; never copy the box1
-`.env`, tokens, pairing state, or channel identity. Recreate jobs paused while
-box1 remains frozen, then enable and verify one at a time under a separate
-approval. Do not decommission box1 until every required skill, job, Brain
-workspace, and external behavior has a recorded disposition.
+- a target-managed skill wins over an equivalent legacy skill;
+- a compatible user-authored skill absent from the target installs in one
+  reviewed batch;
+- obsolete, generated, identity-bearing, or unsafe executable state stays
+  inert in the complete Recovery Set;
+- every source job is transformed into the current schema and created paused;
+- the manifest binds every staged file and the complete job plan, including
+  schedule, prompt, origin, working directory, and paused state;
+- native clients and helpers retain explicit executable modes;
+- copied helpers use `/data` paths, an explicit migrated home, and account
+  identity derived from the staged target-compatible store, never a copied
+  source literal.
+
+When creating a transport archive on macOS, set `COPYFILE_DISABLE=1`; unsigned
+AppleDouble files must fail verification. Run the target image's current cron
+guard against the converted jobs. Rewrite old absolute work paths to admitted
+`/data` workdirs and use relative references inside job prompts where the guard
+would otherwise interpret examples as executable paths.
+
+Restore external ownership only through supported target flows:
+
+- grant and sync FiniteBrain by full Brain ID; do not select a checkout by a
+  short name or copy the source Brain identity into active state;
+- pair Telegram through the target flow, submit each pairing code once, and
+  wait for refreshed connection state before retrying. A timed-out request may
+  still complete and a retry may create a second pending request. Select the
+  approved chat as the home chat and leave duplicate requests unapproved;
+- obtain fresh Google Workspace OAuth rather than copying legacy OAuth state;
+- preserve compatible Signal state, but move its daemon off Runtime-reserved
+  port 8080, use an available non-reserved port, and verify that its watchdog
+  recurs forever rather than completing as a one-shot.
+
+Republish Sites as a separate Project-first phase after the Hermes data canary:
+
+- preserve every legacy endpoint and readable source automatically, then
+  publish only endpoints proven live and target-compatible at the frozen
+  boundary; stopped, broken, and source-less endpoints remain inactive
+  evidence without owner-by-owner file classification;
+- never serve a broad legacy workspace when a dedicated output directory can
+  express the Site. Static outputs must contain the exact served bytes, and app
+  outputs must use the target-provided `PORT` and place all mutable state under
+  `DATA_DIR`;
+- run the static tree checks and every app's read/write smoke networkless in the
+  exact target image before any Project is created;
+- add the target's shared Finite identity to the owner's Sites mailbox keyset
+  through `fsite auth sites-key request` and `fsite auth sites-key add`. Agent
+  launch, Chat identity, and channel pairing do not substitute for this
+  product-scoped mailbox proof;
+- when the publishing tool uses a stopped target identity, mount only
+  `identity.json` read-only inside a writable scratch Finite Home. `fsite`
+  creates an adjacent `.lock`, so mounting the entire identity directory
+  read-only fails before authentication;
+- run `fsite project init --dry-run` for the complete candidate set before
+  applying any Project. Then initialize, obtain a scoped Git credential with
+  `--store`, commit only `finite.toml` and the selected output tree, push the
+  deploy branch, and reproduce the frozen owner/email access map with explicit
+  Shares;
+- when packaging Project sources on macOS, set `COPYFILE_DISABLE=1` so the
+  transport archive contains no AppleDouble or provenance-only metadata; and
+- require every push to return an active Version, then verify the exact Sites
+  URLs and access policy externally. A partially accepted Git ref is repaired
+  with a new correcting commit, never by replaying the same push blindly.
+
+After the behavior bundle passes against the restored target, stop the real
+target through Core, prove no writer, take and restore a complete pre-behavior
+archive, then install the same bundle networkless. Restart once through Core
+and wait for the control request. Verify Web Chat and each restored external
+channel before enabling jobs.
+
+Enable source-equivalent jobs in dependency order through Hermes's supported
+scheduler. Compare behavior with the frozen source outcome rather than an
+idealized dependency list. A missing optional credential is not a blocker when
+the source also skipped that integration and continued useful work. Require no
+duplicate, past-due, one-shot-converted-from-recurring, or early manual runs.
+
+Follow [the post-cutover repair brief](../../finitecomputer-v2/docs/legacy-hermes-post-cutover-repair.md)
+for stale-path repair and the retained evidence checklist. Do not decommission
+box1 until every required skill, job, Brain workspace, and external behavior
+has a recorded target outcome.
 
 ## Rollback
 
@@ -607,9 +738,16 @@ and Chat hashes. Never repair a partial target by hand.
 After target restart, stop the target through Core before any rollback. Restore
 the fresh target archive if the v2 target itself must be reset. To resume
 box1, first prove target compute is stopped, then scale only
-`statefulset/austin-finite` back to one and verify the original bot. Never run
-both writers.
+`statefulset/<SOURCE_STATEFULSET>` back to one and verify the original bot.
+Never run both writers.
 
 Do not delete the target, source PVC, staging bundle, or either recovery
 archive during rollback. Decommission and credential reauthorization are later
 changes with separate approval.
+
+After migration acceptance, the non-destructive box1 disable boundary is the
+source StatefulSet at zero replicas, no source pod, and the PVC still bound.
+The legacy control plane has no separate disabled flag. Do not substitute
+`finitec machine deprovision`: it deletes machine control-plane state and
+secrets and may drive resource removal. Deprovisioning, secret removal, and PVC
+deletion require a later destructive approval and a separate retention plan.
