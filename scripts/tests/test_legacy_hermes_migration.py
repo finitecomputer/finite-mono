@@ -70,24 +70,24 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.bundle = self.root / "bundle"
         self.payload = self.bundle / "payload"
         (self.payload / "hermes/memories").mkdir(parents=True)
-        (self.payload / "hermes/skills/austin-skill").mkdir(parents=True)
+        (self.payload / "hermes/skills/user-skill").mkdir(parents=True)
         (self.payload / "hermes/cron").mkdir(parents=True)
         (self.payload / "hermes/scripts").mkdir(parents=True)
         (self.payload / "home/workspace").mkdir(parents=True)
         (self.payload / "home/dev/project").mkdir(parents=True)
         (self.payload / "home/uploads").mkdir(parents=True)
         (self.payload / "hermes/memories/MEMORY.md").write_text(
-            "Austin memory\n", encoding="utf-8"
+            "Legacy memory\n", encoding="utf-8"
         )
-        (self.payload / "hermes/skills/austin-skill/SKILL.md").write_text(
-            "# Austin\n", encoding="utf-8"
+        (self.payload / "hermes/skills/user-skill/SKILL.md").write_text(
+            "# User skill\n", encoding="utf-8"
         )
         (self.payload / "hermes/cron/jobs.json").write_text(
             json.dumps(
                 {
                     "jobs": [
                         {
-                            "id": "daily-austin",
+                            "id": "daily-user-job",
                             "enabled": True,
                             "prompt": "Prepare the daily report",
                         }
@@ -157,7 +157,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             connection.execute(
                 "CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, content TEXT)"
             )
-            connection.execute("INSERT INTO facts VALUES (1, 'Austin fact')")
+            connection.execute("INSERT INTO facts VALUES (1, 'Legacy fact')")
             connection.commit()
         source_home = self.root / "manifest-source-home"
         (source_home / "workspace").mkdir(parents=True)
@@ -174,7 +174,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             "unknown but durable\n", encoding="utf-8"
         )
         (source_home / "dev/published-site/index.html").write_text(
-            "Austin site\n", encoding="utf-8"
+            "Example site\n", encoding="utf-8"
         )
         (source_home / ".hermes/.env").write_text(
             "TELEGRAM_BOT_TOKEN=synthetic-telegram-secret\n"
@@ -206,11 +206,11 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.published_endpoints.write_text(
             json.dumps(
                 {
-                    "machineId": "austin-finite",
+                    "machineId": "legacy-bot",
                     "endpoints": [
                         {
-                            "hostname": "austin-site.finite.computer",
-                            "label": "Austin Site",
+                            "hostname": "example-site.invalid",
+                            "label": "Example Site",
                             "target_port": 3000,
                             "status": "published",
                             "run_command": "python3 -m http.server 3000",
@@ -218,7 +218,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
                             "desired_process_state": "running",
                             "auth": {
                                 "mode": "self",
-                                "owner_email": "austin@finite.vip",
+                                "owner_email": "owner@example.invalid",
                             },
                             "created_at": "2026-07-01T00:00:00Z",
                             "updated_at": "2026-08-01T00:00:00Z",
@@ -232,7 +232,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             self.bundle / "sites.json",
             self.published_endpoints,
             self.bundle / "source-volume-inventory.json",
-            expected_machine_id="austin-finite",
+            expected_machine_id="legacy-bot",
         )
         migration.inventory_source_integrations(
             self.bundle / "integrations.json",
@@ -249,8 +249,8 @@ class LegacyHermesMigrationTests(unittest.TestCase):
     def metadata(self) -> migration.SourceMetadata:
         return migration.SourceMetadata(
             host_id="box1",
-            machine_id="austin-finite",
-            owner_email="austin@finite.vip",
+            machine_id="legacy-bot",
+            owner_email="owner@example.invalid",
             hermes_version="0.14.0",
             image_reference="docker.io/library/fc-agent-runtime:main",
             image_manifest_digest="sha256:" + "a" * 64,
@@ -290,11 +290,11 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         control_plane_export.write_text(
             json.dumps(
                 {
-                    "machineId": "austin-finite",
+                    "machineId": "legacy-bot",
                     "endpoints": [
                         {
-                            "hostname": "austin-site.finite.computer",
-                            "label": "Austin Site",
+                            "hostname": "example-site.invalid",
+                            "label": "Example Site",
                             "target_port": 3000,
                             "status": "published",
                             "run_command": "python3 -m http.server 3000",
@@ -302,7 +302,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
                             "desired_process_state": "running",
                             "auth": {
                                 "mode": "self",
-                                "owner_email": "austin@finite.vip",
+                                "owner_email": "owner@example.invalid",
                             },
                             "created_at": "2026-07-01T00:00:00Z",
                             "updated_at": "2026-08-01T00:00:00Z",
@@ -327,11 +327,11 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             output,
             control_plane_export,
             self.bundle / "source-volume-inventory.json",
-            expected_machine_id="austin-finite",
+            expected_machine_id="legacy-bot",
         )
 
         self.assertEqual(result["schema"], "finite.legacy-hermes-sites.v1")
-        self.assertEqual(result["machine_id"], "austin-finite")
+        self.assertEqual(result["machine_id"], "legacy-bot")
         self.assertEqual(result["endpoint_count"], 2)
         self.assertEqual(result["source_paths_required"], 1)
         self.assertEqual(result["source_paths_present"], 1)
@@ -360,7 +360,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
                 self.bundle / "sites-missing.json",
                 control_plane_export,
                 self.bundle / "source-volume-inventory.json",
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
             )
 
     def test_integrations_inventory_records_policy_without_secret_values(self) -> None:
@@ -424,7 +424,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
                     "--source-volume-inventory",
                     str(self.bundle / "source-volume-inventory.json"),
                     "--expected-machine-id",
-                    "austin-finite",
+                    "legacy-bot",
                     "--output",
                     str(self.bundle / "sites-cli.json"),
                 ]
@@ -452,7 +452,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         manifest = self.build_manifest()
 
         self.assertEqual(manifest["schema"], "finite.legacy-hermes-migration.v2")
-        self.assertEqual(manifest["source"]["machine_id"], "austin-finite")
+        self.assertEqual(manifest["source"]["machine_id"], "legacy-bot")
         self.assertEqual(manifest["cron"]["count"], 1)
         self.assertEqual(manifest["cron"]["target_state"], "review-only-not-active")
         self.assertEqual(manifest["memory"]["fact_count"], 1)
@@ -603,7 +603,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("source-home.tar", runbook)
         self.assertIn("unknown safe paths default to `preserve`", runbook)
         self.assertIn("zero structurally blocked entries", runbook)
-        self.assertNotIn("Austin explicitly chooses", runbook)
+        self.assertNotIn("the owner explicitly chooses", runbook)
         self.assertNotIn("owner decisions", runbook)
         self.assertIn("dst=/opt/migration,ro", runbook)
         install_section = runbook.split(
@@ -735,7 +735,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
     ) -> None:
         source = self.root / "source-home"
         generated_links = {
-            ".config/pulse/austin-finite-0-runtime": "/tmp/pulse-runtime",
+            ".config/pulse/legacy-bot-0-runtime": "/tmp/pulse-runtime",
             ".hermes/venv/bin/python": "/nix/store/legacy-python/bin/python",
             ".local/uv-tools/ruff/bin/python": "/nix/store/legacy-ruff/bin/python",
             "dev/reap-video/venv/bin/python": "/nix/store/legacy-python/bin/python",
@@ -867,7 +867,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         receipt = migration.install_bundle(
             self.bundle,
             target,
-            expected_machine_id="austin-finite",
+            expected_machine_id="legacy-bot",
             expected_manifest_sha256=self.manifest_sha256(),
             expected_identity_sha256=identity_before,
             expected_chat_client_sha256=client_before,
@@ -883,7 +883,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertFalse((target / "agent/hermes-home/skills").exists())
         self.assertTrue(
             target.joinpath(
-                "migration/legacy-hermes-v2/review-only/skills/austin-skill/SKILL.md"
+                "migration/legacy-hermes-v2/review-only/skills/user-skill/SKILL.md"
             ).is_file()
         )
         self.assertTrue(
@@ -947,7 +947,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=identity_before,
                 expected_chat_client_sha256=client_before,
@@ -966,7 +966,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         receipt = migration.install_bundle(
             self.bundle,
             target,
-            expected_machine_id="austin-finite",
+            expected_machine_id="legacy-bot",
             expected_manifest_sha256=self.manifest_sha256(),
             expected_identity_sha256=hashlib.sha256(identity.read_bytes()).hexdigest(),
             expected_chat_client_sha256=hashlib.sha256(client.read_bytes()).hexdigest(),
@@ -1002,7 +1002,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256="0" * 64,
                 expected_identity_sha256=actual_identity,
                 expected_chat_client_sha256=actual_client,
@@ -1014,7 +1014,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256="0" * 64,
                 expected_chat_client_sha256=actual_client,
@@ -1026,7 +1026,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=actual_identity,
                 expected_chat_client_sha256="0" * 64,
@@ -1041,7 +1041,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=actual_identity,
                 expected_chat_client_sha256=actual_client,
@@ -1069,7 +1069,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=identity_sha256,
                 expected_chat_client_sha256=chat_client_sha256,
@@ -1103,7 +1103,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=identity_sha256,
                 expected_chat_client_sha256=chat_client_sha256,
@@ -1139,7 +1139,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             migration.install_bundle(
                 self.bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=self.manifest_sha256(),
                 expected_identity_sha256=identity_sha256,
                 expected_chat_client_sha256=chat_client_sha256,
@@ -1273,7 +1273,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             connection.execute(
                 "CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, content TEXT)"
             )
-            connection.execute("INSERT INTO facts VALUES (1, 'remember Austin')")
+            connection.execute("INSERT INTO facts VALUES (1, 'remember legacy fact')")
             connection.commit()
         source_before = hashlib.sha256(source_db.read_bytes()).hexdigest()
         output = self.root / "memory_store.db"
@@ -1288,6 +1288,36 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         )
         self.assertFalse(Path(str(output) + "-wal").exists())
         self.assertFalse(Path(str(output) + "-shm").exists())
+
+    def test_source_memory_snapshot_recovers_legacy_header_damage(self) -> None:
+        source_db = self.root / "source-memory-with-damaged-header.db"
+        with closing(sqlite3.connect(source_db)) as connection:
+            connection.execute("PRAGMA page_size=4096")
+            connection.execute(
+                "CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, content TEXT)"
+            )
+            connection.execute("INSERT INTO facts VALUES (1, 'remember legacy fact')")
+            connection.commit()
+        with source_db.open("ab") as handle:
+            handle.write(bytes(8192))
+        damaged = bytearray(source_db.read_bytes())
+        damaged[:40] = bytes(range(40))
+        source_db.write_bytes(damaged)
+        source_before = hashlib.sha256(source_db.read_bytes()).hexdigest()
+        output = self.root / "memory_store.db"
+
+        with mock.patch("importlib.metadata.version", return_value="0.14.0"):
+            result = migration.snapshot_source_memory(output, source_db)
+
+        self.assertEqual(result["facts"], 1)
+        self.assertEqual(result["recovery"], "sqlite-header-and-orphan-page-rebuild")
+        self.assertEqual(
+            hashlib.sha256(source_db.read_bytes()).hexdigest(), source_before
+        )
+        with closing(sqlite3.connect(f"file:{output}?mode=ro", uri=True)) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA quick_check").fetchall(), [("ok",)]
+            )
 
     def test_source_writer_check_fails_on_a_writable_fd_under_the_pvc(self) -> None:
         source_root = self.root / "source-pvc"

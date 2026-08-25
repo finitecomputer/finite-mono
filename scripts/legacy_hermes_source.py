@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Frozen-source evidence and export operations for legacy Hermes migrations."""
 
 from __future__ import annotations
@@ -8,8 +7,10 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
+import tempfile
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -199,8 +200,13 @@ def snapshot_source_memory(output: Path, source_database: Path) -> dict[str, Any
         raise MigrationError(
             f"source memory database is missing or unsafe: {source_database}"
         )
+    recovery = "none"
     try:
-        _copy_sqlite(source_database, output)
+        try:
+            _copy_sqlite(source_database, output)
+        except sqlite3.DatabaseError:
+            output.unlink(missing_ok=True)
+            recovery = _rebuild_legacy_memory_database(source_database, output)
         with closing(sqlite3.connect(output)) as connection:
             checkpoint = connection.execute(
                 "PRAGMA wal_checkpoint(TRUNCATE)"
@@ -226,7 +232,90 @@ def snapshot_source_memory(output: Path, source_database: Path) -> dict[str, Any
         "facts": fact_count,
         "bytes": output.stat().st_size,
         "sha256": _sha256(output),
+        "recovery": recovery,
     }
+
+
+def _rebuild_legacy_memory_database(source: Path, output: Path) -> str:
+    """Rebuild a narrowly recognizable SQLite file whose first header fields were lost."""
+    source_size = source.stat().st_size
+    with source.open("rb") as handle:
+        source_header = handle.read(100)
+    if source_header.startswith(b"SQLite format 3" + bytes([0])) or source_size < 512:
+        raise MigrationError("memory snapshot failed SQLite backup")
+    if (
+        int.from_bytes(source_header[44:48], "big") not in (1, 2, 3, 4)
+        or int.from_bytes(source_header[56:60], "big") not in (1, 2, 3)
+        or source_header[72:92] != bytes(20)
+    ):
+        raise MigrationError("memory database is not a recoverable legacy SQLite file")
+
+    change_counter = int.from_bytes(source_header[92:96], "big")
+    valid_candidates: list[tuple[Path, list[str]]] = []
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output.name}.header-recovery-", dir=output.parent
+    ) as scratch_name:
+        scratch = Path(scratch_name)
+        for page_size in (4096, 8192, 16384, 32768, 65536, 2048, 1024, 512):
+            if source_size % page_size:
+                continue
+            encoded_page_size = 1 if page_size == 65536 else page_size
+            header = (
+                b"SQLite format 3"
+                + bytes([0])
+                + encoded_page_size.to_bytes(2, "big")
+                + bytes([1, 1, 0, 64, 32, 32])
+                + change_counter.to_bytes(4, "big")
+                + (source_size // page_size).to_bytes(4, "big")
+                + bytes(8)
+            )
+            candidate = scratch / f"page-{page_size}.db"
+            shutil.copyfile(source, candidate)
+            with candidate.open("r+b") as handle:
+                handle.write(header)
+            os.chmod(candidate, 0o600)
+            try:
+                with closing(
+                    sqlite3.connect(f"file:{candidate}?mode=ro&immutable=1", uri=True)
+                ) as connection:
+                    tables = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                        )
+                    }
+                    if "facts" not in tables:
+                        continue
+                    integrity_lines = [
+                        line
+                        for row in connection.execute("PRAGMA integrity_check")
+                        for line in str(row[0]).splitlines()
+                    ]
+            except sqlite3.DatabaseError:
+                continue
+            allowed = all(
+                line == "ok"
+                or line == "*** in database main ***"
+                or re.fullmatch(r"Page [0-9]+: never used", line)
+                for line in integrity_lines
+            )
+            if allowed:
+                valid_candidates.append((candidate, integrity_lines))
+
+        if len(valid_candidates) != 1:
+            raise MigrationError(
+                "memory database header recovery did not produce one unambiguous SQLite layout"
+            )
+        candidate, _ = valid_candidates[0]
+        with closing(sqlite3.connect(candidate)) as connection:
+            connection.execute("VACUUM INTO ?", (str(output),))
+
+    with closing(
+        sqlite3.connect(f"file:{output}?mode=ro&immutable=1", uri=True)
+    ) as connection:
+        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise MigrationError("rebuilt memory database failed SQLite quick_check")
+    return "sqlite-header-and-orphan-page-rebuild"
 
 
 def _is_below(relative: Path, root: Path) -> bool:
