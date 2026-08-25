@@ -705,19 +705,26 @@ impl KataLauncher {
         host_port: u16,
     ) -> Result<(), RunnerError> {
         let started = Instant::now();
+        let mut last_ready_reason: Option<String> = None;
         loop {
-            if self
-                .probe_bounded_health(plan, host_port)?
-                .as_ref()
-                .and_then(|value| value.get("ready"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            {
-                return Ok(());
+            if let Some(body) = self.probe_bounded_health(plan, host_port)? {
+                if body.get("ready").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return Ok(());
+                }
+                // The runtime names its not-ready cause (truthful-readiness
+                // N+1); carry the last seen one into the timeout failure so
+                // the lifecycle record says WHY readiness never came. Images
+                // before that change simply omit the field.
+                if let Some(reason) = body.get("ready_reason").and_then(serde_json::Value::as_str) {
+                    last_ready_reason = Some(reason.to_owned());
+                }
             }
             if started.elapsed() >= self.config.readiness_timeout {
-                return Err(RunnerError::RuntimeLaunch(format!(
-                    "Kata runtime /healthz did not become ready within {}s",
+                let reason = last_ready_reason
+                    .map(|reason| format!("; last ready_reason: {reason}"))
+                    .unwrap_or_default();
+                return Err(RunnerError::RuntimeReadinessTimeout(format!(
+                    "Kata runtime /healthz did not become ready within {}s{reason}",
                     self.config.readiness_timeout.as_secs()
                 )));
             }
@@ -3948,6 +3955,63 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn readiness_timeout_reports_the_runtime_ready_reason() {
+        // The runtime names its not-ready cause on 503 bodies; the timeout
+        // failure must carry it so the lifecycle record says why readiness
+        // never came.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let server = std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                // The wake connect after the timeout lands here once stop is set.
+                if stop_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let body = r#"{"ready":false,"ready_reason":"agentd_status_stale"}"#;
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let launcher = KataLauncher::new(KataConfig {
+            readiness_timeout: Duration::from_millis(300),
+            readiness_interval: Duration::from_millis(25),
+            ..KataConfig::default()
+        });
+        let plan = KataLaunchPlan {
+            container_name: "finite-kata-test".to_string(),
+            state_root: PathBuf::from("/data/finite-saas-runner/kata/test"),
+            metadata_root: PathBuf::from("/data/finite-saas-runner/kata-metadata/test"),
+            env_file: PathBuf::from("/data/finite-saas-runner/kata-metadata/test/launch.env"),
+            host_address: "127.0.0.1".parse().unwrap(),
+            container_port: 8080,
+        };
+        let error = launcher.wait_for_runtime_http(&plan, port).unwrap_err();
+        stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(("127.0.0.1", port));
+        server.join().unwrap();
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, RunnerError::RuntimeReadinessTimeout(_)),
+            "unexpected error variant: {message}"
+        );
+        assert!(
+            message.contains("last ready_reason: agentd_status_stale"),
+            "timeout must name the runtime's ready_reason, got: {message}"
+        );
+    }
+
     #[derive(Clone)]
     struct TestRecoveryBehavior {
         operation_hash: String,
@@ -4273,7 +4337,8 @@ esac
                 requested_by_user_id: "admin-1".to_string(),
                 kind: RuntimeControlKind::Upgrade,
                 target_runtime_artifact_id: Some("artifact-v2".to_string()),
-                status: RuntimeControlRequestStatus::Running,
+                status: RuntimeControlRequestStatus::Launching,
+                failure_stage: None,
                 runner_id: Some("kata-runner".to_string()),
                 lease_token: Some("lease".to_string()),
                 lease_expires_at: None,

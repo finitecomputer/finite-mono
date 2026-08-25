@@ -54,6 +54,7 @@ const AEON_HERMES_PROBE_MARKER: &str = "FINITE_AEON_HERMES_PROBE ";
 const SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
 const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
 const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
+const BRIDGE_READY_TIMEOUT_ENV: &str = "FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StartupSpecializationBundleConfig {
@@ -86,6 +87,10 @@ pub struct DaemonConfig {
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
     pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+    /// How long startup waits for the Finite Chat bridge to serve readiness
+    /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
+    /// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides it.
+    pub bridge_ready_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +184,9 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             )?,
+            bridge_ready_timeout: bridge_ready_timeout_from_value(
+                std::env::var(BRIDGE_READY_TIMEOUT_ENV).ok().as_deref(),
+            )?,
         })
     }
 
@@ -267,8 +275,10 @@ fn specialization_bundle_status(
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
+    become_process_group_leader();
     fs::create_dir_all(config.state_dir())?;
     fs::set_permissions(config.state_dir(), fs::Permissions::from_mode(0o700))?;
+    clear_boot_scoped_health_evidence(&config);
     prepare_agent_runtime(&config)?;
     let identity = load_agent_identity(&config.agent_home)?;
     let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
@@ -324,7 +334,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         Arc::clone(&verified_hermes_generation),
     );
 
-    wait_for_bridge(&bridge).await?;
+    wait_for_bridge(&bridge, config.bridge_ready_timeout).await?;
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
     let executor = CommandExecutor {
@@ -344,6 +354,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     let delivery_worker =
         run_delivery_loop(delivery_rx, |delivery| executor.handle_delivery(delivery));
     tokio::pin!(delivery_worker);
+    // SIGTERM takes the same graceful path as ctrl_c: a container stop
+    // reaches agentd as SIGTERM (forwarded by entrypoint.sh), and the
+    // supervisor's TERM-then-KILL drain is what gives Hermes/bridge/the
+    // health server their bounded window to finish mid-stream writes.
+    // Backported from PR 440 (83ef3024).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = &mut delivery_worker => {
             result
@@ -352,6 +368,59 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
             signal?;
             supervisor.shutdown().await;
             Ok(())
+        }
+        _ = sigterm.recv() => {
+            supervisor.shutdown().await;
+            Ok(())
+        }
+    }
+}
+
+/// agentd leads its own session/process group when PID 1 (entrypoint.sh) is
+/// its parent, so the entrypoint's post-exit sweep can SIGKILL the whole
+/// supervised tree by pgid after agentd exits — the current topology's
+/// equivalent of PR 440's shell-level generation quiesce (ec46243e). Scoped
+/// to parent==PID 1 so an interactive `finite-agentd serve` keeps normal
+/// terminal signal behavior; a setsid failure (e.g. EPERM because the
+/// spawner already made us a group leader) only degrades the sweep to a
+/// no-op, never the boot.
+fn become_process_group_leader() {
+    let parent_is_init = rustix::process::getppid()
+        .map(|parent| parent.as_raw_pid() == 1)
+        .unwrap_or(false);
+    if !parent_is_init {
+        return;
+    }
+    if let Err(error) = rustix::process::setsid() {
+        eprintln!(
+            "finite-agentd: could not lead a process group ({error}); \
+             the entrypoint post-exit orphan sweep will no-op"
+        );
+    }
+}
+
+/// Health evidence is boot-scoped: files written under a previous boot must
+/// never describe this one. Cleared before the writers (bridge sidecar,
+/// health server, Hermes) are spawned, so /healthz can only ever report on
+/// this boot's processes — a stale hermes-bridge-status.json otherwise keeps
+/// claiming "connected" after the adapter that wrote it died. Mirrors the
+/// transient allowlist recover_chat_boot.py enforces on recovery boots
+/// (bridge_health_cache, agentd_health_cache, agentd_finitechat_ready). The
+/// durable startup report is NOT touched: it is the recovery journal's
+/// projection, not health evidence.
+fn clear_boot_scoped_health_evidence(config: &DaemonConfig) {
+    for path in [
+        config.agent_home.join("hermes-bridge-status.json"),
+        config.status_path(),
+        config.state_dir().join("finitechat-ready.json"),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "finite-agentd: could not clear stale health evidence {}: {error}",
+                path.display()
+            ),
         }
     }
 }
@@ -1055,11 +1124,28 @@ fn spawn_delivery_stream(bridge: BridgeClient, tx: mpsc::Sender<RuntimeCommandDe
 /// 2026-08-18: a ~15k-message room needed ~55s on lat3 and boot-looped
 /// against the old 30s deadline; 180s gives large rooms headroom while a
 /// truly dead bridge still fails (and is retried) within minutes.
-const BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides this default.
+const DEFAULT_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
-async fn wait_for_bridge(bridge: &BridgeClient) -> Result<(), AgentdError> {
+fn bridge_ready_timeout_from_value(value: Option<&str>) -> Result<Duration, AgentdError> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_BRIDGE_READY_TIMEOUT);
+    };
+    let secs = raw
+        .parse::<u64>()
+        .ok()
+        .filter(|secs| *secs > 0)
+        .ok_or_else(|| {
+            AgentdError::Config(format!(
+                "{BRIDGE_READY_TIMEOUT_ENV} must be a positive integer"
+            ))
+        })?;
+    Ok(Duration::from_secs(secs))
+}
+
+async fn wait_for_bridge(bridge: &BridgeClient, timeout: Duration) -> Result<(), AgentdError> {
     let mut retry = Duration::from_millis(50);
-    let deadline = tokio::time::Instant::now() + BRIDGE_READY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if bridge.wait_until_ready().await.is_ok() {
             return Ok(());
@@ -1174,6 +1260,73 @@ mod tests {
         .unwrap();
         assert_eq!(bundle.bundle_id, DEFAULT_AEON_SPECIALIZATION_BUNDLE);
         assert!(!format!("{bundle:?}").contains("worker-secret"));
+    }
+
+    #[test]
+    fn bridge_ready_timeout_defaults_to_180s_and_validates_override() {
+        assert_eq!(
+            bridge_ready_timeout_from_value(None).unwrap(),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            bridge_ready_timeout_from_value(Some("  ")).unwrap(),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            bridge_ready_timeout_from_value(Some("45")).unwrap(),
+            Duration::from_secs(45)
+        );
+        assert!(bridge_ready_timeout_from_value(Some("0")).is_err());
+        assert!(bridge_ready_timeout_from_value(Some("-5")).is_err());
+        assert!(bridge_ready_timeout_from_value(Some("soon")).is_err());
+    }
+
+    #[test]
+    fn boot_scoped_health_evidence_is_cleared_but_durable_state_survives() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_home = home.path().join("agent");
+        let state_dir = agent_home.join("agentd");
+        fs::create_dir_all(&state_dir).unwrap();
+        for path in [
+            agent_home.join("hermes-bridge-status.json"),
+            state_dir.join("status.json"),
+            state_dir.join("finitechat-ready.json"),
+        ] {
+            fs::write(path, "{}\n").unwrap();
+        }
+        // The recovery journal's projection and real durable state are not
+        // health evidence and must survive the boot clearing.
+        fs::write(agent_home.join("startup-report.json"), "{}\n").unwrap();
+        fs::write(agent_home.join("config.json"), "{}\n").unwrap();
+
+        let mut config = DaemonConfig {
+            agent_home: agent_home.clone(),
+            hermes_home: agent_home.join("hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/bin/finitechat"),
+            prepare_command: PathBuf::from("/bin/true"),
+            hermes_command: PathBuf::from("/bin/true"),
+            hermes_probe_python: PathBuf::from("python"),
+            hermes_probe_script: PathBuf::from("/opt/probe_hermes_vision.py"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            specialization_bundle: None,
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        clear_boot_scoped_health_evidence(&config);
+
+        assert!(!agent_home.join("hermes-bridge-status.json").exists());
+        assert!(!state_dir.join("status.json").exists());
+        assert!(!state_dir.join("finitechat-ready.json").exists());
+        assert!(agent_home.join("startup-report.json").exists());
+        assert!(agent_home.join("config.json").exists());
+
+        // Missing files are a normal first-boot state, not an error.
+        clear_boot_scoped_health_evidence(&config);
+        config.agent_home = home.path().join("missing-agent-home");
+        clear_boot_scoped_health_evidence(&config);
     }
 
     #[test]

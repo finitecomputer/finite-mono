@@ -27,39 +27,43 @@ use crate::{
     FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
     LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
-    OffboardingPhase, Project, ProjectMembershipRole, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OffboardingPhase, Project, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+    RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
     RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
     ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
-    RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
-    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
-    agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope,
+    RuntimeRelocationV1, RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult, StoreErrorDetail,
+    StoredRuntimeHealth, SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt,
+    UpsertRuntimeArtifactInput, agent_creation_entitlement_id_for,
+    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
+    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
     parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
     parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
-    parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_resource_class,
-    parse_time, parse_user_link_status, project_room_membership_id_for,
+    parse_runtime_control_kind, parse_runtime_control_request_status,
+    parse_runtime_lifecycle_stage, parse_runtime_resource_class, parse_time,
+    parse_user_link_status, project_room_membership_id_for, project_runtime_health,
     project_runtime_link_id_for, provider_operation_allows_generic_failure,
     provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
-    runtime_artifact_reference_is_immutable_oci, runtime_operation_spec_v1,
+    runtime_artifact_reference_is_immutable_oci, runtime_lifecycle, runtime_operation_spec_v1,
     runtime_spec_secret_references, runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, source_import_key, trim_to_option,
     valid_agent_npub, valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
@@ -776,6 +780,14 @@ impl CoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await
+    }
+
+    pub async fn record_runtime_health_report(
+        &self,
+        input: RecordRuntimeHealthReportInput,
+    ) -> CoreResult<RuntimeHealthReportAck> {
+        let client = self.connection().await?;
+        postgres_record_runtime_health_report(&**client, input).await
     }
 
     pub async fn admin_archive_unrecoverable_runtime(
@@ -2382,7 +2394,9 @@ where
                     control.requested_by_user_id AS control_requested_by_user_id,
                     control.kind AS control_kind,
                     control.target_runtime_artifact_id AS control_target_runtime_artifact_id,
-                    control.status AS control_status, control.runner_id AS control_runner_id,
+                    control.status AS control_status,
+                    control.failure_stage AS control_failure_stage,
+                    control.runner_id AS control_runner_id,
                     control.lease_token AS control_lease_token,
                     core_rfc3339(control.lease_expires_at) AS control_lease_expires_at,
                     control.failure_message AS control_failure_message,
@@ -2399,7 +2413,7 @@ where
                SELECT request.*
                FROM runtime_control_requests AS request
                WHERE request.agent_runtime_id = runtime.id
-                 AND request.status IN ('requested', 'running')
+                 AND request.status IN ('requested', 'launching', 'compute_up', 'ready')
                ORDER BY request.created_at, request.id
                LIMIT 1
              ) AS control ON TRUE
@@ -2479,6 +2493,22 @@ where
             let active_runtime_control = row
                 .get::<_, Option<String>>("control_id")
                 .map(|id| {
+                    let status = parse_runtime_control_request_status(
+                        &row.get::<_, String>("control_status"),
+                    )
+                    .ok_or_else(|| CoreError::Store("invalid runtime control status".into()))?;
+                    let failure_stage = if status == RuntimeControlRequestStatus::Failed {
+                        Some(
+                            parse_runtime_lifecycle_stage(
+                                &row.get::<_, String>("control_failure_stage"),
+                            )
+                            .ok_or_else(|| {
+                                CoreError::Store("invalid runtime control failure stage".into())
+                            })?,
+                        )
+                    } else {
+                        None
+                    };
                     Ok::<RuntimeControlRequest, CoreError>(RuntimeControlRequest {
                         id,
                         project_id: row.get("control_project_id"),
@@ -2491,10 +2521,8 @@ where
                                 CoreError::Store("invalid runtime control kind".into())
                             })?,
                         target_runtime_artifact_id: row.get("control_target_runtime_artifact_id"),
-                        status: parse_runtime_control_request_status(
-                            &row.get::<_, String>("control_status"),
-                        )
-                        .ok_or_else(|| CoreError::Store("invalid runtime control status".into()))?,
+                        status,
+                        failure_stage,
                         runner_id: row.get("control_runner_id"),
                         lease_token: row.get("control_lease_token"),
                         lease_expires_at: row.get("control_lease_expires_at"),
@@ -4150,6 +4178,23 @@ where
 fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlRequest> {
     let kind: String = row.get("kind");
     let status: String = row.get("status");
+    let failure_stage: String = row.get("failure_stage");
+    let status = parse_runtime_control_request_status(&status).ok_or_else(|| {
+        CoreError::Store(format!("invalid runtime control request status {status}"))
+    })?;
+    // The lifecycle invariant: a failed request always names its stage, and
+    // only a failed request carries one.
+    let failure_stage = if status == RuntimeControlRequestStatus::Failed {
+        Some(
+            parse_runtime_lifecycle_stage(&failure_stage).ok_or_else(|| {
+                CoreError::Store(format!(
+                    "invalid runtime control failure stage {failure_stage}"
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
     Ok(RuntimeControlRequest {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -4160,9 +4205,8 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
         kind: parse_runtime_control_kind(&kind)
             .ok_or_else(|| CoreError::Store(format!("invalid runtime control kind {kind}")))?,
         target_runtime_artifact_id: row.get("target_runtime_artifact_id"),
-        status: parse_runtime_control_request_status(&status).ok_or_else(|| {
-            CoreError::Store(format!("invalid runtime control request status {status}"))
-        })?,
+        status,
+        failure_stage,
         runner_id: row.get("runner_id"),
         lease_token: row.get("lease_token"),
         lease_expires_at: row.get("lease_expires_at"),
@@ -4175,7 +4219,7 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
 
 const RUNTIME_CONTROL_REQUEST_COLUMNS: &str = "id, project_id, agent_runtime_id, source_host_id,
     source_machine_id, requested_by_user_id, kind, target_runtime_artifact_id,
-    status, runner_id, lease_token,
+    status, failure_stage, runner_id, lease_token,
     core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at";
 
 async fn postgres_runtime_control_request<C>(
@@ -4334,7 +4378,8 @@ where
     // partial unique index is a database-level backstop.
     let existing_sql = format!(
         "SELECT {RUNTIME_CONTROL_REQUEST_COLUMNS} FROM runtime_control_requests
-         WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+         WHERE agent_runtime_id = $1
+           AND status IN ('requested', 'launching', 'compute_up', 'ready')
          ORDER BY created_at, id
          LIMIT 1
          FOR UPDATE"
@@ -4375,6 +4420,7 @@ where
         kind,
         target_runtime_artifact_id,
         status: RuntimeControlRequestStatus::Requested,
+        failure_stage: None,
         runner_id: None,
         lease_token: None,
         lease_expires_at: None,
@@ -4395,7 +4441,7 @@ where
                      $9::text::timestamptz, $9::text::timestamptz, NULL)
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[
@@ -4535,7 +4581,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&agent_runtime_id],
         )
@@ -4674,7 +4721,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&agent_runtime_id],
         )
@@ -4988,7 +5036,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&runtime.id],
         )
@@ -4998,7 +5047,7 @@ where
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
-    // The succeeded stop receipt proves no writer survives on the source.
+    // The stopped stop receipt proves no writer survives on the source.
     // Under the compute-absent attestation there is nothing to stop and the
     // receipt is unobtainable; absence itself (verified by the operator's
     // bounded probe per the relocation runbook) is the stronger guarantee.
@@ -5011,7 +5060,7 @@ where
                AND source_host_id = $2
                AND source_machine_id = $3
                AND kind = 'stop'
-               AND status = 'succeeded'
+               AND status = 'stopped'
              LIMIT 1",
                 &[
                     &runtime.id,
@@ -5241,7 +5290,7 @@ where
                 WHERE (
                         request.status = 'requested'
                         OR (
-                          request.status = 'running'
+                          request.status = 'launching'
                           AND (request.lease_expires_at IS NULL OR request.lease_expires_at <= $4::text::timestamptz)
                         )
                       )
@@ -5267,7 +5316,7 @@ where
                 LIMIT 1
              )
              UPDATE runtime_control_requests AS request
-             SET status = 'running',
+             SET status = 'launching',
                  runner_id = $1,
                  lease_token = $2,
                  lease_expires_at = $3::text::timestamptz,
@@ -5279,6 +5328,7 @@ where
                        request.source_host_id, request.source_machine_id,
                        request.requested_by_user_id, request.kind,
                        request.target_runtime_artifact_id, request.status,
+                       request.failure_stage,
                        request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                        request.failure_message, core_rfc3339(request.created_at) AS created_at,
                        core_rfc3339(request.updated_at) AS updated_at, core_rfc3339(request.completed_at) AS completed_at",
@@ -5322,7 +5372,8 @@ where
                 client
                     .execute(
                         "UPDATE runtime_control_requests
-                         SET status = 'failed', runner_id = NULL, lease_token = NULL,
+                         SET status = 'failed', failure_stage = 'launch',
+                             runner_id = NULL, lease_token = NULL,
                              lease_expires_at = NULL, failure_message = $2,
                              updated_at = $3::text::timestamptz,
                              completed_at = $3::text::timestamptz
@@ -5455,8 +5506,8 @@ fn verify_runtime_control_lease(
         trim_to_option(Some(runner_id)).ok_or(CoreError::MissingAgentCreationRunnerId)?;
     let lease_token =
         trim_to_option(Some(lease_token)).ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-    if request.status != RuntimeControlRequestStatus::Running {
-        return Err(CoreError::RuntimeControlRequestNotRunning);
+    if request.status != RuntimeControlRequestStatus::Launching {
+        return Err(CoreError::RuntimeControlRequestNotLaunching);
     }
     if request.runner_id.as_deref() != Some(runner_id.as_str())
         || request.lease_token.as_deref() != Some(lease_token.as_str())
@@ -5600,13 +5651,19 @@ where
     runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.clone().unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
-    if locked.status == RuntimeControlRequestStatus::Succeeded {
+    // Terminal requests accept no completion. The single exception is the
+    // idempotent Destroy replay: the same receipt re-presented against the
+    // stopped request returns the stored row unchanged.
+    if locked.status.is_terminal() {
         let stored = postgres_runtime_retirement_snapshot(client, &input.request_id).await?;
-        if locked.kind == RuntimeControlKind::Destroy
-            && stored.as_ref().map(|snapshot| &snapshot.receipt)
-                == input.retirement_snapshot.as_ref()
-            && crate::runtime_control_completion_has_no_upgrade_facts(&input)
-        {
+        let idempotent_destroy_replay = locked.status == RuntimeControlRequestStatus::Stopped
+            && locked.kind == RuntimeControlKind::Destroy
+            && matches!(
+                RuntimeControlCompletion::parse(locked.kind, &input),
+                Ok(RuntimeControlCompletion::Destroy(ref receipt))
+                    if stored.as_ref().map(|snapshot| &snapshot.receipt) == Some(&**receipt)
+            );
+        if idempotent_destroy_replay {
             return Ok(locked);
         }
         return Err(CoreError::RuntimeRetirementSnapshotConflict);
@@ -5619,139 +5676,124 @@ where
         &now,
     )
     .await?;
-    let retirement_snapshot = if locked.kind == RuntimeControlKind::Destroy {
-        let receipt = input
-            .retirement_snapshot
-            .clone()
-            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
-            .await?
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        let row = client
-            .query_opt(
-                "SELECT runtime_spec
+    // The completion shape is parsed once and keyed on the request kind, so
+    // the upgrade-with-facts / destroy / plain shapes cannot be confused
+    // anywhere below this line.
+    let completion = RuntimeControlCompletion::parse(locked.kind, &input)?;
+    let retirement_snapshot = match &completion {
+        RuntimeControlCompletion::Destroy(receipt) => {
+            let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+                .await?
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            let row = client
+                .query_opt(
+                    "SELECT runtime_spec
                  FROM agent_creation_requests
                  WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
                  ORDER BY created_at DESC, id DESC
                  LIMIT 1",
-                &[&runtime.id],
-            )
-            .await
-            .map_err(store_error)?
-            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-        let value: Value = row.get("runtime_spec");
-        let runtime_spec: RuntimeSpecEnvelope =
-            serde_json::from_value(value).map_err(json_error)?;
-        validate_runtime_retirement_snapshot_receipt(
-            &receipt,
-            &locked,
-            &runtime,
-            &runtime_spec,
-            &now,
-        )?;
-        Some(RuntimeRetirementSnapshot {
-            receipt,
-            stored_at: now.clone(),
-        })
-    } else {
-        if input.retirement_snapshot.is_some() {
-            return Err(CoreError::RuntimeRetirementSnapshotMismatch);
-        }
-        None
-    };
-    let upgrade = if locked.kind == RuntimeControlKind::Upgrade {
-        let target_id = locked
-            .target_runtime_artifact_id
-            .as_deref()
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let reported_id = trim_to_option(input.runtime_artifact_id.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let target = select_runtime_artifact(client, target_id)
-            .await?
-            .ok_or(CoreError::RuntimeArtifactNotFound)?;
-        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
-            .await?
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        validate_runtime_capabilities_artifact_policy(
-            input.runtime_capabilities.as_ref(),
-            runtime.placement,
-            &target,
-        )?;
-        // A target may be retired after the runner leased and swapped it.
-        // Immutable material remains authoritative for committing the actual
-        // compute state; lifecycle policy is enforced at request and lease.
-        ensure_runtime_upgrade_target_material(&runtime, &target)?;
-        let state_schema_version = trim_to_option(input.state_schema_version.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let runtime_host = trim_to_option(input.runtime_host.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let published_app_urls = input
-            .published_app_urls
-            .clone()
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
-        if reported_id != target.id || state_schema_version != target.state_schema_version {
-            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
-        }
-        let runtime_spec = if let Some(row) = client
-            .query_opt(
-                "SELECT runtime_spec
-                 FROM agent_creation_requests
-                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT 1",
-                &[&runtime.id],
-            )
-            .await
-            .map_err(store_error)?
-        {
+                    &[&runtime.id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
             let value: Value = row.get("runtime_spec");
-            let current_spec: RuntimeSpecEnvelope =
+            let runtime_spec: RuntimeSpecEnvelope =
                 serde_json::from_value(value).map_err(json_error)?;
-            let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-            let current_artifact_id = runtime
-                .runtime_artifact_id
+            validate_runtime_retirement_snapshot_receipt(
+                receipt,
+                &locked,
+                &runtime,
+                &runtime_spec,
+                &now,
+            )?;
+            Some(RuntimeRetirementSnapshot {
+                receipt: (**receipt).clone(),
+                stored_at: now.clone(),
+            })
+        }
+        _ => None,
+    };
+    let upgrade = match &completion {
+        RuntimeControlCompletion::Upgrade(facts) => {
+            let target_id = locked
+                .target_runtime_artifact_id
                 .as_deref()
-                .ok_or(CoreError::RuntimeSpecMismatch)?;
-            let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let reported_id = facts.runtime_artifact_id.clone();
+            let target = select_runtime_artifact(client, target_id)
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
-            Some(runtime_operation_spec_v1(
-                &current_spec,
-                RuntimeSpecIdentity {
-                    operation_id: &locked.id,
-                    project_id: &runtime.project_id,
-                    agent_runtime_id: &runtime.id,
-                    placement,
-                },
-                &current_artifact,
+            let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+                .await?
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            validate_runtime_capabilities_artifact_policy(
+                facts.runtime_capabilities.as_ref(),
+                runtime.placement,
                 &target,
-                RuntimeBootIntent::Normal,
-                Some(runtime_environment),
-                Some(runtime_secret_references),
-            )?)
-        } else {
-            None
-        };
-        Some(RuntimeUpgradeCompletion {
-            runtime_artifact_id: reported_id,
-            state_schema_version,
-            runtime_host,
-            published_app_urls,
-            contact_endpoint,
-            runtime_spec,
-            runtime_capabilities: input.runtime_capabilities.clone(),
-        })
-    } else {
-        if input.runtime_artifact_id.is_some()
-            || input.state_schema_version.is_some()
-            || input.runtime_host.is_some()
-            || input.published_app_urls.is_some()
-            || input.runtime_capabilities.is_some()
-        {
-            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            )?;
+            // A target may be retired after the runner leased and swapped it.
+            // Immutable material remains authoritative for committing the actual
+            // compute state; lifecycle policy is enforced at request and lease.
+            ensure_runtime_upgrade_target_material(&runtime, &target)?;
+            let state_schema_version = facts.state_schema_version.clone();
+            let runtime_host = facts.runtime_host.clone();
+            let published_app_urls = facts.published_app_urls.clone();
+            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
+            if reported_id != target.id || state_schema_version != target.state_schema_version {
+                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            }
+            let runtime_spec = if let Some(row) = client
+                .query_opt(
+                    "SELECT runtime_spec
+                 FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                    &[&runtime.id],
+                )
+                .await
+                .map_err(store_error)?
+            {
+                let value: Value = row.get("runtime_spec");
+                let current_spec: RuntimeSpecEnvelope =
+                    serde_json::from_value(value).map_err(json_error)?;
+                let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+                let current_artifact_id = runtime
+                    .runtime_artifact_id
+                    .as_deref()
+                    .ok_or(CoreError::RuntimeSpecMismatch)?;
+                let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                    .await?
+                    .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                Some(runtime_operation_spec_v1(
+                    &current_spec,
+                    RuntimeSpecIdentity {
+                        operation_id: &locked.id,
+                        project_id: &runtime.project_id,
+                        agent_runtime_id: &runtime.id,
+                        placement,
+                    },
+                    &current_artifact,
+                    &target,
+                    RuntimeBootIntent::Normal,
+                    Some(runtime_environment),
+                    Some(runtime_secret_references),
+                )?)
+            } else {
+                None
+            };
+            Some(RuntimeUpgradeCompletion {
+                runtime_artifact_id: reported_id,
+                state_schema_version,
+                runtime_host,
+                published_app_urls,
+                contact_endpoint,
+                runtime_spec,
+                runtime_capabilities: facts.runtime_capabilities.clone(),
+            })
         }
-        None
+        _ => None,
     };
     if let Some(snapshot) = retirement_snapshot.as_ref() {
         let receipt = &snapshot.receipt;
@@ -5802,10 +5844,32 @@ where
         )
         .await?;
     }
+    // Drive the canonical lifecycle machine to its terminal. Up-bound
+    // operations pass through ComputeUp and Ready before Succeeded: the
+    // Runner only calls complete after its bounded readiness wait returned
+    // ready, so the chain is recorded atomically here. (Persisting ComputeUp
+    // and Ready as separately observable writes lands with the readiness
+    // transport follow-up; the ordering invariant is already enforced by the
+    // machine.) Down-bound operations confirm straight into Stopped.
+    let launching =
+        runtime_lifecycle::RuntimeLifecycle::<runtime_lifecycle::phase::Launching>::from_status(
+            locked.status,
+        )
+        .ok_or(CoreError::RuntimeControlRequestNotLaunching)?;
+    let terminal_status = match locked.kind {
+        RuntimeControlKind::Restart
+        | RuntimeControlKind::RecoverKnownGoodChatRuntime
+        | RuntimeControlKind::Upgrade => {
+            launching.compute_up(&completion).ready().succeed().status()
+        }
+        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
+            launching.confirm_stopped(&completion).status()
+        }
+    };
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
-             SET status = 'succeeded',
+             SET status = $3,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = NULL,
@@ -5814,10 +5878,10 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
-            &[&input.request_id, &now],
+            &[&input.request_id, &now, &terminal_status.as_str()],
         )
         .await
         .map_err(store_error)?;
@@ -5884,12 +5948,18 @@ where
     let now = input.now.unwrap_or(current_time_iso()?);
     let failure_message = trim_to_option(Some(&input.failure_message))
         .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
+    // N-1 Runners do not name a stage; their failures record `unknown`
+    // rather than blocking the failure write.
+    let failure_stage = input
+        .failure_stage
+        .unwrap_or(RuntimeLifecycleStage::Unknown);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
     verify_runtime_control_lease(&locked, &input.runner_id, &input.lease_token)?;
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
              SET status = 'failed',
+                 failure_stage = $4,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = $2,
@@ -5898,10 +5968,10 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
-            &[&input.request_id, &failure_message, &now],
+            &[&input.request_id, &failure_message, &now, &failure_stage.as_str()],
         )
         .await
         .map_err(store_error)?;
@@ -5948,7 +6018,7 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       failure_stage, runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &lease_expires_at, &now],
         )
@@ -5982,13 +6052,14 @@ where
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
-             SET status = 'requested', runner_id = NULL, lease_token = NULL,
+             SET status = 'requested', failure_stage = 'unknown',
+                 runner_id = NULL, lease_token = NULL,
                  lease_expires_at = NULL, failure_message = $2,
                  updated_at = $3::text::timestamptz, completed_at = NULL
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       failure_stage, runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &failure_message, &now],
         )
@@ -6693,6 +6764,7 @@ async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<Admin
 where
     C: GenericClient + Sync,
 {
+    let now = current_time_iso()?;
     let rows = client
         .query(
             "SELECT runtime.id AS agent_runtime_id, runtime.project_id, runtime.source_host_id,
@@ -6703,6 +6775,12 @@ where
                     owner.normalized_email AS owner_email,
                     artifact.version_label AS runtime_artifact_version_label,
                     runtime.runtime_capabilities,
+                    core_rfc3339(runtime.health_reported_at) AS health_reported_at,
+                    core_rfc3339(runtime.health_observed_at) AS health_observed_at,
+                    runtime.health_ready,
+                    runtime.health_reason,
+                    runtime.health_report_interval_seconds,
+                    runtime.health_reporting_npub,
                     EXISTS (
                       SELECT 1 FROM project_runtime_links link
                       WHERE link.agent_runtime_id = runtime.id AND link.active
@@ -6739,6 +6817,20 @@ where
                 })
                 .transpose()?;
             let project_display_name: Option<String> = row.get("project_display_name");
+            let runtime_health = project_runtime_health(
+                host_facts.runtime_status,
+                &StoredRuntimeHealth {
+                    reported_at: row.get("health_reported_at"),
+                    observed_at: row.get("health_observed_at"),
+                    ready: row.get("health_ready"),
+                    reason: row.get("health_reason"),
+                    report_interval_seconds: row
+                        .get::<_, Option<i32>>("health_report_interval_seconds")
+                        .map(i64::from),
+                    reporting_npub: row.get("health_reporting_npub"),
+                },
+                &now,
+            )?;
             Ok(AdminRuntimeOverview {
                 project_id: row.get("project_id"),
                 project_display_name: project_display_name
@@ -6764,9 +6856,86 @@ where
                     .as_ref()
                     .map(|capabilities| *capabilities.v1()),
                 offboarding_phase,
+                runtime_health,
             })
         })
         .collect()
+}
+
+/// Record one runner-ferried standing-readiness report on the runtime row.
+/// The source host comes from the runner credential and scopes the UPDATE, so
+/// a body naming another host's runtime (or an unknown runtime) misses every
+/// row and fails closed as not-found without leaking cross-host existence.
+async fn postgres_record_runtime_health_report<C>(
+    client: &C,
+    input: RecordRuntimeHealthReportInput,
+) -> CoreResult<RuntimeHealthReportAck>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.clone().unwrap_or(current_time_iso()?);
+    let agent_runtime_id =
+        trim_to_option(Some(&input.agent_runtime_id)).ok_or(CoreError::MissingAgentRuntimeId)?;
+    let source_host_id =
+        trim_to_option(Some(&input.source_host_id)).ok_or(CoreError::MissingSourceHostId)?;
+    let reason = trim_to_option(input.reason.as_deref());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS)
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    // The observation time is runner-clock evidence; it must still parse.
+    parse_time(&input.observed_at)?;
+    let agent_npub = trim_to_option(input.agent_npub.as_deref());
+    if agent_npub
+        .as_ref()
+        .is_some_and(|value| !valid_agent_npub(value))
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = input.report_interval_seconds;
+    if interval_seconds.is_some_and(|value| {
+        !(RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS..=RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS)
+            .contains(&value)
+    }) {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = interval_seconds
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| CoreError::InvalidRuntimeHealthReport)?;
+    let row = client
+        .query_opt(
+            "UPDATE agent_runtimes
+             SET health_reported_at = $3::text::timestamptz,
+                 health_observed_at = $4::text::timestamptz,
+                 health_ready = $5,
+                 health_reason = $6,
+                 health_report_interval_seconds = $7,
+                 health_reporting_npub = $8
+             WHERE id = $1 AND source_host_id = $2
+             RETURNING id",
+            &[
+                &agent_runtime_id,
+                &source_host_id,
+                &now,
+                &input.observed_at,
+                &input.ready,
+                &reason,
+                &interval_seconds,
+                &agent_npub,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    let Some(row) = row else {
+        return Err(CoreError::ProjectRuntimeNotFound);
+    };
+    Ok(RuntimeHealthReportAck {
+        agent_runtime_id: row.get("id"),
+        recorded_at: now,
+    })
 }
 
 /// Find-or-create a PENDING user by natural key (email). Mirrors
@@ -8480,7 +8649,8 @@ mod tests {
         FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
         RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     };
-    use std::collections::BTreeSet;
+    use futures_util::FutureExt;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
         RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
@@ -9288,6 +9458,221 @@ mod tests {
             connection.abort();
         })
         .await;
+    }
+
+    /// The schema as production knew it before the lifecycle state machine:
+    /// every migration except 0021. The remap test below builds this shape,
+    /// seeds the legacy vocabulary, and proves 0021 maps it exactly.
+    const PRE_LIFECYCLE_SCHEMA_SQL: &str = concat!(
+        include_str!("../migrations/0001_core.sql"),
+        "\n",
+        include_str!("../migrations/0002_runtime_upgrade.sql"),
+        "\n",
+        include_str!("../migrations/0003_launch_codes.sql"),
+        "\n",
+        include_str!("../migrations/0004_membership_archive.sql"),
+        "\n",
+        include_str!("../migrations/0005_phala_expand.sql"),
+        "\n",
+        include_str!("../migrations/0006_runtime_capabilities_expand.sql"),
+        "\n",
+        include_str!("../migrations/0007_provider_creation_operations.sql"),
+        "\n",
+        include_str!("../migrations/0008_agent_creation_provisional_runtime.sql"),
+        "\n",
+        include_str!("../migrations/0009_artifact_recovery_support.sql"),
+        "\n",
+        include_str!("../migrations/0010_align_finite_private_generous.sql"),
+        "\n",
+        include_str!("../migrations/0011_agent_email.sql"),
+        "\n",
+        include_str!("../migrations/0012_runtime_retirement_snapshots.sql"),
+        "\n",
+        include_str!("../migrations/0013_double_finite_private_default.sql"),
+        "\n",
+        include_str!("../migrations/0014_finite_private_user_controls.sql"),
+        "\n",
+        include_str!("../migrations/0015_runner_capacity_fences.sql"),
+        "\n",
+        include_str!("../migrations/0016_runtime_cold_relocation.sql"),
+        "\n",
+        include_str!("../migrations/0017_rfc3339_reads.sql"),
+        "\n",
+        include_str!("../migrations/0018_finite_private_5x_profile.sql"),
+        "\n",
+        include_str!("../migrations/0019_brain_agent_departure_facts.sql")
+    );
+
+    #[tokio::test]
+    async fn postgres_lifecycle_migration_remaps_legacy_statuses_exactly() {
+        // A scratch database at the pre-H1 schema, migrated forward by 0021
+        // alone, mirrors the production upgrade path byte for byte.
+        let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL")
+            .expect("FC_CORE_POSTGRES_TEST_URL is required for Core Postgres tests");
+        let (admin, admin_connection) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
+        let admin_connection = tokio::spawn(async move {
+            let _ = admin_connection.await;
+        });
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_name = format!("fc_test_lifecycle_{unique}");
+        admin
+            .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
+            .await
+            .unwrap();
+        let (base, query) = match admin_url.split_once('?') {
+            Some((base, query)) => (base.to_string(), Some(query.to_string())),
+            None => (admin_url.clone(), None),
+        };
+        let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
+        let db_url = match base[scheme_end..].find('/') {
+            Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
+            None => format!("{base}/{db_name}"),
+        };
+        let db_url = match query {
+            Some(query) => format!("{db_url}?{query}"),
+            None => db_url,
+        };
+        let (raw, connection) = tokio_postgres::connect(&db_url, NoTls).await.unwrap();
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let outcome = std::panic::AssertUnwindSafe(async {
+            raw.batch_execute(PRE_LIFECYCLE_SCHEMA_SQL).await.unwrap();
+            raw.batch_execute(
+                "INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                 VALUES ('legacy-user', 'legacy@finite.vip', 'linked', 'workos-legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                 VALUES ('legacy-org', 'legacy-user', 'Legacy', 'grandfathered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                 VALUES ('legacy-project', 'legacy-org', 'legacy-user', 'Legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_artifacts (id, kind, reference, version_label, state_schema_version, created_at, promoted_at)
+                 VALUES ('legacy-artifact', 'oci_image', 'image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'v1', 'state-v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO agent_runtimes (
+                   id, project_id, source_host_id, source_machine_id, source_import_key,
+                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                 ) VALUES
+                   ('legacy-runtime', 'legacy-project', 'legacy-host', 'legacy-machine',
+                    'legacy-host/legacy-machine', 'legacy-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-runtime-2', 'legacy-project', 'legacy-host', 'legacy-machine-2',
+                    'legacy-host/legacy-machine-2', 'legacy-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, status, created_at, updated_at
+                 ) VALUES
+                   ('legacy-requested', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'restart', 'requested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-running', 'legacy-project', 'legacy-runtime-2', 'legacy-host', 'legacy-machine-2', 'legacy-user', 'restart', 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-restart', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'restart', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-stop', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'stop', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-destroy', 'legacy-project', 'legacy-runtime-2', 'legacy-host', 'legacy-machine-2', 'legacy-user', 'destroy', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-failed', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'upgrade', 'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+            )
+            .await
+            .unwrap();
+
+            raw.batch_execute(include_str!("../migrations/0021_runtime_lifecycle.sql"))
+                .await
+                .unwrap();
+
+            let rows = raw
+                .query(
+                    "SELECT id, status, failure_stage FROM runtime_control_requests ORDER BY id",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let mapped: BTreeMap<String, (String, String)> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get::<_, String>("id"),
+                        (row.get::<_, String>("status"), row.get::<_, String>("failure_stage")),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                mapped.get("legacy-requested"),
+                Some(&("requested".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-running"),
+                Some(&("launching".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-restart"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-stop"),
+                Some(&("stopped".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-destroy"),
+                Some(&("stopped".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-failed"),
+                Some(&("failed".to_string(), "unknown".to_string()))
+            );
+
+            // The new CHECK rejects the legacy vocabulary.
+            let legacy_write = raw
+                .execute(
+                    "UPDATE runtime_control_requests SET status = 'running' WHERE id = 'legacy-requested'",
+                    &[],
+                )
+                .await;
+            assert!(legacy_write.is_err());
+
+            // The one-active index spans every non-terminal state.
+            let index_definition: String = raw
+                .query_one(
+                    "SELECT pg_get_indexdef(indexrelid) FROM pg_index
+                     WHERE indexrelid = 'runtime_control_requests_one_active_per_runtime'::regclass",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(index_definition.contains("'launching'"));
+            assert!(index_definition.contains("'compute_up'"));
+            assert!(!index_definition.contains("'running'"));
+
+            // Reapplying is a no-op: the migration runs at every Core startup.
+            raw.batch_execute(include_str!("../migrations/0021_runtime_lifecycle.sql"))
+                .await
+                .unwrap();
+            let remapped_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM runtime_control_requests WHERE status IN ('running')",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(remapped_count, 0);
+        })
+        .catch_unwind()
+        .await;
+
+        drop(raw);
+        connection.abort();
+        let _ = admin
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"),
+                &[],
+            )
+            .await;
+        drop(admin);
+        admin_connection.abort();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test]
@@ -11288,6 +11673,244 @@ mod tests {
         .await;
     }
 
+    /// Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
+    /// 3): a report writes the runtime row's latest-report columns scoped to
+    /// the runner credential's host, and the admin overview projects
+    /// ready / not_ready(+reason) / unknown(stale) at read time — no sweeper.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_record_scope_and_project() {
+        with_isolated_postgres(|store| async move {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string();
+            let host = format!("health-report-host-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-08-24T12:00:00Z").await;
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: format!("artifact-health-report-{run}"),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:health-report@sha256:{}",
+                        "7".repeat(64)
+                    ),
+                    version_label: "health-report-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("health-report-owner-{run}@finite.vip"),
+                    workos_user_id: format!("workos_health_report_owner_{run}"),
+                    display_name: "Health Report Agent".to_string(),
+                    launch_code,
+                    idempotency_key: format!("health-report-{run}"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-health-{run}"),
+                    source_host_id: None,
+                    lease_token: format!("lease-health-{run}"),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("health report request should lease");
+            assert_eq!(lease.request.id, created.request.id);
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-health-{run}"),
+                    lease_token: format!("lease-health-{run}"),
+                    source_host_id: host.clone(),
+                    source_machine_id: format!("health-report-agent-{run}"),
+                    runtime_artifact_id: Some(format!("artifact-health-report-{run}")),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Health Report Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some("http://127.0.0.1:41001".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            async fn overview_health(
+                store: &CoreStore,
+                runtime_id: &str,
+            ) -> crate::RuntimeHealthProjection {
+                store
+                    .admin_runtime_overviews()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|overview| overview.agent_runtime_id == runtime_id)
+                    .unwrap()
+                    .runtime_health
+            }
+            let report =
+                |ready: bool, reason: Option<&str>, observed_at: &str, now: Option<&str>| {
+                    RecordRuntimeHealthReportInput {
+                        source_host_id: host.clone(),
+                        agent_runtime_id: runtime_id.clone(),
+                        ready,
+                        reason: reason.map(str::to_string),
+                        observed_at: observed_at.to_string(),
+                        agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                        report_interval_seconds: Some(60),
+                        now: now.map(str::to_string),
+                    }
+                };
+
+            // No report yet: the named unknown state, never a frozen ready.
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+            assert_eq!(health.reported_at, None);
+
+            // A fresh ready report projects ready with the pinned npub as
+            // anti-squat evidence.
+            let ack = store
+                .record_runtime_health_report(report(true, None, "2026-08-24T11:59:00Z", None))
+                .await
+                .unwrap();
+            assert_eq!(ack.agent_runtime_id, runtime_id);
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Ready);
+            assert_eq!(
+                health.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str())
+            );
+
+            // A fresh not-ready report surfaces its reason.
+            store
+                .record_runtime_health_report(report(
+                    false,
+                    Some("model endpoint 503"),
+                    "2026-08-24T12:00:00Z",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::NotReady);
+            assert_eq!(health.reason.as_deref(), Some("model endpoint 503"));
+
+            // A report recorded long ago (runner stopped reporting) crosses
+            // the 3x cadence deadline and projects unknown again.
+            store
+                .record_runtime_health_report(report(
+                    true,
+                    None,
+                    "2020-01-01T00:00:00Z",
+                    Some("2020-01-01T00:00:00Z"),
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+
+            // Scope: the credential's host guards the write. Another host's
+            // runtime id and an unknown id both fail closed as not-found.
+            let wrong_host = RecordRuntimeHealthReportInput {
+                source_host_id: format!("other-host-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(wrong_host).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+            let unknown_runtime = RecordRuntimeHealthReportInput {
+                agent_runtime_id: format!("runtime-missing-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(unknown_runtime).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+
+            // Bounded fields reject out-of-shape reports.
+            let bad_npub = RecordRuntimeHealthReportInput {
+                agent_npub: Some("not-an-npub".to_string()),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_npub).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_interval = RecordRuntimeHealthReportInput {
+                report_interval_seconds: Some(86_400),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_interval).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let long_reason = RecordRuntimeHealthReportInput {
+                reason: Some("x".repeat(crate::MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS + 1)),
+                ..report(false, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(long_reason).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_observed = RecordRuntimeHealthReportInput {
+                observed_at: "not-a-time".to_string(),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_observed).await,
+                Err(CoreError::InvalidTimestamp)
+            ));
+        })
+        .await;
+    }
+
+    /// The migration runs inside CORE_SCHEMA_SQL at every Core startup, so
+    /// reapplying it against an already-migrated database must be a no-op.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_migration_reapplies_cleanly() {
+        with_isolated_postgres(|db| async move {
+            let (raw, connection) = tokio_postgres::connect(&db.url, NoTls).await.unwrap();
+            let handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            handle.abort();
+        })
+        .await;
+    }
+
     /// Fail-closed repair for a Runtime whose destroy stored a verified
     /// retirement receipt but whose offboarding never ran: the compute-absent
     /// attestation, exact binding, and owner must match, an in-flight control
@@ -11469,7 +12092,7 @@ mod tests {
             store
                 .exec(&format!(
                     "UPDATE runtime_control_requests \
-                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                     SET status = 'stopped', lease_token = NULL, lease_expires_at = NULL, \
                          completed_at = CURRENT_TIMESTAMP \
                      WHERE id = '{}'",
                     destroy.id
@@ -12496,7 +13119,7 @@ mod tests {
             store
                 .exec(&format!(
                     "UPDATE runtime_control_requests \
-                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                     SET status = 'stopped', lease_token = NULL, lease_expires_at = NULL, \
                          completed_at = CURRENT_TIMESTAMP \
                      WHERE id = '{}'",
                     destroy.id

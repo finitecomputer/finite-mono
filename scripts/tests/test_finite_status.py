@@ -59,7 +59,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,restart,launching,online,2026-08-01T13:59:00Z,t,,60",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
@@ -67,6 +67,11 @@ class FiniteStatusTests(unittest.TestCase):
             result = finite_status.psql_query_sets({})
         self.assertEqual(len(result["runtimes"]), 1)
         self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
+        # The canonical lifecycle state arrives with the row, unmodified.
+        self.assertEqual(result["runtimes"][0]["control_status"], "launching")
+        # So do the standing-health columns.
+        self.assertEqual(result["runtimes"][0]["health_ready"], "t")
+        self.assertEqual(result["runtimes"][0]["runtime_status"], "online")
         call = run.call_args
         sql = call.kwargs["input_text"]
         self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
@@ -74,6 +79,30 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIn(finite_status.DISTRIBUTION_QUERY, sql)
         self.assertIn(finite_status.RUNTIME_DETAILS_QUERY, sql)
         self.assertEqual(call.args[0].count("psql"), 1)
+
+    def test_human_output_projects_active_control_state(self) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for group in raw["core"]["runtime_groups"]:
+            group["count"] = 0
+        raw["core"]["runtime_groups"].append(
+            {
+                "source_host_id": "finite-lat-1",
+                "id_prefix": "ctl-agent",
+                "project_prefix": "ctl-project",
+                "name_prefix": "Control Agent",
+                "version_label": "2026-07-22.1",
+                "link_state": "active",
+                "count": 1,
+                "control_kind": "restart",
+                "control_status": "compute_up",
+            }
+        )
+        expanded = finite_status.expand_fixture(raw)
+        now = finite_status.parse_time(expanded["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(expanded, now)
+        output = finite_status.render_human(report)
+        self.assertIn("CONTROL Control Agent 01 [ctl-agent-01]: restart compute_up", output)
 
     def test_human_output_names_every_straggler(self) -> None:
         output = finite_status.render_human(self.fixture_report())
@@ -498,6 +527,128 @@ class FiniteStatusTests(unittest.TestCase):
             output,
         )
         self.assertIn("lifecycle 1/3 operable", output)
+
+    def report_with_health_group(self, group: dict[str, object]) -> dict[str, object]:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for existing in raw["core"]["runtime_groups"]:
+            existing["count"] = 0
+        raw["core"]["runtime_groups"].append(
+            {
+                "source_host_id": "finite-lat-9",
+                "id_prefix": "health-agent",
+                "project_prefix": "health-project",
+                "name_prefix": "Health Agent",
+                "version_label": "2026-08-01.1",
+                "link_state": "active",
+                "count": 1,
+                **group,
+            }
+        )
+        expanded = finite_status.expand_fixture(raw)
+        now = finite_status.parse_time(expanded["now"])
+        self.assertIsNotNone(now)
+        return finite_status.build_report(expanded, now)
+
+    def lat9(self, report: dict[str, object]) -> dict[str, object]:
+        fleet = report["sections"]["fleet_convergence"]
+        return next(
+            host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-9"
+        )
+
+    def test_fresh_ready_health_report_keeps_the_host_green(self) -> None:
+        # 30s old at the default 60s cadence is fresh.
+        report = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:59:30Z", "health_ready": True}
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "green")
+        self.assertEqual((host["health_ready_count"], host["health_tracked_count"]), (1, 1))
+        output = finite_status.render_human(report)
+        self.assertIn("health 1/1 ready (0 unknown)", output)
+
+    def test_fresh_not_ready_health_report_is_red_and_names_the_reason(self) -> None:
+        report = self.report_with_health_group(
+            {
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": False,
+                "health_reason": "unreachable",
+            }
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "red")
+        self.assertEqual(report["sections"]["fleet_convergence"]["status"], "red")
+        entry = host["health_not_ready"][0]
+        self.assertEqual(entry["health"]["reason"], "unreachable")
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "HEALTH Health Agent 01 [health-agent-01]: not_ready (unreachable)", output
+        )
+
+    def test_stale_health_report_reads_unknown_past_three_cadences(self) -> None:
+        # 600s old at a 60s cadence is past the 3x deadline: the "died at 3am"
+        # runtime stops displaying its frozen last-known ready.
+        report = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:50:00Z", "health_ready": True}
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "unknown")
+        entry = host["health_unknown"][0]
+        self.assertEqual(entry["health"]["status"], "unknown")
+        self.assertEqual(entry["health"]["age_seconds"], 600)
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "HEALTH-UNKNOWN Health Agent 01 [health-agent-01]: no fresh report (last report 10m ago)",
+            output,
+        )
+        # At exactly 3x cadence the report is still fresh.
+        fresh_edge = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:57:00Z", "health_ready": True}
+        )
+        self.assertEqual(self.lat9(fresh_edge)["health_ready_count"], 1)
+        self.assertEqual(self.lat9(fresh_edge)["status"], "green")
+        # A slower reporter gets its own deadline (10m cadence, 600s old).
+        slow = self.report_with_health_group(
+            {
+                "health_reported_at": "2026-08-01T13:50:00Z",
+                "health_ready": True,
+                "health_report_interval_seconds": 600,
+            }
+        )
+        self.assertEqual(self.lat9(slow)["status"], "green")
+
+    def test_online_runtime_that_never_reported_is_unknown(self) -> None:
+        report = self.report_with_health_group({"runtime_status": "online"})
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "unknown")
+        entry = host["health_unknown"][0]
+        self.assertEqual(entry["health"]["status"], "unknown")
+        self.assertIsNone(entry["health"]["age_seconds"])
+        output = finite_status.render_human(report)
+        self.assertIn("no fresh report (never reported)", output)
+
+    def test_offline_runtime_health_is_displayed_but_not_tracked(self) -> None:
+        # An intentionally stopped runtime carries no standing readiness claim:
+        # even a fresh-looking last report projects unknown and is not counted
+        # against the host.
+        report = self.report_with_health_group(
+            {
+                "runtime_status": "offline",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            }
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "green")
+        self.assertEqual(host["health_tracked_count"], 0)
+        projected = finite_status.project_runtime_health(
+            {
+                "runtime_status": "offline",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            },
+            finite_status.parse_time("2026-08-01T14:00:00Z"),
+        )
+        self.assertEqual(projected["status"], "unknown")
 
     def test_single_disk_profile_does_not_imply_raid(self) -> None:
         profile = finite_status.CONTRACT["hosts"]["finite-lat-1"]

@@ -261,6 +261,16 @@ wait "$child_pid" || child_status="$?"
 if [[ "$terminating" -eq 1 ]] && kill -0 "$child_pid" 2>/dev/null; then
     wait "$child_pid" || child_status="$?"
 fi
+# Post-exit orphan sweep (backported from PR 440's generation quiesce):
+# finite-agentd serve leads its own process group (setsid when PID 1 is its
+# parent), so its pid is its pgid and everything it spawned — the Finite Chat
+# bridge on :37633, the health server, Hermes, gateway-forked stragglers —
+# must not outlive it. An orphaned bridge once held :37633 across a restart
+# and the next boot's bridge exited at bind. This is a no-op when the group
+# is already gone (agentd's own graceful drain emptied it) or when agentd
+# never became a group leader (ESRCH); it can never hit this script's own
+# group, whose pgid is PID 1, not the child's.
+kill -KILL -- "-$child_pid" 2>/dev/null || true
 stop_periodic_backup
 if [[ -n "$brain_sync_pid" ]]; then
     if kill -0 "$brain_sync_pid" 2>/dev/null; then

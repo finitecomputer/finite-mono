@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,12 @@ BRIDGE_STATUS_FILE = AGENT_HOME / "hermes-bridge-status.json"
 AGENTD_STATUS_FILE = AGENT_HOME / "agentd" / "status.json"
 STARTUP_REPORT_FILE = AGENT_HOME / "startup-report.json"
 RECOVERY_BOOT_INTENT_ACTIVE = bool(os.environ.get("FINITE_AGENT_BOOT_INTENT_JSON"))
+# Liveness window for the agentd status heartbeat (truthful-readiness
+# backport from PR 440): agentd rewrites status.json every second while
+# alive, so a file untouched for more than a few seconds is evidence of a
+# dead or frozen supervisor, never of health. 5s tolerates several missed
+# ticks under host contention without letting a corpse serve green.
+AGENTD_STATUS_STALE_SECS = float(os.environ.get("FINITE_AGENTD_STATUS_STALE_SECS", "5"))
 AGENTD_REQUIRED = os.environ.get("FINITE_AGENTD_REQUIRED", "").lower() in {
     "1",
     "true",
@@ -128,6 +135,9 @@ def bridge_status() -> dict[str, Any]:
 
 def agentd_status() -> dict[str, Any]:
     try:
+        # stat before reading: if the file is replaced in between, the
+        # freshness check then errs on the older (conservative) side.
+        mtime = AGENTD_STATUS_FILE.stat().st_mtime
         payload = json.loads(AGENTD_STATUS_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"status": "starting", "ok": not AGENTD_REQUIRED}
@@ -136,12 +146,29 @@ def agentd_status() -> dict[str, Any]:
     processes = payload.get("processes", {}).get("processes", {})
     required = ("finitechat", "health", "hermes")
     ok = all(processes.get(name, {}).get("state") == "running" for name in required)
-    return {
+    status: dict[str, Any] = {
         "status": "running" if ok else "starting",
         "ok": ok,
         "version": payload.get("version"),
         "processes": {name: processes.get(name, {}).get("state", "starting") for name in required},
     }
+    # Liveness-gated ready: green contents a dead agentd left behind must not
+    # pass. A frozen file means the supervisor is gone (SIGKILL, wedge), so
+    # the last-known process states below are history, not evidence.
+    age_secs = time.time() - mtime
+    if age_secs > AGENTD_STATUS_STALE_SECS:
+        status.update(
+            {
+                "status": "unavailable",
+                "ok": False,
+                "stale": True,
+                "error": (
+                    "agentd status heartbeat stopped "
+                    f"{int(age_secs)}s ago (limit {int(AGENTD_STATUS_STALE_SECS)}s)"
+                ),
+            }
+        )
+    return status
 
 
 def _invalid_startup_report(
@@ -282,7 +309,43 @@ def runtime_health() -> dict[str, Any]:
     startup = startup_report()
     if startup is not None:
         payload["startup"] = startup
+    # The top-level "ready" is the same verdict as the HTTP status code
+    # (truthful-readiness backport from PR 440): the runner reads only this
+    # field, so it must not stay true on a 503 while a dead bridge or a
+    # frozen agentd heartbeat sits underneath a live identity. The 200 body
+    # is byte-identical to before; 503 bodies may now carry "ready": false
+    # where they previously claimed true, plus the additive "ready_reason".
+    ready = runtime_ready(payload)
+    if not ready:
+        payload["ready_reason"] = ready_reason(payload)
+    payload["ready"] = ready
     return payload
+
+
+def ready_reason(payload: dict[str, Any]) -> str:
+    """Name the not-ready cause from a small, stable vocabulary.
+
+    Callers: the runner surfaces this in its readiness-timeout failure, and
+    operators see it in the 503 body. The most operationally alarming cause
+    wins (a refused recovery boot outranks a missing bridge). Adapted from
+    PR 440's ready_reason; keep the vocabulary additive, never rename.
+
+    Must be called before `payload["ready"]` is overwritten with the full
+    verdict: here it still carries identity()'s value, so a payload failing
+    only on identity falls through to `identity_not_ready`.
+    """
+    if payload.get("startup", {}).get("ok") is False:
+        return "bootstrap_failed"
+    agentd = payload.get("agentd", {})
+    if agentd.get("stale") is True:
+        return "agentd_status_stale"
+    if agentd.get("ok") is False:
+        return "agentd_not_running"
+    if payload.get("bridge", {}).get("ok") is False:
+        return "bridge_not_connected"
+    if not payload.get("ready"):
+        return "identity_not_ready"
+    return "starting"
 
 
 def runtime_ready(payload: dict[str, Any]) -> bool:
