@@ -21,8 +21,10 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   admission, launch, identity readiness, and chat readiness, then prove the
   end-to-end promise. Runner drain and capacity are product availability state,
   not merely operator configuration.
-- **This repo is public.** Never commit a secret value, token, or key — not
-  in code, config, tests, or docs. Secrets are documented by NAME and
+- **Source remains secret-free.** ADR-0007 moves the Source Authority to a
+  private Origin repository, but private git history is not a secret store and
+  the Release Repository is public. Never commit a secret value, token, or key
+  — not in code, config, tests, or docs. Secrets are documented by NAME and
   location only (see `infra/README.md`). If one slips in: rotate first, then
   remove.
 - **Work lands here first.** The old per-component repos are archived (or
@@ -30,9 +32,10 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   source repo is merged in with `scripts/import-sync <name>`.
 - **Releases are component-scoped tags**: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
   `fbrain/vX.Y.Z`; images version via workflow dispatch. Release asset names
-  are product contracts — never rename them. Installers use the per-component
-  rolling alias releases (`finitechat-latest` etc.), refreshed by the release
-  workflows — this repo is the ONLY release host (doctrine §4).
+  are product contracts — never rename them. After the ADR-0007 Hard Cutover,
+  public `finitecomputer/finite-releases` owns release-only tags, assets, and
+  per-component rolling aliases (`finitechat-latest` etc.); it is never a
+  Source Authority (doctrine §4).
 - **Deploys are defined in `infra/`** — per-host trees, CI-built digest-pinned
   images, runbooks. Nothing is built on a prod box.
 - **Services own their public route surface in code; the edge proxies, never
@@ -81,7 +84,10 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 `cargo test --workspace --locked` against real Postgres, dashboard
 lint/test/build, the finitechat Hermes bridge suite, and skills/search static
 checks. Release and image workflows are described in `infra/images/README.md`
-and the workflow files themselves.
+and the workflow files themselves. ADR-0007 and
+`docs/origin-depot-migration-plan.md` define the approved Hard Cutover to
+Origin and native Depot CI; until a lane's evidence gate passes, its existing
+GitHub workflow remains the operational legacy path.
 
 ## Agent skills
 

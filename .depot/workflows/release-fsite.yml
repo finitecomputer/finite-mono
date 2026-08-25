@@ -1,0 +1,128 @@
+name: Release fsite
+on:
+  push:
+    tags: ["fsite/v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after all build rows pass
+        required: true
+        default: false
+        type: boolean
+      alias_only:
+        description: Repoint the rolling alias from existing versioned assets without rebuilding
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Historical component tag for alias-only promotion; leave blank for a normal release
+        required: false
+        default: ""
+concurrency:
+  group: release-fsite
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    if: github.event_name != 'workflow_dispatch' || inputs.alias_only != true
+    runs-on: depot-ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_name: fsite-linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - asset_name: fsite-macos-aarch64
+            target: aarch64-apple-darwin
+          - asset_name: fsite-macos-x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate component version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            fsite/v*) version="${GITHUB_REF_NAME#fsite/v}" ;;
+            *) echo "::error::release workflow must run at an fsite/v* tag"; exit 1 ;;
+          esac
+          python3 scripts/delivery.py verify-component-version --component fsite --version "$version"
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Build fsite
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$TARGET" == *-apple-darwin ]]; then
+            nix develop .#release-ci --command cargo zigbuild --locked --release --target "$TARGET" --package fsite-cli --bin fsite
+          else
+            nix develop .#release-ci --command cargo build --locked --release --target "$TARGET" --package fsite-cli --bin fsite
+          fi
+      - name: Package fsite
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          cp "target/$TARGET/release/fsite" dist/fsite
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist -czf "$ASSET_NAME.tar.gz" fsite
+          sha256sum "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
+      - name: Build finitesitesd
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          nix develop .#release-ci --command cargo build --locked --release --target x86_64-unknown-linux-gnu --package finitesitesd --bin finitesitesd
+          mkdir -p dist-daemon
+          cp target/x86_64-unknown-linux-gnu/release/finitesitesd dist-daemon/finitesitesd
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist-daemon -czf finitesitesd-linux-x86_64.tar.gz finitesitesd
+          sha256sum finitesitesd-linux-x86_64.tar.gz > finitesitesd-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.tar.gz.sha256
+            finitesitesd-linux-x86_64.tar.gz
+            finitesitesd-linux-x86_64.tar.gz.sha256
+          if-no-files-found: ignore
+  publish:
+    needs: build
+    if: vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish immutable version and rolling alias
+        env:
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#fsite/v}"
+          source_sha="$(git rev-parse HEAD)"
+          python3 scripts/delivery.py publish-release \
+            --component fsite \
+            --version "$version" \
+            --source-sha "$source_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --assets-dir release-assets \
+            --repository finitecomputer/finite-releases
+  promote-alias:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repoint rolling alias from verified immutable assets
+        env:
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            fsite/v*) version="${RELEASE_TAG#fsite/v}" ;;
+            *) echo "::error::release_tag must be an fsite/v* tag"; exit 1 ;;
+          esac
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          source_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          python3 scripts/delivery.py promote-release-alias \
+            --component fsite \
+            --version "$version" \
+            --expected-source-sha "$source_sha" \
+            --repository finitecomputer/finite-releases

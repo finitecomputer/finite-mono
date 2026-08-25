@@ -791,6 +791,66 @@ fn supervise_working_tree_root(args: &[String], env: &CliEnvironment) -> PathBuf
         .unwrap_or_else(|| env.cwd.clone())
 }
 
+#[cfg(any(target_os = "macos", test))]
+struct WorkingTreeLifecycleMonitor {
+    cancelled: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for WorkingTreeLifecycleMonitor {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn spawn_working_tree_lifecycle_monitor(
+    sender: mpsc::Sender<Result<BrainUpdateNotification, String>>,
+    root: PathBuf,
+) -> WorkingTreeLifecycleMonitor {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let thread_cancelled = Arc::clone(&cancelled);
+    let handle = std::thread::spawn(move || {
+        let mut previous = working_tree_instance(&root).ok();
+        while !thread_cancelled.load(Ordering::SeqCst) {
+            std::thread::park_timeout(Duration::from_millis(100));
+            if thread_cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            let current = working_tree_instance(&root).ok();
+            if current == previous {
+                continue;
+            }
+            previous = current;
+            let reason = if current.is_some() {
+                "working_tree_root_reopened"
+            } else {
+                "working_tree_root_removed"
+            };
+            if sender
+                .send(Ok(BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: reason.to_owned(),
+                    transport_epoch: 0,
+                }))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    WorkingTreeLifecycleMonitor {
+        cancelled,
+        handle: Some(handle),
+    }
+}
+
 fn daemon_supervise<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -804,7 +864,14 @@ fn daemon_supervise<W: Write>(
         option_value(args, "--max-events").and_then(|value| value.parse::<usize>().ok());
     let (sender, receiver) = mpsc::channel::<Result<BrainUpdateNotification, String>>();
     let file_sender = sender.clone();
-    let notification_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    // Watch and compare the same lexical path. On macOS `/var` resolves to
+    // `/private/var`; canonicalizing only the comparison root causes kqueue
+    // paths under `/var` to be discarded as outside the Working Tree.
+    let notification_root = if root.is_absolute() {
+        root.clone()
+    } else {
+        env.cwd.join(&root)
+    };
     let watched_root = notification_root.clone();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
@@ -831,7 +898,7 @@ fn daemon_supervise<W: Write>(
         })
         .map_err(|error| CliError::InvalidInput(format!("filesystem watcher failed: {error}")))?;
     watcher
-        .watch(&root, RecursiveMode::Recursive)
+        .watch(&notification_root, RecursiveMode::Recursive)
         .map_err(|error| {
             CliError::InvalidInput(format!("could not watch Brain Working Trees: {error}"))
         })?;
@@ -876,6 +943,14 @@ fn daemon_supervise<W: Write>(
     } else {
         None
     };
+
+    // kqueue may coalesce a rapid root rename + recreation without delivering
+    // either lifecycle edge. Watching the root inode itself is a bounded
+    // fallback: it never scans contents, and its guard cancels and joins the
+    // monitor when supervision exits.
+    #[cfg(target_os = "macos")]
+    let _lifecycle_monitor =
+        spawn_working_tree_lifecycle_monitor(sender.clone(), notification_root.clone());
     let mut explicitly_watched_trees = BTreeSet::<PathBuf>::new();
 
     // Catch up every already-open Working Tree before trusting live hints.
@@ -968,8 +1043,8 @@ fn daemon_supervise<W: Write>(
                                 ))
                             })?;
                     }
-                } else if root.is_dir() {
-                    match watcher.watch(&root, RecursiveMode::Recursive) {
+                } else if notification_root.is_dir() {
+                    match watcher.watch(&notification_root, RecursiveMode::Recursive) {
                         Ok(()) => {}
                         Err(error) if notify_path_temporarily_missing(&error) => {}
                         Err(error) => {
@@ -1043,7 +1118,7 @@ fn daemon_supervise<W: Write>(
         if notification.reason == "working_tree_root_reopened" {
             explicitly_watched_trees.clear();
             retire_brain_sync_workers(&mut workers)?;
-            match watcher.watch(&root, RecursiveMode::Recursive) {
+            match watcher.watch(&notification_root, RecursiveMode::Recursive) {
                 Ok(()) => {}
                 Err(error) if notify_path_temporarily_missing(&error) => continue,
                 Err(error) => {
@@ -1100,6 +1175,7 @@ fn daemon_supervise<W: Write>(
                 tree_env.cwd = path.clone();
                 let _ = mutate_agent_state(&tree_env, |state, _| {
                     state.daemon.notification_status = Some("unsupported".to_owned());
+                    state.daemon.last_error = None;
                     Ok(())
                 });
             }
@@ -5381,6 +5457,22 @@ mod tests {
             ),
             Some("local_updated")
         );
+    }
+
+    #[test]
+    fn working_tree_lifecycle_monitor_releases_its_sender_on_shutdown() {
+        let scratch = TempDir::new().unwrap();
+        let root = scratch.path().join("working-trees");
+        fs::create_dir(&root).unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        let monitor = spawn_working_tree_lifecycle_monitor(sender, root);
+        drop(monitor);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]

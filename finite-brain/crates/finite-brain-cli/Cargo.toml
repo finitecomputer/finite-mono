@@ -20,7 +20,10 @@ finite-brain-core = { path = "../finite-brain-core" }
 finite-identity.workspace = true
 finite-nostr.workspace = true
 nostr = { version = "0.45.0-alpha.2", features = ["nip44", "os-rng"] }
-notify = "8.2.0"
+# The default macOS FSEvents backend links Apple frameworks that are not
+# available to Linux cross-builders. kqueue preserves native filesystem
+# notifications without requiring the macOS SDK.
+notify = { version = "8.2.0", default-features = false, features = ["macos_kqueue"] }
 pulldown-cmark.workspace = true
 rusqlite.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "process"] }

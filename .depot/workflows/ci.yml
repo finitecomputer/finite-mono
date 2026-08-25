@@ -1,0 +1,774 @@
+name: CI
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches:
+      - main
+      - migration-integration
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  CACHIX_CACHE_NAME: finite
+jobs:
+  changes:
+    name: Detect required CI harnesses
+    runs-on: depot-ubuntu-24.04
+    outputs:
+      run_rust: ${{ steps.detect.outputs.run_rust }}
+      run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
+      run_dashboard_browser: ${{ steps.detect.outputs.run_dashboard_browser }}
+      run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
+      run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
+      run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
+      run_search_check: ${{ steps.detect.outputs.run_search_check }}
+      run_monitoring_nixos_contract: ${{ steps.detect.outputs.run_monitoring_nixos_contract }}
+      run_finite_status_contract: ${{ steps.detect.outputs.run_finite_status_contract }}
+      run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
+      run_devfinity_smoke: ${{ steps.detect.outputs.run_devfinity_smoke }}
+      run_brain_product_matrix: ${{ steps.detect.outputs.run_brain_product_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - name: Detect required harnesses
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          scripts/ci/select-harnesses \
+            --github-output "$GITHUB_OUTPUT" \
+            --summary "$GITHUB_STEP_SUMMARY"
+  rust:
+    name: Rust workspace
+    needs: changes
+    if: needs.changes.outputs.run_rust == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Install Rust
+        # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
+        # crates, and floating stable (1.96 today) trips new let-chain lints
+        # in devfinity. 1.93.1 is verified clean across the whole workspace.
+        # Bump deliberately (run clippy locally first), don't float.
+        # MSRV (rust-version 1.88) is still exercised by the release builds.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Select Rust package scope
+        id: rust_scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        env:
+          RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
+        run: cargo clippy --locked $RUST_CI_CARGO_ARGS --all-targets -- -D warnings
+      - name: Test workspace
+        env:
+          RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
+        run: |
+          nix develop .#rust-ci --command bash -euxo pipefail -c '
+            cargo run --quiet --locked -p devfinity -- run -- cargo test --locked "$@"
+          ' bash $RUST_CI_CARGO_ARGS
+  dashboard:
+    name: Dashboard
+    needs: changes
+    if: needs.changes.outputs.run_dashboard == 'true'
+    runs-on: depot-ubuntu-24.04
+    defaults:
+      run:
+        working-directory: finitecomputer-v2/apps/dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: finitecomputer-v2/apps/dashboard/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint dashboard
+        run: pnpm run lint
+      - name: Typecheck dashboard and TSX tooling
+        # `next build` checks only the application graph. This project-wide
+        # tsc invocation also covers scripts/ and browser/ files run by tsx.
+        run: pnpm run typecheck
+      - name: Test dashboard
+        run: pnpm test
+      - name: Test dashboard product flows
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+        run: pnpm run test:browser
+      - name: Build dashboard
+        run: pnpm run build
+  hermes-bridge:
+    name: finitechat Hermes bridge
+    needs: changes
+    if: needs.changes.outputs.run_hermes_bridge == 'true'
+    runs-on: depot-ubuntu-24.04
+    defaults:
+      run:
+        working-directory: finitechat
+    env:
+      FINITE_HERMES_AGENT_VERSION: "0.20.0"
+      LEGACY_HERMES_AGENT_REV: "a91a57fa5a13d516c38b07a141a9ce8a3daabeb0"
+      # PyPI channel was retired upstream in v0.20.0; use the pinned upstream
+      # Nix package instead of downloading GitHub archives during CI.
+      HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
+      HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
+      # The hermes scripts resolve reports and built binaries relative to the
+      # finitechat/ working directory (target/...); point cargo there too so
+      # the two agree, exactly like the pre-mono repo layout.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/finitechat/target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Select Cachix push mode
+        id: cachix
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          push_enabled=false
+          case "$GITHUB_EVENT_NAME" in
+            push|merge_group)
+              push_enabled=true
+              ;;
+            pull_request)
+              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+                push_enabled=true
+              fi
+              ;;
+          esac
+
+          echo "push_enabled=$push_enabled" >> "$GITHUB_OUTPUT"
+      - name: Configure Cachix read-only cache
+        if: steps.cachix.outputs.push_enabled != 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Require Cachix token for trusted cache push
+        if: steps.cachix.outputs.push_enabled == 'true'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+      - name: Configure Cachix trusted cache
+        if: steps.cachix.outputs.push_enabled == 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Hermes CLI round-trip smoke
+        run: scripts/hermes-sidecar-smoke.sh
+      - name: Build Hermes Agent runtime
+        id: hermes_agent_runtime
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_PLAN: ${{ runner.temp }}/hermes-agent-runtime-build-plan
+          HERMES_AGENT_RUNTIME_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-output
+          HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-python-output
+          LEGACY_HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/legacy-hermes-agent-python-output
+        run: |
+          set -euo pipefail
+
+          nix build --dry-run --option builders '' "$HERMES_AGENT_NIX_ATTR" 2>&1 | tee "$BUILD_PLAN"
+          if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
+            echo "built_paths=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "built_paths=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
+            "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_RUNTIME_OUTPUT"
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
+            "$HERMES_AGENT_PYTHON_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
+          legacy_hermes_expr="(builtins.getFlake \"github:NousResearch/hermes-agent/$LEGACY_HERMES_AGENT_REV\").packages.x86_64-linux.default.hermesVenv"
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
+            --expr "$legacy_hermes_expr" | tee "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT"
+
+          hermes_agent_runtime="$(grep -E '^/nix/store/' "$HERMES_AGENT_RUNTIME_OUTPUT" | tail -n 1)"
+          hermes_agent_python="$(grep -E '^/nix/store/' "$HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
+          legacy_hermes_agent_python="$(grep -E '^/nix/store/' "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
+          if [[ -z "$hermes_agent_runtime" || ! -x "$hermes_agent_runtime/bin/hermes" ]]; then
+            echo "::error::Hermes Agent Nix runtime did not produce an executable hermes"
+            exit 1
+          fi
+          if [[ -z "$hermes_agent_python" || ! -x "$hermes_agent_python/bin/python3" ]]; then
+            echo "::error::Hermes Agent Nix environment did not produce an executable python3"
+            exit 1
+          fi
+          if [[ -z "$legacy_hermes_agent_python" || ! -x "$legacy_hermes_agent_python/bin/python3" ]]; then
+            echo "::error::Legacy Hermes Agent Nix environment did not produce an executable python3"
+            exit 1
+          fi
+
+          "$hermes_agent_python/bin/python3" - <<'PY'
+          import importlib.metadata
+          import gateway.config
+          import hermes_cli.plugins
+          assert importlib.metadata.version("hermes-agent") == "0.20.0"
+          PY
+          "$legacy_hermes_agent_python/bin/python3" - <<'PY'
+          import importlib.metadata
+          assert importlib.metadata.version("hermes-agent") == "0.14.0"
+          PY
+
+          {
+            echo "path=$hermes_agent_runtime"
+            echo "python_path=$hermes_agent_python"
+            echo "python=$hermes_agent_python/bin/python3"
+            echo "legacy_python_path=$legacy_hermes_agent_python"
+            echo "legacy_python=$legacy_hermes_agent_python/bin/python3"
+          } >> "$GITHUB_OUTPUT"
+      - name: Push Hermes Agent runtime closure
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths == 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          HERMES_AGENT_RUNTIME_PATH: ${{ steps.hermes_agent_runtime.outputs.path }}
+          HERMES_AGENT_PYTHON_PATH: ${{ steps.hermes_agent_runtime.outputs.python_path }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          closure_paths="$RUNNER_TEMP/hermes-agent-runtime-closure"
+          nix path-info --recursive "$HERMES_AGENT_RUNTIME_PATH" "$HERMES_AGENT_PYTHON_PATH" > "$closure_paths"
+          closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
+          echo "Pushing $closure_count Hermes Agent runtime closure paths to $CACHIX_CACHE_NAME"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
+      - name: Skip Cachix push for fully substituted Hermes Agent runtime
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths != 'true'
+        run: echo "Nix dry-run found no Hermes Agent runtime derivations to build; skipping Cachix push."
+      - name: Ruff format
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check .
+      - name: Ruff check
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check .
+      - name: BasedPyright
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
+      - name: Chat reliability fast gate (Hermes adapter)
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: |
+          "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
+            --python "$HERMES_AGENT_PYTHON" \
+            --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
+      - name: Upload Hermes adapter regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-adapter-regressions-${{ github.run_attempt }}
+          path: ${{ env.CARGO_TARGET_DIR }}/hermes-adapter-regressions/report.json
+          if-no-files-found: error
+      - name: Hermes platform adapter tests
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: |
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
+      - name: Legacy Hermes mixed-version migration tests
+        working-directory: ${{ github.workspace }}
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+          LEGACY_HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.legacy_python }}
+        run: |
+          "$HERMES_AGENT_PYTHON" -m unittest \
+            scripts.tests.test_legacy_hermes_migration \
+            finitechat.tests.hermes.test_legacy_hermes_migration
+  skills-check:
+    name: Skills static check
+    needs: changes
+    if: needs.changes.outputs.run_skills_check == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Skills check
+        run: nix develop --command just skills check
+  search-check:
+    name: Search static check
+    needs: changes
+    if: needs.changes.outputs.run_search_check == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Search check
+        run: nix develop --command just search check
+  monitoring-nixos-contract:
+    name: Monitoring NixOS contract
+    needs: changes
+    if: needs.changes.outputs.run_monitoring_nixos_contract == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Monitoring NixOS contract
+        run: nix develop --command just monitoring-nixos-contract
+  finite-status-contract:
+    name: Finite status contract
+    needs: changes
+    if: needs.changes.outputs.run_finite_status_contract == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Finite status contract
+        run: nix develop --command just finite-status-contract
+  nix-checks:
+    name: Nix static contracts
+    needs: changes
+    if: needs.changes.outputs.run_nix_checks == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Brain product language check
+        run: nix develop --command just brain-language-check
+      - name: Canonical Runtime image contract
+        run: nix develop --command just runtime-image-contract
+      - name: Finite Private DeepSeek production candidate contract
+        run: nix develop --command just finite-private-deepseek-contract
+      - name: lat1 existing-Runtime rollout contract
+        run: nix develop --command just lat1-rollout-contract
+      - name: lat3 Runner-only closure rollout contract
+        run: nix develop --command just lat3-runner-rollout-contract
+      - name: lat1 healthcheck activation contract
+        run: nix develop --command just lat1-healthcheck-contract
+      - name: Kata Runner host anti-drift contract
+        run: nix develop --command just runner-host-contract
+      - name: Identity edge route contract
+        run: nix develop --command just identity-edge-contract
+      - name: Stripe Price contract
+        run: nix develop --command just stripe-price-contract
+      - name: Hosted Recovery Set contract
+        run: nix develop --command just hosted-recovery-contract
+      - name: Litestream recovery contract
+        run: nix develop --command just litestream-recovery-contract
+      - name: lat1 secret bootstrap contract
+        run: nix develop --command just lat1-secret-bootstrap-contract
+      - name: Runbook facts contract
+        run: nix develop --command just runbook-facts-contract
+      - name: Production deploy contract
+        run: nix develop --command just production-deploy-contract
+      - name: Evaluate production NixOS configuration
+        run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
+  nix-service-packages:
+    name: Nix service packages
+    needs: changes
+    if: needs.changes.outputs.run_nix_service_packages == 'true'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Docker-backed jobs can preserve root-owned diagnostics. A fresh
+          # path keeps their artifacts from poisoning this package checkout.
+          path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Select Cachix push mode
+        id: cachix
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          push_enabled=false
+          case "$GITHUB_EVENT_NAME" in
+            push|merge_group)
+              push_enabled=true
+              ;;
+            pull_request)
+              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+                push_enabled=true
+              fi
+              ;;
+          esac
+
+          echo "push_enabled=$push_enabled" >> "$GITHUB_OUTPUT"
+      - name: Configure Cachix read-only cache
+        if: steps.cachix.outputs.push_enabled != 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Require Cachix token for trusted cache push
+        if: steps.cachix.outputs.push_enabled == 'true'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+      - name: Configure Cachix trusted cache
+        if: steps.cachix.outputs.push_enabled == 'true'
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Build every scoped Rust package
+        id: build_packages
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          ARTIFACT_BUILD_PLAN: ${{ runner.temp }}/nix-service-package-artifact-build-plan
+          BUILD_PLAN: ${{ runner.temp }}/nix-service-package-build-plan
+          CARGO_ARTIFACT_OUTPUTS: ${{ runner.temp }}/nix-service-package-cargo-artifact-outputs
+          PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+        run: |
+          set -euo pipefail
+
+          packages=(
+            ".#packages.x86_64-linux.devfinity"
+            ".#packages.x86_64-linux.finite-saas-core"
+            ".#packages.x86_64-linux.finite-saas-local"
+            ".#packages.x86_64-linux.finite-saas-runner"
+            ".#packages.x86_64-linux.finitechat-server"
+            ".#packages.x86_64-linux.finitechat-hosted-device"
+            ".#packages.x86_64-linux.finite-agentd"
+            ".#packages.x86_64-linux.finite-specialization-worker"
+            ".#packages.x86_64-linux.finitesitesd"
+            ".#packages.x86_64-linux.finite-brain"
+            ".#packages.x86_64-linux.finite-identity"
+            ".#packages.x86_64-linux.fsite"
+            ".#packages.x86_64-linux.fbrain"
+            ".#packages.x86_64-linux.finitechat"
+            ".#packages.x86_64-linux.finitechat-rmp"
+          )
+
+          cargo_artifacts=()
+          for package in "${packages[@]}"; do
+            cargo_artifacts+=("${package}.cargoArtifacts")
+          done
+
+          nix build --dry-run --option builders '' "${cargo_artifacts[@]}" 2>&1 | tee "$ARTIFACT_BUILD_PLAN"
+          nix build --dry-run --option builders '' "${packages[@]}" 2>&1 | tee "$BUILD_PLAN"
+
+          artifact_build_required=false
+          package_build_required=false
+          if grep -Eq 'derivations? will be built:' "$ARTIFACT_BUILD_PLAN"; then
+            artifact_build_required=true
+          fi
+          if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
+            package_build_required=true
+          fi
+          if [[ "$artifact_build_required" == true || "$package_build_required" == true ]]; then
+            echo "built_paths=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "built_paths=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          artifact_started="$SECONDS"
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' "${cargo_artifacts[@]}" \
+            | sort -u \
+            | tee "$CARGO_ARTIFACT_OUTPUTS"
+          artifact_elapsed="$((SECONDS - artifact_started))"
+
+          package_started="$SECONDS"
+          nix build --no-link --print-build-logs --print-out-paths --option builders '' "${packages[@]}" \
+            | tee "$PACKAGE_OUTPUTS"
+          package_elapsed="$((SECONDS - package_started))"
+
+          artifact_count="$(wc -l < "$CARGO_ARTIFACT_OUTPUTS" | tr -d '[:space:]')"
+          package_count="$(wc -l < "$PACKAGE_OUTPUTS" | tr -d '[:space:]')"
+          if [[ "$artifact_count" -ne 9 ]]; then
+            echo "::error::expected 9 distinct Cargo dependency artifacts for the 15 scoped packages; got $artifact_count"
+            exit 1
+          fi
+          {
+            echo "### Nix service package cache"
+            echo
+            echo "| Phase | Output roots | Elapsed | Build required before execution |"
+            echo "| --- | ---: | ---: | --- |"
+            echo "| Cargo dependency artifacts | $artifact_count | ${artifact_elapsed}s | $artifact_build_required |"
+            echo "| Application/runtime packages | $package_count | ${package_elapsed}s | $package_build_required |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Push Nix service package runtime closures and Cargo artifacts
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths == 'true'
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          CARGO_ARTIFACT_OUTPUTS: ${{ runner.temp }}/nix-service-package-cargo-artifact-outputs
+          PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s "$PACKAGE_OUTPUTS" ]]; then
+            echo "::error::Nix service package build did not record any output paths"
+            exit 1
+          fi
+          if [[ ! -s "$CARGO_ARTIFACT_OUTPUTS" ]]; then
+            echo "::error::Nix service package build did not record any Cargo artifact paths"
+            exit 1
+          fi
+
+          closure_paths="$RUNNER_TEMP/nix-service-package-cache-closure"
+          mapfile -t outputs < "$PACKAGE_OUTPUTS"
+          mapfile -t cargo_artifacts < "$CARGO_ARTIFACT_OUTPUTS"
+          nix path-info --recursive "${outputs[@]}" "${cargo_artifacts[@]}" | sort -u > "$closure_paths"
+          closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
+          echo "Pushing $closure_count Nix paths for ${#outputs[@]} runtime outputs and ${#cargo_artifacts[@]} Cargo artifact outputs to $CACHIX_CACHE_NAME"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
+          {
+            echo
+            echo "Pushed **$closure_count** unique runtime and Cargo artifact closure paths to Cachix."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Skip Cachix push for fully substituted service packages and Cargo artifacts
+        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths != 'true'
+        run: echo "Nix dry-run found no service package or Cargo artifact derivations to build; skipping Cachix push."
+      - name: Verify Chat reports its scoped source fingerprint
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          chat_out="$(
+            nix build --no-link --print-out-paths --option builders '' \
+              .#packages.x86_64-linux.finitechat-server
+          )"
+          expected="$(
+            nix eval --raw \
+              .#packages.x86_64-linux.finitechat-server.sourceFingerprint
+          )"
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          health_json="$(mktemp)"
+          "$chat_out/bin/finitechat-server" serve "127.0.0.1:$port" &
+          server_pid="$!"
+          trap 'kill "$server_pid" 2>/dev/null || true; rm -f "$health_json"' EXIT
+          for _ in $(seq 1 20); do
+            if curl --fail --silent "http://127.0.0.1:$port/health" >"$health_json"; then
+              break
+            fi
+            sleep 1
+          done
+          python3 - "$health_json" "$expected" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              health = json.load(stream)
+          assert health["source_fingerprint"] == sys.argv[2], health
+          assert health["source_dirty"] is False, health
+          assert "source_commit" not in health, health
+          PY
+      - name: Remove Nix package checkout
+        if: always()
+        env:
+          CHECKOUT_PATH: ${{ github.workspace }}/nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          expected="$GITHUB_WORKSPACE/nix-packages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ "$CHECKOUT_PATH" != "$expected" || "$CHECKOUT_PATH" == "$GITHUB_WORKSPACE" ]]; then
+            printf 'refusing unexpected checkout cleanup target: %s\n' "$CHECKOUT_PATH" >&2
+            exit 64
+          fi
+          if [[ -e "$CHECKOUT_PATH" ]]; then
+            sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
+          fi
+  devfinity-smoke:
+    name: devfinity services-only smoke
+    needs:
+      - changes
+      - nix-service-packages
+    if: needs.changes.outputs.run_devfinity_smoke == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - uses: Swatinem/rust-cache@v2
+      - name: Prebuild smoke test artifacts
+        run: |
+          nix develop .#devfinity-ci --command bash -euxo pipefail -c '
+            cargo test -p finitechat-client --locked --lib --no-run
+            cargo test -p devfinity --locked --test stack_smoke --no-run
+          '
+      - name: devfinity smoke
+        env:
+          # Keep CI headroom for package substitution and dashboard startup.
+          DEVFINITY_READY_TIMEOUT_SECS: "600"
+        run: |
+          nix develop .#devfinity-ci --command bash -euxo pipefail -c '
+            nix run .#devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
+          '
+      - name: Dump devfinity logs on failure
+        if: failure()
+        run: |
+          for f in .local-state/dfs/runs/default/logs/*; do
+            echo "===== $f ====="
+            tail -50 "$f" || true
+          done
+  brain-product-matrix:
+    name: Brain acceptance matrix
+    needs:
+      - changes
+    if: needs.changes.outputs.run_brain_product_matrix == 'true'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Readiness contract, notification cursor, supervisor discovery, and collaboration acceptance
+        run: nix develop --accept-flake-config --command just brain-product-matrix
+      - name: Upload collaboration report and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-product-matrix
+          path: target/brain-product-matrix
+          if-no-files-found: error
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - changes
+      - rust
+      - dashboard
+      - hermes-bridge
+      - skills-check
+      - search-check
+      - monitoring-nixos-contract
+      - finite-status-contract
+      - nix-checks
+      - nix-service-packages
+      - devfinity-smoke
+      - brain-product-matrix
+    runs-on: depot-ubuntu-24.04
+    env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      RUN_RUST: ${{ needs.changes.outputs.run_rust }}
+      RESULT_RUST: ${{ needs.rust.result }}
+      RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
+      RUN_DASHBOARD_BROWSER: ${{ needs.changes.outputs.run_dashboard_browser }}
+      RESULT_DASHBOARD: ${{ needs.dashboard.result }}
+      RUN_HERMES_BRIDGE: ${{ needs.changes.outputs.run_hermes_bridge }}
+      RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
+      RUN_SKILLS_CHECK: ${{ needs.changes.outputs.run_skills_check }}
+      RESULT_SKILLS_CHECK: ${{ needs['skills-check'].result }}
+      RUN_SEARCH_CHECK: ${{ needs.changes.outputs.run_search_check }}
+      RESULT_SEARCH_CHECK: ${{ needs['search-check'].result }}
+      RUN_MONITORING_NIXOS_CONTRACT: ${{ needs.changes.outputs.run_monitoring_nixos_contract }}
+      RESULT_MONITORING_NIXOS_CONTRACT: ${{ needs['monitoring-nixos-contract'].result }}
+      RUN_FINITE_STATUS_CONTRACT: ${{ needs.changes.outputs.run_finite_status_contract }}
+      RESULT_FINITE_STATUS_CONTRACT: ${{ needs['finite-status-contract'].result }}
+      RUN_NIX_CHECKS: ${{ needs.changes.outputs.run_nix_checks }}
+      RESULT_NIX_CHECKS: ${{ needs['nix-checks'].result }}
+      RUN_NIX_SERVICE_PACKAGES: ${{ needs.changes.outputs.run_nix_service_packages }}
+      RESULT_NIX_SERVICE_PACKAGES: ${{ needs['nix-service-packages'].result }}
+      RUN_DEVFINITY_SMOKE: ${{ needs.changes.outputs.run_devfinity_smoke }}
+      RESULT_DEVFINITY_SMOKE: ${{ needs['devfinity-smoke'].result }}
+      RUN_BRAIN_PRODUCT_MATRIX: ${{ needs.changes.outputs.run_brain_product_matrix }}
+      RESULT_BRAIN_PRODUCT_MATRIX: ${{ needs['brain-product-matrix'].result }}
+    steps:
+      - name: Require selected harnesses
+        run: |
+          set -euo pipefail
+
+          if [[ "$CHANGES_RESULT" != success ]]; then
+            echo "Change detection finished with: $CHANGES_RESULT" >&2
+            exit 1
+          fi
+
+          failed=false
+
+          check_selected() {
+            local name=$1
+            local selected=$2
+            local result=$3
+
+            case "$selected" in
+              true)
+                if [[ "$result" != success ]]; then
+                  echo "$name was selected but finished with: $result" >&2
+                  failed=true
+                fi
+                ;;
+              false)
+                ;;
+              *)
+                echo "$name has an invalid selection value: $selected" >&2
+                failed=true
+                ;;
+            esac
+          }
+
+          check_selected "Rust workspace" "$RUN_RUST" "$RESULT_RUST"
+          check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
+          check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
+          check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
+          check_selected "Search check" "$RUN_SEARCH_CHECK" "$RESULT_SEARCH_CHECK"
+          check_selected "Monitoring NixOS contract" "$RUN_MONITORING_NIXOS_CONTRACT" "$RESULT_MONITORING_NIXOS_CONTRACT"
+          check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
+          check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"
+          check_selected "Nix service packages" "$RUN_NIX_SERVICE_PACKAGES" "$RESULT_NIX_SERVICE_PACKAGES"
+          check_selected "devfinity smoke" "$RUN_DEVFINITY_SMOKE" "$RESULT_DEVFINITY_SMOKE"
+          check_selected "Brain product matrix" "$RUN_BRAIN_PRODUCT_MATRIX" "$RESULT_BRAIN_PRODUCT_MATRIX"
+
+          case "$RUN_DASHBOARD_BROWSER" in
+            true)
+              if [[ "$RUN_DASHBOARD" != true ]]; then
+                echo "Dashboard browser e2e was selected without the Dashboard job" >&2
+                failed=true
+              fi
+              ;;
+            false)
+              ;;
+            *)
+              echo "Dashboard browser e2e has an invalid selection value: $RUN_DASHBOARD_BROWSER" >&2
+              failed=true
+              ;;
+          esac
+
+          if [[ "$failed" == true ]]; then
+            exit 1
+          fi
