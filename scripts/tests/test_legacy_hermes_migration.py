@@ -610,7 +610,8 @@ class LegacyHermesMigrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             migration.MigrationError,
-            "active payload does not match source inventory",
+            "active payload is absent from source inventory: "
+            "dev/project/uninventoried.txt",
         ):
             self.build_manifest()
 

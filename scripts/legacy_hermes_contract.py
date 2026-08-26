@@ -118,8 +118,15 @@ def _validate_active_payload_records(
         if source_relative is None:
             continue
         expected = source_entries.get(source_relative.as_posix())
-        if expected is None or expected.get("disposition") != "activate":
-            raise MigrationError("active payload does not match source inventory")
+        if expected is None:
+            raise MigrationError(
+                f"active payload is absent from source inventory: {source_relative}"
+            )
+        if expected.get("disposition") != "activate":
+            raise MigrationError(
+                "active payload source is not activate: "
+                f"{source_relative} ({expected.get('disposition')})"
+            )
         comparable = {
             "kind": expected.get("kind"),
             "size": expected.get("size"),
@@ -127,14 +134,21 @@ def _validate_active_payload_records(
             "sha256": expected.get("sha256"),
             "link_target": expected.get("link_target"),
         }
-        if comparable != {
+        actual = {
             "kind": record.get("kind"),
             "size": record.get("size"),
             "mode": record.get("mode"),
             "sha256": record.get("sha256"),
             "link_target": record.get("link_target"),
-        }:
-            raise MigrationError("active payload does not match source inventory")
+        }
+        if comparable != actual:
+            differing_fields = ",".join(
+                field for field in comparable if comparable[field] != actual[field]
+            )
+            raise MigrationError(
+                "active payload metadata does not match source inventory: "
+                f"{source_relative} ({differing_fields})"
+            )
 
 
 @dataclass(frozen=True)
