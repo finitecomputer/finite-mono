@@ -14,6 +14,8 @@ export const PURCHASED_PACKAGE_BILLING_CADENCE_FIELD_UNIVERSAL_IDENTIFIER =
   '020f81a1-d55c-4590-b478-7b0b2bfa78e3';
 export const PURCHASED_PACKAGE_MRR_FIELD_UNIVERSAL_IDENTIFIER =
   'b74071c0-e0a7-4b54-87d8-fc411fca5306';
+export const PURCHASED_PACKAGE_SOURCED_MONTHLY_PRICE_USD_FIELD_UNIVERSAL_IDENTIFIER =
+  '8d9c485e-5185-4c8b-a90d-df43cbab276f';
 export const PURCHASED_PACKAGE_PRICE_TERM_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   'ec52a3f2-2e99-4822-879c-0f62494a5542';
 
@@ -190,6 +192,18 @@ export default defineObject({
       name: 'effectiveTo',
       label: 'Effective to',
       icon: 'IconCalendar',
+      isNullable: true,
+      defaultValue: null,
+    },
+    {
+      universalIdentifier:
+        PURCHASED_PACKAGE_SOURCED_MONTHLY_PRICE_USD_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.CURRENCY,
+      name: 'sourcedMonthlyPriceUsd',
+      label: 'Sourced monthly price (USD)',
+      description:
+        'Source fact used to normalize a non-USD recurring price; not a calculated projection',
+      icon: 'IconCurrencyDollar',
       isNullable: true,
       defaultValue: null,
     },

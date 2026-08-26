@@ -91,6 +91,25 @@ Read the current organization summary:
 just commercial agent show --organization NED
 ```
 
+Rebuild only the calculated Company totals after an effective date passes (or
+after repairing source records):
+
+```console
+just commercial agent refresh --organization NED
+just commercial agent refresh --all
+```
+
+The refresh operation never changes source records. It recalculates current
+MRR, lifetime net cash, and current-customer status and skips Company records
+whose projections are already current. Run the all-organizations form daily
+once the register is deployed so the directory views follow effective dates
+without requiring an unrelated update.
+
+List reads follow Twenty's cursor pages rather than accepting the first page as
+complete. A full page with missing or repeated pagination metadata fails before
+a projection write, so a partial payment history cannot silently become an
+authoritative total.
+
 [`tests/fixtures/ned-update.json`](tests/fixtures/ned-update.json) is an
 executable, explicitly synthetic contract example. Its contact and amounts are
 not real NED facts and must never be used to seed the live register. Real
@@ -101,14 +120,21 @@ Recurring Package updates require a stable `priceTermKey`, effective start, a
 real price, and a monthly, quarterly, or annual cadence. Updating the same key
 changes that term; a new key creates a new effective-dated term, so history is
 not overwritten. USD MRR is normalized automatically and activates according
-to the effective dates. A non-USD recurring term must supply its sourced USD
-monthly normalization.
+to the effective dates. A non-USD recurring term supplies
+`sourcedMonthlyPriceUsd`; the read-only `monthlyRecurringRevenueUsd` field is
+always calculated and is never accepted in an update document.
 
 Incoming digital-asset payments preserve native amount, asset code, network,
 transaction reference, and an optional receipt-time USD value; later
 exchange-rate changes do not rewrite it. If a received non-USD payment lacks a
 sourced USD value, the USD lifetime-cash result is `null` with an unresolved
 fact, never a fabricated zero.
+
+Each Commercial Account starts with `cashHistoryReconciled: false`. Lifetime
+cash remains unknown until an agent has checked the known historical period and
+sets the field to true with a Source Reference. A reconciled account with no
+Incoming Payments is then a real zero; an unreconciled account with no Payment
+records is not.
 
 Price-bearing Packages, Charges, and Incoming Payments require either a Source
 Reference or an explicit reconciliation warning. The `show` response nests

@@ -6,6 +6,8 @@ export const COMMERCIAL_ACCOUNT_NAME_FIELD_UNIVERSAL_IDENTIFIER =
   'be17140d-2f13-465d-9f0a-46612cf7753c';
 export const COMMERCIAL_ACCOUNT_STATUS_FIELD_UNIVERSAL_IDENTIFIER =
   '9a48ab90-9053-47f4-b1cf-3969e2d83009';
+export const COMMERCIAL_ACCOUNT_CASH_HISTORY_RECONCILED_FIELD_UNIVERSAL_IDENTIFIER =
+  '4274942d-c18a-4363-be40-795509a27079';
 
 export default defineObject({
   universalIdentifier: COMMERCIAL_ACCOUNT_UNIVERSAL_IDENTIFIER,
@@ -53,6 +55,17 @@ export default defineObject({
           color: 'gray',
         },
       ],
+    },
+    {
+      universalIdentifier:
+        COMMERCIAL_ACCOUNT_CASH_HISTORY_RECONCILED_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.BOOLEAN,
+      name: 'cashHistoryReconciled',
+      label: 'Cash history reconciled',
+      description:
+        'True only when known historical Incoming Payments are complete for this account',
+      icon: 'IconChecklist',
+      defaultValue: false,
     },
     {
       universalIdentifier: 'b5268ddb-bb91-450a-bbcb-296c27a6511b',

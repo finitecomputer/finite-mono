@@ -2,7 +2,11 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { applyCommercialUpdate, showOrganization } from './register';
+import {
+  applyCommercialUpdate,
+  refreshCommercialProjections,
+  showOrganization,
+} from './register';
 import { TwentyClient } from './twenty-client';
 import { parseCommercialUpdate } from './validation';
 
@@ -27,8 +31,26 @@ async function main(argv: string[]): Promise<void> {
     writeJson(result);
     return;
   }
+  if (command === 'refresh') {
+    const organization = option(args, '--organization');
+    const all = args.includes('--all');
+    if (
+      (organization === undefined && !all) ||
+      (organization !== undefined && all)
+    ) {
+      throw new Error(
+        'refresh requires exactly one of --organization <name> or --all',
+      );
+    }
+    const result = await refreshCommercialProjections(
+      clientFromEnvironment(),
+      organization === undefined ? {} : { organizationName: organization },
+    );
+    writeJson(result);
+    return;
+  }
   throw new Error(
-    'usage: finite-commercial-register apply --file <path>|- | show --organization <name>',
+    'usage: finite-commercial-register apply --file <path>|- | show --organization <name> | refresh (--organization <name>|--all)',
   );
 }
 

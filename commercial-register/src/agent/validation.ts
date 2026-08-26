@@ -52,11 +52,25 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
     const account = objectAt(update.account, 'account');
     nonEmptyString(account.name, 'account.name');
     optionalEnum(account.status, ['ACTIVE', 'INACTIVE'], 'account.status');
+    optionalBoolean(
+      account.cashHistoryReconciled,
+      'account.cashHistoryReconciled',
+    );
     optionalString(account.sourceReference, 'account.sourceReference');
     optionalBoolean(
       account.reconciliationWarning,
       'account.reconciliationWarning',
     );
+    if (account.cashHistoryReconciled === true) {
+      if (
+        typeof account.sourceReference !== 'string' ||
+        account.sourceReference.trim() === ''
+      ) {
+        throw new Error(
+          'account.sourceReference is required when cashHistoryReconciled is true',
+        );
+      }
+    }
   }
 
   const contacts = optionalArray(update.contacts, 'contacts');
@@ -99,6 +113,10 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
       `opportunities[${index}].stage`,
     );
     optionalString(
+      opportunity.brainWants,
+      `opportunities[${index}].brainWants`,
+    );
+    optionalString(
       opportunity.sourceReference,
       `opportunities[${index}].sourceReference`,
     );
@@ -106,6 +124,13 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
       opportunity.reconciliationWarning,
       `opportunities[${index}].reconciliationWarning`,
     );
+    if (opportunity.amount !== undefined) {
+      positiveMoney(
+        opportunity.amount,
+        `opportunities[${index}].amount`,
+      );
+      evidenceOrWarning(opportunity, `opportunities[${index}]`);
+    }
   }
 
   const arrangements = optionalArray(update.arrangements, 'arrangements');
@@ -138,6 +163,7 @@ function validateArrangement(
   );
   optionalDate(arrangement.startsOn, `${path}.startsOn`);
   optionalDate(arrangement.endsOn, `${path}.endsOn`);
+  optionalString(arrangement.wonOpportunity, `${path}.wonOpportunity`);
   optionalString(arrangement.sourceReference, `${path}.sourceReference`);
   optionalBoolean(
     arrangement.reconciliationWarning,
@@ -178,16 +204,33 @@ function validatePackage(
     purchasedPackage.reconciliationWarning,
     `${path}.reconciliationWarning`,
   );
+  const rawPackage = purchasedPackage as PurchasedPackageUpdate & {
+    monthlyRecurringRevenueUsd?: unknown;
+  };
+  if (rawPackage.monthlyRecurringRevenueUsd !== undefined) {
+    throw new Error(
+      `${path}.monthlyRecurringRevenueUsd is calculated and cannot be supplied`,
+    );
+  }
   if (purchasedPackage.price !== undefined) {
     positiveMoney(purchasedPackage.price, `${path}.price`);
     evidenceOrWarning(purchasedPackage, path);
   }
   if (
-    purchasedPackage.monthlyRecurringRevenueUsd !== undefined &&
-    (!Number.isFinite(purchasedPackage.monthlyRecurringRevenueUsd) ||
-      purchasedPackage.monthlyRecurringRevenueUsd < 0)
+    purchasedPackage.sourcedMonthlyPriceUsd !== undefined &&
+    (!Number.isFinite(purchasedPackage.sourcedMonthlyPriceUsd) ||
+      purchasedPackage.sourcedMonthlyPriceUsd < 0)
   ) {
-    throw new Error(`${path}.monthlyRecurringRevenueUsd must not be negative`);
+    throw new Error(`${path}.sourcedMonthlyPriceUsd must not be negative`);
+  }
+  if (
+    purchasedPackage.sourcedMonthlyPriceUsd !== undefined &&
+    (purchasedPackage.priceBasis !== 'RECURRING' ||
+      purchasedPackage.price?.currencyCode.toUpperCase() === 'USD')
+  ) {
+    throw new Error(
+      `${path}.sourcedMonthlyPriceUsd is only valid for a non-USD recurring price`,
+    );
   }
   if (purchasedPackage.priceBasis === 'RECURRING') {
     if (purchasedPackage.price === undefined) {
@@ -205,10 +248,10 @@ function validatePackage(
     nonEmptyString(purchasedPackage.priceTermKey, `${path}.priceTermKey`);
     if (
       purchasedPackage.price.currencyCode.toUpperCase() !== 'USD' &&
-      purchasedPackage.monthlyRecurringRevenueUsd === undefined
+      purchasedPackage.sourcedMonthlyPriceUsd === undefined
     ) {
       throw new Error(
-        `${path}.monthlyRecurringRevenueUsd is required for a non-USD recurring package`,
+        `${path}.sourcedMonthlyPriceUsd is required for a non-USD recurring package`,
       );
     }
   }
@@ -248,6 +291,10 @@ function validatePackage(
       line.serviceEndsOn,
       `${path}.offeringLines[${index}].serviceEndsOn`,
     );
+    optionalString(
+      line.description,
+      `${path}.offeringLines[${index}].description`,
+    );
   }
   uniqueNames(purchasedPackage.charges ?? [], `${path}.charges`);
   for (const [index, charge] of (purchasedPackage.charges ?? []).entries()) {
@@ -286,6 +333,10 @@ function validatePayment(payment: IncomingPaymentUpdate, path: string): void {
     `${path}.status`,
   );
   optionalString(payment.network, `${path}.network`);
+  optionalString(
+    payment.transactionReference,
+    `${path}.transactionReference`,
+  );
   optionalString(payment.sourceReference, `${path}.sourceReference`);
   optionalBoolean(
     payment.reconciliationWarning,

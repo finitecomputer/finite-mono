@@ -92,6 +92,7 @@ export async function applyCommercialUpdate(
       compact({
         name: update.account.name,
         status: update.account.status,
+        cashHistoryReconciled: update.account.cashHistoryReconciled,
         sourceReference: update.account.sourceReference,
         reconciliationWarning: update.account.reconciliationWarning,
         organizationId: organization.id,
@@ -181,6 +182,10 @@ export async function applyCommercialUpdate(
           billingCadence: purchasedPackage.billingCadence,
           effectiveFrom: purchasedPackage.effectiveFrom,
           effectiveTo: purchasedPackage.effectiveTo,
+          sourcedMonthlyPriceUsd:
+            purchasedPackage.sourcedMonthlyPriceUsd === undefined
+              ? null
+              : usdToTwenty(purchasedPackage.sourcedMonthlyPriceUsd),
           monthlyRecurringRevenueUsd: usdToTwenty(normalizedMrr),
           sourceReference: purchasedPackage.sourceReference,
           reconciliationWarning: purchasedPackage.reconciliationWarning,
@@ -266,16 +271,10 @@ export async function applyCommercialUpdate(
     graph.packages,
     graph.offeringLines,
     graph.incomingPayments,
+    graph.accounts,
     at,
   );
-  await client.update('companies', organization.id, {
-    currentMrrUsd: usdToTwenty(metrics.currentMrrUsd),
-    lifetimeNetCashUsd:
-      metrics.lifetimeNetCashUsd === null
-        ? null
-        : usdToTwenty(metrics.lifetimeNetCashUsd),
-    isCurrentCustomer: metrics.isCurrentCustomer,
-  });
+  await writeOrganizationProjection(client, organization, metrics);
   changes.push({
     action: 'updated',
     resource: 'companies',
@@ -310,6 +309,7 @@ export async function showOrganization(
     graph.packages,
     graph.offeringLines,
     graph.incomingPayments,
+    graph.accounts,
     at,
   );
 
@@ -329,6 +329,7 @@ export async function showOrganization(
         'id',
         'name',
         'status',
+        'cashHistoryReconciled',
         'sourceReference',
         'reconciliationWarning',
       ]),
@@ -371,6 +372,7 @@ export async function showOrganization(
           'billingCadence',
           'effectiveFrom',
           'effectiveTo',
+          'sourcedMonthlyPriceUsd',
           'monthlyRecurringRevenueUsd',
           'arrangementId',
           'sourceReference',
@@ -418,6 +420,61 @@ export async function showOrganization(
       .sort(compareNames),
     metrics,
     unresolvedFacts: reconciliationWarnings(graph),
+  };
+}
+
+export async function refreshCommercialProjections(
+  client: TwentyClient,
+  options: { organizationName?: string; at?: Date } = {},
+): Promise<Record<string, unknown>> {
+  const at = options.at ?? new Date();
+  let organizations: TwentyRecord[];
+  if (options.organizationName) {
+    const organization = await findOneByName(
+      client,
+      'companies',
+      options.organizationName,
+      {},
+    );
+    if (!organization) {
+      throw new Error(
+        `organization ${JSON.stringify(options.organizationName)} was not found`,
+      );
+    }
+    organizations = [organization];
+  } else {
+    organizations = await client.list('companies');
+  }
+
+  const projections: Record<string, unknown>[] = [];
+  let updated = 0;
+  for (const organization of organizations) {
+    const graph = await loadOrganizationGraph(client, organization);
+    const metrics = deriveMetrics(
+      graph.packages,
+      graph.offeringLines,
+      graph.incomingPayments,
+      graph.accounts,
+      at,
+    );
+    const changed = !organizationProjectionMatches(organization, metrics);
+    if (changed) {
+      await writeOrganizationProjection(client, organization, metrics);
+      updated += 1;
+    }
+    projections.push({
+      organization: { id: organization.id, name: organization.name },
+      changed,
+      metrics,
+      unresolvedFacts: reconciliationWarnings(graph),
+    });
+  }
+
+  return {
+    refreshedAt: at.toISOString(),
+    scanned: organizations.length,
+    updated,
+    projections,
   };
 }
 
@@ -781,7 +838,15 @@ function reconciliationWarnings(graph: OrganizationGraph): string[] {
       (payment) =>
         `payment: ${String(payment.name ?? payment.id)} lacks receipt-time USD value`,
     );
-  return [...new Set([...explicit, ...missingConversions])];
+  const incompleteCashHistory = graph.accounts
+    .filter((account) => account.cashHistoryReconciled !== true)
+    .map(
+      (account) =>
+        `account: ${String(account.name ?? account.id)} cash history is not reconciled`,
+    );
+  return [
+    ...new Set([...explicit, ...missingConversions, ...incompleteCashHistory]),
+  ];
 }
 
 function arrangementsForDisplay(
@@ -813,6 +878,7 @@ function arrangementsForDisplay(
             'billingCadence',
             'effectiveFrom',
             'effectiveTo',
+            'sourcedMonthlyPriceUsd',
             'monthlyRecurringRevenueUsd',
             'sourceReference',
             'reconciliationWarning',
@@ -921,6 +987,37 @@ function compact(
 ): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined),
+  );
+}
+
+async function writeOrganizationProjection(
+  client: TwentyClient,
+  organization: TwentyRecord,
+  metrics: ReturnType<typeof deriveMetrics>,
+): Promise<void> {
+  await client.update('companies', organization.id, {
+    currentMrrUsd: usdToTwenty(metrics.currentMrrUsd),
+    lifetimeNetCashUsd:
+      metrics.lifetimeNetCashUsd === null
+        ? null
+        : usdToTwenty(metrics.lifetimeNetCashUsd),
+    isCurrentCustomer: metrics.isCurrentCustomer,
+  });
+}
+
+function organizationProjectionMatches(
+  organization: TwentyRecord,
+  metrics: ReturnType<typeof deriveMetrics>,
+): boolean {
+  const lifetimeCashMatches =
+    metrics.lifetimeNetCashUsd === null
+      ? organization.lifetimeNetCashUsd === null
+      : moneyAmount(organization.lifetimeNetCashUsd) ===
+        metrics.lifetimeNetCashUsd;
+  return (
+    moneyAmount(organization.currentMrrUsd) === metrics.currentMrrUsd &&
+    lifetimeCashMatches &&
+    organization.isCurrentCustomer === metrics.isCurrentCustomer
   );
 }
 

@@ -252,6 +252,9 @@ _Avoid_: P&L, revenue recognition, complete company profitability
   commitment, Contributions, Customer External Spend, and Pass-Through Charges.
 - Incomplete history uses a **Reconciliation Warning** and an unknown value,
   never a fabricated zero.
+- Each Commercial Account explicitly records whether its known cash history is
+  reconciled. Until it is, Lifetime Net Cash is unknown even when no Incoming
+  Payment records exist; only a sourced reconciliation permits a zero.
 - **Organization Wants** may inform package and proposal preparation but do not
   prove a purchase or authorize a change to a Commercial Arrangement.
 
@@ -274,6 +277,13 @@ _Avoid_: P&L, revenue recognition, complete company profitability
   payment fact retains a Reconciliation Warning until corroborated.
 - Calculated views are rebuilt from their source facts; humans correct the
   source fact or mapping rather than editing a calculated total.
+- A recurring USD Package's normalized MRR is calculated from its price and
+  cadence. A non-USD recurring Package keeps a separately sourced monthly USD
+  normalization; neither agents nor humans supply the calculated MRR field.
+- A projection-only refresh recalculates Company MRR, lifetime net cash, and
+  current-customer status without changing commercial source records. Once the
+  register is deployed, it runs daily so effective-date boundaries appear in
+  Twenty's directory views even when no source update occurs that day.
 
 ## Implementation boundary
 

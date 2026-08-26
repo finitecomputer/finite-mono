@@ -10,6 +10,7 @@
   "account": {
     "name": "NED account",
     "status": "ACTIVE",
+    "cashHistoryReconciled": true,
     "sourceReference": "test://synthetic/ned"
   },
   "contacts": [

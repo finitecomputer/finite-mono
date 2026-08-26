@@ -60,6 +60,11 @@ test('the installed app exposes organizations and their commercial accounts', ()
     ),
     'Commercial Account must belong to a Company',
   );
+  const cashHistoryReconciled = account.fields.find(
+    (field) => field.name === 'cashHistoryReconciled',
+  );
+  assert.ok(cashHistoryReconciled, 'Account cash completeness must be explicit');
+  assert.equal(cashHistoryReconciled.defaultValue, false);
 });
 
 test('the installed app represents won purchases and open follow-on work', () => {
@@ -138,6 +143,12 @@ test('the installed app represents won purchases and open follow-on work', () =>
     (field) => field.name === 'monthlyRecurringRevenueUsd',
   );
   assert.equal(packageMrr.isUIEditable, false);
+  assert.ok(
+    purchasedPackage.fields.some(
+      (field) => field.name === 'sourcedMonthlyPriceUsd',
+    ),
+    'Non-USD price terms need a distinct sourced USD monthly value',
+  );
   assert.ok(
     purchasedPackage.fields.some((field) => field.name === 'priceTermKey'),
     'Recurring price terms need a stable identity across effective-date changes',

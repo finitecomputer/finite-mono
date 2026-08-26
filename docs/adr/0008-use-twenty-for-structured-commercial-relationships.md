@@ -75,7 +75,13 @@ or accounting revenue. It normalizes effective-dated active recurring price
 terms, counts a shared Package price only once, and excludes one-time charges,
 uncommitted variable usage, Contributions, Customer External Spend, and
 Pass-Through Charges. Sponsored MRR may be viewed by payer or beneficiary but
-is counted only once globally.
+is counted only once globally. Non-USD terms keep a distinct sourced monthly
+USD normalization; calculated MRR is not a writable input. A projection-only
+refresh updates Company totals as effective dates pass without rewriting source
+facts. Account cash history starts unreconciled, so the cash projection remains
+unknown until a sourced completeness check makes an empty payment history a
+meaningful zero. Projection reads paginate completely or fail before writing a
+possibly partial total.
 
 ## Considered options
 

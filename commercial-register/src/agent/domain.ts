@@ -65,12 +65,18 @@ export function normalizedMonthlyRecurringRevenueUsd(
 ): number {
   if (purchasedPackage.priceBasis !== 'RECURRING') return 0;
 
-  const explicit = moneyAmount(purchasedPackage.monthlyRecurringRevenueUsd);
-  if (explicit !== undefined) return roundMoney(explicit);
-
   const price = moneyAmount(purchasedPackage.price);
   const currency = moneyCurrency(purchasedPackage.price);
-  if (price === undefined || currency !== 'USD') return 0;
+  if (price === undefined || currency === undefined) return 0;
+
+  if (currency !== 'USD') {
+    const sourcedMonthlyPriceUsd = moneyAmount(
+      purchasedPackage.sourcedMonthlyPriceUsd,
+    );
+    return sourcedMonthlyPriceUsd === undefined
+      ? 0
+      : roundMoney(sourcedMonthlyPriceUsd);
+  }
 
   const divisor =
     purchasedPackage.billingCadence === 'MONTHLY'
@@ -87,6 +93,7 @@ export function deriveMetrics(
   packages: TwentyRecord[],
   offeringLines: TwentyRecord[],
   incomingPayments: TwentyRecord[],
+  accounts: TwentyRecord[] = [],
   at = new Date(),
 ): CommercialMetrics {
   const currentMrrUsd = roundMoney(
@@ -97,7 +104,9 @@ export function deriveMetrics(
     ),
   );
   const paymentValues = incomingPayments.map(paymentCashUsd);
-  const lifetimeNetCashUsd = paymentValues.some((value) => value === null)
+  const lifetimeNetCashUsd =
+    accounts.some((account) => account.cashHistoryReconciled !== true) ||
+    paymentValues.some((value) => value === null)
     ? null
     : roundMoney(
         paymentValues.reduce<number>((sum, value) => sum + (value ?? 0), 0),

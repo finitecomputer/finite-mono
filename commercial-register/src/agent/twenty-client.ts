@@ -1,5 +1,7 @@
 import type { TwentyRecord } from './types';
 
+const LIST_PAGE_SIZE = 200;
+
 export class TwentyClient {
   readonly #baseUrl: string;
   readonly #apiKey: string;
@@ -13,13 +15,54 @@ export class TwentyClient {
     resource: string,
     filter?: { field: string; value: string },
   ): Promise<TwentyRecord[]> {
-    const url = new URL(`${this.#baseUrl}/rest/${resource}`);
-    url.searchParams.set('limit', '200');
-    if (filter) {
-      url.searchParams.set('filter', `${filter.field}[eq]:${filter.value}`);
+    const records: TwentyRecord[] = [];
+    const recordIds = new Set<string>();
+    const cursors = new Set<string>();
+    let startingAfter: string | undefined;
+
+    for (;;) {
+      const url = new URL(`${this.#baseUrl}/rest/${resource}`);
+      url.searchParams.set('limit', String(LIST_PAGE_SIZE));
+      if (filter) {
+        url.searchParams.set('filter', `${filter.field}[eq]:${filter.value}`);
+      }
+      if (startingAfter) {
+        url.searchParams.set('starting_after', startingAfter);
+      }
+      const payload = await this.#request('GET', url);
+      const page = extractRecords(payload, resource);
+      for (const record of page) {
+        if (recordIds.has(record.id)) {
+          throw new Error(
+            `Twenty pagination returned duplicate ${resource} record ${JSON.stringify(record.id)}`,
+          );
+        }
+        recordIds.add(record.id);
+        records.push(record);
+      }
+
+      const pageInfo = extractPageInfo(payload, resource);
+      if (!pageInfo) {
+        if (page.length >= LIST_PAGE_SIZE) {
+          throw new Error(
+            `Twenty returned a full page without pagination metadata for ${resource}; refusing a possibly truncated result`,
+          );
+        }
+        break;
+      }
+      if (!pageInfo.hasNextPage) break;
+      if (page.length === 0 || !pageInfo.endCursor) {
+        throw new Error(
+          `Twenty returned invalid pagination metadata for ${resource}`,
+        );
+      }
+      if (cursors.has(pageInfo.endCursor)) {
+        throw new Error(`Twenty repeated a pagination cursor for ${resource}`);
+      }
+      cursors.add(pageInfo.endCursor);
+      startingAfter = pageInfo.endCursor;
     }
-    const payload = await this.#request('GET', url);
-    return extractRecords(payload, resource);
+    return records;
   }
 
   async create(
@@ -98,6 +141,33 @@ function extractRecords(payload: unknown, resource: string): TwentyRecord[] {
     if (Array.isArray(firstArray)) return firstArray.map(assertRecord);
   }
   return [];
+}
+
+function extractPageInfo(
+  payload: unknown,
+  resource: string,
+): { hasNextPage: boolean; endCursor?: string } | undefined {
+  if (!isObject(payload)) return undefined;
+  const data = payload.data;
+  const resourceAtData = isObject(data) ? data[resource] : undefined;
+  const resourceAtRoot = payload[resource];
+  const candidates = [
+    payload.pageInfo,
+    isObject(data) ? data.pageInfo : undefined,
+    isObject(resourceAtData) ? resourceAtData.pageInfo : undefined,
+    isObject(resourceAtRoot) ? resourceAtRoot.pageInfo : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (!isObject(candidate) || typeof candidate.hasNextPage !== 'boolean') {
+      continue;
+    }
+    const endCursor = candidate.endCursor;
+    return {
+      hasNextPage: candidate.hasNextPage,
+      endCursor: typeof endCursor === 'string' ? endCursor : undefined,
+    };
+  }
+  return undefined;
 }
 
 function extractRecord(payload: unknown, resource: string): TwentyRecord {

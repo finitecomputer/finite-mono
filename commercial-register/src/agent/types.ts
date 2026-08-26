@@ -32,6 +32,7 @@ export interface OrganizationUpdate {
 export interface AccountUpdate {
   name: string;
   status?: 'ACTIVE' | 'INACTIVE';
+  cashHistoryReconciled?: boolean;
   sourceReference?: string;
   reconciliationWarning?: boolean;
 }
@@ -102,7 +103,7 @@ export interface PurchasedPackageUpdate {
   billingCadence?: 'NONE' | 'MONTHLY' | 'QUARTERLY' | 'ANNUAL';
   effectiveFrom?: string;
   effectiveTo?: string;
-  monthlyRecurringRevenueUsd?: number;
+  sourcedMonthlyPriceUsd?: number;
   sourceReference?: string;
   reconciliationWarning?: boolean;
   offeringLines?: OfferingLineUpdate[];
