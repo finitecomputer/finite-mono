@@ -64,7 +64,7 @@ export default defineView({
       fieldMetadataUniversalIdentifier:
         OPPORTUNITY_COMMERCIAL_STAGE_FIELD_UNIVERSAL_IDENTIFIER,
       operand: ViewFilterOperand.IS_NOT,
-      value: 'WON',
+      value: ['WON'],
       positionInViewFilterGroup: 0,
     },
     {
@@ -72,7 +72,7 @@ export default defineView({
       fieldMetadataUniversalIdentifier:
         OPPORTUNITY_COMMERCIAL_STAGE_FIELD_UNIVERSAL_IDENTIFIER,
       operand: ViewFilterOperand.IS_NOT,
-      value: 'LOST',
+      value: ['LOST'],
       positionInViewFilterGroup: 1,
     },
   ],
@@ -100,6 +100,18 @@ export default defineView({
       fieldValue: 'PAUSED',
       position: 3,
       isVisible: true,
+    },
+    {
+      universalIdentifier: 'e4106c2f-29d3-4c31-bcc4-28af80c8620f',
+      fieldValue: 'WON',
+      position: 4,
+      isVisible: false,
+    },
+    {
+      universalIdentifier: '693c5f1e-6d17-4ad2-9983-072198cc03cc',
+      fieldValue: 'LOST',
+      position: 5,
+      isVisible: false,
     },
   ],
 });

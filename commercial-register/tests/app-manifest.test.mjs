@@ -52,6 +52,15 @@ test('the installed app exposes organizations and their commercial accounts', ()
     assert.equal(field.isUIEditable, false, `${fieldName} must be derived`);
   }
 
+  const commercialRoles = companyFields.find(
+    (field) => field.name === 'commercialRoles',
+  );
+  assert.equal(
+    commercialRoles.defaultValue,
+    undefined,
+    'Twenty 2.33 rejects an explicit empty MULTI_SELECT default',
+  );
+
   assert.ok(
     manifest.fields.some(
       (field) =>
@@ -261,7 +270,24 @@ test('the installed app provides the three MVP operating views', () => {
     '3b0feccb-187a-46fa-905a-b07721ba0a95',
   );
   assert.deepEqual(
-    ['LOST', 'WON'],
-    openOpportunities.filters.map((filter) => filter.value).sort(),
+    [['LOST'], ['WON']],
+    openOpportunities.filters
+      .map((filter) => filter.value)
+      .sort((left, right) => left[0].localeCompare(right[0])),
+    'Twenty 2.33 select filters must use list values for the UI to render',
   );
+  assert.deepEqual(
+    ['EXPLORING', 'LOST', 'PAUSED', 'PROPOSAL_DRAFTED', 'PROPOSAL_SENT', 'WON'],
+    openOpportunities.groups.map((group) => group.fieldValue).sort(),
+    'Kanban metadata must declare a group for every stage option',
+  );
+  for (const terminalStage of ['LOST', 'WON']) {
+    assert.equal(
+      openOpportunities.groups.find(
+        (group) => group.fieldValue === terminalStage,
+      ).isVisible,
+      false,
+      `${terminalStage} must stay hidden from the open pipeline`,
+    );
+  }
 });

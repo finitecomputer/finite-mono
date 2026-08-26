@@ -15,7 +15,6 @@ export default defineField({
   label: 'Commercial roles',
   description: 'Current roles in Finite commercial relationships',
   icon: 'IconTags',
-  defaultValue: [],
   options: [
     {
       id: 'd22992bf-1913-4b7e-9f99-5531faa80539',
