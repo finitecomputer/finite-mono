@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -175,6 +176,132 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(
             runner["finite_private_model_state"], "unresolved-shared-role"
         )
+
+    def write_fixture_variant(self, mutate) -> Path:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mutate(raw)
+        descriptor, name = tempfile.mkstemp(suffix=".json")
+        os.close(descriptor)
+        path = Path(name)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        self.addCleanup(path.unlink)
+        return path
+
+    def fixture_runner(self) -> dict[str, object]:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        return report["sections"]["host_health"]["runner"]
+
+    def test_runner_pin_on_target_is_green_matched(self) -> None:
+        runner = self.fixture_runner()
+        self.assertEqual(runner["artifact_pin"], "finite-agent-runtime-2026-08-01.1")
+        self.assertEqual(runner["target_artifact_id"], runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "green")
+        self.assertEqual(runner["pin_state"], "matched")
+        output = finite_status.render_human(self.fixture_report())
+        self.assertIn(
+            "pin=finite-agent-runtime-2026-08-01.1 [GREEN] (matched)", output
+        )
+
+    def test_runner_pin_mismatch_stays_red_and_names_mismatched(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_environment"][
+            "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+        ] = "finite-agent-runtime-2026-07-22.1"
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["pin_status"], "red")
+        self.assertEqual(runner["pin_state"], "mismatched")
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
+
+    def test_absent_pin_with_readable_environment_is_red_not_unknown(self) -> None:
+        # kata-runner-host.nix dropped its implicit pin default: an operator
+        # runner.env without FC_RUNNER_RUNTIME_ARTIFACT_ID halts new agent
+        # creation, so it must not read as probe noise.
+        fixture = self.write_fixture_variant(
+            lambda raw: raw["host_health"]["runner_environment"].pop(
+                "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+            )
+        )
+        result = subprocess.run(
+            [str(COMMAND), "--json", "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        runner = payload["sections"]["host_health"]["runner"]
+        self.assertIsNone(runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "red")
+        self.assertEqual(runner["pin_state"], "absent")
+        self.assertEqual(payload["sections"]["host_health"]["status"], "red")
+        self.assertEqual(payload["overall_status"], "red")
+        # Same entry point as the contract job renders it loudly, too.
+        human = subprocess.run(
+            [str(COMMAND), "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("pin=unset [RED] (absent)", human.stdout)
+
+    def test_unprobeable_runner_environment_keeps_plain_unknown(self) -> None:
+        # No environment evidence at all (both files unreadable): pin absence
+        # cannot be distinguished from an unprobeable host, so stay unknown.
+        def no_environment_evidence(raw: dict[str, object]) -> None:
+            raw["host_health"]["runner_environment"].pop(
+                "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+            )
+            raw["host_health"]["runner_environment_files_read"] = []
+
+        fixture = self.write_fixture_variant(no_environment_evidence)
+        result = subprocess.run(
+            [str(COMMAND), "--json", "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        runner = payload["sections"]["host_health"]["runner"]
+        self.assertIsNone(runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "unknown")
+        self.assertEqual(runner["pin_state"], "unresolved")
+        # Contrast with the absent case: without environment evidence an
+        # otherwise-green host is plain unknown, never red by pin.
+        self.assertEqual(payload["sections"]["host_health"]["status"], "unknown")
+        human = subprocess.run(
+            [str(COMMAND), "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("pin=unknown [UNKNOWN] (unresolved)", human.stdout)
+        self.assertNotIn("(absent)", human.stdout)
+
+    def test_legacy_reports_without_collection_marker_stay_conservative(self) -> None:
+        # Inputs predating runner_environment_files_read (persisted snapshots,
+        # external harnesses) keep the old conservative unknown semantics.
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_environment"][
+            "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+        ] = ""
+        del raw["host_health"]["runner_environment_files_read"]
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["pin_status"], "unknown")
+        self.assertEqual(runner["pin_state"], "unresolved")
 
     def test_json_has_four_sections_and_red_exit(self) -> None:
         result = subprocess.run(

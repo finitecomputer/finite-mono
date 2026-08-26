@@ -69,6 +69,8 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
+pub const RUNTIME_LIFECYCLE_REVERSE_REMAP_SQL: &str =
+    include_str!("../migrations/runtime_lifecycle_reverse_remap.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
@@ -8939,6 +8941,13 @@ mod tests {
         assert!(CORE_SCHEMA_SQL.contains("500000000"));
         assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
+        // Operator-rescue scripts stay out of CORE_SCHEMA_SQL by construction:
+        // CORE_SCHEMA_SQL is an explicit concat! allowlist and each rescue
+        // lives in its own const, so Core startup can never mutate user state
+        // outside the migration ladder. Keyed on each rescue's audit action,
+        // which appears nowhere else in the schema.
+        assert!(!CORE_SCHEMA_SQL.contains("runtime.upgrade.rollback_rescue"));
+        assert!(!CORE_SCHEMA_SQL.contains("runtime.lifecycle.reverse_remap"));
     }
 
     #[test]
