@@ -416,6 +416,8 @@ jobs:
         run: nix develop --command just runbook-facts-contract
       - name: Production deploy contract
         run: nix develop --command just production-deploy-contract
+      - name: Depot workflow contract
+        run: nix develop --command just depot-workflow-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
   nix-service-packages:
@@ -424,6 +426,8 @@ jobs:
     if: needs.changes.outputs.run_nix_service_packages == 'true'
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      devfinity_handoff_required: ${{ steps.devfinity_handoff.outputs.required }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -474,6 +478,7 @@ jobs:
           ARTIFACT_BUILD_PLAN: ${{ runner.temp }}/nix-service-package-artifact-build-plan
           BUILD_PLAN: ${{ runner.temp }}/nix-service-package-build-plan
           CARGO_ARTIFACT_OUTPUTS: ${{ runner.temp }}/nix-service-package-cargo-artifact-outputs
+          DEVFINITY_BUILD_PLAN: ${{ runner.temp }}/nix-service-package-devfinity-build-plan
           PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
         run: |
           set -euo pipefail
@@ -503,8 +508,11 @@ jobs:
 
           nix build --dry-run --option builders '' "${cargo_artifacts[@]}" 2>&1 | tee "$ARTIFACT_BUILD_PLAN"
           nix build --dry-run --option builders '' "${packages[@]}" 2>&1 | tee "$BUILD_PLAN"
+          nix build --dry-run --option builders '' .#packages.x86_64-linux.devfinity \
+            2>&1 | tee "$DEVFINITY_BUILD_PLAN"
 
           artifact_build_required=false
+          devfinity_handoff_required=false
           package_build_required=false
           if grep -Eq 'derivations? will be built:' "$ARTIFACT_BUILD_PLAN"; then
             artifact_build_required=true
@@ -512,11 +520,15 @@ jobs:
           if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
             package_build_required=true
           fi
+          if grep -Eq 'derivations? will be built:' "$DEVFINITY_BUILD_PLAN"; then
+            devfinity_handoff_required=true
+          fi
           if [[ "$artifact_build_required" == true || "$package_build_required" == true ]]; then
             echo "built_paths=true" >> "$GITHUB_OUTPUT"
           else
             echo "built_paths=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "devfinity_handoff_required=$devfinity_handoff_required" >> "$GITHUB_OUTPUT"
 
           artifact_started="$SECONDS"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' "${cargo_artifacts[@]}" \
@@ -542,7 +554,31 @@ jobs:
             echo "| --- | ---: | ---: | --- |"
             echo "| Cargo dependency artifacts | $artifact_count | ${artifact_elapsed}s | $artifact_build_required |"
             echo "| Application/runtime packages | $package_count | ${package_elapsed}s | $package_build_required |"
+            echo
+            echo "Devfinity same-run handoff required: **$devfinity_handoff_required**"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Package devfinity Nix closure for this workflow run
+        id: devfinity_handoff
+        if: steps.cachix.outputs.push_enabled != 'true' && steps.build_packages.outputs.devfinity_handoff_required == 'true'
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          HANDOFF_DIR: ${{ runner.temp }}/devfinity-nix-handoff
+          PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
+        run: |
+          set -euo pipefail
+          scripts/ci/nix-service-package-handoff \
+            pack "$GITHUB_SHA" "$PACKAGE_OUTPUTS" "$HANDOFF_DIR"
+          echo "required=true" >> "$GITHUB_OUTPUT"
+      - name: Upload devfinity Nix closure for this workflow run
+        if: steps.devfinity_handoff.outputs.required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: devfinity-nix-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/devfinity-nix-handoff
+          if-no-files-found: error
+          retention-days: 1
+          # Nix file caches already contain compressed NARs.
+          compression-level: 0
       - name: Push Nix service package runtime closures and Cargo artifacts
         if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths == 'true'
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
@@ -638,6 +674,15 @@ jobs:
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
+      - name: Download devfinity Nix closure from the package job
+        if: needs.nix-service-packages.outputs.devfinity_handoff_required == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: devfinity-nix-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/devfinity-nix-handoff
+      - name: Restore devfinity Nix closure from the package job
+        if: needs.nix-service-packages.outputs.devfinity_handoff_required == 'true'
+        run: scripts/ci/nix-service-package-handoff restore "$GITHUB_SHA" "$RUNNER_TEMP/devfinity-nix-handoff"
       - uses: Swatinem/rust-cache@v2
       - name: Prebuild smoke test artifacts
         run: |

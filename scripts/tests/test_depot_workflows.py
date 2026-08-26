@@ -197,6 +197,46 @@ class DepotWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("PR_HEAD_REPO", workflow)
         self.assertEqual(workflow.count("push|merge_group)"), 2)
 
+    def test_ci_hands_new_devfinity_closures_to_the_dependent_smoke_job(
+        self,
+    ) -> None:
+        workflow = self.workflow("ci.yml")
+        artifact_name = (
+            "devfinity-nix-handoff-${{ github.run_id }}-${{ github.run_attempt }}"
+        )
+
+        self.assertIn(
+            "devfinity_handoff_required: "
+            "${{ steps.devfinity_handoff.outputs.required }}",
+            workflow,
+        )
+        self.assertIn(
+            "if: steps.cachix.outputs.push_enabled != 'true' && "
+            "steps.build_packages.outputs.devfinity_handoff_required == 'true'",
+            workflow,
+        )
+        self.assertIn(
+            "scripts/ci/nix-service-package-handoff \\\n"
+            '            pack "$GITHUB_SHA" "$PACKAGE_OUTPUTS" "$HANDOFF_DIR"',
+            workflow,
+        )
+        self.assertEqual(workflow.count(artifact_name), 2)
+        self.assertEqual(
+            workflow.count(
+                "if: needs.nix-service-packages.outputs."
+                "devfinity_handoff_required == 'true'"
+            ),
+            2,
+        )
+        self.assertIn(
+            'nix-service-package-handoff restore "$GITHUB_SHA"',
+            workflow,
+        )
+        self.assertLess(
+            workflow.index("Package devfinity Nix closure for this workflow run"),
+            workflow.index("  devfinity-smoke:"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

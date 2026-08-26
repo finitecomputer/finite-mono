@@ -64,6 +64,12 @@ deploy-lat1-closure artifact_dir *args:
 deploy-lat3-closure artifact_dir *args:
     just nixos deploy-lat3-closure "$@"
 
+depot-workflow-contract:
+    python3 -m unittest \
+        scripts.tests.test_ci_select_harnesses \
+        scripts.tests.test_depot_workflows \
+        scripts.tests.test_nix_service_package_handoff
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 
