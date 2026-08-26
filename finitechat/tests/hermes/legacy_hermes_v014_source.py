@@ -8,6 +8,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import shutil
 import sys
 import tarfile
 from pathlib import Path
@@ -40,17 +41,7 @@ def main() -> int:
 
     root = args.root
     payload = root / "bundle/payload"
-    for relative in (
-        "hermes/memories",
-        "hermes/skills/legacy-finite",
-        "home/workspace",
-        "home/dev",
-        "home/uploads",
-    ):
-        (payload / relative).mkdir(parents=True, exist_ok=True)
-    (payload / "hermes/skills/legacy-finite/SKILL.md").write_text(
-        "# Legacy Finite skill\n", encoding="utf-8"
-    )
+    payload.mkdir(parents=True)
 
     source_state = root / "source-state.db"
     sessions = SessionDB(db_path=source_state)
@@ -99,7 +90,8 @@ def main() -> int:
     source_home = root / "source-home"
     (source_home / "workspace").mkdir(parents=True)
     (source_home / "dev/published-site").mkdir(parents=True)
-    (source_home / ".hermes").mkdir()
+    (source_home / "uploads").mkdir()
+    (source_home / ".hermes/skills/legacy-finite").mkdir(parents=True)
     (source_home / "custom-data").mkdir()
     (source_home / ".finite").mkdir()
     (source_home / "workspace/README.md").write_text("legacy workspace\n", encoding="utf-8")
@@ -107,12 +99,19 @@ def main() -> int:
         "unknown durable source data\n", encoding="utf-8"
     )
     (source_home / "dev/published-site/index.html").write_text("legacy site\n", encoding="utf-8")
+    (source_home / "uploads/photo.jpg").write_bytes(b"synthetic photo\n")
+    (source_home / ".hermes/skills/legacy-finite/SKILL.md").write_text(
+        "# Legacy Finite skill\n", encoding="utf-8"
+    )
     (source_home / ".hermes/.env").write_text(
         "TELEGRAM_BOT_TOKEN=synthetic-mixed-version-token\n", encoding="utf-8"
     )
     (source_home / ".finite/device.key").write_text("legacy platform identity\n", encoding="utf-8")
     source_inventory = root / "bundle/source-volume-inventory.json"
     migration.inventory_source_volume(source_inventory, source_home)
+    active_payload = root / "active-payload"
+    migration.stage_source_active_payload(active_payload, source_home, source_inventory)
+    shutil.copytree(active_payload, payload, dirs_exist_ok=True, symlinks=True)
     endpoints = root / "published-endpoints.json"
     endpoints.write_text(
         json.dumps(
