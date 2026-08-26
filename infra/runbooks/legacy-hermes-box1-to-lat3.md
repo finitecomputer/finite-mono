@@ -682,6 +682,13 @@ request and collect source-bot-only task, shim, VM, mount, and open-file evidenc
 Per-container cleanup is a break-glass repair with its own evidence and
 approval, not a normal migration step.
 
+Do not remove the canonical Runtime container, even when its task is stale.
+Current restart, known-good Chat recovery, and upgrade operations all require
+that owned container to exist. None can recreate it from an intact durable
+root. If break-glass cleanup has already removed the canonical container, leave
+the durable root untouched and roll back to box1. Do not reconstruct the
+container by hand or treat Core's recorded `Online` state as live-compute proof.
+
 Complete the receipt status in the retained operator evidence, not by editing
 the receipt inside `/data`. Record IDs, digests, hashes, counts, timestamps,
 and outcomes; record no token, key, message content, or secret value.
@@ -789,6 +796,15 @@ the fresh target archive if the v2 target itself must be reset. To resume
 box1, first prove target compute is stopped, then scale only
 `statefulset/<SOURCE_STATEFULSET>` back to one and verify the original bot.
 Never run both writers.
+
+Rollback verification is behavior-level, not just pod readiness. Require the
+source pod to be Ready with no unexpected restarts, then prove the original
+Chat or messaging route, credentials needed by active jobs, scheduled-job
+state, Brain sync, and source-hosted Sites. Run `fbrain repair` before sync if
+the restored Working Tree fails its permission boundary. Record any external
+or source-less Site failure separately instead of attributing it to the source
+Runtime. Finish with `scripts/finite-status --json` and keep the offline target
+durable root and pre-import archive intact.
 
 Do not delete the target, source PVC, staging bundle, or either recovery
 archive during rollback. Decommission and credential reauthorization are later
