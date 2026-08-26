@@ -15,14 +15,14 @@ python3 /opt/finite-commercial-register/status/finite-status --json \
 
 current_url="$(sed -n 's/^SERVER_URL=//p' "${environment_file}")"
 case "${current_url}" in
-  https://crm.finite.computer)
+  https://business.finite.computer)
     ;;
   http://localhost:3020)
     temporary="$(mktemp "${config_root}/twenty.env.XXXXXX")"
     trap 'rm -f -- "${temporary}"' EXIT
-    sed 's|^SERVER_URL=http://localhost:3020$|SERVER_URL=https://crm.finite.computer|' \
+    sed 's|^SERVER_URL=http://localhost:3020$|SERVER_URL=https://business.finite.computer|' \
       "${environment_file}" > "${temporary}"
-    test "$(grep -Ec '^SERVER_URL=https://crm\.finite\.computer$' "${temporary}")" -eq 1
+    test "$(grep -Ec '^SERVER_URL=https://business\.finite\.computer$' "${temporary}")" -eq 1
     chown root:root "${temporary}"
     chmod 0600 "${temporary}"
     mv "${temporary}" "${environment_file}"
@@ -40,4 +40,4 @@ systemctl restart finite-commercial-register.service
 /opt/finite-commercial-register/bin/health
 python3 /opt/finite-commercial-register/status/finite-status --json \
   > "${status_root}/finite-status-after.json"
-echo "commercial-register public URL prepared; DNS and Caddy remain separate mutation boundaries"
+echo "Finite Business public URL prepared; DNS and Caddy remain separate mutation boundaries"

@@ -9,7 +9,7 @@ usage() {
   cat >&2 <<'USAGE'
 usage: infra/commercial-register/ubuntu/deploy --activate [--bootstrap-secrets] [ubuntu@host]
 
-Deploy the digest-pinned Twenty commercial register to the monitoring VM.
+Deploy the digest-pinned Finite Business application to the monitoring VM.
 --activate is the explicit production-mutation boundary. --bootstrap-secrets
 creates the first root-owned Twenty secrets if they do not exist; it never
 creates or guesses the separately custodied Borg repository credentials.

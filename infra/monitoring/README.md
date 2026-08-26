@@ -10,7 +10,7 @@ The active receiver config is `infra/monitoring/ubuntu/`. It runs:
 - Loki log ingestion at `metrics-ingest.finite.computer/loki/api/v1/push`
 - Blackbox HTTP probes for the narrow public uptime dashboard
 - Caddy as the only public edge
-- The private Twenty commercial register origin at `crm.finite.computer`
+- The private Finite Business application at `business.finite.computer`
 
 Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic

@@ -61,10 +61,16 @@ def main() -> None:
 
     caddy = read(ROOT / "infra/monitoring/ubuntu/Caddyfile")
     prometheus = read(ROOT / "infra/monitoring/ubuntu/prometheus.yml")
-    require("crm.finite.computer" in caddy, "Caddy CRM origin missing")
-    require("reverse_proxy 127.0.0.1:3020" in caddy, "Caddy CRM upstream drifted")
-    require("job_name: crm.finite.computer" in prometheus, "CRM blackbox probe missing")
-    require("https://crm.finite.computer/healthz" in prometheus, "CRM health target drifted")
+    require("business.finite.computer" in caddy, "Finite Business origin missing")
+    require("reverse_proxy 127.0.0.1:3020" in caddy, "Finite Business upstream drifted")
+    require(
+        "job_name: business.finite.computer" in prometheus,
+        "Finite Business blackbox probe missing",
+    )
+    require(
+        "https://business.finite.computer/healthz" in prometheus,
+        "Finite Business health target drifted",
+    )
 
     expected = {
         "finite-commercial-register.service",
@@ -96,7 +102,7 @@ def main() -> None:
     publish = read(HERE / "scripts/publish-url")
     for required in (
         "--activate",
-        "SERVER_URL=https://crm.finite.computer",
+        "SERVER_URL=https://business.finite.computer",
         "finite-status-before.json",
         "finite-status-after.json",
         "/opt/finite-commercial-register/bin/backup",
@@ -106,9 +112,9 @@ def main() -> None:
 
     monitoring_deploy = read(ROOT / "infra/monitoring/ubuntu/deploy")
     require(
-        'https://crm.finite.computer/healthz "public commercial register health"'
+        'https://business.finite.computer/healthz "public Finite Business health"'
         in monitoring_deploy,
-        "monitoring edge deploy does not prove public CRM health",
+        "monitoring edge deploy does not prove public Finite Business health",
     )
 
     forbidden = re.compile(r"(?i)(password|secret|token|api[_-]?key)=([^$\n{][^\n]*)")

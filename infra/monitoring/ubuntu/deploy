@@ -324,7 +324,7 @@ wait_http_status 200 GET http://127.0.0.1:9090/-/ready "local Prometheus readine
 wait_http_status 200 GET http://127.0.0.1:3100/ready "local Loki readiness"
 wait_http_status 200 GET http://127.0.0.1:3000/api/health "local Grafana health"
 wait_http_status 200 GET https://monitoring.finite.computer/api/health "public Grafana health"
-wait_http_status 200 GET https://crm.finite.computer/healthz "public commercial register health"
+wait_http_status 200 GET https://business.finite.computer/healthz "public Finite Business health"
 wait_http_status 401 POST https://metrics-ingest.finite.computer/api/v1/write "unauthenticated remote write"
 wait_http_status 401 POST https://metrics-ingest.finite.computer/loki/api/v1/push "unauthenticated Loki push"
 

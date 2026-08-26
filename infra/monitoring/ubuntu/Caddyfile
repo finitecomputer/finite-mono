@@ -8,7 +8,7 @@ monitoring.finite.computer {
 	reverse_proxy 127.0.0.1:3000
 }
 
-crm.finite.computer {
+business.finite.computer {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:3020
 }

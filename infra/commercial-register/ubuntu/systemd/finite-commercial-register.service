@@ -1,5 +1,5 @@
 [Unit]
-Description=Finite commercial register (Twenty)
+Description=Finite Business (Twenty commercial module)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target

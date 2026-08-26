@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Finite commercial register backup
+Description=Daily Finite Business backup
 
 [Timer]
 OnBootSec=30min

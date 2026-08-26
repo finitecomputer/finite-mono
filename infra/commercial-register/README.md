@@ -1,9 +1,10 @@
-# Commercial register production service
+# Finite Business production service
 
-Finite's private Twenty instance runs beside Grafana on the dedicated monitoring
-VM (`152.236.5.27`). It is intentionally isolated from the product database and
-binds only to `127.0.0.1:3020`; the monitoring VM's one Caddy edge publishes the
-service at `https://crm.finite.computer`.
+Finite Business is Finite's private internal business hub, built on Twenty. Its
+first module is the commercial relationship register. It runs beside Grafana on
+the dedicated monitoring VM (`152.236.5.27`), isolated from the product
+database, and binds only to `127.0.0.1:3020`; the monitoring VM's one Caddy edge
+publishes it at `https://business.finite.computer`.
 
 The active Ubuntu/systemd definition is [`ubuntu/`](ubuntu/). It uses the
 official Twenty, PostgreSQL, and Redis images by immutable digest. Nothing is
@@ -36,8 +37,8 @@ or guesses the independently custodied Borg credentials.
 The generated first-boot `SERVER_URL` is `http://localhost:3020` so the first
 administrator can claim the only workspace through an SSH tunnel without
 exposing an unclaimed instance. The reviewed `publish-url --activate` command
-changes it to `https://crm.finite.computer`, restarts Twenty, and proves a new
-off-host Recovery Set before the DNS/Caddy publication boundary.
+changes it to `https://business.finite.computer`, restarts Twenty, and proves a
+new off-host Recovery Set before the DNS/Caddy publication boundary.
 
 The encryption key is part of the encrypted Recovery Set because losing it
 makes encrypted values in PostgreSQL unreadable. The Borg passphrase and SSH

@@ -1,5 +1,5 @@
 [Unit]
-Description=Check Finite commercial register health
+Description=Check Finite Business health
 
 [Timer]
 OnBootSec=5min

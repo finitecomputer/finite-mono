@@ -1,5 +1,5 @@
 [Unit]
-Description=Finite commercial register application and recovery health
+Description=Finite Business application and recovery health
 After=finite-commercial-register.service
 Requires=finite-commercial-register.service
 

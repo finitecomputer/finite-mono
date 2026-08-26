@@ -120,7 +120,7 @@ capacity. The one accepted next candidate and its hard gates live in
 | **finite-lat-2** (64.34.80.19) | **Live app-plane host (ADR 0007).** Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard, Caddy, backups, litestream. No Agent Runner. Recovery Authority and the `wg-finite` hub at `10.254.3.1`. | `finite.computer` DNS points here. Post-cutover cleanup (old runners, leftover credentials, stale smoke row) is still open. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 42.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=42`. This owner-authorized ceiling deliberately overcommits the declared 8-GiB guest maximum against physical RAM; swap is not counted as usable Agent capacity. No Recovery Authority exists here. |
 | **finite-lat-4** (152.236.34.15) | **Second live NixOS Agent Runner** (same chassis class as lat3). RAID1 root and `/data`; `10.254.3.4` on `wg-finite`. | `FC_RUNNER_DRAIN=false`. Holds the relocated lat1 cohort (21 active Runtimes as of 2026-08-29). No Recovery Authority. |
-| **finite-monitoring-1-81926** (152.236.5.27) | Dedicated Ubuntu 24.04 monitoring receiver. The accepted NixOS definition is a future replacement, not the active path. | Native systemd Grafana, Prometheus, Loki, blackbox exporter, and one Caddy edge. The digest-pinned private Finite Business definition under `infra/commercial-register/` is the reviewed candidate for this host; it is not observed as deployed until `scripts/finite-status` reports its commercial module configured and green. |
+| **finite-monitoring-1-81926** (152.236.5.27) | Dedicated Ubuntu 24.04 monitoring receiver. The accepted NixOS definition is a future replacement, not the active path. | Native systemd Grafana, Prometheus, Loki, blackbox exporter, and one Caddy edge. The digest-pinned private Finite Business application under `infra/commercial-register/` is the reviewed candidate for this host; it is not observed as deployed until `scripts/finite-status` reports its commercial module configured and green. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (chat lives on the app-plane host, lat2). |
 | Tinfoil | Measured enclaves | GLM-5.3-Flash inference + finite-private-limiter enclave on container `finite-private` (`v2026-08-28-glm-5-3-flash-5`, `acc651a6…`); searxng enclave. Admission is usage-api. Canonical model `glm-5-3-flash`; `deepseek-v4-flash-0731` and `glm-5-2` remain mixed-version request aliases. The historical `kimi-k2-6` hostname is retired. Deployed from the public satellite repos (`tinfoil/`). |
@@ -132,8 +132,9 @@ capacity. The one accepted next candidate and its hard gates live in
   Origin CA cert, served by lat2's Caddy since the 2026-08-29 cutover);
   `*.docs.finite.chat` same edge.
 - `monitoring.finite.computer`, `metrics-ingest.finite.computer` → the dedicated
-  monitoring VM (Namecheap). `business.finite.computer` joins that exact host only
-  after its private origin, off-host backup, and empty-target restore are green.
+  monitoring VM (Namecheap). `business.finite.computer` joins that exact host
+  only after its private origin, off-host backup, and empty-target restore are
+  green.
 - `brain.finite.computer` is the canonical production Brain signing/API
   origin. The WorkOS-protected embedded client remains under
   `finite.computer/client`; its capability names the canonical Brain origin.

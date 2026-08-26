@@ -4,7 +4,7 @@ import { DEFAULT_ROLE_UNIVERSAL_IDENTIFIER } from './constants/universal-identif
 
 export default defineApplicationRole({
   universalIdentifier: DEFAULT_ROLE_UNIVERSAL_IDENTIFIER,
-  label: 'Finite Commercial Register application role',
+  label: 'Finite Business application role',
   description: 'No autonomous Twenty capabilities in the MVP',
   canReadAllObjectRecords: false,
   canUpdateAllObjectRecords: false,

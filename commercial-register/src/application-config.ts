@@ -4,7 +4,7 @@ import { APPLICATION_UNIVERSAL_IDENTIFIER } from './constants/universal-identifi
 
 export default defineApplication({
   universalIdentifier: APPLICATION_UNIVERSAL_IDENTIFIER,
-  displayName: 'Finite Commercial Register',
+  displayName: 'Finite Business',
   description:
-    'Finite commercial relationships, purchases, payments, and recurring revenue',
+    'Finite business hub for customers, purchases, payments, and recurring revenue',
 });

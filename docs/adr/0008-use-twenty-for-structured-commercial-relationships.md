@@ -2,11 +2,12 @@
 status: accepted
 ---
 
-# Use Twenty for structured commercial relationships and Brain for narrative context
+# Use Twenty for Finite Business and Brain for narrative context
 
-Finite will self-host Twenty as the structured Commercial Relationship Register
-and Customer Commercial Subledger. Finite will build a versioned Twenty app
-whose data model follows `docs/commercial-relationships/CONTEXT.md`, while the
+Finite will self-host Twenty as **Finite Business**, the internal business hub.
+Its first module is the structured Commercial Relationship Register and
+Customer Commercial Subledger. Finite will build a versioned Twenty app whose
+data model follows `docs/commercial-relationships/CONTEXT.md`, while the
 Organization Brain remains the durable home for meeting notes, Organization
 Wants, relationship narrative, research, and proposal work.
 
@@ -111,9 +112,10 @@ possibly partial total.
 - The private deployment runs beside Grafana on the dedicated monitoring VM,
   not in the coupled product cluster. It has its own PostgreSQL, Redis, local
   file storage, encryption keys, off-host Recovery Set, and restore drill;
-  monitoring and CRM share only the host and its single Caddy edge.
+  monitoring and Finite Business share only the host and its single Caddy edge.
 - Stripe/Core imports are idempotent and read-only with respect to their source
   facts. Meeting and proposal automation cannot bypass the typed Twenty write
   boundary.
-- The initial implementation remains internal dogfood. It does not imply a
-  customer-facing CRM feature or upstream contribution to Twenty.
+- The initial Finite Business implementation remains internal dogfood. Its
+  broader name is not authority to absorb every business system, and it does
+  not imply a customer-facing product or upstream contribution to Twenty.

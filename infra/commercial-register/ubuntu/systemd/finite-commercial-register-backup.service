@@ -1,5 +1,5 @@
 [Unit]
-Description=Service-consistent Finite commercial register backup
+Description=Service-consistent Finite Business backup
 After=finite-commercial-register.service network-online.target
 Requires=finite-commercial-register.service
 Wants=network-online.target

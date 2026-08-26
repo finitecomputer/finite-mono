@@ -2620,7 +2620,7 @@ def render_human(report: dict[str, Any]) -> str:
         if health["commercial_register_configured"]:
             healthy_containers = sum(container["status"] == "green" for container in health["containers"])
             lines.append(
-                f"  commercial register containers: {healthy_containers}/{len(health['containers'])} healthy"
+                f"  Finite Business containers: {healthy_containers}/{len(health['containers'])} healthy"
             )
     elif health.get("healthcheck"):
         check = health["healthcheck"]
@@ -2700,7 +2700,7 @@ def render_human(report: dict[str, Any]) -> str:
     elif recovery.get("profile") == "commercial-register":
         snapshot = recovery["snapshot"]
         lines.append(
-            f"  commercial register snapshot {snapshot.get('name', 'unknown')}: "
+            f"  Finite Business snapshot {snapshot.get('name', 'unknown')}: "
             f"age {human_age(snapshot.get('age_seconds'))} {badge(snapshot['status'])}"
         )
         borg = recovery["borg"]

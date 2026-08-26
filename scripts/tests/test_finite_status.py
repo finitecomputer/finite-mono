@@ -416,7 +416,7 @@ class FiniteStatusTests(unittest.TestCase):
             "rollout": {"exists": False, "root": "/tmp/none"},
         }
 
-    def test_monitoring_host_status_includes_crm_images_and_recovery(self) -> None:
+    def test_monitoring_host_status_includes_business_app_images_and_recovery(self) -> None:
         now = finite_status.parse_time("2026-08-26T16:30:00Z")
         self.assertIsNotNone(now)
         report = finite_status.build_report(self.monitoring_raw(), now)
@@ -430,9 +430,9 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(recovery["borg"]["stamp_status"], "green")
         output = finite_status.render_human(report)
         self.assertIn("not applicable on the monitoring host", output)
-        self.assertIn("commercial register containers: 4/4 healthy", output)
+        self.assertIn("Finite Business containers: 4/4 healthy", output)
 
-    def test_monitoring_host_rejects_a_drifted_crm_image(self) -> None:
+    def test_monitoring_host_rejects_a_drifted_business_app_image(self) -> None:
         raw = self.monitoring_raw()
         raw["host_health"]["containers"]["finite-commercial-register-server"]["image"] = (
             "docker.io/twentycrm/twenty:latest"

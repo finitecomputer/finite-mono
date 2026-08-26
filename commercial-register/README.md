@@ -1,8 +1,9 @@
-# Finite Commercial Register
+# Finite Business
 
-Finite's private Twenty application for structured organizations, contacts,
-opportunities, purchases, payments, and recurring revenue. FiniteBrain remains
-the source for meeting notes, Organization Wants, and narrative context.
+Finite's private business hub, built on Twenty. Its first module covers
+structured organizations, contacts, opportunities, purchases, payments, and
+recurring revenue. FiniteBrain remains the source for meeting notes,
+Organization Wants, and narrative context.
 
 This is intentionally not Salesforce and not a general ledger. The MVP answers:
 
@@ -63,8 +64,8 @@ just commercial app-apply
 Do not use `--force` for ordinary app application. The digest-pinned production
 service, backup, restore drill, DNS, and rollback boundary are declared under
 [`infra/commercial-register`](../infra/commercial-register/README.md). The
-production register becomes an authority only after the first off-host archive
-has passed that empty-target restore and the real application has been applied
+commercial module becomes an authority only after the first off-host archive has
+passed that empty-target restore and the real application has been applied
 without seeding the synthetic NED fixture.
 
 ## Agent interface
