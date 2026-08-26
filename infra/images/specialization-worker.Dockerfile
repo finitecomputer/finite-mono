@@ -1,5 +1,5 @@
 # Shared AEON specialization worker. Build context: finite-mono root.
-# Built only by .github/workflows/service-images.yml.
+# Built only by .depot/workflows/service-images.yml.
 
 FROM rust:bookworm AS builder
 

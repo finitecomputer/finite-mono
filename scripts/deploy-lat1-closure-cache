@@ -6,9 +6,19 @@ set -euo pipefail
 LAT1="${FINITE_LAT1_TARGET:-root@64.34.82.77}"
 
 usage() {
-  echo "usage: $0 <lat1-closure-artifact-dir> [runtime rollout options]" >&2
+  echo "usage: $0 [--validate-only] <lat1-closure-artifact-dir> [runtime rollout options]" >&2
 }
 
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 64
+fi
+
+mode="deploy"
+if [[ "$1" == "--validate-only" ]]; then
+  mode="validate"
+  shift
+fi
 if [[ $# -lt 1 ]]; then
   usage
   exit 64
@@ -43,7 +53,10 @@ with open(path, encoding="utf-8") as fh:
 expected_schema = "finite.lat1.nixos-closure.v1"
 if data.get("schema") != expected_schema:
     raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
-if data.get("repository") != "finitecomputer/finite-mono":
+if data.get("repository") not in {
+    "finite-co/finite-mono",
+    "finitecomputer/finite-mono",
+}:
     raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
 
 rev = data.get("rev")
@@ -92,6 +105,9 @@ echo "==> using prebuilt lat1 closure artifact"
 echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
+if [[ "$mode" == "validate" ]]; then
+  exit 0
+fi
 
 if git cat-file -e "$REV:infra/nixos/modules/metrics.nix" 2>/dev/null \
   && git grep -q 'FINITE_LOGS_WRITE_PASSWORD' "$REV" -- infra/nixos/modules/metrics.nix; then

@@ -28,8 +28,8 @@ spec.loader.exec_module(affected_rust_packages)
 class NormalizePathTests(unittest.TestCase):
     def test_dotfile_path_is_preserved(self) -> None:
         self.assertEqual(
-            changed_paths.normalize_path(".github/workflows/ci.yml"),
-            ".github/workflows/ci.yml",
+            changed_paths.normalize_path(".depot/workflows/ci.yml"),
+            ".depot/workflows/ci.yml",
         )
 
     def test_dot_slash_prefix_is_stripped(self) -> None:
@@ -57,7 +57,7 @@ class AffectedRustPackagesChangedFileTests(unittest.TestCase):
             event="pull_request",
             base=None,
             head=None,
-            changed_files=[".github/workflows/ci.yml"],
+            changed_files=[".depot/workflows/ci.yml"],
         )
 
         selection = affected_rust_packages.select_package_scope(args)
@@ -65,7 +65,7 @@ class AffectedRustPackagesChangedFileTests(unittest.TestCase):
         self.assertEqual(selection["mode"], "full")
         self.assertEqual(
             selection["reason"],
-            ".github/workflows/ci.yml can affect the whole Rust workspace",
+            ".depot/workflows/ci.yml can affect the whole Rust workspace",
         )
 
     def test_dot_slash_prefix_matches_bare_path(self) -> None:

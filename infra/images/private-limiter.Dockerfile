@@ -1,7 +1,7 @@
 # finite-private-limiter image (runs inside the Finite Private Tinfoil CVM,
 # port 8002). Moved from finitecomputer-v2/deploy/finite-computer/images/ and
 # adapted for the finite-mono root build context. Build context: repo root.
-# Built ONLY by .github/workflows/service-images.yml.
+# Built ONLY by .depot/workflows/service-images.yml.
 #
 # This image being built HERE closes the old split-brain: the source of truth
 # crate is finitecomputer-v2/crates/finite-private-limiter (this repo), while
@@ -18,7 +18,7 @@ RUN cargo build --release --locked -p finite-private-limiter
 FROM debian:bookworm-slim
 
 ARG FINITE_MONO_REV
-LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono" \
+LABEL org.opencontainers.image.source="https://origin.cursor.com/finite-co/finite-mono" \
       org.opencontainers.image.revision="$FINITE_MONO_REV"
 
 RUN apt-get update \

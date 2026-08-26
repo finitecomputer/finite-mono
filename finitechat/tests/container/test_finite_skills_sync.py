@@ -18,7 +18,7 @@ RUNTIME_DOCKERFILE = (
 HEALTHCHECK = (
     MONOREPO_ROOT / "finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh"
 )
-RUNTIME_IMAGE_WORKFLOW = MONOREPO_ROOT / ".github/workflows/runtime-image.yml"
+RUNTIME_IMAGE_WORKFLOW = MONOREPO_ROOT / ".depot/workflows/runtime-image.yml"
 GOOGLE_WORKSPACE_SKILL = MONOREPO_ROOT / "finite-skills/skills/productivity/google-workspace-finite"
 GOOGLE_WORKSPACE_DASHBOARD_SCOPES = (
     MONOREPO_ROOT / "finitecomputer-v2/apps/dashboard/src/contracts/google-workspace-scopes.json"

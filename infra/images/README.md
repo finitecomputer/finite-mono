@@ -44,12 +44,46 @@ Notes:
   Dockerfile as a "test fixture" (the former
   `finitechat/containers/agent/Dockerfile` drifted from the product image
   and was deleted in ownership audit O12).
-- Image workflows run on Depot-managed GitHub Actions runners and Depot remote
-  builders; lat2 is not required for Docker CI. Set `DEPOT_PROJECT_ID` as a
-  repository variable or secret, or override by lane with
+- Image workflows run in native Depot CI with Depot remote builders; lat2 is
+  not required for Docker CI. Set `DEPOT_PROJECT_ID` as a Depot repository
+  variable, or override by lane with
   `DEPOT_SERVICE_IMAGES_PROJECT_ID`, `DEPOT_RUNTIME_IMAGE_PROJECT_ID`, or
   `DEPOT_DEEPSEEK_VLLM_PROJECT_ID`. The workflows authenticate via
   `depot/setup-action` OIDC.
+- After the Origin/Depot hard cut, dispatch production image publishers through
+  Depot on reviewed Origin `main`, then verify the resolved source revision and
+  record the pinned digest printed by the workflow. For example:
+
+  ```sh
+  git fetch origin --prune
+  REV="$(git rev-parse HEAD)"
+  [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
+  git merge-base --is-ancestor "$REV" origin/main
+  depot ci dispatch \
+    --org scthc5h66g \
+    --repo finite-co/finite-mono \
+    --workflow service-images.yml \
+    --ref main \
+    --input rev="$REV" \
+    --input image=dashboard \
+    --input version=2026-07-08.1 \
+    --input publish_production=true \
+    --output json
+
+  depot ci dispatch \
+    --org scthc5h66g \
+    --repo finite-co/finite-mono \
+    --workflow deepseek-v4-vllm-image.yml \
+    --ref main \
+    --input rev="$REV" \
+    --input version=0.25.1-0731-reasoning.1 \
+    --input publish_production=true \
+    --output json
+  ```
+
+  These workflows publish verified GHCR digests only. They do not edit a
+  production manifest or host and do not restart a workload; promotion of the
+  pinned digest remains a separate runbook-controlled action.
 - Version tags are date-based for images (`2026-07-08.1`); every push also
   gets a `sha-<git sha>` tag and the workflow summary prints the pinned
   `name:tag@digest` to use in manifests.

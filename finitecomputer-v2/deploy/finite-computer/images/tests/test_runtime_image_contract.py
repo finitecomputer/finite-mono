@@ -89,7 +89,7 @@ class RuntimeImageContractTests(unittest.TestCase):
         )
 
     def test_phala_readonly_workflow_passes_but_build_lane_fails(self) -> None:
-        workflow = Path(".github/workflows/phala-readonly-preflight.yml")
+        workflow = Path(".depot/workflows/phala-readonly-preflight.yml")
         self.write(
             workflow,
             "name: Phala read-only preflight\n"
@@ -115,14 +115,14 @@ class RuntimeImageContractTests(unittest.TestCase):
 
     def test_second_agent_runtime_publisher_fails(self) -> None:
         self.write(
-            ".github/workflows/runtime-backup-publisher.yml",
+            ".depot/workflows/runtime-backup-publisher.yml",
             "name: backup\nrun: docker push ghcr.io/example/agent-runtime:latest",
         )
         self.assertTrue(
             any("sole Agent Runtime publisher" in item for item in self.violations())
         )
         self.write(
-            ".github/workflows/runtime-backup-publisher.yml",
+            ".depot/workflows/runtime-backup-publisher.yml",
             "name: backup\nrun: depot build --push -t ghcr.io/example/agent-runtime:latest .",
         )
         self.assertTrue(

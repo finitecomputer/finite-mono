@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".depot" / "workflows"
 
@@ -12,7 +11,9 @@ class DepotWorkflowContractTests(unittest.TestCase):
     def workflow(self, name: str) -> str:
         return (WORKFLOWS / name).read_text(encoding="utf-8")
 
-    def test_native_workflows_do_not_request_unsupported_execution_boundaries(self) -> None:
+    def test_native_workflows_do_not_request_unsupported_execution_boundaries(
+        self,
+    ) -> None:
         for path in sorted(WORKFLOWS.glob("*.yml")):
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
@@ -23,7 +24,9 @@ class DepotWorkflowContractTests(unittest.TestCase):
                 self.assertNotIn("runs_on_json", text)
                 self.assertNotIn("fromJSON(inputs.", text)
 
-    def test_finitechat_release_defers_electron_and_uses_release_repository(self) -> None:
+    def test_finitechat_release_defers_electron_and_uses_release_repository(
+        self,
+    ) -> None:
         workflow = self.workflow("release-finitechat.yml")
         self.assertNotIn("electron:", workflow)
         self.assertNotIn("APPLE_", workflow)
@@ -79,6 +82,11 @@ class DepotWorkflowContractTests(unittest.TestCase):
             workflow = self.workflow(name)
             with self.subTest(path=name):
                 self.assertIn("FINITE_RELEASE_PUBLISH_ENABLED == 'true'", workflow)
+                self.assertIn(
+                    "FINITE_RELEASE_CANARY_PUBLISH_ENABLED == 'true'", workflow
+                )
+                self.assertIn("inputs.canary_publish == true", workflow)
+                self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
                 self.assertIn("inputs.alias_only", workflow)
                 self.assertIn("inputs.release_tag", workflow)
                 self.assertIn("git fetch --no-tags origin", workflow)
@@ -100,8 +108,19 @@ class DepotWorkflowContractTests(unittest.TestCase):
                 self.assertIn("ghcr.io/finitecomputer/", workflow)
                 self.assertIn("canary-", workflow)
                 self.assertIn("docker logout ghcr.io", workflow)
-                self.assertIn("FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'", workflow)
+                self.assertIn(
+                    "FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'", workflow
+                )
                 self.assertIn("inputs.publish_production", workflow)
+                self.assertIn("SOURCE_REV: ${{ inputs.rev }}", workflow)
+                self.assertIn("ref: ${{ inputs.rev }}", workflow)
+                self.assertIn('[[ "$SOURCE_REV" =~ ^[0-9a-f]{40}$ ]]', workflow)
+                self.assertIn('test "$(git rev-parse HEAD)" = "$SOURCE_REV"', workflow)
+                self.assertIn(
+                    'git merge-base --is-ancestor "$SOURCE_REV" origin/main',
+                    workflow,
+                )
+                self.assertNotIn("GITHUB_SHA", workflow)
                 self.assertNotIn("github.repository_owner", workflow)
                 if name != "runtime-image.yml":
                     self.assertIn("save: true", workflow)
@@ -112,8 +131,21 @@ class DepotWorkflowContractTests(unittest.TestCase):
     def test_production_workflow_has_no_mutating_job(self) -> None:
         workflow = self.workflow("production-deploy.yml")
         self.assertIn("scripts/delivery.py require-production-disabled", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertNotIn("&& 'production'", workflow)
         self.assertNotIn("\n  deploy:\n", workflow)
         self.assertNotIn("FINITE_PRODUCTION_SSH_KEY", workflow)
+
+    def test_closure_workflows_require_full_origin_main_ancestry(self) -> None:
+        for name in ("lat1-nixos-closure.yml", "lat3-nixos-closure.yml"):
+            workflow = self.workflow(name)
+            with self.subTest(path=name):
+                self.assertIn("fetch-depth: 0", workflow)
+                self.assertIn("git fetch --no-tags origin main", workflow)
+                self.assertIn(
+                    'git merge-base --is-ancestor "$REV" origin/main', workflow
+                )
+                self.assertNotIn("--depth=1", workflow)
 
     def test_ci_gate_has_no_electron_dependency(self) -> None:
         workflow = self.workflow("ci.yml")

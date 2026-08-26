@@ -54,6 +54,29 @@ class Lat1ClosureArtifactTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema": "finite.lat1.nixos-closure.v1",
+                        "repository": "finite-co/finite-mono",
+                        "rev": "a" * 40,
+                        "system": "/nix/store/"
+                        + "b" * 32
+                        + "-nixos-system-finite-lat-1-25.11.test",
+                        "disko": "/nix/store/" + "c" * 32 + "-disko",
+                        "cache": "nix-cache",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = self.run_deploy(artifact)
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("artifact cache is missing or incomplete", result.stderr)
+
+    def test_legacy_github_artifact_remains_rollback_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp)
+            (artifact / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "finite.lat1.nixos-closure.v1",
                         "repository": "finitecomputer/finite-mono",
                         "rev": "a" * 40,
                         "system": "/nix/store/"
@@ -69,6 +92,14 @@ class Lat1ClosureArtifactTests(unittest.TestCase):
             result = self.run_deploy(artifact)
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact cache is missing or incomplete", result.stderr)
+        self.assertNotIn("unexpected repository", result.stderr)
+
+    def test_validate_only_stops_before_any_remote_operation(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        validation_exit = source.index('if [[ "$mode" == "validate" ]]')
+
+        self.assertLess(validation_exit, source.index("ssh -o BatchMode=yes"))
+        self.assertLess(validation_exit, source.index("nix copy --no-check-sigs"))
 
     def test_deploy_preflights_log_shipping_secrets_before_snapshot(self) -> None:
         text = DEPLOY.read_text(encoding="utf-8")

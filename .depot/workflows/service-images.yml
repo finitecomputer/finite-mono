@@ -3,6 +3,10 @@ run-name: Build ${{ inputs.image }} ${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
+      rev:
+        description: Exact reviewed commit on Origin main to build
+        required: true
+        type: string
       image:
         description: Which image to build
         required: true
@@ -23,6 +27,8 @@ on:
         type: boolean
 concurrency:
   group: service-image-${{ inputs.image }}-${{ inputs.version }}
+env:
+  SOURCE_REV: ${{ inputs.rev }}
 jobs:
   publish:
     runs-on: depot-ubuntu-24.04
@@ -31,6 +37,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev }}
+          fetch-depth: 0
+      - name: Verify exact source revision
+        run: |
+          [[ "$SOURCE_REV" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REV"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_REV" origin/main
       - uses: depot/setup-action@v1
         with:
           oidc: true
@@ -59,7 +74,7 @@ jobs:
               echo "name=private-limiter" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
-              echo "build_args=FINITE_MONO_REV=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+              echo "build_args=FINITE_MONO_REV=$SOURCE_REV" >> "$GITHUB_OUTPUT"
               ;;
             specialization-worker)
               echo "name=finite-specialization-worker" >> "$GITHUB_OUTPUT"
@@ -111,7 +126,7 @@ jobs:
             --platform linux/amd64 \
             --require-attestation
           if [ "${{ inputs.image }}" = "private-limiter" ]; then
-            test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+            test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REV"
           fi
           echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
           echo "pinned=$IMAGE@$destination_digest" >> "$GITHUB_OUTPUT"
@@ -136,7 +151,7 @@ jobs:
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
-          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          sha_ref="$IMAGE:sha-${SOURCE_REV::12}"
           depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
           for ref in "$version_ref" "$sha_ref"; do
             docker pull "$ref" >/dev/null

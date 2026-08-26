@@ -9,7 +9,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "hermes-durable-home-docker-smoke.py"
-WORKFLOW_PATH = REPO_ROOT.parent / ".github" / "workflows" / "hermes-runtime-smoke.yml"
+WORKFLOW_PATH = REPO_ROOT.parent / ".depot" / "workflows" / "hermes-runtime-smoke.yml"
 
 spec = importlib.util.spec_from_file_location("hermes_durable_home_docker_smoke", SCRIPT_PATH)
 assert spec is not None

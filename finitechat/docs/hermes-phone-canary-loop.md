@@ -234,9 +234,9 @@ Layer 2 proof is therefore the canonical-image Docker smoke:
 scripts/hermes-durable-home-docker-smoke.py --image finite-agent-runtime:local
 ```
 
-In CI the same pair runs in `.github/workflows/hermes-runtime-smoke.yml`
+In CI the same pair runs in `.depot/workflows/hermes-runtime-smoke.yml`
 (build once with Depot, then smoke the loaded image), and the publication
-workflow `.github/workflows/runtime-image.yml` runs the durable smoke against
+workflow `.depot/workflows/runtime-image.yml` runs the durable smoke against
 the exact image ID it pushes. A pre-built tag from that workflow
 (`ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...`) can be passed to
 `--image` instead of building locally.

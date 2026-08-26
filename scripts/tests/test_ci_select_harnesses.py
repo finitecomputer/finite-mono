@@ -35,8 +35,8 @@ def selected(*paths: str) -> set[str]:
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
-    def test_github_ci_does_not_reference_parked_electron_harness(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    def test_depot_ci_does_not_reference_parked_electron_harness(self) -> None:
+        workflow = (ROOT / ".depot" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
         self.assertNotIn("electron-alpha", workflow)
         self.assertNotIn("run_electron_alpha", workflow)
@@ -113,6 +113,15 @@ class CiHarnessSelectionTests(unittest.TestCase):
     def test_runbook_markdown_runs_nix_checks(self) -> None:
         self.assertEqual(
             selected("infra/runbooks/deploy-core.md"),
+            {"run_nix_checks"},
+        )
+
+    def test_depot_closure_fetcher_runs_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/fetch_depot_nixos_closure.py",
+                "scripts/tests/test_depot_closure_artifact.py",
+            ),
             {"run_nix_checks"},
         )
 
@@ -278,11 +287,11 @@ class CiHarnessSelectionTests(unittest.TestCase):
             self.assertEqual(value, "true", key)
 
     def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
-        args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
+        args = argparse.Namespace(changed_files=[".depot/workflows/README.md"])
         selection, _reason, paths = select_harnesses.select_harnesses(args)
         values = selection.values()
 
-        self.assertEqual(paths, [".github/workflows/README.md"])
+        self.assertEqual(paths, [".depot/workflows/README.md"])
         for key, value in values.items():
             self.assertEqual(value, "true", key)
 

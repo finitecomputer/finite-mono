@@ -507,7 +507,7 @@ a publish artifact by validating that the local Docker image id still matches
 the proven `facts.image_id`, tagging that exact image, and optionally pushing
 it to GHCR.
 
-### Phase 6: Promote To CI And Release Gates
+### Phase 6: Historical GitHub CI And Release-Gate Experiment
 
 - Quality: make adapter unit tests, Rust integration tests, service contract
   tests, and runtime-image smoke checks part of the package/release story.
@@ -520,10 +520,10 @@ it to GHCR.
 - Understanding: each release should answer what changed, what was tested, and
   which runtime image digest was proven.
 
-Current CI shape:
+Historical CI shape (removed at the Origin/Depot Hard Cutover):
 
-- `.github/workflows/ci.yml` pins the adapter test environment to the root
-  flake's Nix Hermes runtime.
+- The former GitHub CI workflow pinned the adapter test environment to the
+  root flake's Nix Hermes runtime.
 - Every PR and `main`/`codex/**` push runs Rust fmt, clippy, workspace tests,
   the local Hermes CLI round-trip smoke, Ruff, BasedPyright, and Python adapter
   tests.
@@ -536,42 +536,18 @@ Current CI shape:
   restic repository when the default local backend is used. The report includes
   the local Docker image ID, image metadata, restic backend, restic snapshot
   metadata, repository metadata, encrypted backup flag, snapshot tag, and
-  backup source for the image it proved. This is the current release-gate
-  stand-in. Before generating the combined hardening audit, the Docker job
+  backup source for the image it proved. This was the release-gate stand-in.
+  Before generating the combined hardening audit, the Docker job
   downloads the sidecar smoke artifact from the Rust/Hermes job so
   `target/hermes-hardening-audit.json` reflects the full CI evidence chain
   instead of only the files produced inside the Docker job.
-- Manual workflow dispatch with `publish_runtime_image=true` runs the Docker
-  smoke first and requires `restic_backend=s3`. The workflow accepts either a
-  full `restic_repository` input or derives the repository from
-  `latitude_storage_bucket`, `latitude_object_endpoint`, and `restic_prefix`
-  inputs/repository variables. It passes `FINITE_DOCKER_RESTIC_PASSWORD`,
-  `FINITE_DOCKER_RESTIC_AWS_ACCESS_KEY_ID`,
-  `FINITE_DOCKER_RESTIC_AWS_SECRET_ACCESS_KEY`, and optional
-  `FINITE_DOCKER_RESTIC_AWS_SESSION_TOKEN` and
-  `FINITE_DOCKER_RESTIC_AWS_REGION` repository secrets into the Docker smoke.
-  `scripts/hermes-github-secrets-setup.py` can install those names from `.env`,
-  process env, or the standard AWS shared credentials/config files without
-  printing secret values. `scripts/hermes-github-ci-preflight.py` checks the
-  GitHub secret and variable names before the slow workflow is started without
-  reading secret values. `scripts/hermes-branch-publication-readiness.py`
-  checks the local worktree before that slow path by classifying publishable
-  source changes, blocking obvious generated or sensitive paths, reporting clean
-  already-pushed worktrees distinctly from blocked ones, and printing the exact
-  stage/commit/push commands when there are source changes to publish without
-  mutating git.
-  `scripts/hermes-github-publish-gate.py` then dispatches the manual workflow,
-  watches it, downloads artifacts, and writes a local report so the S3
-  smoke/publish gate can be driven from the repo rather than the Actions UI. On
-  success it imports the downloaded reports into the canonical local
-  `target/...` paths and refreshes the hardening audit. It refuses to dispatch
-  from a dirty local worktree or a missing remote branch because GitHub Actions
-  can only prove the pushed ref.
-  The hardening audit rejects a placeholder publish-gate `{"status":"passed"}`
-  report: it requires the dispatched run id/URL, successful watch/download
-  exits, a local audit refresh, and copied canonical artifacts for the Docker
-  smoke, restic preflight, image publish report, Tinfoil handoff, and canary
-  summary.
+- The former GitHub Actions S3 publication experiment accepted
+  `publish_runtime_image=true` and produced an orchestration report consumed by
+  the hardening audit. Its workflow and three `hermes-github-*` operator helpers
+  were removed at the Origin/Depot Hard Cutover. Existing report fixtures remain
+  historical evidence only. If this parked experiment resumes, it must use an
+  explicit Origin revision and native Depot artifacts while preserving the
+  underlying S3 smoke, digest, handoff, and live-canary evidence contracts.
   After the S3-backed smoke passes, it logs into GHCR, tags the exact
   `facts.image_id` from the passing smoke report as
   `ghcr.io/<owner>/finite-chat-hermes-runtime:<commit-sha>`, pushes it, and

@@ -106,6 +106,9 @@ litestream-recovery-contract:
 monitoring-nixos-contract:
     just monitoring monitoring-nixos-contract
 
+origin-depot-hard-cutover-contract:
+    python3 -m unittest scripts.tests.test_origin_depot_hard_cutover
+
 nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     just nixos nixos-build-lat1-closure {{ quote(rev) }} {{ quote(out_dir) }}
 

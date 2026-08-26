@@ -47,5 +47,5 @@ def normalize_path(path: str) -> str:
         except ValueError:
             return path
     # Only strip a literal "./" prefix; lstrip("./") would also eat leading
-    # dots and turn ".github/workflows/ci.yml" into "github/workflows/ci.yml".
+    # dots and turn ".depot/workflows/ci.yml" into "depot/workflows/ci.yml".
     return path.replace(os.sep, "/").removeprefix("./")

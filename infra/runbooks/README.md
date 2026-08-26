@@ -5,8 +5,9 @@ Operational procedures for everything Finite runs. The 2026-07-08 files under
 roles live in `infra/README.md`; executable NixOS configuration is authority
 for declared NixOS state; a fresh read-only inventory is authority for physical
 state. These runbooks must name which source they rely on rather than silently
-promoting an old capture. This repo is public: **no secret values, ever** — env
-var names and locations only (`infra/README.md`, secrets policy).
+promoting an old capture. Private source is not a secret store: **no secret
+values, ever** — env var names and locations only (`infra/README.md`, secrets
+policy).
 
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
@@ -72,9 +73,9 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 2. **Rung-ladder: local proof → Docker proof → Kata → Phala/Tinfoil.**
    Nothing is promoted to a confidential-compute lane without a recorded
-   proof at the rung below it. `.github/workflows/runtime-image.yml` builds the
+   proof at the rung below it. `.depot/workflows/runtime-image.yml` builds the
    canonical image once, smokes that immutable local image ID, then publishes
-   those exact bytes. The separate `.github/workflows/hermes-runtime-smoke.yml`
+   those exact bytes. The separate `.depot/workflows/hermes-runtime-smoke.yml`
    rebuild is optional source preflight, never publication or exact-image
    promotion evidence. Concretely:
    - local: devfinity / `cargo test` / local smoke scripts pass;

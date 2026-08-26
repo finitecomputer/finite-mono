@@ -80,7 +80,10 @@ if data.get("schema") != "finite.lat3.nixos-closure.v1":
     raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
 if data.get("host") != "finite-lat-3":
     raise SystemExit(f"unexpected manifest host: {data.get('host')!r}")
-if data.get("repository") != "finitecomputer/finite-mono":
+if data.get("repository") not in {
+    "finite-co/finite-mono",
+    "finitecomputer/finite-mono",
+}:
     raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
 
 rev = data.get("rev")

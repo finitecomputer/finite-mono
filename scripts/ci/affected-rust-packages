@@ -15,7 +15,7 @@ import changed_paths
 
 
 GLOBAL_EXACT_PATHS = {
-    ".github/workflows/ci.yml",
+    ".depot/workflows/ci.yml",
     "Cargo.lock",
     "Cargo.toml",
     "flake.lock",

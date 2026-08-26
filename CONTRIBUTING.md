@@ -10,7 +10,8 @@ Everything is pinned by Nix — do not install Rust/Node/Postgres yourself.
 
 1. Install Nix (with flakes enabled) — https://nixos.org/download
 2. Install direnv — https://direnv.net
-3. `git clone https://github.com/finitecomputer/finite-mono && cd finite-mono`
+3. After receiving `finite-co` access, run
+   `origin repo clone finite-co/finite-mono && cd finite-mono`
 4. `direnv allow` — the flake dev shell provides rustc/cargo, just,
    process-compose, Postgres, and friends.
 
@@ -121,13 +122,14 @@ just dev smoke       # portable services-only integration smoke (Linux CI)
 just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt/clippy/tests against real Postgres,
+Native Depot CI (`.depot/workflows/ci.yml`) runs fmt/clippy/tests against real Postgres,
 dashboard lint/test/build, the finitechat Hermes bridge suite, and
-skills/search checks on every PR.
+skills/search checks on every Origin PR.
 
 ## Rules worth repeating
 
-- **This repo is public. Never commit a secret value.** Names and locations
-  only (`infra/README.md` explains the secrets model).
+- **Private source is not a secret store. Never commit a secret value.** Names
+  and locations only (`infra/README.md` explains the secrets model); public
+  release surfaces make this boundary especially important.
 - Release asset names and legacy install URLs are product contracts.
 - Deploy changes go in `infra/`, not in shell history.

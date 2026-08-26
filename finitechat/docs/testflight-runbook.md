@@ -41,14 +41,15 @@ version may not require a full review.
 
 ## Xcode Cloud
 
-Use Xcode Cloud for repeatable TestFlight delivery after the App Store Connect
-record exists.
+The prior GitHub-backed Xcode Cloud source integration is retired by the
+Cursor Origin Hard Cutover. Do not point it at the frozen GitHub source
+repository or introduce an outbound source mirror to keep it running. Resume
+repeatable TestFlight delivery only after an Origin-compatible source checkout
+has been designed and reviewed.
 
-Suggested first workflow:
+The former workflow configuration is retained below as non-authoritative
+reference for that follow-up:
 
-- Primary repository: `https://github.com/finitecomputer/finite-mono.git`
-- Repository branch: the release branch used for Finite Chat builds, then
-  `main` after the accepted changes merge
 - Files and folders: `finitechat/**`, plus root Cargo/Nix/build inputs used by
   the native bridge
 - Project: `finitechat/ios/FiniteChat.xcodeproj`

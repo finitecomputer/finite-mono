@@ -28,7 +28,6 @@ OUTPUT_NAMES = (
 )
 
 GLOBAL_EXACT_PATHS = {
-    ".github/workflows/ci.yml",
     ".depot/workflows/ci.yml",
     "Cargo.lock",
     "Cargo.toml",
@@ -40,8 +39,6 @@ GLOBAL_EXACT_PATHS = {
 
 GLOBAL_PREFIXES = (
     ".cargo/",
-    ".github/actions/",
-    ".github/workflows/",
     ".depot/workflows/",
 )
 
@@ -102,6 +99,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_lat1_secret_bootstrap.py",
     "scripts/ci/select-harnesses",
     "scripts/deploy-lat1-closure-cache",
+    "scripts/fetch_depot_nixos_closure.py",
     "scripts/build-lat3-nixos-closure-artifact",
     "scripts/deploy-lat3-closure-cache",
     "scripts/tests/test_check_deepseek_v4_0731_quality.py",
@@ -112,6 +110,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_deploy_lat1_rollout.py",
     "scripts/tests/test_lat1_closure_artifact.py",
     "scripts/tests/test_lat3_closure_artifact.py",
+    "scripts/tests/test_depot_closure_artifact.py",
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.rev }}
-          fetch-depth: 1
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Build and package closure
         env:
@@ -26,6 +26,8 @@ jobs:
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$REV"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$REV" origin/main
           scripts/build-lat1-nixos-closure-artifact \
             "$REV" \
             target/lat1-nixos-closure

@@ -86,6 +86,6 @@ git clone https://git.finite.chat/PROJECT.git
 
 # GitHub Release Shape
 
-The public repository is expected to publish `fsite` binaries from tags named
-`v*`. Keep README install commands and generated `/llms.txt` instructions in
-sync with `.github/workflows/release.yml`.
+The public Release Repository publishes `fsite` binaries from Source Authority
+tags named `fsite/v*`. Keep README install commands and generated `/llms.txt`
+instructions in sync with `.depot/workflows/release-fsite.yml`.

@@ -99,7 +99,7 @@ import sys
 
 manifest = {
     "schema": "finite.lat1.nixos-closure.v1",
-    "repository": "finitecomputer/finite-mono",
+    "repository": "finite-co/finite-mono",
     "rev": "$rev",
     "builder_system": "$current_system",
     "system": "$system_path",

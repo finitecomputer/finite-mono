@@ -41,10 +41,10 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
   `FC_CORE_RUNTIME_ENV_JSON` that previously lived only in Runner config.
   Runner's `FC_RUNNER_RUNTIME_ENV_JSON` is N-1 fallback only.
 - The `Lat1 NixOS Closure` workflow can run on a Depot-managed x86_64 Linux
-  runner, and the operator can download its artifact with `gh`. The deploy
-  machine needs Nix only to copy an already built binary cache to lat1; it must
-  not evaluate or build the production closure on the Mac, clawland, lat1, or
-  lat2.
+  runner, and the operator can retrieve its artifact with the repository-owned
+  Depot helper. The deploy machine needs Nix only to copy an already built
+  binary cache to lat1; it must not evaluate or build the production closure
+  on the Mac, clawland, lat1, or lat2.
 - ssh access from the deploy machine to `root@64.34.82.77`.
 - For a dashboard bump: the new image is CI-built and pushed to GHCR, and you
   have its `name@sha256:...` digest (from the Service Images workflow summary).
@@ -70,7 +70,7 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 ### STEPS
 
 > **Automated path:** build the closure with
-> `.github/workflows/lat1-nixos-closure.yml`, download the
+> `.depot/workflows/lat1-nixos-closure.yml`, download the
 > `lat1-nixos-closure-REV` artifact, then run
 > `just deploy-lat1-closure <artifact-dir>`. That copies the prebuilt closure
 > from the artifact's file binary cache, switches lat1, and verifies the
@@ -95,47 +95,46 @@ Fleet scope requires both `--roll-all` and an explicit
 `--roll-canary-project-id`; that canary must already be healthy on the target.
 
 1. **Core (and any config/module change):** From the reviewed checkout, select
-   the full commit, prove it is on `origin/main`, and dispatch the Depot-backed
-   closure build:
+   the full commit and use the repository-owned helper to dispatch the native
+   Depot workflow, wait for it, download the exact artifact, and validate it
+   without contacting production:
 
    ```sh
    set -euo pipefail
-   git fetch origin --prune
    REV="$(git rev-parse HEAD)"
    [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
-   git merge-base --is-ancestor "$REV" origin/main
-   gh workflow run lat1-nixos-closure.yml --ref main -f rev="$REV"
+   ARTIFACT_DIR="target/lat1-nixos-closure-$REV"
+   scripts/fetch_depot_nixos_closure.py lat1 "$REV" "$ARTIFACT_DIR"
    ```
 
    `REV` must be exactly 40 lowercase hex characters; do not hand off a tag,
-   branch, abbreviation, or dirty working tree. Wait for the workflow to
-   complete successfully, then download and inspect the artifact:
+   branch, abbreviation, dirty working tree, or legacy GitHub run. The helper
+   proves `REV` is on authoritative Origin `main`, dispatches
+   `.depot/workflows/lat1-nixos-closure.yml` in `finite-co/finite-mono`, waits
+   for a successful terminal Depot state, selects exactly one artifact from
+   that run, rejects unsafe archive paths, and runs the deploy helper's
+   `--validate-only` path. It prints the Depot run and artifact IDs for the
+   deployment record. It refuses to overwrite an existing artifact directory.
+
+2. After fresh production authorization, retain a green fleet-status snapshot,
+   deploy only that artifact, and retain the post-deploy snapshot. The first
+   status failure stops before mutation; the second makes a failed rollout
+   visible and must be resolved before proceeding:
 
    ```sh
-   RUN_ID="$(
-     gh run list --workflow lat1-nixos-closure.yml --commit "$REV" \
-       --json databaseId,conclusion \
-       --jq '.[] | select(.conclusion == "success") | .databaseId' \
-       | head -1
-   )"
-   test -n "$RUN_ID"
-   ARTIFACT_DIR="target/lat1-nixos-closure-$REV"
-   rm -rf "$ARTIFACT_DIR"
-   gh run download "$RUN_ID" \
-     --name "lat1-nixos-closure-$REV" \
-     --dir "$ARTIFACT_DIR"
-   python3 -m json.tool "$ARTIFACT_DIR/manifest.json" >/dev/null
+   set -euo pipefail
+   EVIDENCE_DIR=".local-state/deployments/lat1-$REV"
+   mkdir -p "$EVIDENCE_DIR"
+   scripts/finite-status --json | tee "$EVIDENCE_DIR/pre.json"
+   just deploy-lat1-closure "$ARTIFACT_DIR"
+   scripts/finite-status --json | tee "$EVIDENCE_DIR/post.json"
    ```
 
-2. Deploy only that artifact. The deploy script validates the manifest, proves
+   The deploy script validates the manifest, proves
    `REV` is on `origin/main`, takes the pre-deploy recovery snapshot, copies the
    unsigned file binary cache to lat1 with `--no-check-sigs`, installs `SYSTEM`
    as the boot profile, activates it in a transient systemd unit, and asserts
    `/run/current-system` is exactly the artifact's `SYSTEM` path:
-
-   ```sh
-   just deploy-lat1-closure "$ARTIFACT_DIR"
-   ```
 
    The script does not evaluate or build Nix derivations. Its local Nix use is
    limited to copying the workflow-produced file binary cache to lat1.

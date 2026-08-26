@@ -184,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            echo "::error::set CACHIX_AUTH_TOKEN as a Depot CI secret"
             exit 1
           fi
       - name: Configure Cachix trusted cache
@@ -360,6 +360,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Brain product language check
         run: nix develop --command just brain-language-check
+      - name: Origin and Depot Hard Cutover contract
+        run: nix develop --command just origin-depot-hard-cutover-contract
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
       - name: Finite Private DeepSeek production candidate contract
@@ -427,7 +429,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            echo "::error::set CACHIX_AUTH_TOKEN as a Depot CI secret"
             exit 1
           fi
       - name: Configure Cachix trusted cache

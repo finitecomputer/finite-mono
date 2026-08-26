@@ -14,7 +14,7 @@ CANONICAL_DOCKERFILE = Path(
     "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
 )
 CANONICAL_BUILDER = Path("finitecomputer-v2/scripts/build_runtime_image.py")
-CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
+CANONICAL_WORKFLOW = Path(".depot/workflows/runtime-image.yml")
 PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
@@ -219,7 +219,7 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
     workflows = [
         path
         for path in files
-        if path.parts[:2] == (".github", "workflows")
+        if path.parts[:2] == (".depot", "workflows")
         and path.suffix.lower() in {".yml", ".yaml"}
     ]
     for path in workflows:
@@ -281,7 +281,7 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
             for match in IMAGE_ASSIGNMENT.finditer(text):
                 key, reference = match.groups()
                 if (
-                    path.parts[:2] == (".github", "workflows")
+                    path.parts[:2] == (".depot", "workflows")
                     and key.lower() == "image"
                     and "agent-runtime" not in reference.lower()
                 ):

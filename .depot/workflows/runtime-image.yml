@@ -3,6 +3,10 @@ run-name: Build agent runtime ${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
+      rev:
+        description: Exact reviewed commit on Origin main to build
+        required: true
+        type: string
       version:
         description: Image version tag, for example 2026-07-08.1
         required: true
@@ -17,6 +21,7 @@ concurrency:
 env:
   CACHIX_CACHE_NAME: finite
   HERMES_AGENT_VERSION: "0.20.0"
+  SOURCE_REV: ${{ inputs.rev }}
   USER: runner
 jobs:
   publish:
@@ -26,6 +31,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev }}
+          fetch-depth: 0
+      - name: Verify exact source revision
+        run: |
+          [[ "$SOURCE_REV" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REV"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_REV" origin/main
       - uses: depot/setup-action@v1
         with:
           oidc: true
@@ -76,8 +90,8 @@ jobs:
 
           local_image_id="$(docker image inspect "$version_ref" --format '{{.Id}}')"
           test -n "$local_image_id"
-          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REV"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$SOURCE_REV"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$local_image_id"
           docker run --rm --entrypoint /bin/sh "$version_ref" -ec '
             test -n "$HERMES_AGENT_STORE_PATH"
@@ -181,7 +195,7 @@ jobs:
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
-          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          sha_ref="$IMAGE:sha-${SOURCE_REV::12}"
           depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
           for ref in "$version_ref" "$sha_ref"; do
             docker pull "$ref" >/dev/null

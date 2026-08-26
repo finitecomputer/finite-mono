@@ -359,10 +359,11 @@ nix develop ..#hermes-bridge-ci --command bash -lc \
 
 ### Releases
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the
+Pushing a `finitechat/v*` tag to the Source Authority runs
+`.depot/workflows/release-finitechat.yml`, which builds the
 `finitechat` binary for linux-x86_64, macos-aarch64, and macos-x86_64 and
 attaches `finitechat-<platform>.tar.gz` plus `.sha256` checksums to the
-GitHub release. The install block at the top of this README consumes those
+public `finitecomputer/finite-releases` release. The install block at the top of this README consumes those
 assets.
 
 ### Publish Safety

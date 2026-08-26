@@ -82,12 +82,19 @@ current routine deploy path is the CI-built closure artifact documented in
 
 The routine deploy path is:
 
-1. Dispatch `.github/workflows/lat1-nixos-closure.yml` for the exact reviewed
-   `origin/main` revision. The workflow runs on `depot-ubuntu-24.04` by default,
+1. Run `scripts/fetch_depot_nixos_closure.py lat1 REV ARTIFACT_DIR` for the
+   exact reviewed Origin `main` revision. It dispatches
+   `.depot/workflows/lat1-nixos-closure.yml`, waits for the native Depot run,
+   downloads exactly its closure artifact, and validates it without contacting
+   production. The workflow runs on `depot-ubuntu-24.04`,
    builds `nixosConfigurations.finite-lat-1.config.system.build.toplevel` and
    the matching disko script with remote builders disabled, and uploads a file
    binary cache artifact named `lat1-nixos-closure-REV`.
-2. Download that artifact and run `just deploy-lat1-closure ARTIFACT_DIR`.
+2. After fresh production authorization, retain a green
+   `scripts/finite-status --json` result, run
+   `just deploy-lat1-closure ARTIFACT_DIR`, and immediately retain a second
+   `scripts/finite-status --json` result. A failing pre-status blocks mutation;
+   a failing post-status makes the rollout failed and stops further work.
    `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
    prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
    the exact `SYSTEM` path in a transient systemd unit, and verifies
@@ -96,15 +103,18 @@ The routine deploy path is:
    values-redacting `infra/nixos/scripts/check-lat-monitoring-secrets` preflight
    so a missing `/etc/finite/logs-write.env` blocks before Alloy restarts.
 
-For a finite-lat-3 Runner change, use the separate `Lat3 NixOS Closure`
-workflow. It builds only
+For a finite-lat-3 Runner change, use the same helper with `lat3`. The separate
+`Lat3 NixOS Closure` workflow builds only
 `nixosConfigurations.finite-lat-3.config.system.build.toplevel`; it does not
 package a disk installer and cannot deploy by itself. Download the exact
 `lat3-nixos-closure-REV` artifact, then run:
 
 ```sh
-just deploy-lat3-closure ARTIFACT_DIR --validate-only
-just deploy-lat3-closure ARTIFACT_DIR --prepare
+REV="$(git rev-parse HEAD)"
+ARTIFACT_DIR="target/lat3-nixos-closure-$REV"
+scripts/fetch_depot_nixos_closure.py lat3 "$REV" "$ARTIFACT_DIR"
+just deploy-lat3-closure "$ARTIFACT_DIR" --validate-only
+just deploy-lat3-closure "$ARTIFACT_DIR" --prepare
 ```
 
 `--prepare` validates the main-branch revision, copies the prebuilt closure,

@@ -123,16 +123,17 @@ capacity. The one accepted next candidate and its hard gates live in
 
 ## Secrets policy
 
-**No secret values in this repo, ever.** This repo is public. Secrets live
-where they run: on lat1, root-owned `/etc/finite/*.env` and
+**No secret values in this repo, ever.** The private Origin repository is not a
+secret store, and its Release Repository is public. Secrets live where they
+run: on lat1, root-owned `/etc/finite/*.env` and
 `/etc/finite-saas/` files (bootstrap checklist in `infra/nixos/README.md`);
 Tinfoil sealed secrets; Phala sealed env; the legacy fleet's k8s Secrets on
 smoke/clawland. Each host README documents which secrets each service needs —
 variable **names** and where the value lives, never the value. If you find a
 secret value committed here, rotate it first, then delete it.
 
-CI-only operational secrets live as GitHub Actions repository or organization
-secrets. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
+CI-only operational secrets live in Depot CI with the narrowest repository and
+workflow scope that supports the lane. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
 cache used by the CI Nix service package job. The cache must remain readable
 without that token for forked pull requests to substitute from it.
 

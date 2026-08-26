@@ -22,17 +22,17 @@ This repo is not a product app. It is an ops and integration repo for:
 
 ## Current Status
 
-The repo bootstrap is complete and pushed to the private GitHub repo:
+The component import is complete in the private Cursor Origin Source Authority:
 
 ```text
-https://github.com/finitecomputer/finite-search
+https://cursor.com/codebase/finite-co/finite-mono
 ```
 
 What is done:
 
 - `main` is the active branch.
 - GitHub Issues are configured for the bootstrap PRD and tracer-bullet slices.
-- GitHub Actions runs `scripts/check-static.sh`.
+- Native Depot CI runs `scripts/check-static.sh`.
 - The original lat2 Docker proof passed and is retained in dated runbooks.
 - Current production search runs from the mono NixOS configuration on `lat1`.
 - SearXNG is deployed on `lat1` and bound to host-local port `8080`.

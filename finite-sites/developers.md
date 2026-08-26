@@ -172,7 +172,8 @@ the runbook.
 
 ## Release Shape
 
-Tags named `v*` trigger `.github/workflows/release.yml`.
+Tags named `fsite/v*` trigger `.depot/workflows/release-fsite.yml` in native
+Depot CI.
 
 The GitHub release currently packages `fsite` binaries for:
 
