@@ -78,6 +78,7 @@ class ProcessBinarySmokeTests(unittest.TestCase):
             server = self._start_server(addr, db_path)
             try:
                 self._wait_for_health(server, server_url)
+                self._assert_ready(server_url)
                 health = self._cli_json(server_url, "health")
                 self.assertEqual(health["status"], "ok")
 
@@ -106,6 +107,7 @@ class ProcessBinarySmokeTests(unittest.TestCase):
 
                 server = self._restart_server(server, addr, db_path)
                 self._wait_for_health(server, server_url)
+                self._assert_ready(server_url)
 
                 page = self._cli_json(
                     server_url,
@@ -182,6 +184,15 @@ class ProcessBinarySmokeTests(unittest.TestCase):
                 last_error = error
             time.sleep(0.05)
         self.fail(f"server did not become healthy at {health_url}: {last_error}")
+
+    def _assert_ready(self, server_url: str) -> None:
+        readiness_url = f"{server_url}/readyz"
+        with urllib.request.urlopen(readiness_url, timeout=2) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["checks"]["delivery_core"]["status"], "ok")
+        self.assertEqual(body["checks"]["durable_store"]["status"], "ok")
 
     def _cli_json(self, server_url: str, *args: str) -> dict:
         result = self._cli(server_url, *args)

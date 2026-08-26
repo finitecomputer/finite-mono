@@ -47,7 +47,7 @@ CONTRACT: dict[str, Any] = {
         "probes": {
             "finite-saas-core": "http://127.0.0.1:4200/healthz",
             "dashboard": "http://127.0.0.1:3000/healthz",
-            "finitechat-server": "http://127.0.0.1:8788/health",
+            "finitechat-server": "http://127.0.0.1:8788/readyz",
             "hosted-web-device": "http://127.0.0.1:38918/healthz",
             "finite-brain": "http://127.0.0.1:3015/health",
             "finitesitesd": "http://127.0.0.1:8787/api/v1/healthz",

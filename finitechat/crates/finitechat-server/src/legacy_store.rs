@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use finitechat_delivery::{
     HttpDeliveryService, HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishTarget,
@@ -13,7 +15,7 @@ use finitechat_http::{
 use finitechat_proto::{DeviceMembership, DeviceRef};
 use finitechat_transport::engine::KeyPackage;
 use finitechat_transport::{MemberId, MessageId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +28,9 @@ use crate::state::{
     mark_next_key_package_claimed, retire_older_finite_key_packages,
 };
 use crate::{DurableStoreError, SNAPSHOT_ZSTD_LEVEL};
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 pub(crate) fn unix_now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -170,6 +175,10 @@ impl SqliteHttpDeliveryStore {
                 backend TEXT NOT NULL CHECK (backend IN ('sqlite','object')),
                 created_at_ms INTEGER NOT NULL,
                 migrated_at_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS http_readiness_probe (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                checked_at_ms INTEGER NOT NULL
             );",
         )?;
         ensure_blob_content_type_column(&conn)?;
@@ -184,6 +193,78 @@ impl SqliteHttpDeliveryStore {
         )?;
         drop(conn);
         Ok(store)
+    }
+
+    /// Commit and read back one service-owned row through the same SQLite
+    /// connection and durability settings as user delivery writes.
+    ///
+    /// The row is health evidence, not Room or Device state. Keeping it in a
+    /// dedicated singleton table makes the probe idempotent and ensures it can
+    /// never appear in a user's encrypted delivery history.
+    pub(crate) fn probe_readiness(&self, budget: Duration) -> Result<(), &'static str> {
+        let started = Instant::now();
+        let mut conn = loop {
+            match self.conn.try_lock() {
+                Ok(conn) => break conn,
+                Err(TryLockError::WouldBlock) if started.elapsed() < budget => {
+                    thread::sleep(READINESS_LOCK_POLL_INTERVAL);
+                }
+                Err(TryLockError::WouldBlock) => return Err("connection_contended"),
+                Err(TryLockError::Poisoned(_)) => return Err("connection_lock_poisoned"),
+            }
+        };
+
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err("connection_contended");
+        }
+        if let Err(error) = conn.busy_timeout(remaining) {
+            eprintln!("finitechat-server: readiness could not set SQLite timeout: {error}");
+            return Err("timeout_configuration_failed");
+        }
+
+        let checked_at_ms = unix_now_ms();
+        let write_result = (|| -> Result<i64, rusqlite::Error> {
+            let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let _delivery_head: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM http_delivery_ops",
+                [],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO http_readiness_probe (id, checked_at_ms)
+                 VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE
+                 SET checked_at_ms = excluded.checked_at_ms",
+                params![checked_at_ms],
+            )?;
+            transaction.commit()?;
+            conn.query_row(
+                "SELECT checked_at_ms FROM http_readiness_probe WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+        })();
+        let restore_result = conn.busy_timeout(SQLITE_BUSY_TIMEOUT);
+
+        let observed = match write_result {
+            Ok(observed) => observed,
+            Err(error) => {
+                eprintln!("finitechat-server: readiness SQLite commit failed: {error}");
+                return Err("commit_failed");
+            }
+        };
+        if let Err(error) = restore_result {
+            eprintln!("finitechat-server: readiness could not restore SQLite timeout: {error}");
+            return Err("timeout_restore_failed");
+        }
+        if observed != checked_at_ms {
+            eprintln!(
+                "finitechat-server: readiness SQLite read-back mismatch (wrote {checked_at_ms}, observed {observed})"
+            );
+            return Err("read_back_mismatch");
+        }
+        Ok(())
     }
 
     pub(crate) fn append_operation(

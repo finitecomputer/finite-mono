@@ -25,11 +25,12 @@ scrape_configs:
         action: keep
 
   - job_name: chat.finite.computer
+    scrape_interval: 1m
     metrics_path: /probe
     params:
-      module: [http_200]
+      module: [chat_ready]
     static_configs:
-      - targets: [https://chat.finite.computer/health]
+      - targets: [https://chat.finite.computer/readyz]
         labels:
           probe: finite-monitoring
     relabel_configs: *blackbox_relabel

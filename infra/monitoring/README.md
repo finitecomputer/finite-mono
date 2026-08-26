@@ -15,6 +15,19 @@ Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic
 auth credentials.
 
+The Chat public probe is semantic rather than process-only: once per minute it
+calls `https://chat.finite.computer/readyz`. The server must acquire its shared
+delivery lock and commit a service-owned SQLite probe row within one second;
+the blackbox edge-to-store request has a 1.5-second timeout. Either a 503 or a
+slow response makes the existing `chat.finite.computer` availability series
+red in Grafana. The service caches results for thirty seconds to coalesce the
+host and public checks and bound the write rate of this public endpoint.
+
+Roll out the lat1 closure that serves `/readyz` before deploying the monitoring
+receiver change. A rollback to a pre-`/readyz` server closure must also roll the
+receiver target back to `/health`; otherwise Chat can be serving while the
+newer probe correctly reports that its expected semantic endpoint is absent.
+
 The monitoring host stores operational credentials only as operator-provisioned
 host files:
 

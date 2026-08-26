@@ -4,7 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use finitechat_blob::BlobDescriptor;
@@ -51,7 +53,7 @@ use finitechat_transport::engine::KeyPackage;
 use finitechat_transport::transport::{
     Timestamp, TransportEnvelope, TransportMessage, TransportSource,
 };
-use finitechat_transport::{EpochId, MemberId, MessageId};
+use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use nostr::PublicKey as NostrPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,6 +95,65 @@ type EphemeralActivityBucket = BTreeMap<String, Vec<EphemeralActivityRecord>>;
 /// `(room_id, conversation_id)`.
 type EphemeralActivityCache = BTreeMap<(String, Option<String>), EphemeralActivityBucket>;
 
+pub(crate) const READINESS_BUDGET_MILLIS: u64 = 1_000;
+const READINESS_COMPONENT_BUDGET: Duration = Duration::from_millis(450);
+const READINESS_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+// Cache contract: the live delivery-core sync plus committed SQLite read-back
+// below are the source of truth. Completion time invalidates a result after 30
+// seconds. While one replacement probe is running, concurrent callers may see
+// at most 65-second-old evidence so the host and public checks coalesce; once
+// that bound passes they fail closed instead of serving indefinitely stale
+// green. Failures are cached too, so recovery may remain red for up to 30s.
+const READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
+const READINESS_MAX_STALE_WHILE_IN_FLIGHT: Duration = Duration::from_secs(65);
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReadinessCheckResult {
+    pub(crate) elapsed: Duration,
+    pub(crate) failure: Option<&'static str>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ServerReadiness {
+    pub(crate) delivery_core: ReadinessCheckResult,
+    pub(crate) durable_store: ReadinessCheckResult,
+    pub(crate) elapsed: Duration,
+    pub(crate) budget_exceeded: bool,
+}
+
+impl ServerReadiness {
+    pub(crate) fn is_ready(&self) -> bool {
+        self.delivery_core.failure.is_none()
+            && self.durable_store.failure.is_none()
+            && !self.budget_exceeded
+    }
+
+    fn unavailable(reason: &'static str) -> Self {
+        let failed = ReadinessCheckResult {
+            elapsed: Duration::ZERO,
+            failure: Some(reason),
+        };
+        Self {
+            delivery_core: failed.clone(),
+            durable_store: failed,
+            elapsed: Duration::ZERO,
+            budget_exceeded: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReadinessCache {
+    last: Option<CachedReadiness>,
+    in_flight: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CachedReadiness {
+    completed_at: Instant,
+    result: ServerReadiness,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HttpServerState {
     service: Arc<Mutex<HttpDeliveryService>>,
@@ -124,6 +185,10 @@ pub struct HttpServerState {
     /// True while a snapshot persist runs on its background thread; op
     /// triggers that land in the meantime skip instead of stacking threads.
     snapshot_in_flight: Arc<AtomicBool>,
+    /// Bounds the public readiness endpoint's SQLite write rate and coalesces
+    /// concurrent internal/external probes. This must never be used by chat
+    /// request paths as serving evidence; it only protects the probe itself.
+    readiness_cache: Arc<Mutex<ReadinessCache>>,
     /// Long-poll wake signal (/sync/wait). A single hub: every accepted publish
     /// wakes all waiters, who re-check their own predicates. Sized for the
     /// current phase (hundreds of users); per-key channels are the documented
@@ -213,6 +278,7 @@ impl HttpServerState {
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
+            readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: None,
         }
@@ -299,9 +365,108 @@ impl HttpServerState {
             public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
+            readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: Some(store),
         })
+    }
+
+    /// Exercise the two shared seams every delivered chat message needs:
+    /// access to the ordering-authoritative in-memory core and a committed
+    /// write through the durable SQLite store.
+    pub(crate) fn probe_readiness(&self) -> ServerReadiness {
+        let now = Instant::now();
+        let mut cache = match self.readiness_cache.lock() {
+            Ok(cache) => cache,
+            Err(_) => return ServerReadiness::unavailable("readiness_cache_lock_poisoned"),
+        };
+        if let Some(cached) = &cache.last
+            && now.saturating_duration_since(cached.completed_at) <= READINESS_CACHE_TTL
+        {
+            return cached.result.clone();
+        }
+        if cache.in_flight {
+            // A simultaneous host/public check may reuse older evidence while
+            // the first caller performs the new bounded transaction. The
+            // first caller remains responsible for publishing the fresh red
+            // result if that transaction stalls or fails.
+            return cache
+                .last
+                .as_ref()
+                .filter(|cached| {
+                    now.saturating_duration_since(cached.completed_at)
+                        <= READINESS_MAX_STALE_WHILE_IN_FLIGHT
+                })
+                .map_or_else(
+                    || ServerReadiness::unavailable("readiness_probe_in_flight"),
+                    |cached| cached.result.clone(),
+                );
+        }
+        cache.in_flight = true;
+        drop(cache);
+
+        let result = self.probe_readiness_uncached();
+        if let Ok(mut cache) = self.readiness_cache.lock() {
+            cache.in_flight = false;
+            cache.last = Some(CachedReadiness {
+                completed_at: Instant::now(),
+                result: result.clone(),
+            });
+        }
+        result
+    }
+
+    fn probe_readiness_uncached(&self) -> ServerReadiness {
+        let started = Instant::now();
+        let core_started = Instant::now();
+        let core_failure = loop {
+            match self.service.try_lock() {
+                Ok(service) => {
+                    // Exercise the same bounded group-sync contract and
+                    // central state lock as a reconnecting user, without
+                    // advancing any cursor or mutating a Room.
+                    let probe_group = GroupId::new(b"finitechat-readiness-v1".to_vec());
+                    match service.sync_group(&probe_group, 0, 1) {
+                        Ok(_) => break None,
+                        Err(error) => {
+                            eprintln!(
+                                "finitechat-server: readiness delivery-core sync failed: {error}"
+                            );
+                            break Some("delivery_core_sync_failed");
+                        }
+                    }
+                }
+                Err(TryLockError::WouldBlock)
+                    if core_started.elapsed() < READINESS_COMPONENT_BUDGET =>
+                {
+                    thread::sleep(READINESS_LOCK_POLL_INTERVAL);
+                }
+                Err(TryLockError::WouldBlock) => break Some("delivery_core_contended"),
+                Err(TryLockError::Poisoned(_)) => break Some("delivery_core_lock_poisoned"),
+            }
+        };
+        let delivery_core = ReadinessCheckResult {
+            elapsed: core_started.elapsed(),
+            failure: core_failure,
+        };
+
+        let store_started = Instant::now();
+        let store_failure = match &self.store {
+            Some(store) => store.probe_readiness(READINESS_COMPONENT_BUDGET).err(),
+            None => Some("durable_store_not_configured"),
+        };
+        let durable_store = ReadinessCheckResult {
+            elapsed: store_started.elapsed(),
+            failure: store_failure,
+        };
+
+        let elapsed = started.elapsed();
+        ServerReadiness {
+            delivery_core,
+            durable_store,
+            elapsed,
+            budget_exceeded: elapsed > Duration::from_millis(READINESS_BUDGET_MILLIS),
+        }
     }
 
     pub fn put_blob_object(
@@ -4044,4 +4209,26 @@ fn key_package_claim_inventory_records(
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::HttpServerState;
+
+    #[test]
+    fn readiness_reports_delivery_core_contention_separately_from_storage() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state = HttpServerState::from_sqlite_path(directory.path().join("server.sqlite3"))
+            .expect("durable state");
+        let _delivery_guard = state.service.lock().expect("delivery core lock");
+
+        let readiness = state.probe_readiness();
+
+        assert_eq!(
+            readiness.delivery_core.failure,
+            Some("delivery_core_contended")
+        );
+        assert_eq!(readiness.durable_store.failure, None);
+        assert!(!readiness.is_ready());
+    }
 }

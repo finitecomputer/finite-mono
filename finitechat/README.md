@@ -443,5 +443,18 @@ deploys a compatible finite-chat package. See
 `docs/server-deployment-gate.md` for the required handoff and verification
 steps.
 
+Production serving readiness is separate from that liveness/version contract:
+
+```sh
+curl --fail --silent https://chat.finite.computer/readyz | jq .
+```
+
+`/readyz` acquires the ordering-authoritative delivery lock and commits then
+reads back a singleton service-owned row through the production SQLite store.
+It returns 503 when either shared seam is unavailable or the one-second server
+budget is exceeded. The probe never creates a Room, Device, Message, or other
+user-visible history, and results are cached for thirty seconds so a
+public caller cannot amplify the probe's durable write rate.
+
 For iOS beta distribution, see `docs/testflight-runbook.md`. Finite Chat uses
 bundle ID `computer.finite.finitechat`.

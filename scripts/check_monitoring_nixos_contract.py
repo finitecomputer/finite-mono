@@ -96,6 +96,11 @@ def nix_eval() -> dict[str, Any]:
         datasourceUids =
           map (datasource: datasource.uid)
             cfg.services.grafana.provision.datasources.settings.datasources;
+        chatProbe = builtins.head (
+          builtins.filter
+            (job: job.job_name == "chat.finite.computer")
+            cfg.services.prometheus.scrapeConfigs
+        );
       in {
         hostName = cfg.networking.hostName;
         release = cfg.system.nixos.release;
@@ -116,6 +121,11 @@ def nix_eval() -> dict[str, Any]:
           retentionTime = cfg.services.prometheus.retentionTime;
           extraFlags = cfg.services.prometheus.extraFlags;
           scrapeJobs = map (job: job.job_name) cfg.services.prometheus.scrapeConfigs;
+          chatProbe = {
+            interval = chatProbe.scrape_interval;
+            module = builtins.head chatProbe.params.module;
+            target = builtins.head (builtins.head chatProbe.static_configs).targets;
+          };
         };
         blackbox = {
           enable = cfg.services.prometheus.exporters.blackbox.enable;
@@ -297,6 +307,15 @@ def main() -> int:
             "uptime-probe.docs.finite.chat",
         ],
         "public probe job set drifted",
+    )
+    require(
+        prometheus["chatProbe"]
+        == {
+            "interval": "1m",
+            "module": "chat_ready",
+            "target": "https://chat.finite.computer/readyz",
+        },
+        "Chat probe must exercise semantic readiness every minute",
     )
 
     blackbox = contract["blackbox"]
