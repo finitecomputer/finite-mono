@@ -18,7 +18,7 @@ references; it does not change migration identity or import more state.
 
 ## Repair order
 
-1. Keep the 12 legacy cron definitions and every legacy skill inactive in the
+1. Keep every frozen legacy cron definition and legacy skill inactive in the
    migration review-only directory.
 2. Establish the new Agent Principal's Finite Brain Email Access Delegation and
    Folder Key Grants through the normal product flow. Do not copy an nsec,

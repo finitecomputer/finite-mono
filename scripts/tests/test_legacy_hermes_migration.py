@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import socket
 import sqlite3
 import sys
 import tarfile
@@ -759,6 +760,42 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             {path: dispositions[path] for path in generated_links},
             {path: "rebuild" for path in generated_links},
         )
+
+    def test_source_volume_inventory_rebuilds_cocod_runtime_socket(self) -> None:
+        socket_root = tempfile.TemporaryDirectory(dir="/tmp", prefix="lhm-")
+        self.addCleanup(socket_root.cleanup)
+        source = Path(socket_root.name) / "source"
+        socket_path = source / ".cocod/cocod.sock"
+        socket_path.parent.mkdir(parents=True)
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(socket_path))
+        inventory_path = self.root / "cocod-inventory.json"
+
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(stdout):
+            exit_code = migration.main(
+                [
+                    "source-volume-inventory",
+                    "--source-root",
+                    str(source),
+                    "--output",
+                    str(inventory_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual(printed["status"], "complete")
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        self.assertEqual(inventory["classifications"]["blocked"]["entries"], 0)
+        self.assertEqual(inventory["classifications"]["rebuild"]["special_files"], 1)
+        disposition = {
+            entry["path"]: entry["disposition"] for entry in inventory["entries"]
+        }
+        self.assertEqual(disposition[".cocod/cocod.sock"], "rebuild")
 
     def test_source_volume_inventory_fails_cleanly_on_unreadable_data(self) -> None:
         source = self.root / "source-home"

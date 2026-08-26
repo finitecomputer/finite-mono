@@ -63,6 +63,7 @@ SOURCE_REBUILD_ROOTS = (
     Path(".bun"),
     Path(".cache"),
     Path(".cargo"),
+    Path(".cocod"),
     Path(".config/pulse"),
     Path(".hermes/venv"),
     Path(".local"),
@@ -461,7 +462,10 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
                 ) from exc
             relative = candidate.relative_to(resolved_source)
             classification = _source_inventory_classification(relative)
-            if not (candidate.is_symlink() or candidate.is_file()) or (
+            if (
+                not (candidate.is_symlink() or candidate.is_file())
+                and classification != "rebuild"
+            ) or (
                 candidate.is_symlink()
                 and not _source_symlink_is_contained(
                     candidate, resolved_source, os.readlink(candidate)
