@@ -100,6 +100,21 @@ LINE 42: SELECT runtime_rows.health_ready
         ):
             finite_status.psql_query_sets({})
 
+    def test_runtime_query_tolerates_pre_health_report_schema(self) -> None:
+        query = finite_status.RUNTIME_DETAILS_QUERY
+
+        # Health reporting is an additive Core migration. The status collector
+        # must remain usable while Core is still on the immediately preceding
+        # schema, where these row keys are absent.
+        for column in (
+            "health_reported_at",
+            "health_ready",
+            "health_reason",
+            "health_report_interval_seconds",
+        ):
+            self.assertIn(f"to_jsonb(ar) ->> '{column}'", query)
+            self.assertNotIn(f"ar.{column}", query)
+
     def test_human_output_projects_active_control_state(self) -> None:
         raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
         for group in raw["core"]["runtime_groups"]:

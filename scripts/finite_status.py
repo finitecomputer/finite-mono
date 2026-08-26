@@ -153,10 +153,13 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
        control.kind as control_kind,
        control.status as control_status,
        ar.host_facts ->> 'runtime_status' as runtime_status,
-       core_rfc3339(ar.health_reported_at) as health_reported_at,
-       ar.health_ready,
-       ar.health_reason,
-       ar.health_report_interval_seconds
+       core_rfc3339(
+         (to_jsonb(ar) ->> 'health_reported_at')::timestamptz
+       ) as health_reported_at,
+       (to_jsonb(ar) ->> 'health_ready')::boolean as health_ready,
+       to_jsonb(ar) ->> 'health_reason' as health_reason,
+       (to_jsonb(ar) ->> 'health_report_interval_seconds')::integer
+         as health_report_interval_seconds
   from agent_runtimes ar
   left join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
   left join projects p on p.id = ar.project_id
