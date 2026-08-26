@@ -18,7 +18,7 @@ RUN cargo build --release --locked -p finite-private-limiter
 FROM debian:bookworm-slim
 
 ARG FINITE_MONO_REV
-LABEL org.opencontainers.image.source="https://origin.cursor.com/finite-co/finite-mono" \
+LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono" \
       org.opencontainers.image.revision="$FINITE_MONO_REV"
 
 RUN apt-get update \

@@ -22,10 +22,10 @@ This repo is not a product app. It is an ops and integration repo for:
 
 ## Current Status
 
-The component import is complete in the private Cursor Origin Source Authority:
+The component import is complete in the GitHub Source Authority:
 
 ```text
-https://cursor.com/codebase/finite-co/finite-mono
+https://github.com/finitecomputer/finite-mono/tree/main/finite-search
 ```
 
 What is done:

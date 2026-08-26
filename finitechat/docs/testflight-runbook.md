@@ -41,11 +41,10 @@ version may not require a full review.
 
 ## Xcode Cloud
 
-The prior GitHub-backed Xcode Cloud source integration is retired by the
-Cursor Origin Hard Cutover. Do not point it at the frozen GitHub source
-repository or introduce an outbound source mirror to keep it running. Resume
-repeatable TestFlight delivery only after an Origin-compatible source checkout
-has been designed and reviewed.
+The GitHub-backed Xcode Cloud lane is currently paused with the other macOS
+builds. GitHub remains the source repository. Resume repeatable TestFlight
+delivery only after a dedicated macOS execution, signing, notarization, and
+qualification plan has been designed and reviewed.
 
 The former workflow configuration is retained below as non-authoritative
 reference for that follow-up:

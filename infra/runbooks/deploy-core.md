@@ -109,8 +109,8 @@ Fleet scope requires both `--roll-all` and an explicit
 
    `REV` must be exactly 40 lowercase hex characters; do not hand off a tag,
    branch, abbreviation, dirty working tree, or legacy GitHub run. The helper
-   proves `REV` is on authoritative Origin `main`, dispatches
-   `.depot/workflows/lat1-nixos-closure.yml` in `finite-co/finite-mono`, waits
+   proves `REV` is on authoritative GitHub `main`, dispatches
+   `.depot/workflows/lat1-nixos-closure.yml` in `finitecomputer/finite-mono`, waits
    for a successful terminal Depot state, selects exactly one artifact from
    that run, rejects unsafe archive paths, and runs the deploy helper's
    `--validate-only` path. It prints the Depot run and artifact IDs for the

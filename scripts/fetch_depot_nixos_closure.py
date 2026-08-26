@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dispatch, download, and validate an Origin/Depot NixOS closure artifact."""
+"""Dispatch, download, and validate a GitHub/Depot NixOS closure artifact."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 DEPOT_ORG = "scthc5h66g"
-DEPOT_REPOSITORY = "finite-co/finite-mono"
-ORIGIN_CLONE_URL = "https://origin.cursor.com/finite-co/finite-mono.git"
+DEPOT_REPOSITORY = "finitecomputer/finite-mono"
+GITHUB_CLONE_URL = "https://github.com/finitecomputer/finite-mono.git"
 POLL_SECONDS = 10
 TIMEOUT_SECONDS = 2 * 60 * 60
 HOSTS = {
@@ -62,7 +62,7 @@ def run_checked(command: list[str]) -> None:
         raise ClosureFetchError(f"command failed: {' '.join(command)}")
 
 
-def require_origin_main_revision(revision: str) -> Path:
+def require_github_main_revision(revision: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ClosureFetchError("revision must be exactly 40 lowercase hex characters")
     root_result = subprocess.run(
@@ -82,12 +82,13 @@ def require_origin_main_revision(revision: str) -> Path:
     )
     remote = remote_result.stdout.strip().removesuffix(".git").rstrip("/")
     accepted_remotes = {
-        ORIGIN_CLONE_URL.removesuffix(".git"),
-        "git@origin.cursor.com:finite-co/finite-mono",
+        GITHUB_CLONE_URL.removesuffix(".git"),
+        "git@github.com:finitecomputer/finite-mono",
     }
     if remote_result.returncode != 0 or remote not in accepted_remotes:
+        actual = remote or "<missing>"
         raise ClosureFetchError(
-            f"origin remote is {remote or '<missing>'}, expected Cursor Origin"
+            f"origin remote is {actual}, expected finitecomputer/finite-mono on GitHub"
         )
     run_checked(["git", "-C", str(root), "fetch", "origin", "--prune"])
     ancestry = subprocess.run(
@@ -103,7 +104,7 @@ def require_origin_main_revision(revision: str) -> Path:
         check=False,
     )
     if ancestry.returncode != 0:
-        raise ClosureFetchError(f"{revision} is not on authoritative origin/main")
+        raise ClosureFetchError(f"{revision} is not on authoritative GitHub main")
     return root
 
 
@@ -264,14 +265,14 @@ def validate_manifest(
 
 def fetch(host: str, revision: str, output_dir: Path) -> tuple[str, str]:
     config = HOSTS[host]
-    root = require_origin_main_revision(revision)
+    root = require_github_main_revision(revision)
     output_dir = output_dir.resolve()
     if output_dir.exists():
         raise ClosureFetchError(f"output directory already exists: {output_dir}")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     workflow = str(config["workflow"])
     expected_name = f"{config['artifact_prefix']}{revision}"
-    print(f"Dispatching {workflow} for Origin revision {revision}", flush=True)
+    print(f"Dispatching {workflow} for GitHub revision {revision}", flush=True)
     run_id = dispatch(workflow, revision)
     print(f"Depot run: {run_id}", flush=True)
     wait_for_success(run_id)
@@ -301,7 +302,7 @@ def fetch(host: str, revision: str, output_dir: Path) -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fetch an exact Origin/Depot NixOS closure without mutating production"
+        description="Fetch an exact GitHub/Depot NixOS closure without mutating production"
     )
     parser.add_argument("host", choices=sorted(HOSTS))
     parser.add_argument("revision")

@@ -50,8 +50,8 @@ Notes:
   `DEPOT_SERVICE_IMAGES_PROJECT_ID`, `DEPOT_RUNTIME_IMAGE_PROJECT_ID`, or
   `DEPOT_DEEPSEEK_VLLM_PROJECT_ID`. The workflows authenticate via
   `depot/setup-action` OIDC.
-- After the Origin/Depot hard cut, dispatch production image publishers through
-  Depot on reviewed Origin `main`, then verify the resolved source revision and
+- After the GitHub/Depot CI cutover, dispatch production image publishers through
+  Depot on reviewed GitHub `main`, then verify the resolved source revision and
   record the pinned digest printed by the workflow. For example:
 
   ```sh
@@ -61,7 +61,7 @@ Notes:
   git merge-base --is-ancestor "$REV" origin/main
   depot ci dispatch \
     --org scthc5h66g \
-    --repo finite-co/finite-mono \
+    --repo finitecomputer/finite-mono \
     --workflow service-images.yml \
     --ref main \
     --input rev="$REV" \
@@ -72,7 +72,7 @@ Notes:
 
   depot ci dispatch \
     --org scthc5h66g \
-    --repo finite-co/finite-mono \
+    --repo finitecomputer/finite-mono \
     --workflow deepseek-v4-vllm-image.yml \
     --ref main \
     --input rev="$REV" \

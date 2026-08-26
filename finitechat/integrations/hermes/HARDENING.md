@@ -520,7 +520,7 @@ it to GHCR.
 - Understanding: each release should answer what changed, what was tested, and
   which runtime image digest was proven.
 
-Historical CI shape (removed at the Origin/Depot Hard Cutover):
+Historical CI shape (removed during the GitHub/Depot CI cutover):
 
 - The former GitHub CI workflow pinned the adapter test environment to the
   root flake's Nix Hermes runtime.
@@ -544,9 +544,9 @@ Historical CI shape (removed at the Origin/Depot Hard Cutover):
 - The former GitHub Actions S3 publication experiment accepted
   `publish_runtime_image=true` and produced an orchestration report consumed by
   the hardening audit. Its workflow and three `hermes-github-*` operator helpers
-  were removed at the Origin/Depot Hard Cutover. Existing report fixtures remain
+  were removed during the GitHub/Depot CI cutover. Existing report fixtures remain
   historical evidence only. If this parked experiment resumes, it must use an
-  explicit Origin revision and native Depot artifacts while preserving the
+  explicit GitHub revision and native Depot artifacts while preserving the
   underlying S3 smoke, digest, handoff, and live-canary evidence contracts.
   After the S3-backed smoke passes, it logs into GHCR, tags the exact
   `facts.image_id` from the passing smoke report as

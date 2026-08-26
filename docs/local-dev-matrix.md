@@ -404,7 +404,7 @@ Owns reusable product-neutral Nostr primitives.
 Documented tools:
 
 - Cargo only.
-- Native Depot CI runs fmt, tests, clippy, and build for Origin changes.
+- Native Depot CI runs fmt, tests, clippy, and build for GitHub changes.
 
 Checks:
 

@@ -390,8 +390,6 @@ jobs:
           skipPush: true
       - name: Brain product language check
         run: nix develop --command just brain-language-check
-      - name: Origin and Depot Hard Cutover contract
-        run: nix develop --command just origin-depot-hard-cutover-contract
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
       - name: Finite Private DeepSeek production candidate contract

@@ -5,7 +5,7 @@ Operational procedures for everything Finite runs. The 2026-07-08 files under
 roles live in `infra/README.md`; executable NixOS configuration is authority
 for declared NixOS state; a fresh read-only inventory is authority for physical
 state. These runbooks must name which source they rely on rather than silently
-promoting an old capture. Private source is not a secret store: **no secret
+promoting an old capture. Source is not a secret store: **no secret
 values, ever** — env var names and locations only (`infra/README.md`, secrets
 policy).
 

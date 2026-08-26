@@ -44,9 +44,9 @@ build it is not the promotion proof for the final digest.
    upgrades, move the reviewed pin in the image and all smoke lanes together;
    do not add a dispatch-time override.
 
-   After the Origin/Depot hard cut, dispatch the production publisher directly
+   After the GitHub/Depot CI cutover, dispatch the production publisher directly
    through Depot. Confirm that the run's resolved source revision is the
-   reviewed Origin `main` revision before promoting its digest:
+   reviewed GitHub `main` revision before promoting its digest:
 
    ```sh
    git fetch origin --prune
@@ -55,7 +55,7 @@ build it is not the promotion proof for the final digest.
    git merge-base --is-ancestor "$REV" origin/main
    depot ci dispatch \
      --org scthc5h66g \
-     --repo finite-co/finite-mono \
+     --repo finitecomputer/finite-mono \
      --workflow runtime-image.yml \
      --ref main \
      --input rev="$REV" \

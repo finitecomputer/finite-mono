@@ -17,16 +17,15 @@ SPEC.loader.exec_module(fetcher)
 
 
 class DepotClosureArtifactTests(unittest.TestCase):
-    def test_helper_targets_only_origin_and_native_depot(self) -> None:
-        self.assertEqual(fetcher.DEPOT_REPOSITORY, "finite-co/finite-mono")
+    def test_helper_targets_only_github_and_native_depot(self) -> None:
+        self.assertEqual(fetcher.DEPOT_REPOSITORY, "finitecomputer/finite-mono")
         self.assertEqual(
-            fetcher.ORIGIN_CLONE_URL,
-            "https://origin.cursor.com/finite-co/finite-mono.git",
+            fetcher.GITHUB_CLONE_URL,
+            "https://github.com/finitecomputer/finite-mono.git",
         )
         source = HELPER.read_text(encoding="utf-8")
         self.assertNotIn("gh workflow", source)
         self.assertNotIn("gh run", source)
-        self.assertNotIn("finitecomputer/finite-mono", source)
 
     def test_dispatch_selects_main_and_the_exact_revision(self) -> None:
         revision = "a" * 40
@@ -45,7 +44,7 @@ class DepotClosureArtifactTests(unittest.TestCase):
                 "--org",
                 "scthc5h66g",
                 "--repo",
-                "finite-co/finite-mono",
+                "finitecomputer/finite-mono",
                 "--workflow",
                 "lat1-nixos-closure.yml",
                 "--ref",
@@ -114,7 +113,7 @@ class DepotClosureArtifactTests(unittest.TestCase):
 
             self.assertFalse((root / "escape").exists())
 
-    def test_manifest_requires_origin_repository_and_complete_cache(self) -> None:
+    def test_manifest_requires_github_repository_and_complete_cache(self) -> None:
         revision = "a" * 40
         with tempfile.TemporaryDirectory() as temporary:
             artifact = Path(temporary)
@@ -124,7 +123,7 @@ class DepotClosureArtifactTests(unittest.TestCase):
             )
             manifest = {
                 "schema": "finite.lat1.nixos-closure.v1",
-                "repository": "finite-co/finite-mono",
+                "repository": "finitecomputer/finite-mono",
                 "rev": revision,
                 "cache": "nix-cache",
             }
@@ -139,7 +138,7 @@ class DepotClosureArtifactTests(unittest.TestCase):
                 "lat1-nixos-closure-" + revision,
             )
 
-            manifest["repository"] = "finitecomputer/finite-mono"
+            manifest["repository"] = "other/repository"
             (artifact / "manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8"
             )

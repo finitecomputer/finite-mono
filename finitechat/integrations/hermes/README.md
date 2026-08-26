@@ -315,7 +315,7 @@ scripts/hermes-publish-proven-image.py \
 
 Do not use this parked local publisher for a production or current canary. The
 GitHub Actions workflow and its three `hermes-github-*` operator helpers were
-removed at the Origin/Depot Hard Cutover. Current publication builds once in
+removed during the GitHub/Depot CI cutover. Current publication builds once in
 `.depot/workflows/runtime-image.yml`, promotes that saved build to a run-scoped
 GHCR canary, verifies the digest and anonymous pull, and leaves production
 promotion closed unless its separate gate is enabled.
@@ -354,9 +354,9 @@ changes to publish. A clean worktree reports `status: clean` instead of
 stage, commit, or push anything.
 
 There is no current remote dispatch for the parked S3/Tinfoil experiment. A
-future implementation must use an explicit Origin revision and native Depot
-artifacts; it may not reintroduce the frozen GitHub source repository as an
-execution authority.
+future implementation must use an explicit GitHub revision and native Depot
+artifacts; it may not reintroduce GitHub Actions as a competing execution
+authority.
 
 After publish, build the redacted Tinfoil handoff report:
 

@@ -83,7 +83,7 @@ current routine deploy path is the CI-built closure artifact documented in
 The routine deploy path is:
 
 1. Run `scripts/fetch_depot_nixos_closure.py lat1 REV ARTIFACT_DIR` for the
-   exact reviewed Origin `main` revision. It dispatches
+   exact reviewed GitHub `main` revision. It dispatches
    `.depot/workflows/lat1-nixos-closure.yml`, waits for the native Depot run,
    downloads exactly its closure artifact, and validates it without contacting
    production. The workflow runs on `depot-ubuntu-24.04`,

@@ -8,7 +8,7 @@ test layer or scheduling Docker builds on `finite-lat-2`.
 
 ## Acceptance Criteria
 
-- The Docker runtime smoke runs in native Depot CI from Cursor Origin events.
+- The Docker runtime smoke runs in native Depot CI from GitHub events.
 - The runtime image is built once before the Docker smoke.
 - The Docker smoke uses that prebuilt image instead of rebuilding inside the
   test.
@@ -48,14 +48,14 @@ removed.
 
 ## Dispatch
 
-Dispatch the build-once runtime image canary at an explicit Origin revision:
+Dispatch the build-once runtime image canary at an explicit GitHub revision:
 
 ```sh
 depot ci dispatch \
   --org scthc5h66g \
-  --repo finite-co/finite-mono \
+  --repo finitecomputer/finite-mono \
   --workflow runtime-image.yml \
-  --ref <origin-branch-or-sha> \
+  --ref <github-branch-or-sha> \
   --input version=<date-based-version> \
   --input publish_production=false
 ```
@@ -65,9 +65,9 @@ Use the Phala durable-home gate when proving the current hosted-agent runtime:
 ```sh
 depot ci dispatch \
   --org scthc5h66g \
-  --repo finite-co/finite-mono \
+  --repo finitecomputer/finite-mono \
   --workflow hermes-runtime-smoke.yml \
-  --ref <origin-branch-or-sha> \
+  --ref <github-branch-or-sha> \
   --input durable_home_docker_smoke=true \
   --input chat_interruption_smoke=true
 ```
@@ -75,8 +75,8 @@ depot ci dispatch \
 ## Current Caveat
 
 The Tinfoil backup/restore Docker smoke is not a current CI lane. Its old
-GitHub Actions dispatch helpers were removed at the Hard Cutover. If that work
-resumes, it must consume the canonical digest proved by the Depot runtime-image
-workflow rather than restoring a GitHub Actions publication path. The current
-hosted-agent lane is the Phala-shaped durable `/home/node` smoke, matching the
+GitHub Actions dispatch helpers were removed during the Depot CI migration. If
+that work resumes, it must consume the canonical digest proved by the Depot
+runtime-image workflow rather than restoring a parallel publication path. The
+current hosted-agent lane is the Phala-shaped durable `/home/node` smoke, matching the
 runner contract proven in finitecomputer's Phala runtime spike.

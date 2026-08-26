@@ -123,8 +123,8 @@ capacity. The one accepted next candidate and its hard gates live in
 
 ## Secrets policy
 
-**No secret values in this repo, ever.** The private Origin repository is not a
-secret store, and its Release Repository is public. Secrets live where they
+**No secret values in this repo, ever.** The public GitHub repository is not a
+secret store. Secrets live where they
 run: on lat1, root-owned `/etc/finite/*.env` and
 `/etc/finite-saas/` files (bootstrap checklist in `infra/nixos/README.md`);
 Tinfoil sealed secrets; Phala sealed env; the legacy fleet's k8s Secrets on
