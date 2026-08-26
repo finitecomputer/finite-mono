@@ -104,7 +104,7 @@ class DepotWorkflowContractTests(unittest.TestCase):
             if "cachix/cachix-action" not in workflow:
                 continue
             with self.subTest(path=path.name):
-                self.assertIn("  USER: root\n", workflow)
+                self.assertIn("  USER: runner\n", workflow)
 
     def test_ci_pull_requests_use_cachix_read_only(self) -> None:
         workflow = self.workflow("ci.yml")

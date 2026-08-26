@@ -29,7 +29,7 @@ on:
 env:
   CACHIX_CACHE_NAME: finite
   FINITE_HERMES_AGENT_VERSION: "0.20.0"
-  USER: root
+  USER: runner
 permissions:
   contents: read
   id-token: write
