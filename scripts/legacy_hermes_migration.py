@@ -64,9 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         help="stage every inventory-approved active source entry",
     )
     active_payload.add_argument("--source-root", type=Path, required=True)
-    active_payload.add_argument(
-        "--source-volume-inventory", type=Path, required=True
-    )
+    active_payload.add_argument("--source-volume-inventory", type=Path, required=True)
     active_payload.add_argument("--output", type=Path, required=True)
 
     sites = subparsers.add_parser(

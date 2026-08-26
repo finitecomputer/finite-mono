@@ -365,9 +365,9 @@ def _empty_inventory_summary() -> dict[str, int]:
     }
 
 
-def _source_symlink_is_contained(
+def _source_symlink_target_relative(
     candidate: Path, source_root: Path, link_target: str
-) -> bool:
+) -> Path | None:
     def normalize(relative: Path) -> Path | None:
         parts: list[str] = []
         for part in relative.parts:
@@ -396,10 +396,10 @@ def _source_symlink_is_contained(
     try:
         parent = candidate.parent.relative_to(source_root)
     except ValueError:
-        return False
+        return None
     relative = target_relative(parent, link_target)
     if relative is None:
-        return False
+        return None
 
     pending = list(relative.parts)
     resolved_parts: list[str] = []
@@ -413,16 +413,16 @@ def _source_symlink_is_contained(
 
         symlink_hops += 1
         if symlink_hops > 40:
-            return False
+            return None
         nested = target_relative(Path(*resolved_parts), os.readlink(probe))
         if nested is None:
-            return False
+            return None
         combined = normalize(nested.joinpath(*pending))
         if combined is None:
-            return False
+            return None
         pending = list(combined.parts)
         resolved_parts = []
-    return True
+    return Path(*resolved_parts)
 
 
 def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
@@ -513,17 +513,32 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
                 ) from exc
             relative = candidate.relative_to(resolved_source)
             classification = _source_inventory_classification(relative)
+            resolved_link_target = (
+                _source_symlink_target_relative(
+                    candidate, resolved_source, os.readlink(candidate)
+                )
+                if candidate.is_symlink()
+                else None
+            )
             if (
                 not (candidate.is_symlink() or candidate.is_file())
                 and classification != "rebuild"
             ) or (
                 candidate.is_symlink()
-                and not _source_symlink_is_contained(
-                    candidate, resolved_source, os.readlink(candidate)
-                )
+                and resolved_link_target is None
                 and classification not in {"quarantine", "rebuild"}
             ):
                 classification = "blocked"
+            elif (
+                candidate.is_symlink()
+                and classification == "activate"
+                and resolved_link_target is not None
+            ):
+                target_classification = _source_inventory_classification(
+                    resolved_link_target
+                )
+                if target_classification != "activate":
+                    classification = target_classification
             summary = classifications[classification]
             summary["entries"] += 1
             if candidate.is_symlink():

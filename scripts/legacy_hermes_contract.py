@@ -247,19 +247,35 @@ def _validate_payload_symlink(payload: Path, candidate: Path) -> None:
             f"payload symlink is forbidden outside workspace roots: {relative}"
         )
     link_target = os.readlink(candidate)
-    root = (payload / Path(root_relative.as_posix())).resolve()
-    unresolved = Path(link_target)
-    resolved = (
-        unresolved.resolve(strict=False)
-        if unresolved.is_absolute()
-        else (candidate.parent / unresolved).resolve(strict=False)
-    )
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise MigrationError(
-            f"payload symlink escapes its allowed root: {relative}"
-        ) from exc
+    target = PurePosixPath(link_target)
+    if target.is_absolute():
+        try:
+            source_relative = target.relative_to("/home/node")
+        except ValueError as exc:
+            raise MigrationError(
+                f"payload symlink escapes its allowed root: {relative}"
+            ) from exc
+        if payload_path_for_source(source_relative) is None:
+            raise MigrationError(
+                f"payload symlink escapes its allowed root: {relative}"
+            )
+        return
+
+    parts: list[str] = []
+    for part in (relative.parent / target).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise MigrationError(
+                    f"payload symlink escapes its allowed root: {relative}"
+                )
+            parts.pop()
+            continue
+        parts.append(part)
+    normalized = PurePosixPath(*parts)
+    if not any(normalized.is_relative_to(root) for root in ALLOWED_PAYLOAD_ROOTS):
+        raise MigrationError(f"payload symlink escapes its allowed root: {relative}")
 
 
 def _walk_payload_entries(payload: Path) -> list[Path]:

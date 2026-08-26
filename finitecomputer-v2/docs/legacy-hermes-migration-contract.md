@@ -90,9 +90,13 @@ and assigned `rebuild` or `quarantine`; they are never followed or activated.
 
 The source tool builds the active payload directly from the inventory. It
 copies every `activate` file and contained symlink, omits every other
-disposition, and rechecks metadata and hashes while copying. The manifest then
-rejects any active payload entry that is absent from, changed from, or has a
-non-`activate` disposition in the source inventory.
+disposition, and rechecks metadata and hashes while copying. A symlink in an
+active path inherits the terminal target's disposition: a link into generated,
+quarantined, or preserved state stays inactive. Absolute links below
+`/home/node` may remain active only when their terminal target is also active;
+the target path is rewritten into the target data layout during import. The
+manifest rejects any active payload entry that is absent from, changed from,
+or has a non-`activate` disposition in the source inventory.
 
 ## Bundle boundary
 

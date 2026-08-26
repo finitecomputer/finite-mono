@@ -61,7 +61,10 @@ one reviewed, values-free endpoint input before rehearsal; unknown ownership,
 authentication, desired state, or source fails closed.
 
 Inventory every symlink. Links contained within an admitted data root may be
-preserved. Links from generated or quarantined trees remain inert metadata.
+preserved only when their terminal target is also active. A link from an active
+path into generated, quarantined, or preserved state inherits that target
+disposition and remains inactive. Links from generated or quarantined trees
+remain inert metadata.
 During a restore rehearsal, resolve absolute `/home/node/...` links inside the
 restored source root, including chains of such links; a chain that eventually
 leaves `/home/node` remains structurally blocked.
@@ -316,8 +319,10 @@ or unreadable entries.
 
 External symlinks below known generated or quarantined roots are recorded as
 inert metadata and keep those dispositions. They are not followed or copied
-into active target state. An external symlink in an active or otherwise
-unclassified path remains structurally blocked.
+into active target state. A link from an active path into generated,
+quarantined, or preserved state inherits the terminal target's disposition.
+An external symlink in an active or otherwise unclassified path remains
+structurally blocked.
 
 ```sh
 SOURCE_IMAGE_REFERENCE='docker.io/library/fc-agent-runtime:main'

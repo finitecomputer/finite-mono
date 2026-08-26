@@ -114,6 +114,9 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             "project\n", encoding="utf-8"
         )
         (self.payload / "home/dev/project/readme-link").symlink_to("README.md")
+        (self.payload / "home/dev/project/project-root").symlink_to(
+            "/home/node/dev/project"
+        )
         (self.payload / "home/uploads/photo.txt").write_text(
             "upload\n", encoding="utf-8"
         )
@@ -796,9 +799,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         outside.write_text("do not follow\n", encoding="utf-8")
         (source / "escape").symlink_to(outside)
         (source / "nested-external").symlink_to("/tmp/outside-secret")
-        (source / "chained-escape").symlink_to(
-            "/home/node/nested-external"
-        )
+        (source / "chained-escape").symlink_to("/home/node/nested-external")
 
         result = migration.inventory_source_volume(
             self.root / "blocked-inventory.json", source
@@ -831,9 +832,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         source = self.root / "source-home"
         versioned_theme = source / "dev/site/versions/1/content/themes/theme"
         versioned_theme.mkdir(parents=True)
-        (source / "dev/site/current").symlink_to(
-            "/home/node/dev/site/versions/1"
-        )
+        (source / "dev/site/current").symlink_to("/home/node/dev/site/versions/1")
         public_themes = source / "dev/site/content/themes"
         public_themes.mkdir(parents=True)
         (public_themes / "theme").symlink_to(
@@ -934,10 +933,12 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         (source / "dev/project/.venv/bin/python").symlink_to(
             "/nix/store/legacy-python/bin/python"
         )
-        (source / ".brain").mkdir()
-        (source / ".brain/identity.json").write_text(
-            "quarantined\n", encoding="utf-8"
+        (source / ".cache/packages/websockets").mkdir(parents=True)
+        (source / "dev/project/websockets").symlink_to(
+            "/home/node/.cache/packages/websockets"
         )
+        (source / ".brain").mkdir()
+        (source / ".brain/identity.json").write_text("quarantined\n", encoding="utf-8")
         (source / "custom-data").mkdir()
         (source / "custom-data/archive.txt").write_text(
             "preserved only\n", encoding="utf-8"
@@ -970,6 +971,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             (output / "home/dev/project/app-link").readlink(), Path("app.py")
         )
         self.assertFalse((output / "home/dev/project/.venv").exists())
+        self.assertFalse((output / "home/dev/project/websockets").is_symlink())
         self.assertFalse((output / ".brain").exists())
         self.assertFalse((output / "custom-data").exists())
 
