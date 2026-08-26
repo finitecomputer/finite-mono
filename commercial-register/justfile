@@ -2,23 +2,26 @@ set shell := ["../scripts/dev-shell", "-cu"]
 
 default: check
 
-check:
+bootstrap:
+    corepack yarn install --immutable
+
+check: bootstrap
     corepack yarn typecheck
     corepack yarn app:build
 
-test:
+test: bootstrap
     corepack yarn test
 
-app-build:
+app-build: bootstrap
     corepack yarn app:build
 
-app-plan:
+app-plan: bootstrap
     corepack yarn twenty plan
 
-app-apply:
+app-apply: bootstrap
     corepack yarn twenty apply
 
 [positional-arguments]
-agent *args:
+agent *args: bootstrap
     corepack yarn build:agent
     node dist/agent/cli.js "$@"

@@ -4,6 +4,7 @@
     "name": "NED",
     "commercialRoles": ["PARTNER"],
     "relationshipSummary": "Partner that purchased one Agent Camp; follow-on work remains open.",
+    "relationshipSummaryRefreshedAt": "2026-08-25T12:00:00.000Z",
     "sourceReference": "test://synthetic/ned"
   },
   "account": {

@@ -35,6 +35,7 @@ test('the installed app exposes organizations and their commercial accounts', ()
       'lifetimeNetCashUsd',
       'reconciliationWarning',
       'relationshipSummary',
+      'relationshipSummaryRefreshedAt',
       'sourceReference',
     ].sort(),
     companyFieldNames.sort(),
@@ -44,6 +45,8 @@ test('the installed app exposes organizations and their commercial accounts', ()
     'currentMrrUsd',
     'isCurrentCustomer',
     'lifetimeNetCashUsd',
+    'relationshipSummary',
+    'relationshipSummaryRefreshedAt',
   ]) {
     const field = companyFields.find((candidate) => candidate.name === fieldName);
     assert.equal(field.isUIEditable, false, `${fieldName} must be derived`);
@@ -135,6 +138,10 @@ test('the installed app represents won purchases and open follow-on work', () =>
     (field) => field.name === 'monthlyRecurringRevenueUsd',
   );
   assert.equal(packageMrr.isUIEditable, false);
+  assert.ok(
+    purchasedPackage.fields.some((field) => field.name === 'priceTermKey'),
+    'Recurring price terms need a stable identity across effective-date changes',
+  );
 });
 
 test('the installed app keeps charges separate from cash received', () => {
@@ -163,6 +170,7 @@ test('the installed app keeps charges separate from cash received', () => {
   for (const fieldName of [
     'assetCode',
     'nativeAmount',
+    'network',
     'receivedAt',
     'reportingValueUsd',
     'sourceReference',

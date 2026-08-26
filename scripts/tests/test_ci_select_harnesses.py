@@ -205,6 +205,18 @@ class CiHarnessSelectionTests(unittest.TestCase):
             set(),
         )
 
+    def test_commercial_source_runs_only_commercial_harness(self) -> None:
+        self.assertEqual(
+            selected("commercial-register/src/agent/register.ts"),
+            {"run_commercial"},
+        )
+
+    def test_commercial_readme_is_docs_only(self) -> None:
+        self.assertEqual(
+            selected("commercial-register/README.md"),
+            set(),
+        )
+
     def test_runbook_markdown_runs_nix_checks(self) -> None:
         self.assertEqual(
             selected("infra/runbooks/deploy-core.md"),

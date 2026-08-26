@@ -15,7 +15,27 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
   nonEmptyString(organization.name, 'organization.name');
   optionalString(organization.domainName, 'organization.domainName');
   optionalString(organization.brainPage, 'organization.brainPage');
+  optionalString(
+    organization.relationshipSummary,
+    'organization.relationshipSummary',
+  );
+  optionalDateTime(
+    organization.relationshipSummaryRefreshedAt,
+    'organization.relationshipSummaryRefreshedAt',
+  );
+  if (
+    organization.relationshipSummary !== undefined &&
+    organization.relationshipSummaryRefreshedAt === undefined
+  ) {
+    throw new Error(
+      'organization.relationshipSummaryRefreshedAt is required with relationshipSummary',
+    );
+  }
   optionalString(organization.sourceReference, 'organization.sourceReference');
+  optionalBoolean(
+    organization.reconciliationWarning,
+    'organization.reconciliationWarning',
+  );
   const commercialRoles = optionalArray(
     organization.commercialRoles,
     'organization.commercialRoles',
@@ -32,6 +52,11 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
     const account = objectAt(update.account, 'account');
     nonEmptyString(account.name, 'account.name');
     optionalEnum(account.status, ['ACTIVE', 'INACTIVE'], 'account.status');
+    optionalString(account.sourceReference, 'account.sourceReference');
+    optionalBoolean(
+      account.reconciliationWarning,
+      'account.reconciliationWarning',
+    );
   }
 
   const contacts = optionalArray(update.contacts, 'contacts');
@@ -73,6 +98,14 @@ export function parseCommercialUpdate(value: unknown): CommercialUpdate {
       ],
       `opportunities[${index}].stage`,
     );
+    optionalString(
+      opportunity.sourceReference,
+      `opportunities[${index}].sourceReference`,
+    );
+    optionalBoolean(
+      opportunity.reconciliationWarning,
+      `opportunities[${index}].reconciliationWarning`,
+    );
   }
 
   const arrangements = optionalArray(update.arrangements, 'arrangements');
@@ -105,7 +138,13 @@ function validateArrangement(
   );
   optionalDate(arrangement.startsOn, `${path}.startsOn`);
   optionalDate(arrangement.endsOn, `${path}.endsOn`);
-  uniqueNames(arrangement.packages ?? [], `${path}.packages`);
+  optionalString(arrangement.sourceReference, `${path}.sourceReference`);
+  optionalBoolean(
+    arrangement.reconciliationWarning,
+    `${path}.reconciliationWarning`,
+  );
+  uniquePackageIdentities(arrangement.packages ?? [], `${path}.packages`);
+  uniquePriceTermKeys(arrangement.packages ?? [], `${path}.packages`);
   for (const [index, purchasedPackage] of (arrangement.packages ?? []).entries()) {
     validatePackage(purchasedPackage, `${path}.packages[${index}]`);
   }
@@ -133,8 +172,15 @@ function validatePackage(
   );
   optionalDate(purchasedPackage.effectiveFrom, `${path}.effectiveFrom`);
   optionalDate(purchasedPackage.effectiveTo, `${path}.effectiveTo`);
+  optionalString(purchasedPackage.priceTermKey, `${path}.priceTermKey`);
+  optionalString(purchasedPackage.sourceReference, `${path}.sourceReference`);
+  optionalBoolean(
+    purchasedPackage.reconciliationWarning,
+    `${path}.reconciliationWarning`,
+  );
   if (purchasedPackage.price !== undefined) {
     positiveMoney(purchasedPackage.price, `${path}.price`);
+    evidenceOrWarning(purchasedPackage, path);
   }
   if (
     purchasedPackage.monthlyRecurringRevenueUsd !== undefined &&
@@ -156,6 +202,7 @@ function validatePackage(
       );
     }
     nonEmptyString(purchasedPackage.effectiveFrom, `${path}.effectiveFrom`);
+    nonEmptyString(purchasedPackage.priceTermKey, `${path}.priceTermKey`);
     if (
       purchasedPackage.price.currencyCode.toUpperCase() !== 'USD' &&
       purchasedPackage.monthlyRecurringRevenueUsd === undefined
@@ -210,6 +257,12 @@ function validatePackage(
     optionalEnum(charge.status, ['OPEN', 'PAID', 'VOID'], `${chargePath}.status`);
     optionalDate(charge.chargedOn, `${chargePath}.chargedOn`);
     optionalDate(charge.dueOn, `${chargePath}.dueOn`);
+    optionalString(charge.sourceReference, `${chargePath}.sourceReference`);
+    optionalBoolean(
+      charge.reconciliationWarning,
+      `${chargePath}.reconciliationWarning`,
+    );
+    evidenceOrWarning(charge, chargePath);
     uniqueNames(charge.payments ?? [], `${chargePath}.payments`);
     for (const [paymentIndex, payment] of (charge.payments ?? []).entries()) {
       validatePayment(payment, `${chargePath}.payments[${paymentIndex}]`);
@@ -232,6 +285,13 @@ function validatePayment(payment: IncomingPaymentUpdate, path: string): void {
     ['RECEIVED', 'REFUNDED', 'VOIDED'],
     `${path}.status`,
   );
+  optionalString(payment.network, `${path}.network`);
+  optionalString(payment.sourceReference, `${path}.sourceReference`);
+  optionalBoolean(
+    payment.reconciliationWarning,
+    `${path}.reconciliationWarning`,
+  );
+  evidenceOrWarning(payment, path);
   optionalEnum(
     payment.method,
     ['BANK', 'CARD', 'DIGITAL_ASSET', 'CASH', 'OTHER'],
@@ -286,6 +346,14 @@ function optionalDate(value: unknown, path: string): void {
   }
 }
 
+function optionalDateTime(value: unknown, path: string): void {
+  if (value === undefined) return;
+  nonEmptyString(value, path);
+  if (Number.isNaN(Date.parse(value))) {
+    throw new Error(`${path} must be an ISO date-time`);
+  }
+}
+
 function enumValue(
   value: unknown,
   allowed: readonly string[],
@@ -304,6 +372,26 @@ function optionalEnum(
   if (value !== undefined) enumValue(value, allowed, path);
 }
 
+function optionalBoolean(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${path} must be a boolean`);
+  }
+}
+
+function evidenceOrWarning(
+  value: { sourceReference?: unknown; reconciliationWarning?: unknown },
+  path: string,
+): void {
+  const hasSource =
+    typeof value.sourceReference === 'string' &&
+    value.sourceReference.trim() !== '';
+  if (!hasSource && value.reconciliationWarning !== true) {
+    throw new Error(
+      `${path} requires sourceReference or reconciliationWarning: true`,
+    );
+  }
+}
+
 function uniqueNames(
   values: Array<{ name?: unknown }>,
   path: string,
@@ -314,6 +402,39 @@ function uniqueNames(
   const duplicate = names.find((name, index) => names.indexOf(name) !== index);
   if (duplicate) {
     throw new Error(`${path} contains duplicate name ${JSON.stringify(duplicate)}`);
+  }
+}
+
+function uniquePriceTermKeys(
+  values: PurchasedPackageUpdate[],
+  path: string,
+): void {
+  const keys = values
+    .map((value) => value.priceTermKey)
+    .filter((value): value is string => value !== undefined);
+  const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (duplicate) {
+    throw new Error(
+      `${path} contains duplicate priceTermKey ${JSON.stringify(duplicate)}`,
+    );
+  }
+}
+
+function uniquePackageIdentities(
+  values: PurchasedPackageUpdate[],
+  path: string,
+): void {
+  const identities = values.map((value, index) => {
+    nonEmptyString(value.name, `${path}[${index}].name`);
+    return value.priceTermKey
+      ? `price term ${value.priceTermKey}`
+      : `package ${value.name}`;
+  });
+  const duplicate = identities.find(
+    (identity, index) => identities.indexOf(identity) !== index,
+  );
+  if (duplicate) {
+    throw new Error(`${path} contains duplicate ${JSON.stringify(duplicate)}`);
   }
 }
 

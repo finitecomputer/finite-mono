@@ -18,4 +18,5 @@ export default defineField({
   icon: 'IconNotes',
   isNullable: true,
   defaultValue: null,
+  isUIEditable: false,
 });

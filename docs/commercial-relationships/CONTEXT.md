@@ -121,8 +121,11 @@ _Avoid_: recurring price multiplied by elapsed months, contribution value
 The derived monthly value of active recurring commercial terms, independently
 of whether the current payment has arrived. Each price term has an effective
 start and optional end; a price change ends the old term and adds a new one.
-MRR is reported separately from cash collected and from variable or one-time
-consideration.
+  MRR is reported separately from cash collected and from variable or one-time
+  consideration.
+  In the Twenty MVP, a stable Price Term Key identifies each recurring term.
+  Reusing the key updates that term; a changed price uses a new key while the
+  prior term receives an effective end date.
 _Avoid_: Lifetime Net Cash, last month's variable usage, one-time Package price
 
 **Incoming Payment**:
@@ -344,9 +347,11 @@ _Avoid_: P&L, revenue recognition, complete company profitability
   Charges, and Incoming Payments are entered only from their actual source
   evidence; event notes do not prove a purchase or payment.
 - The NED MVP implements only the objects and fields required for this ordinary
-  purchase path. Sponsorship, OpenRouter, Bitcoin, Contributions, and Payment
-  Allocations remain documented extensions until their respective pilot cases
-  require them.
+  purchase path. The generic manual-payment record can preserve a Bitcoin
+  amount, network, transaction reference, and receipt-time USD value, but NED
+  does not exercise that path. Sponsorship, OpenRouter attribution,
+  Contributions, and Payment Allocations remain documented extensions until
+  their respective pilot cases require them.
 - The initial global views are the Organization directory, open Opportunity
   pipeline, and current-customer view. Reconciliation Warnings appear inline,
   not in a dedicated global view.

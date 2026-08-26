@@ -134,6 +134,16 @@ export default defineObject({
       ],
     },
     {
+      universalIdentifier: 'bb7d5344-3bc7-4ab9-9675-dc686f1c22fc',
+      type: FieldType.TEXT,
+      name: 'network',
+      label: 'Network',
+      description: 'Payment rail or digital-asset network when relevant',
+      icon: 'IconNetwork',
+      isNullable: true,
+      defaultValue: null,
+    },
+    {
       universalIdentifier: '664a76c5-4e52-4bfb-ae30-427fc41168f2',
       type: FieldType.TEXT,
       name: 'transactionReference',

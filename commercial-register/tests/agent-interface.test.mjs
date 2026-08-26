@@ -8,8 +8,11 @@ import test from 'node:test';
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const {
+  deriveMetrics,
   monthlyRecurringRevenueUsd,
+  normalizedMonthlyRecurringRevenueUsd,
 } = require('../dist/agent/domain.js');
+const { parseCommercialUpdate } = require('../dist/agent/validation.js');
 
 test('MRR counts active recurring package prices once', () => {
   const today = new Date('2026-08-25T00:00:00.000Z');
@@ -45,6 +48,91 @@ test('MRR counts active recurring package prices once', () => {
       today,
     ),
     0,
+  );
+  assert.equal(
+    normalizedMonthlyRecurringRevenueUsd({
+      ...base,
+      billingCadence: 'ANNUAL',
+      effectiveFrom: '2027-01-01',
+    }),
+    100,
+    'normalization must not freeze a future term at zero',
+  );
+});
+
+test('unconverted non-USD cash remains unknown rather than becoming zero', () => {
+  const metrics = deriveMetrics([], [], [
+    {
+      id: 'payment-1',
+      name: 'BTC payment',
+      status: 'RECEIVED',
+      nativeAmount: 0.1,
+      assetCode: 'BTC',
+    },
+  ]);
+
+  assert.equal(metrics.lifetimeNetCashUsd, null);
+});
+
+test('financial facts require evidence or an explicit warning', () => {
+  assert.throws(
+    () =>
+      parseCommercialUpdate({
+        version: 1,
+        organization: { name: 'Example' },
+        account: { name: 'Example account' },
+        arrangements: [
+          {
+            name: 'Arrangement',
+            packages: [
+              {
+                name: 'Package',
+                priceBasis: 'ONE_TIME',
+                price: { amount: 10, currencyCode: 'USD' },
+              },
+            ],
+          },
+        ],
+      }),
+    /sourceReference or reconciliationWarning/,
+  );
+});
+
+test('a price change can end one term and add the next without renaming the package', () => {
+  assert.doesNotThrow(() =>
+    parseCommercialUpdate({
+      version: 1,
+      organization: { name: 'Example' },
+      account: { name: 'Example account' },
+      arrangements: [
+        {
+          name: 'Hosted service',
+          packages: [
+            {
+              name: 'Hosted agent',
+              status: 'ACTIVE',
+              priceBasis: 'RECURRING',
+              priceTermKey: 'hosted-agent-2026-01',
+              price: { amount: 100, currencyCode: 'USD' },
+              billingCadence: 'MONTHLY',
+              effectiveFrom: '2026-01-01',
+              effectiveTo: '2026-08-31',
+              sourceReference: 'test://old-term',
+            },
+            {
+              name: 'Hosted agent',
+              status: 'ACTIVE',
+              priceBasis: 'RECURRING',
+              priceTermKey: 'hosted-agent-2026-09',
+              price: { amount: 150, currencyCode: 'USD' },
+              billingCadence: 'MONTHLY',
+              effectiveFrom: '2026-09-01',
+              sourceReference: 'test://new-term',
+            },
+          ],
+        },
+      ],
+    }),
   );
 });
 
@@ -161,5 +249,25 @@ test('the agent command applies and reads the ordinary NED path idempotently', a
   assert.deepEqual(
     shown.contacts.map((contact) => contact.email),
     ['ned-contact@example.invalid'],
+  );
+  assert.equal(
+    shown.arrangements[0].packages[0].charges[0].payments[0].sourceReference,
+    'test://synthetic/ned/agent-camp/payment',
+  );
+
+  const packageRecords = records.get('purchasedPackages');
+  packageRecords.push({
+    ...packageRecords[0],
+    id: 'purchasedPackages-ambiguous',
+  });
+  const beforeAmbiguousApply = JSON.stringify([...records]);
+  await assert.rejects(
+    run('apply', '--file', fixturePath.pathname),
+    /ambiguous purchasedPackages match/,
+  );
+  assert.equal(
+    JSON.stringify([...records]),
+    beforeAmbiguousApply,
+    'ambiguity must be detected before the first write',
   );
 });

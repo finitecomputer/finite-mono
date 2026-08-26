@@ -1,14 +1,16 @@
 import {
   deriveMetrics,
+  moneyAmount,
   moneyToTwenty,
-  monthlyRecurringRevenueUsd,
+  normalizedMonthlyRecurringRevenueUsd,
   usdToTwenty,
 } from './domain';
 import { TwentyClient } from './twenty-client';
 import type {
-  CommercialMetrics,
+  CommercialArrangementUpdate,
   CommercialUpdate,
   ContactUpdate,
+  PurchasedPackageUpdate,
   TwentyRecord,
 } from './types';
 
@@ -33,13 +35,19 @@ interface OrganizationGraph {
   incomingPayments: TwentyRecord[];
 }
 
+interface PreflightPlan {
+  matches: Map<object, TwentyRecord | undefined>;
+  wonOpportunities: Map<CommercialArrangementUpdate, TwentyRecord>;
+}
+
 export async function applyCommercialUpdate(
   client: TwentyClient,
   update: CommercialUpdate,
   at = new Date(),
 ): Promise<Record<string, unknown>> {
+  const plan = await preflightCommercialUpdate(client, update);
   const changes: Change[] = [];
-  const organization = await upsertByName(
+  const organization = await persistPlannedRecord(
     client,
     'companies',
     update.organization.name,
@@ -55,21 +63,29 @@ export async function applyCommercialUpdate(
           ? undefined
           : links(update.organization.brainPage),
       relationshipSummary: update.organization.relationshipSummary,
+      relationshipSummaryRefreshedAt:
+        update.organization.relationshipSummaryRefreshedAt,
       sourceReference: update.organization.sourceReference,
       reconciliationWarning: update.organization.reconciliationWarning,
     }),
-    {},
+    plan.matches.get(update.organization),
     changes,
   );
 
   let account: TwentyRecord | undefined;
 
   for (const contact of update.contacts ?? []) {
-    await upsertContact(client, organization, contact, changes);
+    await persistContact(
+      client,
+      organization,
+      contact,
+      plan.matches.get(contact),
+      changes,
+    );
   }
 
   if (update.account) {
-    account = await upsertByName(
+    account = await persistPlannedRecord(
       client,
       'commercialAccounts',
       update.account.name,
@@ -80,14 +96,14 @@ export async function applyCommercialUpdate(
         reconciliationWarning: update.account.reconciliationWarning,
         organizationId: organization.id,
       }),
-      { organizationId: organization.id },
+      plan.matches.get(update.account),
       changes,
     );
   }
 
   const opportunitiesByName = new Map<string, TwentyRecord>();
   for (const opportunity of update.opportunities ?? []) {
-    const record = await upsertByName(
+    const record = await persistPlannedRecord(
       client,
       'opportunities',
       opportunity.name,
@@ -106,7 +122,7 @@ export async function applyCommercialUpdate(
         sourceReference: opportunity.sourceReference,
         reconciliationWarning: opportunity.reconciliationWarning,
       }),
-      { companyId: organization.id },
+      plan.matches.get(opportunity),
       changes,
     );
     opportunitiesByName.set(opportunity.name, record);
@@ -121,12 +137,7 @@ export async function applyCommercialUpdate(
     if (arrangement.wonOpportunity) {
       wonOpportunity =
         opportunitiesByName.get(arrangement.wonOpportunity) ??
-        (await findOneByName(
-          client,
-          'opportunities',
-          arrangement.wonOpportunity,
-          { companyId: organization.id },
-        ));
+        plan.wonOpportunities.get(arrangement);
       if (!wonOpportunity) {
         throw new Error(
           `won opportunity ${JSON.stringify(arrangement.wonOpportunity)} was not found`,
@@ -134,7 +145,7 @@ export async function applyCommercialUpdate(
       }
     }
 
-    const arrangementRecord = await upsertByName(
+    const arrangementRecord = await persistPlannedRecord(
       client,
       'commercialArrangements',
       arrangement.name,
@@ -148,13 +159,13 @@ export async function applyCommercialUpdate(
         accountId: account?.id,
         wonOpportunityId: wonOpportunity?.id,
       }),
-      { accountId: account?.id as string },
+      plan.matches.get(arrangement),
       changes,
     );
 
     for (const purchasedPackage of arrangement.packages ?? []) {
-      const mrr = monthlyRecurringRevenueUsd(purchasedPackage, at);
-      const packageRecord = await upsertByName(
+      const normalizedMrr = normalizedMonthlyRecurringRevenueUsd(purchasedPackage);
+      const packageRecord = await persistPlannedRecord(
         client,
         'purchasedPackages',
         purchasedPackage.name,
@@ -162,6 +173,7 @@ export async function applyCommercialUpdate(
           name: purchasedPackage.name,
           status: purchasedPackage.status,
           priceBasis: purchasedPackage.priceBasis,
+          priceTermKey: purchasedPackage.priceTermKey,
           price:
             purchasedPackage.price === undefined
               ? undefined
@@ -169,17 +181,17 @@ export async function applyCommercialUpdate(
           billingCadence: purchasedPackage.billingCadence,
           effectiveFrom: purchasedPackage.effectiveFrom,
           effectiveTo: purchasedPackage.effectiveTo,
-          monthlyRecurringRevenueUsd: usdToTwenty(mrr),
+          monthlyRecurringRevenueUsd: usdToTwenty(normalizedMrr),
           sourceReference: purchasedPackage.sourceReference,
           reconciliationWarning: purchasedPackage.reconciliationWarning,
           arrangementId: arrangementRecord.id,
-        }),
-        { arrangementId: arrangementRecord.id },
+      }),
+        plan.matches.get(purchasedPackage),
         changes,
       );
 
       for (const line of purchasedPackage.offeringLines ?? []) {
-        await upsertByName(
+        await persistPlannedRecord(
           client,
           'offeringLines',
           line.name,
@@ -193,13 +205,13 @@ export async function applyCommercialUpdate(
             description: line.description,
             purchasedPackageId: packageRecord.id,
           }),
-          { purchasedPackageId: packageRecord.id },
+          plan.matches.get(line),
           changes,
         );
       }
 
       for (const charge of purchasedPackage.charges ?? []) {
-        const chargeRecord = await upsertByName(
+        const chargeRecord = await persistPlannedRecord(
           client,
           'charges',
           charge.name,
@@ -214,15 +226,12 @@ export async function applyCommercialUpdate(
             accountId: account?.id,
             purchasedPackageId: packageRecord.id,
           }),
-          {
-            accountId: account?.id as string,
-            purchasedPackageId: packageRecord.id,
-          },
+          plan.matches.get(charge),
           changes,
         );
 
         for (const payment of charge.payments ?? []) {
-          await upsertByName(
+          await persistPlannedRecord(
             client,
             'incomingPayments',
             payment.name,
@@ -237,16 +246,14 @@ export async function applyCommercialUpdate(
               receivedAt: payment.receivedAt,
               status: payment.status,
               method: payment.method,
+              network: payment.network,
               transactionReference: payment.transactionReference,
               sourceReference: payment.sourceReference,
               reconciliationWarning: payment.reconciliationWarning,
               payerAccountId: account?.id,
               chargeId: chargeRecord.id,
             }),
-            {
-              payerAccountId: account?.id as string,
-              chargeId: chargeRecord.id,
-            },
+            plan.matches.get(payment),
             changes,
           );
         }
@@ -263,7 +270,10 @@ export async function applyCommercialUpdate(
   );
   await client.update('companies', organization.id, {
     currentMrrUsd: usdToTwenty(metrics.currentMrrUsd),
-    lifetimeNetCashUsd: usdToTwenty(metrics.lifetimeNetCashUsd),
+    lifetimeNetCashUsd:
+      metrics.lifetimeNetCashUsd === null
+        ? null
+        : usdToTwenty(metrics.lifetimeNetCashUsd),
     isCurrentCustomer: metrics.isCurrentCustomer,
   });
   changes.push({
@@ -310,11 +320,18 @@ export async function showOrganization(
       'domainName',
       'commercialRoles',
       'relationshipSummary',
+      'relationshipSummaryRefreshedAt',
       'brainPage',
       'sourceReference',
     ]),
     accounts: graph.accounts.map((record) =>
-      select(record, ['id', 'name', 'status']),
+      select(record, [
+        'id',
+        'name',
+        'status',
+        'sourceReference',
+        'reconciliationWarning',
+      ]),
     ),
     contacts: graph.contacts
       .map((record) => contactForDisplay(record))
@@ -325,7 +342,23 @@ export async function showOrganization(
       ),
     currentServices: graph.offeringLines
       .filter((line) => line.status === 'ACTIVE')
-      .map((line) => select(line, ['id', 'name', 'fulfillmentPath', 'quantity'])),
+      .map((line) => {
+        const purchasedPackage = graph.packages.find(
+          (candidate) => candidate.id === line.purchasedPackageId,
+        );
+        return compact({
+          ...select(line, [
+            'id',
+            'name',
+            'fulfillmentPath',
+            'quantity',
+            'purchasedPackageId',
+          ]),
+          sourceReference: purchasedPackage?.sourceReference,
+          reconciliationWarning: purchasedPackage?.reconciliationWarning,
+        });
+      }),
+    arrangements: arrangementsForDisplay(graph),
     purchases: graph.packages
       .map((record) =>
         select(record, [
@@ -333,11 +366,15 @@ export async function showOrganization(
           'name',
           'status',
           'priceBasis',
+          'priceTermKey',
           'price',
           'billingCadence',
           'effectiveFrom',
           'effectiveTo',
           'monthlyRecurringRevenueUsd',
+          'arrangementId',
+          'sourceReference',
+          'reconciliationWarning',
         ]),
       )
       .sort(compareNames),
@@ -348,11 +385,16 @@ export async function showOrganization(
           'name',
           'nativeAmount',
           'assetCode',
+          'network',
           'reportingValueUsd',
           'receivedAt',
           'status',
           'method',
           'transactionReference',
+          'payerAccountId',
+          'chargeId',
+          'sourceReference',
+          'reconciliationWarning',
         ]),
       )
       .sort(compareNames),
@@ -369,12 +411,144 @@ export async function showOrganization(
           'commercialStage',
           'amount',
           'brainWants',
+          'sourceReference',
+          'reconciliationWarning',
         ]),
       )
       .sort(compareNames),
     metrics,
     unresolvedFacts: reconciliationWarnings(graph),
   };
+}
+
+async function preflightCommercialUpdate(
+  client: TwentyClient,
+  update: CommercialUpdate,
+): Promise<PreflightPlan> {
+  const plan: PreflightPlan = {
+    matches: new Map(),
+    wonOpportunities: new Map(),
+  };
+  const organization = await findOneByName(
+    client,
+    'companies',
+    update.organization.name,
+    {},
+  );
+  plan.matches.set(update.organization, organization);
+
+  const people = organization
+    ? await client.list('people', {
+        field: 'companyId',
+        value: organization.id,
+      })
+    : [];
+  for (const contact of update.contacts ?? []) {
+    plan.matches.set(contact, findContact(people, contact));
+  }
+
+  const account =
+    organization && update.account
+      ? await findOneByName(
+          client,
+          'commercialAccounts',
+          update.account.name,
+          { organizationId: organization.id },
+        )
+      : undefined;
+  if (update.account) plan.matches.set(update.account, account);
+
+  for (const opportunity of update.opportunities ?? []) {
+    const existing = organization
+      ? await findOneByName(client, 'opportunities', opportunity.name, {
+          companyId: organization.id,
+        })
+      : undefined;
+    plan.matches.set(opportunity, existing);
+  }
+
+  for (const arrangement of update.arrangements ?? []) {
+    const arrangementRecord = account
+      ? await findOneByName(
+          client,
+          'commercialArrangements',
+          arrangement.name,
+          { accountId: account.id },
+        )
+      : undefined;
+    plan.matches.set(arrangement, arrangementRecord);
+
+    if (
+      arrangement.wonOpportunity &&
+      !(update.opportunities ?? []).some(
+        (opportunity) => opportunity.name === arrangement.wonOpportunity,
+      )
+    ) {
+      const wonOpportunity = organization
+        ? await findOneByName(
+            client,
+            'opportunities',
+            arrangement.wonOpportunity,
+            { companyId: organization.id },
+          )
+        : undefined;
+      if (!wonOpportunity) {
+        throw new Error(
+          `won opportunity ${JSON.stringify(arrangement.wonOpportunity)} was not found`,
+        );
+      }
+      plan.wonOpportunities.set(arrangement, wonOpportunity);
+    }
+
+    for (const purchasedPackage of arrangement.packages ?? []) {
+      const packageRecord = arrangementRecord
+        ? await findPurchasedPackage(
+            client,
+            purchasedPackage,
+            arrangementRecord.id,
+          )
+        : undefined;
+      plan.matches.set(purchasedPackage, packageRecord);
+
+      for (const line of purchasedPackage.offeringLines ?? []) {
+        const lineRecord = packageRecord
+          ? await findOneByName(client, 'offeringLines', line.name, {
+              purchasedPackageId: packageRecord.id,
+            })
+          : undefined;
+        plan.matches.set(line, lineRecord);
+      }
+
+      for (const charge of purchasedPackage.charges ?? []) {
+        const chargeRecord =
+          account && packageRecord
+            ? await findOneByName(client, 'charges', charge.name, {
+                accountId: account.id,
+                purchasedPackageId: packageRecord.id,
+              })
+            : undefined;
+        plan.matches.set(charge, chargeRecord);
+
+        for (const payment of charge.payments ?? []) {
+          const paymentRecord =
+            account && chargeRecord
+              ? await findOneByName(
+                  client,
+                  'incomingPayments',
+                  payment.name,
+                  {
+                    payerAccountId: account.id,
+                    chargeId: chargeRecord.id,
+                  },
+                )
+              : undefined;
+          plan.matches.set(payment, paymentRecord);
+        }
+      }
+    }
+  }
+
+  return plan;
 }
 
 async function loadOrganizationGraph(
@@ -431,29 +605,13 @@ async function loadOrganizationGraph(
   };
 }
 
-async function upsertContact(
+async function persistContact(
   client: TwentyClient,
   organization: TwentyRecord,
   contact: ContactUpdate,
+  existing: TwentyRecord | undefined,
   changes: Change[],
 ): Promise<TwentyRecord> {
-  const people = await client.list('people', {
-    field: 'companyId',
-    value: organization.id,
-  });
-  const normalizedEmail = contact.email?.toLowerCase();
-  const matching = people.filter((person) => {
-    if (normalizedEmail) return contactEmail(person)?.toLowerCase() === normalizedEmail;
-    const name = asObject(person.name);
-    return (
-      name?.firstName === contact.firstName && name?.lastName === contact.lastName
-    );
-  });
-  if (matching.length > 1) {
-    throw new Error(
-      `ambiguous people match for ${JSON.stringify(`${contact.firstName} ${contact.lastName}`)}; no record was changed`,
-    );
-  }
   const data = compact({
     name: { firstName: contact.firstName, lastName: contact.lastName },
     emails:
@@ -465,8 +623,8 @@ async function upsertContact(
       contact.linkedinUrl === undefined ? undefined : links(contact.linkedinUrl),
     companyId: organization.id,
   });
-  if (matching[0]) {
-    const updated = await client.update('people', matching[0].id, data);
+  if (existing) {
+    const updated = await client.update('people', existing.id, data);
     changes.push({
       action: 'updated',
       resource: 'people',
@@ -499,15 +657,14 @@ async function listChildren(
   return deduplicate(batches.flat());
 }
 
-async function upsertByName(
+async function persistPlannedRecord(
   client: TwentyClient,
   resource: string,
   name: string,
   data: Record<string, unknown>,
-  scope: Record<string, string>,
+  existing: TwentyRecord | undefined,
   changes: Change[],
 ): Promise<TwentyRecord> {
-  const existing = await findOneByName(client, resource, name, scope);
   if (existing) {
     const updated = await client.update(resource, existing.id, data);
     changes.push({ action: 'updated', resource, id: updated.id, name });
@@ -516,6 +673,51 @@ async function upsertByName(
   const created = await client.create(resource, data);
   changes.push({ action: 'created', resource, id: created.id, name });
   return created;
+}
+
+async function findPurchasedPackage(
+  client: TwentyClient,
+  purchasedPackage: PurchasedPackageUpdate,
+  arrangementId: string,
+): Promise<TwentyRecord | undefined> {
+  const candidates = await client.list('purchasedPackages', {
+    field: 'arrangementId',
+    value: arrangementId,
+  });
+  const matching = candidates.filter((record) =>
+    purchasedPackage.priceTermKey
+      ? record.priceTermKey === purchasedPackage.priceTermKey
+      : record.name === purchasedPackage.name && !record.priceTermKey,
+  );
+  if (matching.length > 1) {
+    const identity = purchasedPackage.priceTermKey ?? purchasedPackage.name;
+    throw new Error(
+      `ambiguous purchasedPackages match for ${JSON.stringify(identity)}; no record was changed`,
+    );
+  }
+  return matching[0];
+}
+
+function findContact(
+  people: TwentyRecord[],
+  contact: ContactUpdate,
+): TwentyRecord | undefined {
+  const normalizedEmail = contact.email?.toLowerCase();
+  const matching = people.filter((person) => {
+    if (normalizedEmail) {
+      return contactEmail(person)?.toLowerCase() === normalizedEmail;
+    }
+    const name = asObject(person.name);
+    return (
+      name?.firstName === contact.firstName && name?.lastName === contact.lastName
+    );
+  });
+  if (matching.length > 1) {
+    throw new Error(
+      `ambiguous people match for ${JSON.stringify(`${contact.firstName} ${contact.lastName}`)}; no record was changed`,
+    );
+  }
+  return matching[0];
 }
 
 async function findOneByName(
@@ -562,11 +764,114 @@ function reconciliationWarnings(graph: OrganizationGraph): string[] {
     ['charge', graph.charges],
     ['payment', graph.incomingPayments],
   ];
-  return resources.flatMap(([kind, records]) =>
+  const explicit = resources.flatMap(([kind, records]) =>
     records
       .filter((record) => record.reconciliationWarning === true)
       .map((record) => `${kind}: ${String(record.name ?? record.id)}`),
   );
+  const missingConversions = graph.incomingPayments
+    .filter(
+      (payment) =>
+        payment.status === 'RECEIVED' &&
+        typeof payment.assetCode === 'string' &&
+        payment.assetCode.toUpperCase() !== 'USD' &&
+        moneyAmount(payment.reportingValueUsd) === undefined,
+    )
+    .map(
+      (payment) =>
+        `payment: ${String(payment.name ?? payment.id)} lacks receipt-time USD value`,
+    );
+  return [...new Set([...explicit, ...missingConversions])];
+}
+
+function arrangementsForDisplay(
+  graph: OrganizationGraph,
+): Record<string, unknown>[] {
+  return graph.arrangements
+    .map((arrangement) => ({
+      ...select(arrangement, [
+        'id',
+        'name',
+        'status',
+        'startsOn',
+        'endsOn',
+        'accountId',
+        'wonOpportunityId',
+        'sourceReference',
+        'reconciliationWarning',
+      ]),
+      packages: graph.packages
+        .filter((purchasedPackage) => purchasedPackage.arrangementId === arrangement.id)
+        .map((purchasedPackage) => ({
+          ...select(purchasedPackage, [
+            'id',
+            'name',
+            'status',
+            'priceBasis',
+            'priceTermKey',
+            'price',
+            'billingCadence',
+            'effectiveFrom',
+            'effectiveTo',
+            'monthlyRecurringRevenueUsd',
+            'sourceReference',
+            'reconciliationWarning',
+          ]),
+          offeringLines: graph.offeringLines
+            .filter((line) => line.purchasedPackageId === purchasedPackage.id)
+            .map((line) =>
+              select(line, [
+                'id',
+                'name',
+                'status',
+                'fulfillmentPath',
+                'quantity',
+                'serviceStartsOn',
+                'serviceEndsOn',
+                'description',
+              ]),
+            )
+            .sort(compareNames),
+          charges: graph.charges
+            .filter((charge) => charge.purchasedPackageId === purchasedPackage.id)
+            .map((charge) => ({
+              ...select(charge, [
+                'id',
+                'name',
+                'amount',
+                'status',
+                'chargedOn',
+                'dueOn',
+                'accountId',
+                'sourceReference',
+                'reconciliationWarning',
+              ]),
+              payments: graph.incomingPayments
+                .filter((payment) => payment.chargeId === charge.id)
+                .map((payment) =>
+                  select(payment, [
+                    'id',
+                    'name',
+                    'nativeAmount',
+                    'assetCode',
+                    'network',
+                    'reportingValueUsd',
+                    'receivedAt',
+                    'status',
+                    'method',
+                    'transactionReference',
+                    'payerAccountId',
+                    'sourceReference',
+                    'reconciliationWarning',
+                  ]),
+                )
+                .sort(compareNames),
+            }))
+            .sort(compareNames),
+        }))
+        .sort(compareNames),
+    }))
+    .sort(compareNames);
 }
 
 function contactForDisplay(record: TwentyRecord): Record<string, unknown> {

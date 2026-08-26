@@ -57,6 +57,14 @@ export function monthlyRecurringRevenueUsd(
     return 0;
   }
 
+  return normalizedMonthlyRecurringRevenueUsd(purchasedPackage);
+}
+
+export function normalizedMonthlyRecurringRevenueUsd(
+  purchasedPackage: Partial<PurchasedPackageUpdate> | TwentyRecord,
+): number {
+  if (purchasedPackage.priceBasis !== 'RECURRING') return 0;
+
   const explicit = moneyAmount(purchasedPackage.monthlyRecurringRevenueUsd);
   if (explicit !== undefined) return roundMoney(explicit);
 
@@ -88,9 +96,12 @@ export function deriveMetrics(
       0,
     ),
   );
-  const lifetimeNetCashUsd = roundMoney(
-    incomingPayments.reduce((sum, payment) => sum + paymentCashUsd(payment), 0),
-  );
+  const paymentValues = incomingPayments.map(paymentCashUsd);
+  const lifetimeNetCashUsd = paymentValues.some((value) => value === null)
+    ? null
+    : roundMoney(
+        paymentValues.reduce<number>((sum, value) => sum + (value ?? 0), 0),
+      );
 
   return {
     currentMrrUsd,
@@ -99,7 +110,7 @@ export function deriveMetrics(
   };
 }
 
-function paymentCashUsd(payment: TwentyRecord): number {
+function paymentCashUsd(payment: TwentyRecord): number | null {
   if (payment.status !== 'RECEIVED') return 0;
   if (
     typeof payment.assetCode === 'string' &&
@@ -108,7 +119,7 @@ function paymentCashUsd(payment: TwentyRecord): number {
   ) {
     return payment.nativeAmount;
   }
-  return moneyAmount(payment.reportingValueUsd) ?? 0;
+  return moneyAmount(payment.reportingValueUsd) ?? null;
 }
 
 function isEffectiveAt(

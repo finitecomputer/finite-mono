@@ -24,6 +24,7 @@ export interface OrganizationUpdate {
   commercialRoles?: CommercialRole[];
   brainPage?: string;
   relationshipSummary?: string;
+  relationshipSummaryRefreshedAt?: string;
   sourceReference?: string;
   reconciliationWarning?: boolean;
 }
@@ -72,6 +73,7 @@ export interface IncomingPaymentUpdate {
   nativeAmount: number;
   assetCode: string;
   reportingValueUsd?: number;
+  network?: string;
   receivedAt: string;
   status?: 'RECEIVED' | 'REFUNDED' | 'VOIDED';
   method?: 'BANK' | 'CARD' | 'DIGITAL_ASSET' | 'CASH' | 'OTHER';
@@ -95,6 +97,7 @@ export interface PurchasedPackageUpdate {
   name: string;
   status?: 'PLANNED' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
   priceBasis?: 'ONE_TIME' | 'RECURRING' | 'USAGE' | 'INCLUDED';
+  priceTermKey?: string;
   price?: MoneyInput;
   billingCadence?: 'NONE' | 'MONTHLY' | 'QUARTERLY' | 'ANNUAL';
   effectiveFrom?: string;
@@ -130,6 +133,6 @@ export type TwentyRecord = Record<string, unknown> & { id: string };
 
 export interface CommercialMetrics {
   currentMrrUsd: number;
-  lifetimeNetCashUsd: number;
+  lifetimeNetCashUsd: number | null;
   isCurrentCustomer: boolean;
 }

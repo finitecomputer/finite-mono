@@ -14,6 +14,8 @@ export const PURCHASED_PACKAGE_BILLING_CADENCE_FIELD_UNIVERSAL_IDENTIFIER =
   '020f81a1-d55c-4590-b478-7b0b2bfa78e3';
 export const PURCHASED_PACKAGE_MRR_FIELD_UNIVERSAL_IDENTIFIER =
   'b74071c0-e0a7-4b54-87d8-fc411fca5306';
+export const PURCHASED_PACKAGE_PRICE_TERM_KEY_FIELD_UNIVERSAL_IDENTIFIER =
+  'ec52a3f2-2e99-4822-879c-0f62494a5542';
 
 export default defineObject({
   universalIdentifier: PURCHASED_PACKAGE_UNIVERSAL_IDENTIFIER,
@@ -73,6 +75,18 @@ export default defineObject({
           color: 'gray',
         },
       ],
+    },
+    {
+      universalIdentifier:
+        PURCHASED_PACKAGE_PRICE_TERM_KEY_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'priceTermKey',
+      label: 'Price term key',
+      description:
+        'Stable agent-supplied identity for one effective-dated recurring price term',
+      icon: 'IconKey',
+      isNullable: true,
+      defaultValue: null,
     },
     {
       universalIdentifier:

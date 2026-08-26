@@ -67,9 +67,10 @@ empty-target restore test are gates before Twenty becomes the sole authority.
 ## Agent interface
 
 The command accepts a versioned JSON update document. It searches only within
-the obvious parent scope, creates or updates matching records, rejects
-ambiguous matches, never deletes records omitted from the document, rebuilds
-derived totals from stored records, and prints a change report.
+the obvious parent scope, preflights every match before the first write, creates
+or updates matching records, rejects ambiguous matches, never deletes records
+omitted from the document, rebuilds derived totals from stored records, and
+prints a change report.
 
 Two environment variables are required. Store their values outside git:
 
@@ -96,11 +97,26 @@ not real NED facts and must never be used to seed the live register. Real
 financial records require their actual Source Reference; incomplete facts use
 the inline reconciliation marker rather than an invented value.
 
-Recurring Package updates require an effective start, a real price, and a
-monthly, quarterly, or annual cadence. USD MRR is derived automatically. A
-non-USD recurring term must supply its sourced USD monthly normalization.
-Incoming digital-asset payments preserve native amount and asset code plus an
-optional receipt-time USD value; later exchange-rate changes do not rewrite it.
+Recurring Package updates require a stable `priceTermKey`, effective start, a
+real price, and a monthly, quarterly, or annual cadence. Updating the same key
+changes that term; a new key creates a new effective-dated term, so history is
+not overwritten. USD MRR is normalized automatically and activates according
+to the effective dates. A non-USD recurring term must supply its sourced USD
+monthly normalization.
+
+Incoming digital-asset payments preserve native amount, asset code, network,
+transaction reference, and an optional receipt-time USD value; later
+exchange-rate changes do not rewrite it. If a received non-USD payment lacks a
+sourced USD value, the USD lifetime-cash result is `null` with an unresolved
+fact, never a fabricated zero.
+
+Price-bearing Packages, Charges, and Incoming Payments require either a Source
+Reference or an explicit reconciliation warning. The `show` response nests
+Arrangements, Packages, Offering Lines, Charges, and Payments and returns those
+references with the material answers.
+
+Brain-projected relationship summaries are read-only in Twenty and include the
+time at which the projection was refreshed.
 
 The command's API credential is never printed. It uses Twenty's generated
 `/rest/` record endpoints; the versioned app remains the only schema mutation
