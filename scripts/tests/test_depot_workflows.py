@@ -98,9 +98,13 @@ class DepotWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("electron-alpha", workflow)
         self.assertNotIn("run_electron_alpha", workflow)
 
-    def test_ci_sets_the_container_user_for_cachix(self) -> None:
-        workflow = self.workflow("ci.yml")
-        self.assertIn("  USER: root\n", workflow)
+    def test_cachix_workflows_set_the_container_user(self) -> None:
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            if "cachix/cachix-action" not in workflow:
+                continue
+            with self.subTest(path=path.name):
+                self.assertIn("  USER: root\n", workflow)
 
 
 if __name__ == "__main__":

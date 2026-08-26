@@ -17,6 +17,7 @@ concurrency:
 env:
   CACHIX_CACHE_NAME: finite
   HERMES_AGENT_VERSION: "0.20.0"
+  USER: root
 jobs:
   publish:
     runs-on: depot-ubuntu-24.04
