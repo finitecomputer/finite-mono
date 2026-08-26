@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -159,6 +160,25 @@ class DepotWorkflowContractTests(unittest.TestCase):
                 continue
             with self.subTest(path=path.name):
                 self.assertIn("  USER: runner\n", workflow)
+
+    def test_every_depot_nix_job_configures_cachix(self) -> None:
+        job_pattern = re.compile(
+            r"^  (?P<name>[A-Za-z0-9_-]+):\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            for match in job_pattern.finditer(workflow):
+                body = match.group("body")
+                if "DeterminateSystems/nix-installer-action@v16" not in body:
+                    continue
+                with self.subTest(path=path.name, job=match.group("name")):
+                    self.assertIn("cachix/cachix-action@v17", body)
+                    self.assertLess(
+                        body.index("DeterminateSystems/nix-installer-action@v16"),
+                        body.index("cachix/cachix-action@v17"),
+                    )
 
     def test_ci_pull_requests_use_cachix_read_only(self) -> None:
         workflow = self.workflow("ci.yml")
