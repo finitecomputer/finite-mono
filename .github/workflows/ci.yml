@@ -453,6 +453,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run_nix_checks == 'true'
     runs-on: depot-ubuntu-24.04
+    env:
+      NIX_CONFIG: |
+        access-tokens = github.com=${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
