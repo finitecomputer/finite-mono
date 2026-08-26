@@ -2,6 +2,10 @@ name: Production Deploy Plan
 on:
   pull_request:
     branches: [production]
+env:
+  CACHIX_CACHE_NAME: finite
+  # Depot CI sandboxes do not populate USER; Cachix needs the runner account.
+  USER: runner
 jobs:
   plan:
     name: Plan production deploy
@@ -12,6 +16,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Build and guard deployment plan
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

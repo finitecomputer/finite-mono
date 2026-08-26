@@ -10,6 +10,10 @@ concurrency:
   group: lat3-nixos-closure-${{ inputs.rev }}
 permissions:
   contents: read
+env:
+  CACHIX_CACHE_NAME: finite
+  # Depot CI sandboxes do not populate USER; Cachix needs the runner account.
+  USER: runner
 jobs:
   build:
     runs-on: depot-ubuntu-24.04
@@ -19,6 +23,11 @@ jobs:
           ref: ${{ inputs.rev }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Build and package finite-lat-3 closure
         env:
           REV: ${{ inputs.rev }}
