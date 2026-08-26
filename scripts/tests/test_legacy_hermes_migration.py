@@ -313,6 +313,23 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             connection.commit()
         return target
 
+    def test_verify_summary_omits_per_file_records(self) -> None:
+        manifest = self.build_manifest()
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            exit_code = migration.main(
+                ["verify", "--bundle", str(self.bundle), "--summary"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(summary["file_count"], len(manifest["files"]))
+        self.assertEqual(summary["sessions"], manifest["sessions"])
+        self.assertNotIn("files", summary)
+        self.assertNotIn("endpoints", summary["sites"])
+        self.assertNotIn("integrations", summary["integrations"])
+
     def test_sites_inventory_binds_authoritative_records_to_preserved_source(
         self,
     ) -> None:

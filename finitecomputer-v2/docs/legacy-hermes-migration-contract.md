@@ -98,6 +98,11 @@ the target path is rewritten into the target data layout during import. The
 manifest rejects any active payload entry that is absent from, changed from,
 or has a non-`activate` disposition in the source inventory.
 
+The staging directory itself is root-only, but operators must not recursively
+change modes below the active payload or bundle. File and directory modes are
+source metadata bound by the inventory and manifest; changing them after
+staging invalidates the bundle.
+
 ## Bundle boundary
 
 `finite.legacy-hermes-migration.v2` contains:

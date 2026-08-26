@@ -481,6 +481,13 @@ bundle validator rejects unknown payload files, while the manifest binds the
 uncompressed `source-home.tar`. Compress before transport; an uncompressed
 whole-home transfer can turn a short cutover into a multi-hour outage.
 
+Keep the staging and bundle parent directories mode `0700`. Do not run a
+recursive `chmod` below either directory: source file and directory modes are
+part of the inventory and manifest, so changing them after staging invalidates
+the bundle. Use literal, fully expanded paths inside privileged compression or
+extraction shells; do not rely on an outer shell variable being visible inside
+`sudo sh -c`.
+
 Do not add an exclusion to the complete source snapshot. `--hard-dereference`
 stores hard-linked file content independently; it does not follow symlinks.
 Never add `--dereference`. If the inventory or manifest finds a special file,
@@ -515,7 +522,8 @@ sudo nerdctl --namespace finite run --rm --network none \
   --source-container-image-id \
     '<SOURCE_CONTAINER_IMAGE_ID>' \
   --source-volume-inventory-sha256 \
-    "$SOURCE_VOLUME_INVENTORY_SHA256"
+    "$SOURCE_VOLUME_INVENTORY_SHA256" \
+  --summary
 
 sudo nerdctl --namespace finite run --rm --network none --read-only \
   --mount 'type=bind,src=<BUNDLE>,dst=/migration,ro' \
@@ -523,7 +531,8 @@ sudo nerdctl --namespace finite run --rm --network none --read-only \
     'type=bind,src=<LAT3_TOOL_DIR>,dst=/opt/migration,ro' \
   --entrypoint /usr/local/bin/python3 \
   "$TARGET_RUNTIME_IMAGE" \
-  /opt/migration/legacy_hermes_migration.py verify --bundle /migration
+  /opt/migration/legacy_hermes_migration.py verify \
+  --bundle /migration --summary
 
 sudo sha256sum '<BUNDLE>/manifest.json'
 ```

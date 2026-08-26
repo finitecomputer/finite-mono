@@ -35,6 +35,37 @@ from legacy_hermes_source import (
 from legacy_hermes_target import install_bundle as install_bundle
 
 
+def _manifest_summary(result: dict) -> dict:
+    return {
+        "schema": result["schema"],
+        "source": result["source"],
+        "file_count": len(result["files"]),
+        "sessions": result["sessions"],
+        "memory": result["memory"],
+        "cron": result["cron"],
+        "compatibility": result["compatibility"],
+        "sites": {
+            key: result["sites"][key]
+            for key in (
+                "endpoint_count",
+                "source_paths_required",
+                "source_paths_present",
+                "status",
+            )
+        },
+        "integrations": {
+            key: result["integrations"][key]
+            for key in (
+                "integration_count",
+                "policy_counts",
+                "status",
+            )
+        },
+        "source_inventory": result["source_inventory"],
+        "source_snapshot": result["source_snapshot"],
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -106,11 +137,21 @@ def _parser() -> argparse.ArgumentParser:
     manifest.add_argument("--source-image-manifest-digest", required=True)
     manifest.add_argument("--source-container-image-id", required=True)
     manifest.add_argument("--source-volume-inventory-sha256", required=True)
+    manifest.add_argument(
+        "--summary",
+        action="store_true",
+        help="print counts and compatibility evidence without the file list",
+    )
 
     verify = subparsers.add_parser(
         "verify", help="verify a sealed bundle without mutation"
     )
     verify.add_argument("--bundle", type=Path, required=True)
+    verify.add_argument(
+        "--summary",
+        action="store_true",
+        help="print counts and compatibility evidence without the file list",
+    )
 
     install = subparsers.add_parser(
         "install", help="install into one stopped target /data root"
@@ -199,6 +240,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     except MigrationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "summary", False):
+        result = _manifest_summary(result)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
