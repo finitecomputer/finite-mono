@@ -100,6 +100,10 @@ snapshot is not a reservation.
   check, not a product called “Finite Status.”
 - A fresh box1 off-host backup completed, and the Recovery Set can restore to
   an empty scratch target. Record the archive name without recording keys.
+  A rehearsal restore includes both the complete source PVC subtree and the
+  archive's matching SQLite snapshot tree. The backup intentionally excludes
+  live `-wal` and `-shm` files, so a raw database file from the PVC subtree is
+  preservation evidence, not a valid rehearsal export source by itself.
 - The exact reviewed tools completed a real-data rehearsal against an isolated
   restore of the source Recovery Set. Record its manifest hash, counts, duration,
   source-volume inventory hash, source-home snapshot hash, automatic
@@ -383,6 +387,14 @@ snapshot must pass `quick_check`. Record the command's `recovery` field; any
 other result is a hard stop. Retain the inventory hash and both export
 commands' counts, byte counts, and SHA-256 output.
 
+For a rehearsal against an off-host backup, keep the restored PVC unchanged
+and point the two database export commands at the matching files below the
+archive's `var/lib/finitecomputer/backups/sqlite-snapshots/<ARCHIVE>/` tree.
+Require `MANIFEST.tsv` to map both exact source database paths, require neither
+path in `SKIPPED.tsv`, and run the same exporters against those consistent
+copies. During the real cutover, use the frozen PVC paths shown above because
+the source pod is stopped and the database files are quiescent.
+
 ### 5. Stage the complete snapshot and active bundle
 
 Run these commands from the trusted operator workstation. Fill only the two
@@ -392,9 +404,12 @@ streams stage the subset that the importer converts or places into active and
 review-only target paths.
 
 ```sh
+set -euo pipefail
+
 SOURCE_PV_PATH='<SOURCE_PV_PATH>'
 BOX1_STAGE='<BOX1_STAGE>'
 BUNDLE='<LAT3_BUNDLE>'
+TRANSPORT_ARCHIVE='<LAT3_ROOT_ONLY_STAGE>/source-home.tar.zst'
 SOURCE_VOLUME_INVENTORY_SHA256='<SOURCE_VOLUME_INVENTORY_SHA256>'
 
 ssh lat3 "sudo install -d -m 0700 \
@@ -403,17 +418,35 @@ ssh box1 "sudo tar --sort=name --numeric-owner --format=pax \
   --hard-dereference --one-file-system --acls --xattrs \
   -C '$SOURCE_PV_PATH' -cpf - . \
   | zstd -T0 -3 -c" \
-  | ssh lat3 "sudo sh -c 'umask 077; cat >\"$BUNDLE/payload/source-home.tar.zst\"'"
-ssh lat3 "sudo sha256sum '$BUNDLE/payload/source-home.tar.zst'"
+  | ssh lat3 "sudo sh -c 'umask 077; cat >\"$TRANSPORT_ARCHIVE\"'"
+ssh lat3 "sudo sha256sum '$TRANSPORT_ARCHIVE'"
 ssh lat3 "sudo sh -c 'umask 077; zstd -T0 -d -c \
-  \"$BUNDLE/payload/source-home.tar.zst\" \
+  \"$TRANSPORT_ARCHIVE\" \
   >\"$BUNDLE/payload/source-home.tar\"'"
-ssh box1 "sudo tar -C '$SOURCE_PV_PATH/.hermes' -cpf - \
-  memories skills cron/jobs.json scripts" \
-  | ssh lat3 "sudo tar -C '$BUNDLE/payload/hermes' -xpf -"
-ssh box1 "sudo tar -C '$SOURCE_PV_PATH' \
-  --exclude='dev/reap-video/venv' -cpf - workspace dev uploads" \
-  | ssh lat3 "sudo tar -C '$BUNDLE/payload/home' -xpf -"
+HERMES_PAYLOAD_PATHS="$(ssh box1 "sudo bash -c '
+  set -euo pipefail
+  cd \"\$1\"
+  for path in memories skills cron/jobs.json scripts; do
+    [[ ! -e \"\$path\" && ! -L \"\$path\" ]] || printf \"%s\\n\" \"\$path\"
+  done
+' _ '$SOURCE_PV_PATH/.hermes'")"
+if [[ -n "$HERMES_PAYLOAD_PATHS" ]]; then
+  ssh box1 "sudo tar -C '$SOURCE_PV_PATH/.hermes' -cpf - \
+    $HERMES_PAYLOAD_PATHS" \
+    | ssh lat3 "sudo tar -C '$BUNDLE/payload/hermes' -xpf -"
+fi
+HOME_PAYLOAD_PATHS="$(ssh box1 "sudo bash -c '
+  set -euo pipefail
+  cd \"\$1\"
+  for path in workspace dev uploads; do
+    [[ ! -e \"\$path\" && ! -L \"\$path\" ]] || printf \"%s\\n\" \"\$path\"
+  done
+' _ '$SOURCE_PV_PATH'")"
+if [[ -n "$HOME_PAYLOAD_PATHS" ]]; then
+  ssh box1 "sudo tar -C '$SOURCE_PV_PATH' -cpf - \
+    $HOME_PAYLOAD_PATHS" \
+    | ssh lat3 "sudo tar -C '$BUNDLE/payload/home' -xpf -"
+fi
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sessions.jsonl" \
   | ssh lat3 "sudo tar -C '$BUNDLE/payload' -xpf -"
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - memory_store.db" \
@@ -425,8 +458,9 @@ ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sites.json integrations.json" \
 ```
 
 Record the compressed archive's SHA-256 before decompression and retain it
-until the bundle passes independent verification. The manifest still binds
-the uncompressed `source-home.tar`. Compress before transport; an uncompressed
+beside, not inside, the bundle until independent verification passes. The
+bundle validator rejects unknown payload files, while the manifest binds the
+uncompressed `source-home.tar`. Compress before transport; an uncompressed
 whole-home transfer can turn a short cutover into a multi-hour outage.
 
 Do not add an exclusion to the complete source snapshot. `--hard-dereference`
