@@ -231,6 +231,19 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_nix_service_handoff_runs_package_smoke_and_contract_lanes(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/ci/nix-service-package-handoff",
+                "scripts/tests/test_nix_service_package_handoff.py",
+            ),
+            {
+                "run_devfinity_smoke",
+                "run_nix_checks",
+                "run_nix_service_packages",
+            },
+        )
+
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
 

@@ -98,6 +98,11 @@ FINITE_STATUS_PATHS = {
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
+NIX_SERVICE_PACKAGE_HANDOFF_PATHS = {
+    "scripts/ci/nix-service-package-handoff",
+    "scripts/tests/test_nix_service_package_handoff.py",
+}
+
 REMAINING_NIX_CHECK_PATHS = {
     "scripts/check-brain-product-language.py",
     "scripts/check_runner_host_contract.py",
@@ -374,6 +379,11 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path in FINITE_STATUS_PATHS:
         selection.run_finite_status_contract = True
+        return
+
+    if path in NIX_SERVICE_PACKAGE_HANDOFF_PATHS:
+        selection.run_devfinity_smoke = True
+        selection.run_nix_checks = True
         return
 
     if path in STRIPE_PRICE_CONTRACT_PATHS:
