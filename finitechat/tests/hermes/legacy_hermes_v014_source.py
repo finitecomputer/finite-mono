@@ -67,7 +67,7 @@ def main() -> int:
             cast(
                 Any,
                 [
-                    {"type": "text", "text": "Remember Austin"},
+                    {"type": "text", "text": "Remember the owner"},
                     {"type": "file", "path": "/home/node/uploads/photo.jpg"},
                     {
                         "type": "audio",
@@ -88,7 +88,7 @@ def main() -> int:
     memories = MemoryStore(db_path=source_memory)
     try:
         memories.add_fact(
-            "Austin hosts a recurring AI meetup",
+            "The owner hosts a recurring technical meetup",
             category="community",
         )
     finally:
@@ -117,11 +117,11 @@ def main() -> int:
     endpoints.write_text(
         json.dumps(
             {
-                "machineId": "austin-finite",
+                "machineId": "legacy-bot",
                 "endpoints": [
                     {
-                        "hostname": "austin-site.finite.computer",
-                        "label": "Austin Site",
+                        "hostname": "legacy-site.example.invalid",
+                        "label": "Legacy Site",
                         "target_port": 3000,
                         "status": "published",
                         "run_command": "python3 -m http.server 3000",
@@ -140,7 +140,7 @@ def main() -> int:
         root / "bundle/sites.json",
         endpoints,
         source_inventory,
-        expected_machine_id="austin-finite",
+        expected_machine_id="legacy-bot",
     )
     integrations = migration.inventory_source_integrations(
         root / "bundle/integrations.json", source_home, source_inventory

@@ -63,8 +63,8 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
                 bundle,
                 migration.SourceMetadata(
                     host_id="box1",
-                    machine_id="austin-finite",
-                    owner_email="austin@finite.vip",
+                    machine_id="legacy-bot",
+                    owner_email="owner@example.invalid",
                     hermes_version="0.14.0",
                     image_reference="docker.io/library/fc-agent-runtime:main",
                     image_manifest_digest="sha256:" + "a" * 64,
@@ -91,7 +91,7 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
             migration.install_bundle(
                 bundle,
                 target,
-                expected_machine_id="austin-finite",
+                expected_machine_id="legacy-bot",
                 expected_manifest_sha256=manifest_sha256,
                 expected_identity_sha256=identity_sha256,
                 expected_chat_client_sha256=chat_client_sha256,
@@ -151,7 +151,7 @@ class LegacyHermesRealImporterTest(unittest.TestCase):
             finally:
                 target_memory.close()
             self.assertEqual(len(facts), 1)
-            self.assertEqual(facts[0]["content"], "Austin hosts a recurring AI meetup")
+            self.assertEqual(facts[0]["content"], "The owner hosts a recurring technical meetup")
 
 
 if __name__ == "__main__":
