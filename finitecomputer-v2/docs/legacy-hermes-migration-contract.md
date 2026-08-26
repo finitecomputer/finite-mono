@@ -152,6 +152,9 @@ Working Tree. Imported memory documents are not rewritten as prose; operators us
 [post-cutover repair brief](legacy-hermes-post-cutover-repair.md) to find and
 repair stale source paths.
 
+The reusable outcomes and known limits from live exercises are summarized in
+the [migration retrospective](legacy-hermes-migration-retrospective.md).
+
 ## Transaction
 
 1. Create the target normally and record its exact Core/Runner binding and

@@ -4,6 +4,12 @@ Use this after the target passes its first Finite Chat round trip and before
 activating any legacy skill, scheduled job, or external credential. It repairs
 references; it does not change migration identity or import more state.
 
+Sites access does not transfer Agent ownership. Record the authoritative SaaS
+login separately from any mailbox used for Sites or email. The owner must use
+the authoritative SaaS login to open the migrated Project and must not create a
+second Agent from a secondary mailbox. A later login-email change requires a
+tested Core account-transfer transaction, not manual row edits.
+
 ## Path map
 
 | Legacy reference | Target disposition |
@@ -34,8 +40,13 @@ references; it does not change migration identity or import more state.
    `source-home.tar`, but it must not become an active dependency without a
    compatible target mapping.
 6. Compare each review-only skill name with the Runtime's Managed Skills
-   Baseline. Retire stale Finite-managed copies. Promote a user-owned skill only
-   after its tools and paths pass on the target.
+   Baseline. Retire stale Finite-managed copies. Before promotion, verify the
+   skill's target tools, paths, configuration, and credential locations in the
+   exact Runtime image. A skill must fail cleanly when an optional tool or
+   credential is absent; it must never search unrelated databases or secret
+   locations. If a live check exposes stale assumptions, quarantine the
+   complete skill outside the active tree, retain a verified rollback archive,
+   and prove the active scan no longer finds it.
 7. Review each scheduled job's paths, Brain dependency, delivery route, and
    credential need. Recreate it paused, then activate and verify one job at a
    time under separate approval.
@@ -49,3 +60,5 @@ references; it does not change migration identity or import more state.
   disposition; and
 - preserved media and cron-output history remain sealed in `source-home.tar`
   rather than being mistaken for active state.
+- the owner has confirmed the authoritative SaaS login, Sites mailbox, channel
+  behavior, commentary preference, and voice-transcript echo preference.

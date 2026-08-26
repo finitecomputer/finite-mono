@@ -19,6 +19,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "scripts" / "legacy_hermes_migration.py"
 RUNBOOK = ROOT / "infra" / "runbooks" / "legacy-hermes-box1-to-lat3.md"
+POST_CUTOVER = (
+    ROOT / "finitecomputer-v2" / "docs" / "legacy-hermes-post-cutover-repair.md"
+)
+RETROSPECTIVE = (
+    ROOT / "finitecomputer-v2" / "docs" / "legacy-hermes-migration-retrospective.md"
+)
 SOURCE_LAUNCHER = ROOT / "scripts" / "legacy-hermes-source"
 sys.path.insert(0, str(MODULE.parent))
 SPEC = importlib.util.spec_from_file_location("legacy_hermes_migration", MODULE)
@@ -649,6 +655,29 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         launcher = SOURCE_LAUNCHER.read_text(encoding="utf-8")
         self.assertIn("source-sites-inventory", launcher)
         self.assertIn("source-integrations-inventory", launcher)
+
+    def test_runbook_covers_account_and_behavior_handoff_paper_cuts(self) -> None:
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        repair = POST_CUTOVER.read_text(encoding="utf-8")
+        retrospective = RETROSPECTIVE.read_text(encoding="utf-8")
+        runbook_prose = " ".join(runbook.split())
+        repair_prose = " ".join(repair.split())
+
+        for required in (
+            "authoritative SaaS login",
+            "Sites mailbox",
+            "must not create a second Agent",
+            "commentary preference",
+            "voice-transcript echo",
+            "target tools",
+            "credential locations",
+            "quarantine the complete skill",
+        ):
+            self.assertIn(required, runbook_prose)
+
+        self.assertIn("Sites access does not transfer Agent ownership", repair_prose)
+        self.assertIn("quarantine the complete skill", repair_prose)
+        self.assertIn("User-specific evidence stays private", retrospective)
 
     def test_source_volume_inventory_preserves_unknown_safe_data_automatically(
         self,

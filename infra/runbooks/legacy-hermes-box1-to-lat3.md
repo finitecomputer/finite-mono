@@ -23,6 +23,8 @@ Resolve and record every source value before mutation:
 | source host | `box1` |
 | machine / namespace | `<SOURCE_MACHINE_ID>` / `<SOURCE_NAMESPACE>` |
 | verified owner account | `<SOURCE_OWNER_EMAIL>` |
+| authoritative SaaS login | account that owns the target Project |
+| Sites mailbox | mailbox used for Sites grants; may differ from the SaaS login |
 | StatefulSet / pod | `<SOURCE_STATEFULSET>` / `<SOURCE_POD>` |
 | PVC | `<SOURCE_PVC>` |
 | PV | `<SOURCE_PV>` |
@@ -127,6 +129,10 @@ snapshot is not a reservation.
   `PROJECT_ID`, `RUNTIME_ID`, `MACHINE_ID`, `DURABLE_STATE_ID`, artifact,
   schema, host, `/data` path, and target Agent `npub`. Its structured-memory
   store must contain zero facts; the importer refuses a non-empty store.
+- The evidence sheet distinguishes the authoritative SaaS login from any Sites
+  mailbox. A Sites grant does not transfer Project ownership. Before cutover,
+  prove that the authoritative SaaS login can see the exact target Project. A
+  secondary mailbox must not create a second Agent.
 - Known box1 credential stores, old identities, and active gateway state are
   preserved only inside the root-only source snapshot. They are never copied
   into active target paths. Treat the entire snapshot and all user-authored
@@ -645,6 +651,12 @@ recovery archives through a minimum 24-hour observation window.
 - Brain access is recorded as pending fresh target authorization and sync. The
   source Brain working tree and identity exist only inside `source-home.tar`.
 - A new Finite Chat message receives exactly one target reply.
+- The owner can open the migrated Project with the authoritative SaaS login.
+  Any separate Sites mailbox sees only its intended Sites access and must not
+  create a second Agent.
+- Acceptance covers fresh Chat plus Telegram text, voice, and image handling
+  when those channels are in scope. Record the owner's commentary preference
+  and voice-transcript echo preference before calling behavior equivalent.
 - box1 has zero source-bot pods; its PVC and off-host archive remain intact.
 - No other box1 or lat3 bot restarted or changed artifact.
 - `scripts/finite-status --json` passes the same status gate used before the
@@ -722,6 +734,16 @@ The converter must apply these rules automatically:
 - copied helpers use `/data` paths, an explicit migrated home, and account
   identity derived from the staged target-compatible store, never a copied
   source literal.
+
+For each skill selected for promotion, test its target tools, absolute paths,
+configuration keys, and credential locations in the exact target image. An
+optional dependency must fail cleanly. A skill must never compensate for a
+missing credential by searching unrelated databases, session state, or secret
+locations. If a live turn reveals a stale assumption, quarantine the complete
+skill atomically outside the active tree, create and verify a root-only rollback
+archive, prove the active skill scan no longer finds it, and verify that managed
+configuration hashes did not change. Do not restart the Runtime when Hermes's
+skill discovery correctly invalidates from the active-tree signature.
 
 When creating a transport archive on macOS, set `COPYFILE_DISABLE=1`; unsigned
 AppleDouble files must fail verification. Run the target image's current cron
