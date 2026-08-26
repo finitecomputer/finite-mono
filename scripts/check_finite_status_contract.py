@@ -47,6 +47,10 @@ def main() -> None:
         [runner["namespace"], runner["drain_variable"], runner["artifact_variable"]],
     )
     require_all(
+        ROOT / "infra" / "nixos" / "modules" / "kata-runner-host.nix",
+        [runner["kata_name_prefix"].removesuffix("-")],
+    )
+    require_all(
         ROOT / "infra" / "nixos" / "hosts" / "finite-lat-1" / "disko.nix",
         contract["hosts"]["finite-lat-1"]["disks"],
     )

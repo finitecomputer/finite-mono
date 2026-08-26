@@ -233,6 +233,50 @@ LINE 42: SELECT runtime_rows.health_ready
         self.assertEqual(payload["overall_status"], "red")
         self.assertEqual(payload["exit_code"], 1)
 
+    def test_json_separates_runner_sandboxes_from_other_namespace_containers(
+        self,
+    ) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        raw["host_health"]["containers"] = {
+            "podman_running": 7,
+            "podman_total": 7,
+            "namespace_running_names": [
+                "finite-kata-agent-a",
+                "finite-kata-agent-b",
+                "migration-helper",
+            ],
+            "namespace_total_names": [
+                "finite-kata-agent-a",
+                "finite-kata-agent-b",
+                "finite-kata-agent-stopped",
+                "migration-helper",
+                "migration-helper-stopped",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "status.json"
+            fixture.write_text(json.dumps(raw), encoding="utf-8")
+            result = subprocess.run(
+                [str(COMMAND), "--json", "--fixture", str(fixture)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        containers = json.loads(result.stdout)["sections"]["host_health"][
+            "containers"
+        ]
+        self.assertEqual(containers["namespace_running"], 3)
+        self.assertEqual(containers["namespace_total"], 5)
+        self.assertEqual(containers["kata_running"], 2)
+        self.assertEqual(containers["kata_total"], 3)
+        self.assertEqual(containers["other_running"], 1)
+        self.assertEqual(containers["other_total"], 2)
+        self.assertEqual(containers["kata_vm_count"], 2)
+        self.assertFalse(any(key.endswith("_names") for key in containers))
+
     def test_exit_precedence_is_red_then_unknown_then_green(self) -> None:
         sections = {
             name: {"status": "green"}

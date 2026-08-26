@@ -62,6 +62,7 @@ CONTRACT: dict[str, Any] = {
         "shared_environment_file": "/etc/finite/runner-shared.env",
         "environment_file": "/etc/finite/runner.env",
         "namespace": "finite",
+        "kata_name_prefix": "finite-kata-",
         "drain_variable": "FC_RUNNER_DRAIN",
         "artifact_variable": "FC_RUNNER_RUNTIME_ARTIFACT_ID",
         "base_url_variable": "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
@@ -475,6 +476,15 @@ def line_count(command: list[str]) -> int:
     return sum(bool(line.strip()) for line in result.stdout.splitlines())
 
 
+def output_lines(command: list[str]) -> list[str]:
+    result = run_read_only(command)
+    if result.returncode != 0:
+        raise CollectionError(
+            f"{' '.join(command[:3])} failed: {result.stderr.strip() or result.returncode}"
+        )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def collect_host_health(hostname: str) -> dict[str, Any]:
     profile = CONTRACT["hosts"].get(hostname)
     if profile is None:
@@ -533,22 +543,38 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
 
     namespace = CONTRACT["runner"]["namespace"]
     raw["containers"] = {}
-    container_commands = {
+    count_commands = {
         "podman_running": ["podman", "ps", "--quiet"],
         "podman_total": ["podman", "ps", "--all", "--quiet"],
-        "kata_running": ["nerdctl", "--namespace", namespace, "ps", "--quiet"],
-        "kata_total": [
+    }
+    for name, command in count_commands.items():
+        try:
+            raw["containers"][name] = line_count(command)
+        except CollectionError as error:
+            raw["containers"][name] = None
+            raw["errors"].append(str(error))
+    name_commands = {
+        "namespace_running_names": [
+            "nerdctl",
+            "--namespace",
+            namespace,
+            "ps",
+            "--format",
+            "{{.Names}}",
+        ],
+        "namespace_total_names": [
             "nerdctl",
             "--namespace",
             namespace,
             "ps",
             "--all",
-            "--quiet",
+            "--format",
+            "{{.Names}}",
         ],
     }
-    for name, command in container_commands.items():
+    for name, command in name_commands.items():
         try:
-            raw["containers"][name] = line_count(command)
+            raw["containers"][name] = output_lines(command)
         except CollectionError as error:
             raw["containers"][name] = None
             raw["errors"].append(str(error))
@@ -1191,12 +1217,49 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
     statuses.append(storage["status"])
 
     raw_containers = raw.get("containers", {})
-    containers = dict(raw_containers)
+    containers = {
+        "podman_running": raw_containers.get("podman_running"),
+        "podman_total": raw_containers.get("podman_total"),
+    }
+    running_names = raw_containers.get("namespace_running_names")
+    total_names = raw_containers.get("namespace_total_names")
+    kata_prefix = CONTRACT["runner"]["kata_name_prefix"]
+    if running_names is not None and total_names is not None:
+        containers.update(
+            {
+                "namespace_running": len(running_names),
+                "namespace_total": len(total_names),
+                "kata_running": sum(
+                    name.startswith(kata_prefix) for name in running_names
+                ),
+                "kata_total": sum(name.startswith(kata_prefix) for name in total_names),
+            }
+        )
+        containers["other_running"] = (
+            containers["namespace_running"] - containers["kata_running"]
+        )
+        containers["other_total"] = (
+            containers["namespace_total"] - containers["kata_total"]
+        )
+    else:
+        # Recorded fixtures from before the namespace split treated every
+        # namespace container as a Runner sandbox.
+        legacy_running = raw_containers.get("kata_running")
+        legacy_total = raw_containers.get("kata_total")
+        containers.update(
+            {
+                "namespace_running": legacy_running,
+                "namespace_total": legacy_total,
+                "kata_running": legacy_running,
+                "kata_total": legacy_total,
+                "other_running": 0 if legacy_running is not None else None,
+                "other_total": 0 if legacy_total is not None else None,
+            }
+        )
     containers["kata_vm_count"] = containers.get("kata_running")
     containers["status"] = (
         "green"
-        if raw_containers
-        and all(value is not None for value in raw_containers.values())
+        if raw_containers and all(value is not None for value in containers.values())
         else "unknown"
     )
     statuses.append(containers["status"])
@@ -1650,7 +1713,8 @@ def render_human(report: dict[str, Any]) -> str:
         containers = health["containers"]
         lines.append(
             f"  containers: podman {containers.get('podman_running')}/{containers.get('podman_total')} running; "
-            f"Kata VMs {containers.get('kata_running')}/{containers.get('kata_total')} running"
+            f"Runner Kata {containers.get('kata_running')}/{containers.get('kata_total')} running; "
+            f"other namespace {containers.get('other_running')}/{containers.get('other_total')} running"
         )
         runner = health["runner"]
         lines.append(
