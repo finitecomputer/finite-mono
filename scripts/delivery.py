@@ -662,7 +662,7 @@ def publish_release(
                     "--title",
                     version_tag,
                     "--notes",
-                    f"Origin source commit: {source_sha}\nDepot build: {run_id}",
+                    f"Source commit: {source_sha}\nDepot build: {run_id}",
                     "--latest=false",
                 ],
                 command_runner=command_runner,

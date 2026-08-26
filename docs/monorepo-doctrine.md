@@ -6,10 +6,9 @@ workspace AGENTS.md, WORKSPACE_INVENTORY.md, and finitecomputer-v2's
 README/AGENTS/service-dependencies docs. Those statements described the
 pre-mono world and are void.
 
-The Origin/Depot authority change was adopted 2026-08-25 in ADR-0007. Until
-its gates pass, the existing GitHub workflows and release URLs remain the
-operational legacy path; the doctrine below describes the post-Hard-Cutover
-authority boundaries.
+The GitHub/Depot CI boundary was adopted 2026-08-25 in ADR-0007. GitHub remains
+the Source Authority while Depot becomes the CI execution and check-reporting
+control plane.
 
 ## Product safety maxims
 
@@ -36,13 +35,12 @@ are recorded in
 
 ## The doctrine
 
-1. **finite-mono is the single company repository and Cursor Origin is its
-   Source Authority.** All first-party code —
+1. **finite-mono on GitHub is the single company repository and Source
+   Authority.** All first-party code —
    product CLIs, servers, the SaaS control plane, apps (dashboard, iOS,
    Electron), protocols, skills, and infrastructure definitions — lives here.
-   Work lands in the Origin-hosted repository first. The frozen private GitHub
-   repository is neither synchronized nor a source of changes; there is no
-   "sync back."
+   Work lands in `finitecomputer/finite-mono` first; there is no "sync back" to
+   the old per-component repositories.
 2. **The old per-component repos are import provenance, not homes.** Each was
    snapshot-imported (no git history; SHAs recorded in
    `docs/monorepo-migration-log.md` and `scripts/import-sync.toml`). After
@@ -57,21 +55,20 @@ are recorded in
    Release Repository receives corresponding release-only tags and assets; it
    is not a source repository. Release asset names are product contracts —
    never rename them.
-4. **`finitecomputer/finite-releases` is the only public Release Host (Hard
-   Cutover adopted 2026-08-25).** Because it hosts several components,
+4. **`finitecomputer/finite-releases` is the public Release Host (adopted
+   2026-08-25).** Because it hosts several components,
    repository-wide `releases/latest` is meaningless. Installers use
    per-component rolling alias releases (`finitechat-latest`, `fsite-latest`,
    `fbrain-latest`) that Depot refreshes only after the immutable versioned
    assets are verified. GitHub `finite-mono` release assets are backfilled and
-   then frozen; their old URLs are not a compatibility promise after the source
-   repository becomes private (see infra/runbooks/release-cli.md).
+   then retained for historical releases; new publication uses the dedicated
+   Release Repository (see infra/runbooks/release-cli.md).
 5. **`infra/` is the single deploy root.** Nothing is built on a prod box;
    images are CI-built and digest-pinned; deploys are scripts/runbooks in this
    tree. See `infra/README.md`.
-6. **The Source Authority is private, but source remains secret-free.** The
-   Release Repository is public, and private repository history is not a safe
-   secret store. No secret values, ever — names and locations only. Rotate
-   first, then delete, if one slips in.
+6. **The Source Authority is public and remains secret-free.** Git history is
+   not a safe secret store. No secret values, ever — names and locations only.
+   Rotate first, then delete, if one slips in.
 
 ## What stays outside, and why
 

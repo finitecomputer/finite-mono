@@ -4,8 +4,8 @@ Date: 2026-08-24
 
 Status: historical decision research. Its initial recommendation was superseded
 by ADR-0007 after Electron was explicitly deferred and the operator chose
-Origin plus native Depot CI. No CI, release, deployment, or production state
-was changed by this research itself.
+GitHub as the Source Authority with native Depot CI. No CI, release,
+deployment, or production state was changed by this research itself.
 
 This comparison uses only first-party sources: the checked-in Finite workflows,
 official Depot and Buildkite documentation and pricing, and a representative

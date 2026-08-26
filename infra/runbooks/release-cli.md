@@ -1,7 +1,8 @@
 # Cutting a CLI release (finitechat / fsite / fbrain)
 
-Cursor Origin is the source authority. Native Depot CI builds the release and
-publishes it to the public `finitecomputer/finite-releases` GitHub repository.
+GitHub `finitecomputer/finite-mono` is the source authority. Native Depot CI
+builds the release and publishes it to the public
+`finitecomputer/finite-releases` GitHub repository.
 The release repository contains metadata and binary assets only; it never
 contains the product source.
 
@@ -25,7 +26,7 @@ Install URL shape:
 
 ## PRECONDITIONS
 
-- The exact source commit is on Origin `main` and `CI gate` is green.
+- The exact source commit is on GitHub `main` and `CI gate` is green.
 - Depot holds `FINITE_RELEASES_GITHUB_TOKEN`, scoped only to Contents write on
   `finitecomputer/finite-releases`.
 - Depot variable `FINITE_RELEASE_PUBLISH_ENABLED` is exactly `true`. It remains
@@ -36,30 +37,30 @@ Install URL shape:
 
 ## STEPS
 
-> **TODO (cutover canary):** These steps remain proposed until an Origin tag or
+> **TODO (cutover canary):** These steps remain proposed until a GitHub tag or
 > an explicit tag-ref dispatch has exercised the scoped credential, all build
 > rows, the publisher, and the rolling alias end to end. Record that run in
-> `docs/migrations/origin-depot/evidence-2026-08-25.md`, then remove the TODO
+> `docs/migrations/github-depot/evidence-2026-08-25.md`, then remove the TODO
 > labels from the exercised path.
 
-1. **TODO (Origin source authority):** Merge the release changes to Origin
-   `main` and prove the required Origin check is green.
-2. **TODO (Origin tag event):** Create the component-scoped tag at that exact
-   commit and push it to Origin:
+1. **TODO (GitHub source authority):** Merge the release changes to GitHub
+   `main` and prove the required Depot check is green.
+2. **TODO (GitHub tag event):** Create the component-scoped tag at that exact
+   commit and push it to GitHub:
 
    ```sh
-   git tag finitechat/vX.Y.Z <origin-main-sha>
+   git tag finitechat/vX.Y.Z <main-sha>
    git push origin finitechat/vX.Y.Z
    ```
 
-3. **TODO (Depot dispatch semantics):** If Origin tag events are connected to
+3. **TODO (Depot dispatch semantics):** If GitHub tag events are connected to
    Depot, watch the matching release workflow. If they are not, dispatch that
-   workflow at the fully qualified Origin tag. The workflow derives and checks
+   workflow at the fully qualified GitHub tag. The workflow derives and checks
    both version and source SHA from that ref:
 
    ```sh
    depot ci dispatch \
-     --repo finite-co/finite-mono \
+     --repo finitecomputer/finite-mono \
      --workflow release-finitechat.yml \
      --ref refs/tags/finitechat/vX.Y.Z \
      --input publish=true \
@@ -79,7 +80,7 @@ Install URL shape:
 2. Repeat through the rolling alias.
 3. Run the component README's clean-install block away from this checkout and
    confirm `--version`.
-4. Confirm `release.json` names the Origin source SHA and Depot run ID.
+4. Confirm `release.json` names the source SHA and Depot run ID.
 
 Example alias verification:
 
@@ -95,13 +96,13 @@ sha256sum -c finitechat-linux-x86_64.tar.gz.sha256
 Versioned releases are immutable. Prefer a patch release. If the rolling alias
 must move back before a patch is ready, use the alias-only workflow path. It
 runs from `main` (where the workflow exists), fetches and resolves the requested
-historical Origin tag, downloads the previous versioned release, verifies every
+historical GitHub tag, downloads the previous versioned release, verifies every
 asset against `release.json` and its checksum sibling, and moves the alias
 without rebuilding:
 
 ```sh
 depot ci dispatch \
-  --repo finite-co/finite-mono \
+  --repo finitecomputer/finite-mono \
   --workflow release-finitechat.yml \
   --ref main \
   --input publish=true \
