@@ -8,7 +8,7 @@ Opened: 2026-07-20
 
 Acceptance: `finite-lat-3` runs the pinned NixOS configuration on mirrored
 root and data storage with swap and is the only Runner accepting new Standard-
-Agent creation, with a hard limit of 32. `finite-lat-1` remains available for
+Agent creation, with a hard limit of 42. `finite-lat-1` remains available for
 existing-Agent lifecycle work, and `finite-lat-2` remains outside Agent
 capacity, build/deploy paths, and long-term archive custody.
 
@@ -43,7 +43,7 @@ admission-fence work and open lat3 directly with a 32-Agent hard limit.
 | --- | --- | --- |
 | `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. The PR #134 WireGuard peer, peer-scoped firewall rules, private Core socket proxy, credential keyring Core, and root-only key are active declarative configuration; no `/run` bridge override remains. Both current system and system profile resolve to the exact merged closure. Root and `/data` remain single-disk. | Keep existing Agents in place. The next destructive storage step requires the accepted backup/empty-target restore gate and a separate maintenance window. |
 | `finite-lat-2` (`64.34.80.19`) | Decommission target. Docker/image CI moved to Depot after this run opened, and the lat1 NixOS closure build path moved to Depot-backed CI artifacts. Historical captures live in git; any private legacy/archive data must be moved off-box before repurpose or release. | Execute `infra/runbooks/decommission-lat2.md`. Keep it out of Docker/image CI, production Nix builds, deploy driving, Agent capacity, recovery authority, and archive authority. |
-| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and keep lat2 out of Agent capacity. |
+| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=42`, and the Runner timer is enabled declaratively. The 42-Agent ceiling was owner-authorized on 2026-08-26 and deliberately overcommits the declared guest-memory maximum; swap is not counted as usable capacity. | Accept up to 42 new Standard Agents. Keep existing Agents on lat1 and keep lat2 out of Agent capacity. |
 
 The pinned lat3 nixpkgs revision is
 `fd1462031fdee08f65fd0b4c6b64e22239a77870`.
@@ -193,8 +193,10 @@ are not gates for the Runner slice.
   The current queue accepts untargeted creation work, so active-active creation
   waits for a later, durable source-host reservation path.
 - A lat3 outage closes new admission. It never automatically undrains lat1.
-- The hard maximum is 32 Standard Agents at 4 vCPU and 8 GiB each.
-  Swap is not counted as Agent capacity.
+- The hard admission maximum is 42 Standard Agents at 4 vCPU and 8 GiB each.
+  This owner-authorized ceiling exposes up to 336 GiB of guest memory on a
+  187-GiB host. It is deliberate overcommit, not a claim that swap adds usable
+  Agent capacity.
 
 This keeps product concepts provider-neutral: Core still owns Hosting Tier,
 Runner Class, Runtime Resource Class, and source-host binding. Latitude remains
@@ -240,7 +242,7 @@ The lat3 Runner uses:
 - the existing public Sites, Brain, Chat, and Identity endpoints;
 - a direct copy of the current runtime secret file, never repository values;
 - `FC_RUNNER_DRAIN=false`;
-- `FC_RUNNER_MAX_SANDBOXES=32`; and
+- `FC_RUNNER_MAX_SANDBOXES=42`; and
 - an active recurring Runner timer.
 
 The Nix Kata configuration uses the declared Standard shape of 4 vCPU and
@@ -463,3 +465,4 @@ Append only decisive checkpoints here:
 | 2026-07-21 | AEON Canary 0714 write-fenced archive and network-isolated empty-target restore on lat3 | Pass |
 | 2026-07-21 | Real-Hermes interruption matrix: graceful, `SIGKILL`, and empty-target restore | Pass |
 | 2026-07-21 | AEON in-flight stop, stable empty-target restore, and two fresh decryptable chats | Pass |
+| 2026-08-26 | Owner authorized raising the declarative lat3 admission ceiling from 32 to 42 with explicit memory overcommit | Pending merged closure activation and post-deploy verification |

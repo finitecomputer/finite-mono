@@ -19,6 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HOSTS = ["finite-lat-1", "finite-lat-3"]
 
+EXPECTED_MAX_SANDBOXES = {
+    "finite-lat-1": "12",
+    "finite-lat-3": "42",
+}
+
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
 OPERATOR_ENV_PATH = "/etc/finite/runner.env"
 
@@ -83,6 +88,12 @@ def parse_env(text: str) -> dict[str, str]:
 def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
     reference, *others = HOSTS
     for host in HOSTS:
+        if envs[host].get("FC_RUNNER_MAX_SANDBOXES") != EXPECTED_MAX_SANDBOXES[host]:
+            raise SystemExit(
+                f"{host}: FC_RUNNER_MAX_SANDBOXES is "
+                f"{envs[host].get('FC_RUNNER_MAX_SANDBOXES')!r}, expected "
+                f"{EXPECTED_MAX_SANDBOXES[host]!r}"
+            )
         rendered_operator_keys = sorted(OPERATOR_ONLY_KEYS & set(envs[host]))
         if rendered_operator_keys:
             raise SystemExit(
