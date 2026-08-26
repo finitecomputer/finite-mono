@@ -763,14 +763,21 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         outside = self.root / "outside-secret"
         outside.write_text("do not follow\n", encoding="utf-8")
         (source / "escape").symlink_to(outside)
+        (source / "nested-external").symlink_to("/tmp/outside-secret")
+        (source / "chained-escape").symlink_to(
+            "/home/node/nested-external"
+        )
 
         result = migration.inventory_source_volume(
             self.root / "blocked-inventory.json", source
         )
 
         self.assertEqual(result["status"], "blocked")
-        self.assertEqual(result["classifications"]["blocked"]["symlinks"], 1)
-        self.assertEqual(result["blocked_roots"][0]["path"], "escape")
+        self.assertEqual(result["classifications"]["blocked"]["symlinks"], 3)
+        self.assertEqual(
+            {entry["path"] for entry in result["blocked_roots"]},
+            {"chained-escape", "escape", "nested-external"},
+        )
 
         stderr = io.StringIO()
         with redirect_stderr(stderr):
@@ -785,6 +792,29 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 1)
         self.assertIn("structurally blocked entries", stderr.getvalue())
+
+    def test_source_volume_inventory_follows_chained_legacy_home_symlinks(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        versioned_theme = source / "dev/site/versions/1/content/themes/theme"
+        versioned_theme.mkdir(parents=True)
+        (source / "dev/site/current").symlink_to(
+            "/home/node/dev/site/versions/1"
+        )
+        public_themes = source / "dev/site/content/themes"
+        public_themes.mkdir(parents=True)
+        (public_themes / "theme").symlink_to(
+            "/home/node/dev/site/current/content/themes/theme"
+        )
+
+        result = migration.inventory_source_volume(
+            self.root / "chained-home-links-inventory.json", source
+        )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["classifications"]["blocked"]["entries"], 0)
+        self.assertEqual(result["classifications"]["activate"]["symlinks"], 2)
 
     def test_source_volume_inventory_rebuilds_generated_external_symlinks(
         self,

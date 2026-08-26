@@ -367,21 +367,60 @@ def _empty_inventory_summary() -> dict[str, int]:
 def _source_symlink_is_contained(
     candidate: Path, source_root: Path, link_target: str
 ) -> bool:
-    target = Path(link_target)
-    legacy_home = Path("/home/node")
-    if target.is_absolute():
-        try:
-            relative = target.relative_to(legacy_home)
-        except ValueError:
-            resolved = target.resolve(strict=False)
+    def normalize(relative: Path) -> Path | None:
+        parts: list[str] = []
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                if not parts:
+                    return None
+                parts.pop()
+                continue
+            parts.append(part)
+        return Path(*parts)
+
+    def target_relative(parent: Path, target_text: str) -> Path | None:
+        target = Path(target_text)
+        if target.is_absolute():
+            try:
+                relative = target.relative_to("/home/node")
+            except ValueError:
+                return None
         else:
-            resolved = (source_root / relative).resolve(strict=False)
-    else:
-        resolved = (candidate.parent / target).resolve(strict=False)
+            relative = parent / target
+        return normalize(relative)
+
+    source_root = source_root.resolve()
     try:
-        resolved.relative_to(source_root)
+        parent = candidate.parent.relative_to(source_root)
     except ValueError:
         return False
+    relative = target_relative(parent, link_target)
+    if relative is None:
+        return False
+
+    pending = list(relative.parts)
+    resolved_parts: list[str] = []
+    symlink_hops = 0
+    while pending:
+        part = pending.pop(0)
+        probe = source_root.joinpath(*resolved_parts, part)
+        if not probe.is_symlink():
+            resolved_parts.append(part)
+            continue
+
+        symlink_hops += 1
+        if symlink_hops > 40:
+            return False
+        nested = target_relative(Path(*resolved_parts), os.readlink(probe))
+        if nested is None:
+            return False
+        combined = normalize(nested.joinpath(*pending))
+        if combined is None:
+            return False
+        pending = list(combined.parts)
+        resolved_parts = []
     return True
 
 

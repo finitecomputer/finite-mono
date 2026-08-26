@@ -62,6 +62,9 @@ authentication, desired state, or source fails closed.
 
 Inventory every symlink. Links contained within an admitted data root may be
 preserved. Links from generated or quarantined trees remain inert metadata.
+During a restore rehearsal, resolve absolute `/home/node/...` links inside the
+restored source root, including chains of such links; a chain that eventually
+leaves `/home/node` remains structurally blocked.
 Python environments named `.venv` or `venv` anywhere below `dev/` are generated
 state: preserve them in the complete snapshot, classify them as `rebuild`, and
 never activate their external interpreter links on the target.
