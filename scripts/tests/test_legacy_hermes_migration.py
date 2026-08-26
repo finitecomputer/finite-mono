@@ -620,6 +620,32 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertNotIn("legacy-hermes-source-export", runbook)
         self.assertNotIn("legacy-hermes-source-memory", runbook)
 
+    def test_runbook_bounds_carried_finite_status_exceptions(self) -> None:
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        prose = " ".join(runbook.split())
+
+        self.assertIn("predates this migration", prose)
+        self.assertIn("private evidence sheet", prose)
+        self.assertIn("unchanged in the before and after reports", prose)
+        self.assertIn("Any new or worsened result stops the migration", prose)
+        for protected_boundary in (
+            "source bot",
+            "owner binding",
+            "target host",
+            "Runner drain",
+            "capacity",
+            "Runtime artifact",
+            "lifecycle",
+            "identity",
+            "Chat",
+            "recovery",
+        ):
+            self.assertIn(protected_boundary, prose)
+
+        # Public migration docs stay generic. Exact exception identities live
+        # only in the private evidence sheet and organization Brain.
+        self.assertNotIn("Smoke Studio", runbook)
+
         launcher = SOURCE_LAUNCHER.read_text(encoding="utf-8")
         self.assertIn("source-sites-inventory", launcher)
         self.assertIn("source-integrations-inventory", launcher)

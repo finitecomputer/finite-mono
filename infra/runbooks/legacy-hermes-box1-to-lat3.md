@@ -93,7 +93,7 @@ snapshot is not a reservation.
 - The intended target uses an already published, digest-pinned canonical
   Runtime image whose durable smoke proves Hermes v0.20. This migration does
   not require publishing or rolling a new image.
-- `scripts/finite-status --json` is retained and green. If the installed
+- `scripts/finite-status --json` passes the status gate below. If the installed
   shortcut is absent, stage `scripts/finite-status` and
   `scripts/finite_status.py` together as described in
   [the runbook index](README.md#standing-rules); this is the canonical status
@@ -140,6 +140,19 @@ snapshot is not a reservation.
   sealed snapshot but never activated. Plan a fresh Agent Principal
   delegation, Folder Key Grant, and sync using
   [the post-cutover repair brief](../../finitecomputer-v2/docs/legacy-hermes-post-cutover-repair.md).
+
+### Finite status gate
+
+Green is the normal requirement. A pre-existing non-green result may carry
+through only when it predates this migration and was already reviewed as
+unrelated to it. Record the exact section, status, and identifiers in the
+private evidence sheet. Do not put user or bot names in Git.
+
+The exception must be unchanged in the before and after reports. It cannot
+touch the source bot, owner binding, target host, Runner drain, capacity,
+Runtime artifact, lifecycle, identity, Chat, or recovery. Any new or worsened
+result stops the migration. If the relationship is uncertain, stop. A carried
+exception is not green and does not authorize its repair.
 
 Abort on any mismatch. Do not delete source compute, PVC data, backup data, or
 target pre-import state in this runbook.
@@ -634,7 +647,9 @@ recovery archives through a minimum 24-hour observation window.
 - A new Finite Chat message receives exactly one target reply.
 - box1 has zero source-bot pods; its PVC and off-host archive remain intact.
 - No other box1 or lat3 bot restarted or changed artifact.
-- `scripts/finite-status --json` is retained and green.
+- `scripts/finite-status --json` passes the same status gate used before the
+  migration. Every carried exception is unchanged, and no new or worsened
+  result appears.
 
 Use a fresh Chat for the acceptance message. If a pre-cutover turn resumes
 after restart, use Hermes `/stop` before sending the probe. A large interrupted

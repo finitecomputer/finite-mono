@@ -229,4 +229,7 @@ either been retained under policy or decommissioned by separate approval.
 - Brain access is reauthorized and synced without copying legacy identity
   state;
 - box1 remains stopped and recoverable; and
-- `scripts/finite-status --json` is green after the cutover.
+- `scripts/finite-status --json` passes the runbook's status gate after the
+  cutover. A carried pre-existing exception is unchanged and remains unrelated
+  to the source, target, capacity, artifact, lifecycle, identity, Chat, and
+  recovery paths. Any new or worsened result is a failed migration gate.
