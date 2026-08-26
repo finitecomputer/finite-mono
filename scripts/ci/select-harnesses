@@ -384,6 +384,11 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_commercial = True
         return
 
+    if path.startswith("infra/commercial-register/"):
+        selection.run_commercial = True
+        selection.run_finite_status_contract = True
+        return
+
     if path.startswith("finitecomputer-v2/apps/dashboard/"):
         selection.run_dashboard = True
         if is_dashboard_browser_path(path):

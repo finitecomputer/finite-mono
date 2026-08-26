@@ -36,6 +36,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat2 (NixOS closure prepare/activate; stateful App Outputs through the Kata app-runner profile) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat2 (:8788) + the single-writer doctrine |
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat2 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
+| [deploy-commercial-register.md](deploy-commercial-register.md) | Digest-pinned Finite Business deployment beside Grafana, including DNS, backup, empty-target restore, app application, and rollback |
 | [decommission-lat2.md](decommission-lat2.md) | **Superseded for the emergency** — legacy credential rotation and runner-removal inventory only; the wipe is Gate A of the cutover |
 | [lat2-replacement-cutover.md](lat2-replacement-cutover.md) | **THE emergency runbook** — wipe, storage capture, artifact-driven install, lat1 state import, go-live, and DNS cutover for finite-lat-2 as the replacement app server (ADR 0007) |
 | [lat4-nixos-runner-install.md](lat4-nixos-runner-install.md) | **ADR 0007 model, third Runner host** — pre-wipe verification, CI-artifact bare-metal install, drained bring-up, and the admission decision for finite-lat-4 |

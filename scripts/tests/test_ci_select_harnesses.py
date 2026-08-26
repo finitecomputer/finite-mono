@@ -217,6 +217,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
             set(),
         )
 
+    def test_commercial_deployment_runs_app_and_status_contracts(self) -> None:
+        self.assertEqual(
+            selected("infra/commercial-register/ubuntu/compose.yaml"),
+            {"run_commercial", "run_finite_status_contract"},
+        )
+
     def test_runbook_markdown_runs_nix_checks(self) -> None:
         self.assertEqual(
             selected("infra/runbooks/deploy-core.md"),

@@ -1,0 +1,9 @@
+[Unit]
+Description=Finite commercial register application and recovery health
+After=finite-commercial-register.service
+Requires=finite-commercial-register.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/finite-commercial-register/bin/health
+TimeoutStartSec=2min

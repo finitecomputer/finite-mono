@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Finite commercial register backup
+
+[Timer]
+OnBootSec=30min
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+RandomizedDelaySec=15min
+Unit=finite-commercial-register-backup.service
+
+[Install]
+WantedBy=timers.target

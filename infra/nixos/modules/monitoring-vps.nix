@@ -13,6 +13,7 @@
 let
   grafanaDomain = "monitoring.finite.computer";
   ingestDomain = "metrics-ingest.finite.computer";
+  commercialRegisterDomain = "crm.finite.computer";
 
   grafanaAdminPasswordFile = "/etc/finite/monitoring/grafana-admin-password";
   grafanaSecretKeyFile = "/etc/finite/monitoring/grafana-secret-key";
@@ -145,6 +146,10 @@ in
       (publicProbe {
         name = "brain.finite.computer";
         target = "https://brain.finite.computer/health";
+      })
+      (publicProbe {
+        name = commercialRegisterDomain;
+        target = "https://${commercialRegisterDomain}/healthz";
       })
       (publicProbe {
         name = "finitechat-native-mockup.finite.chat";
@@ -293,6 +298,11 @@ in
       ${grafanaDomain}.extraConfig = ''
         encode zstd gzip
         reverse_proxy 127.0.0.1:3000
+      '';
+
+      ${commercialRegisterDomain}.extraConfig = ''
+        encode zstd gzip
+        reverse_proxy 127.0.0.1:3020
       '';
 
       ${ingestDomain}.extraConfig = ''

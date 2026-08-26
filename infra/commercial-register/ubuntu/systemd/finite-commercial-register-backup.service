@@ -1,0 +1,13 @@
+[Unit]
+Description=Service-consistent Finite commercial register backup
+After=finite-commercial-register.service network-online.target
+Requires=finite-commercial-register.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/finite-commercial-register/bin/backup
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

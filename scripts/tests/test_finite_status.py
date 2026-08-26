@@ -344,6 +344,105 @@ class FiniteStatusTests(unittest.TestCase):
         sections["fleet_convergence"]["status"] = "red"
         self.assertEqual(finite_status.report_exit_code(report), 1)
 
+    def monitoring_raw(self) -> dict[str, object]:
+        contract = finite_status.CONTRACT["monitoring_host"]
+        commercial = contract["commercial_register"]
+        active = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "running",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        successful = {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        units = {
+            unit: dict(active)
+            for unit in [*contract["services"], *commercial["services"]]
+        }
+        units.update({unit: dict(successful) for unit in commercial["oneshot_services"]})
+        containers = {
+            name: {
+                "image": image,
+                "running": True,
+                "health": "healthy" if name != "finite-commercial-register-worker" else None,
+            }
+            for name, image in commercial["containers"].items()
+        }
+        return {
+            "core": {"applicable": False},
+            "host_health": {
+                "profile": "monitoring",
+                "hostname": "finite-monitoring-1-81926",
+                "commercial_register_configured": True,
+                "units": units,
+                "probes": {
+                    name: {"url": url, "ok": True, "error": None}
+                    for name, url in {
+                        **contract["probes"],
+                        "commercial-register": commercial["probe"],
+                    }.items()
+                },
+                "filesystems": [
+                    {
+                        "mount": "/",
+                        "total_bytes": 1000,
+                        "available_bytes": 500,
+                        "used_percent": 50.0,
+                    }
+                ],
+                "memory": {"total_bytes": 4 * 1024**3, "available_bytes": 2 * 1024**3},
+                "containers": containers,
+            },
+            "recovery": {
+                "profile": "commercial-register",
+                "applicable": True,
+                "snapshot": {
+                    "name": "20260826T160000Z",
+                    "created_at": "2026-08-26T16:00:00Z",
+                    "manifest_entries": 5,
+                    "manifest_valid": True,
+                    "format_valid": True,
+                },
+                "borg_last_success_epoch": 1787760000,
+                "backup_unit": successful,
+                "health_unit": successful,
+            },
+            "rollout": {"exists": False, "root": "/tmp/none"},
+        }
+
+    def test_monitoring_host_status_includes_crm_images_and_recovery(self) -> None:
+        now = finite_status.parse_time("2026-08-26T16:30:00Z")
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(self.monitoring_raw(), now)
+        self.assertEqual(report["overall_status"], "green")
+        self.assertFalse(report["sections"]["fleet_convergence"]["applicable"])
+        health = report["sections"]["host_health"]
+        self.assertTrue(health["commercial_register_configured"])
+        self.assertEqual(len(health["containers"]), 4)
+        recovery = report["sections"]["recovery_boundary"]
+        self.assertEqual(recovery["snapshot"]["status"], "green")
+        self.assertEqual(recovery["borg"]["stamp_status"], "green")
+        output = finite_status.render_human(report)
+        self.assertIn("not applicable on the monitoring host", output)
+        self.assertIn("commercial register containers: 4/4 healthy", output)
+
+    def test_monitoring_host_rejects_a_drifted_crm_image(self) -> None:
+        raw = self.monitoring_raw()
+        raw["host_health"]["containers"]["finite-commercial-register-server"]["image"] = (
+            "docker.io/twentycrm/twenty:latest"
+        )
+        now = finite_status.parse_time("2026-08-26T16:30:00Z")
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
+        self.assertEqual(report["overall_status"], "red")
+
     def test_unlinked_runtime_is_unknown_not_intentionally_inactive(self) -> None:
         raw = finite_status.load_fixture(FIXTURE)
         raw["core"]["runtimes"][0]["link_state"] = "unlinked"

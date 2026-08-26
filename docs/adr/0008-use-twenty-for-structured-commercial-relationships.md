@@ -108,6 +108,10 @@ possibly partial total.
   secret-free configuration, scoped machine credentials, monitored upgrades,
   and a proven backup and empty-target restore before the register becomes the
   sole authority for manual commercial facts.
+- The private deployment runs beside Grafana on the dedicated monitoring VM,
+  not in the coupled product cluster. It has its own PostgreSQL, Redis, local
+  file storage, encryption keys, off-host Recovery Set, and restore drill;
+  monitoring and CRM share only the host and its single Caddy edge.
 - Stripe/Core imports are idempotent and read-only with respect to their source
   facts. Meeting and proposal automation cannot bypass the typed Twenty write
   boundary.

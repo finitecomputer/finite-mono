@@ -8,6 +8,7 @@ bootstrap:
 check: bootstrap
     corepack yarn typecheck
     corepack yarn app:build
+    python3 ../infra/commercial-register/ubuntu/check_contract.py
 
 test: bootstrap
     corepack yarn test
@@ -20,6 +21,9 @@ app-plan: bootstrap
 
 app-apply: bootstrap
     corepack yarn twenty apply
+
+production-contract:
+    python3 ../infra/commercial-register/ubuntu/check_contract.py
 
 [positional-arguments]
 agent *args: bootstrap

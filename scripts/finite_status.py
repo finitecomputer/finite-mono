@@ -185,8 +185,49 @@ CONTRACT: dict[str, Any] = {
             "recovery": False,
         },
     },
+    "monitoring_host": {
+        "hostnames": ["finite-monitoring", "finite-monitoring-1-81926"],
+        "mounts": ["/"],
+        "services": [
+            "finite-monitoring-blackbox-exporter.service",
+            "finite-monitoring-prometheus.service",
+            "finite-monitoring-loki.service",
+            "finite-monitoring-grafana.service",
+            "finite-monitoring-caddy.service",
+        ],
+        "probes": {
+            "prometheus": "http://127.0.0.1:9090/-/ready",
+            "loki": "http://127.0.0.1:3100/ready",
+            "grafana": "http://127.0.0.1:3000/api/health",
+            "blackbox": "http://127.0.0.1:9115/metrics",
+        },
+        "commercial_register": {
+            "config": "/etc/finite/commercial-register/compose.yaml",
+            "services": [
+                "finite-commercial-register.service",
+                "finite-commercial-register-backup.timer",
+                "finite-commercial-register-health.timer",
+            ],
+            "oneshot_services": [
+                "finite-commercial-register-backup.service",
+                "finite-commercial-register-health.service",
+            ],
+            "probe": "http://127.0.0.1:3020/healthz",
+            "containers": {
+                "finite-commercial-register-server": "docker.io/twentycrm/twenty@sha256:a8ab7d34ac102a3c75d4538f917b57ab3f3f853a2afcdf01b4e6fcb7dec2cd6f",
+                "finite-commercial-register-worker": "docker.io/twentycrm/twenty@sha256:a8ab7d34ac102a3c75d4538f917b57ab3f3f853a2afcdf01b4e6fcb7dec2cd6f",
+                "finite-commercial-register-db": "docker.io/library/postgres@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8",
+                "finite-commercial-register-redis": "docker.io/library/redis@sha256:7d1e4ce8b9395088377ab382d1f6cfdbd13b3690795198a0399ab8d683064d6d",
+            },
+            "snapshot_root": "/var/lib/finite-commercial-register/snapshots",
+            "snapshot_format": "finite.commercial-register-recovery.v1",
+            "borg_success_stamp": "/var/lib/finite-commercial-register/borg-last-success",
+            "maximum_age_seconds": 93_600,
+        },
+    },
     "thresholds": {
         "filesystem_red_percent": 90.0,
+        "memory_available_red_bytes": 512 * 1024 * 1024,
     },
 }
 
@@ -550,6 +591,137 @@ def line_count(command: list[str]) -> int:
             f"{' '.join(command[:3])} failed: {result.stderr.strip() or result.returncode}"
         )
     return sum(bool(line.strip()) for line in result.stdout.splitlines())
+
+
+def direct_http_probe(url: str) -> dict[str, Any]:
+    result = run_read_only(
+        ["curl", "--fail", "--silent", "--show-error", "--max-time", "10", url]
+    )
+    return {
+        "url": url,
+        "ok": result.returncode == 0,
+        "error": None if result.returncode == 0 else result.stderr.strip() or f"exit {result.returncode}",
+    }
+
+
+def collect_memory() -> dict[str, Any]:
+    try:
+        values: dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, separator, raw_value = line.partition(":")
+            if separator and key in {"MemTotal", "MemAvailable"}:
+                values[key] = int(raw_value.strip().split()[0]) * 1024
+        if set(values) != {"MemTotal", "MemAvailable"}:
+            raise ValueError("MemTotal or MemAvailable is absent")
+        return {
+            "total_bytes": values["MemTotal"],
+            "available_bytes": values["MemAvailable"],
+        }
+    except (OSError, ValueError) as error:
+        return {"error": str(error)}
+
+
+def collect_docker_container(name: str) -> dict[str, Any]:
+    result = run_read_only(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.Config.Image}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            name,
+        ]
+    )
+    if result.returncode != 0:
+        return {"error": result.stderr.strip() or f"exit {result.returncode}"}
+    image, running, health = (result.stdout.strip().split("|", 2) + ["", ""])[:3]
+    return {"image": image, "running": running == "true", "health": health or None}
+
+
+def collect_monitoring_host_health(hostname: str) -> dict[str, Any]:
+    contract = CONTRACT["monitoring_host"]
+    commercial = contract["commercial_register"]
+    commercial_configured = Path(commercial["config"]).is_file()
+    units = list(contract["services"])
+    if commercial_configured:
+        units.extend(commercial["services"])
+        units.extend(commercial["oneshot_services"])
+    raw: dict[str, Any] = {
+        "profile": "monitoring",
+        "hostname": hostname,
+        "commercial_register_configured": commercial_configured,
+        "units": {},
+        "probes": {},
+        "filesystems": [],
+        "memory": collect_memory(),
+        "containers": {},
+    }
+    for unit in units:
+        try:
+            raw["units"][unit] = systemd_properties(unit)
+        except CollectionError as error:
+            raw["units"][unit] = {"error": str(error)}
+    for name, url in contract["probes"].items():
+        raw["probes"][name] = direct_http_probe(url)
+    if commercial_configured:
+        raw["probes"]["commercial-register"] = direct_http_probe(commercial["probe"])
+        for name in commercial["containers"]:
+            raw["containers"][name] = collect_docker_container(name)
+    for mount in contract["mounts"]:
+        try:
+            stats = os.statvfs(mount)
+            total = stats.f_blocks * stats.f_frsize
+            available = stats.f_bavail * stats.f_frsize
+            used_percent = 0.0 if total == 0 else (total - available) * 100.0 / total
+            raw["filesystems"].append(
+                {
+                    "mount": mount,
+                    "total_bytes": total,
+                    "available_bytes": available,
+                    "used_percent": round(used_percent, 1),
+                }
+            )
+        except OSError as error:
+            raw["filesystems"].append({"mount": mount, "error": str(error)})
+    return raw
+
+
+def collect_monitoring_recovery() -> dict[str, Any]:
+    commercial = CONTRACT["monitoring_host"]["commercial_register"]
+    if not Path(commercial["config"]).is_file():
+        return {"applicable": False, "profile": "commercial-register"}
+    raw: dict[str, Any] = {
+        "applicable": True,
+        "profile": "commercial-register",
+        "snapshot": {},
+    }
+    try:
+        snapshot = safe_snapshot_directory(Path(commercial["snapshot_root"]))
+        checked, failures = verify_manifest(snapshot)
+        format_value = (snapshot / "format").read_text(encoding="utf-8").strip()
+        raw["snapshot"] = {
+            "name": snapshot.name,
+            "created_at": isoformat(datetime.fromtimestamp(snapshot.stat().st_mtime, timezone.utc)),
+            "manifest_entries": checked,
+            "manifest_valid": not failures,
+            "manifest_failures": failures,
+            "format_valid": format_value == commercial["snapshot_format"],
+        }
+    except (CollectionError, OSError, ValueError) as error:
+        raw["snapshot"] = {"error": str(error)}
+    stamp = Path(commercial["borg_success_stamp"])
+    try:
+        raw["borg_last_success_epoch"] = int(stamp.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as error:
+        raw["borg_last_success_error"] = f"cannot read {stamp}: {error}"
+    for key, unit in (
+        ("backup_unit", "finite-commercial-register-backup.service"),
+        ("health_unit", "finite-commercial-register-health.service"),
+    ):
+        try:
+            raw[key] = systemd_properties(unit)
+        except CollectionError as error:
+            raw[key] = {"error": str(error)}
+    return raw
 
 
 def collect_host_health(hostname: str) -> dict[str, Any]:
@@ -1415,6 +1587,12 @@ def build_fleet(
     error: str | None = None,
     probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if core is not None and not core.get("applicable", True):
+        return {
+            "status": "green",
+            "applicable": False,
+            "state": "not-applicable-on-monitoring-host",
+        }
     if core is None:
         return {"status": "unknown", "error": error or "Core evidence unavailable"}
     artifacts = core.get("artifacts", [])
@@ -1582,15 +1760,115 @@ def unit_status(properties: dict[str, Any], *, active_required: bool) -> str:
     return "unknown"
 
 
-def build_host_health(
-    raw: dict[str, Any] | None, target_id: str | None
-) -> dict[str, Any]:
+def build_monitoring_host_health(raw: dict[str, Any]) -> dict[str, Any]:
+    contract = CONTRACT["monitoring_host"]
+    commercial = contract["commercial_register"]
+    statuses: list[str] = []
+    services = []
+    active_units = list(contract["services"])
+    oneshot_units: list[str] = []
+    if raw.get("commercial_register_configured"):
+        active_units.extend(commercial["services"])
+        oneshot_units.extend(commercial["oneshot_services"])
+    for unit in active_units:
+        properties = raw.get("units", {}).get(unit, {"error": "not observed"})
+        status = unit_status(properties, active_required=True)
+        statuses.append(status)
+        services.append(
+            {
+                "unit": unit,
+                "status": status,
+                "active_state": properties.get("ActiveState"),
+                "sub_state": properties.get("SubState"),
+                "error": properties.get("error"),
+            }
+        )
+    for unit in oneshot_units:
+        properties = raw.get("units", {}).get(unit, {"error": "not observed"})
+        status = unit_status(properties, active_required=False)
+        statuses.append(status)
+        services.append(
+            {
+                "unit": unit,
+                "status": status,
+                "active_state": properties.get("ActiveState"),
+                "sub_state": properties.get("SubState"),
+                "error": properties.get("error"),
+            }
+        )
+
+    probes = []
+    for name, evidence in raw.get("probes", {}).items():
+        status = "green" if evidence.get("ok") else "red"
+        statuses.append(status)
+        probes.append({"name": name, "status": status, **evidence})
+
+    filesystems = []
+    for filesystem in raw.get("filesystems", []):
+        if filesystem.get("error"):
+            status = "unknown"
+        elif float(filesystem["used_percent"]) >= CONTRACT["thresholds"]["filesystem_red_percent"]:
+            status = "red"
+        else:
+            status = "green"
+        statuses.append(status)
+        filesystems.append({**filesystem, "status": status})
+
+    memory = dict(raw.get("memory", {}))
+    if memory.get("error") or memory.get("available_bytes") is None:
+        memory["status"] = "unknown"
+    elif memory["available_bytes"] < CONTRACT["thresholds"]["memory_available_red_bytes"]:
+        memory["status"] = "red"
+    else:
+        memory["status"] = "green"
+    statuses.append(memory["status"])
+
+    containers = []
+    if raw.get("commercial_register_configured"):
+        for name, expected_image in commercial["containers"].items():
+            observed = raw.get("containers", {}).get(name, {"error": "not observed"})
+            if observed.get("error"):
+                status = "unknown"
+            elif (
+                not observed.get("running")
+                or observed.get("image") != expected_image
+                or observed.get("health") not in {None, "healthy"}
+            ):
+                status = "red"
+            else:
+                status = "green"
+            statuses.append(status)
+            containers.append(
+                {
+                    "name": name,
+                    "status": status,
+                    "expected_image": expected_image,
+                    **observed,
+                }
+            )
+
+    return {
+        "status": combine_status(statuses),
+        "profile": "monitoring",
+        "hostname": raw.get("hostname"),
+        "commercial_register_configured": bool(raw.get("commercial_register_configured")),
+        "services": services,
+        "http_probes": probes,
+        "filesystems": filesystems,
+        "memory": memory,
+        "containers": containers,
+    }
+
+
+def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict[str, Any]:
     if raw is None or raw.get("error"):
         return {
             "status": "unknown",
             "hostname": None if raw is None else raw.get("hostname"),
             "error": "host evidence unavailable" if raw is None else raw["error"],
         }
+    if raw.get("profile") == "monitoring":
+        return build_monitoring_host_health(raw)
     statuses: list[str] = []
     roles = raw.get("roles") or ["app", "runner"]
     units = []
@@ -1808,9 +2086,73 @@ def build_host_health(
     }
 
 
+def build_monitoring_recovery(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
+    if not raw.get("applicable", True):
+        return {
+            "status": "green",
+            "applicable": False,
+            "profile": "commercial-register",
+            "state": "not-configured",
+        }
+    contract = CONTRACT["monitoring_host"]["commercial_register"]
+    statuses: list[str] = []
+    snapshot = dict(raw.get("snapshot", {}))
+    created = parse_time(snapshot.get("created_at"))
+    if snapshot.get("error") or created is None:
+        snapshot["status"] = "unknown"
+        snapshot["age_seconds"] = None
+    else:
+        snapshot["age_seconds"] = int((now - created).total_seconds())
+        snapshot["status"] = (
+            "green"
+            if snapshot.get("manifest_valid")
+            and snapshot.get("format_valid")
+            and 0 <= snapshot["age_seconds"] <= contract["maximum_age_seconds"]
+            else "red"
+        )
+    statuses.append(snapshot["status"])
+
+    epoch = raw.get("borg_last_success_epoch")
+    if isinstance(epoch, int):
+        borg_age = int(now.timestamp()) - epoch
+        borg_status = (
+            "green" if 0 <= borg_age <= contract["maximum_age_seconds"] else "red"
+        )
+    else:
+        borg_age = None
+        borg_status = "unknown"
+    backup_status = unit_status(raw.get("backup_unit", {}), active_required=False)
+    health_status = unit_status(raw.get("health_unit", {}), active_required=False)
+    statuses.extend([borg_status, backup_status, health_status])
+    return {
+        "status": combine_status(statuses),
+        "applicable": True,
+        "profile": "commercial-register",
+        "snapshot": snapshot,
+        "borg": {
+            "last_success_epoch": epoch,
+            "age_seconds": borg_age,
+            "stamp_status": borg_status,
+            "error": raw.get("borg_last_success_error"),
+        },
+        "backup_unit": {
+            "unit": "finite-commercial-register-backup.service",
+            "status": backup_status,
+            "result": raw.get("backup_unit", {}).get("Result"),
+        },
+        "health_unit": {
+            "unit": "finite-commercial-register-health.service",
+            "status": health_status,
+            "result": raw.get("health_unit", {}).get("Result"),
+        },
+    }
+
+
 def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
     if raw is None:
         return {"status": "unknown", "error": "recovery evidence unavailable"}
+    if raw.get("profile") == "commercial-register":
+        return build_monitoring_recovery(raw, now)
     if not raw.get("applicable", True):
         return {"status": "green", "applicable": False, "state": "not-applicable"}
     statuses: list[str] = []
@@ -2095,12 +2437,24 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         raw.get("core"), now, errors.get("core"), raw.get("lifecycle_probe")
     )
     target_id = fleet.get("target_artifact", {}).get("id")
+    chat_plane_raw = raw.get("chat_plane")
+    if chat_plane_raw is None and raw.get("core", {}).get("applicable") is False:
+        chat_plane_raw = {
+            "server": {
+                "applicable": False,
+                "reason": "chat server database not on the monitoring host",
+            },
+            "sync_rate": {
+                "applicable": False,
+                "reason": "chat edge is not on the monitoring host",
+            },
+        }
     sections = {
         "fleet_convergence": fleet,
         "host_health": build_host_health(raw.get("host_health"), target_id),
         "recovery_boundary": build_recovery(raw.get("recovery"), now),
         "rollout_state": build_rollout(raw.get("rollout")),
-        "chat_plane": build_chat_plane(raw.get("chat_plane"), now),
+        "chat_plane": build_chat_plane(chat_plane_raw, now),
     }
     report = {
         "schema_version": "finite.status.v1",
@@ -2163,7 +2517,9 @@ def render_human(report: dict[str, Any]) -> str:
     lines.append(
         f"Fleet convergence {badge(fleet['status'])} — Core-recorded, NOT verified live"
     )
-    if fleet.get("target_artifact"):
+    if fleet.get("applicable") is False:
+        lines.append("  not applicable on the monitoring host")
+    elif fleet.get("target_artifact"):
         target = fleet["target_artifact"]
         lines.append(
             f"  target: {target['version_label']} ({target['id']}) "
@@ -2239,7 +2595,34 @@ def render_human(report: dict[str, Any]) -> str:
         f"Host health {badge(health['status'])} — "
         f"{health.get('hostname') or 'unknown host'}"
     )
-    if health.get("healthcheck"):
+    if health.get("profile") == "monitoring":
+        failed_services = [unit for unit in health["services"] if unit["status"] != "green"]
+        lines.append(
+            f"  services: {len(health['services']) - len(failed_services)}/{len(health['services'])} healthy"
+        )
+        for unit in failed_services:
+            lines.append(
+                f"    {badge(unit['status'])} {unit['unit']}: {unit['active_state'] or unit.get('error') or 'unknown'}"
+            )
+        for probe in health["http_probes"]:
+            lines.append(
+                f"    {badge(probe['status'])} HTTP {probe['name']}: {probe['url']}"
+            )
+        for filesystem in health["filesystems"]:
+            lines.append(
+                f"  filesystem {filesystem['mount']}: {filesystem.get('used_percent', 'unknown')}% used "
+                f"{badge(filesystem['status'])}"
+            )
+        memory = health["memory"]
+        lines.append(
+            f"  memory available: {memory.get('available_bytes', 'unknown')} bytes {badge(memory['status'])}"
+        )
+        if health["commercial_register_configured"]:
+            healthy_containers = sum(container["status"] == "green" for container in health["containers"])
+            lines.append(
+                f"  commercial register containers: {healthy_containers}/{len(health['containers'])} healthy"
+            )
+    elif health.get("healthcheck"):
         check = health["healthcheck"]
         lines.append(
             f"  {check['unit']}: recorded result={check['recorded_result'] or 'unknown'} {badge(check['status'])}"
@@ -2314,6 +2697,18 @@ def render_human(report: dict[str, Any]) -> str:
     lines.append(f"Recovery boundary {badge(recovery['status'])}")
     if recovery.get("applicable") is False:
         lines.append("  not applicable on this host")
+    elif recovery.get("profile") == "commercial-register":
+        snapshot = recovery["snapshot"]
+        lines.append(
+            f"  commercial register snapshot {snapshot.get('name', 'unknown')}: "
+            f"age {human_age(snapshot.get('age_seconds'))} {badge(snapshot['status'])}"
+        )
+        borg = recovery["borg"]
+        lines.append(
+            f"  Borg last success {human_age(borg['age_seconds'])} ago {badge(borg['stamp_status'])}; "
+            f"backup unit {badge(recovery['backup_unit']['status'])}; "
+            f"health unit {badge(recovery['health_unit']['status'])}"
+        )
     elif recovery.get("snapshot"):
         snapshot = recovery["snapshot"]
         lines.append(
@@ -2411,6 +2806,13 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     now = utc_now()
     hostname = socket.gethostname().split(".", 1)[0]
     raw: dict[str, Any] = {"collection_errors": {}}
+    if hostname in CONTRACT["monitoring_host"]["hostnames"]:
+        raw["core"] = {"applicable": False}
+        raw["host_health"] = collect_monitoring_host_health(hostname)
+        raw["recovery"] = collect_monitoring_recovery()
+        raw["rollout"] = collect_rollout()
+        raw["lifecycle_probe"] = None
+        return raw, now
     try:
         raw["core"] = collect_core()
     except CollectionError as error:

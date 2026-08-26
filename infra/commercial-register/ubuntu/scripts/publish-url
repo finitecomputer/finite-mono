@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "--activate" || $# -ne 1 ]]; then
+  echo "usage: publish-url --activate" >&2
+  exit 64
+fi
+
+config_root=/etc/finite/commercial-register
+environment_file="${config_root}/twenty.env"
+status_root="/var/lib/finite-commercial-register/publications/$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 0700 "${status_root}"
+python3 /opt/finite-commercial-register/status/finite-status --json \
+  > "${status_root}/finite-status-before.json"
+
+current_url="$(sed -n 's/^SERVER_URL=//p' "${environment_file}")"
+case "${current_url}" in
+  https://crm.finite.computer)
+    ;;
+  http://localhost:3020)
+    temporary="$(mktemp "${config_root}/twenty.env.XXXXXX")"
+    trap 'rm -f -- "${temporary}"' EXIT
+    sed 's|^SERVER_URL=http://localhost:3020$|SERVER_URL=https://crm.finite.computer|' \
+      "${environment_file}" > "${temporary}"
+    test "$(grep -Ec '^SERVER_URL=https://crm\.finite\.computer$' "${temporary}")" -eq 1
+    chown root:root "${temporary}"
+    chmod 0600 "${temporary}"
+    mv "${temporary}" "${environment_file}"
+    trap - EXIT
+    ;;
+  *)
+    echo "refusing unexpected SERVER_URL in ${environment_file}" >&2
+    exit 65
+    ;;
+esac
+
+systemctl restart finite-commercial-register.service
+/opt/finite-commercial-register/bin/backup
+/opt/finite-commercial-register/bin/restore-check
+/opt/finite-commercial-register/bin/health
+python3 /opt/finite-commercial-register/status/finite-status --json \
+  > "${status_root}/finite-status-after.json"
+echo "commercial-register public URL prepared; DNS and Caddy remain separate mutation boundaries"

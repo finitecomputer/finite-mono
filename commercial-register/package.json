@@ -5,7 +5,7 @@
   "license": "MIT",
   "engines": {
     "node": "^24.5.0",
-    "twenty": ">=2.33.0 <2.34.0",
+    "twenty": ">=2.35.0 <2.36.0",
     "yarn": ">=4.0.2"
   },
   "packageManager": "yarn@4.13.0",
@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "24.10.0",
-    "twenty-sdk": "2.33.0",
+    "twenty-sdk": "2.35.0",
     "typescript": "5.9.3"
   }
 }

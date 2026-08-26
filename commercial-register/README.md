@@ -60,9 +60,12 @@ just commercial app-plan
 just commercial app-apply
 ```
 
-Do not use `--force` for ordinary app application. This repository declares no
-production Twenty deployment yet; a pinned deployment, export, backup, and
-empty-target restore test are gates before Twenty becomes the sole authority.
+Do not use `--force` for ordinary app application. The digest-pinned production
+service, backup, restore drill, DNS, and rollback boundary are declared under
+[`infra/commercial-register`](../infra/commercial-register/README.md). The
+production register becomes an authority only after the first off-host archive
+has passed that empty-target restore and the real application has been applied
+without seeding the synthetic NED fixture.
 
 ## Agent interface
 
