@@ -14,6 +14,9 @@ permissions:
   contents: read
 env:
   CACHIX_CACHE_NAME: finite
+  # Depot CI sandboxes do not populate USER; Cachix requires it even when the
+  # cache is configured read-only.
+  USER: root
 jobs:
   changes:
     name: Detect required CI harnesses

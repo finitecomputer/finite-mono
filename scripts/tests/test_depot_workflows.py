@@ -98,6 +98,10 @@ class DepotWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("electron-alpha", workflow)
         self.assertNotIn("run_electron_alpha", workflow)
 
+    def test_ci_sets_the_container_user_for_cachix(self) -> None:
+        workflow = self.workflow("ci.yml")
+        self.assertIn("  USER: root\n", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,13 @@ def selected(*paths: str) -> set[str]:
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
+    def test_github_ci_does_not_reference_parked_electron_harness(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("electron-alpha", workflow)
+        self.assertNotIn("run_electron_alpha", workflow)
+        self.assertNotIn("runs-on: macos-", workflow)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),
