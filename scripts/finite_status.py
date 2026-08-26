@@ -365,8 +365,15 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
         input_text="\n".join(sql_lines) + "\n",
     )
     if result.returncode != 0:
-        message = result.stderr.strip().splitlines()
-        detail = message[-1] if message else f"exit {result.returncode}"
+        message = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        detail = next(
+            (
+                line
+                for line in message
+                if line.startswith(("ERROR:", "FATAL:", "PANIC:"))
+            ),
+            message[-1] if message else f"exit {result.returncode}",
+        )
         raise CollectionError(f"read-only Core query failed: {detail}")
     query_sets = {name: [] for name, _, _ in definitions}
     active_name: str | None = None

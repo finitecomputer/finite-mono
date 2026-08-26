@@ -80,6 +80,26 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIn(finite_status.RUNTIME_DETAILS_QUERY, sql)
         self.assertEqual(call.args[0].count("psql"), 1)
 
+    def test_core_query_failure_preserves_the_meaningful_psql_error(self) -> None:
+        stderr = """ERROR:  column runtime_rows.health_ready does not exist
+LINE 42: SELECT runtime_rows.health_ready
+                        ^
+"""
+        completed = subprocess.CompletedProcess(
+            ["psql"],
+            3,
+            "",
+            stderr,
+        )
+        with (
+            mock.patch.object(finite_status, "run_read_only", return_value=completed),
+            self.assertRaisesRegex(
+                finite_status.CollectionError,
+                "read-only Core query failed: ERROR:  column runtime_rows.health_ready does not exist",
+            ),
+        ):
+            finite_status.psql_query_sets({})
+
     def test_human_output_projects_active_control_state(self) -> None:
         raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
         for group in raw["core"]["runtime_groups"]:
