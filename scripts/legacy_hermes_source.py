@@ -12,7 +12,7 @@ import sqlite3
 import stat
 import tempfile
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from legacy_hermes_contract import (
@@ -27,6 +27,7 @@ from legacy_hermes_contract import (
     _memory_database_fact_count,
     _sha256,
     _write_private_json,
+    payload_path_for_source,
 )
 
 SOURCE_ACTIVATE_ROOTS = (
@@ -596,6 +597,123 @@ def inventory_source_volume(output: Path, source_root: Path) -> dict[str, Any]:
     }
     _write_private_json(output, result)
     return result
+
+
+def stage_source_active_payload(
+    output: Path,
+    source_root: Path,
+    source_inventory_path: Path,
+) -> dict[str, Any]:
+    """Copy every inventory-approved active entry into a new payload tree."""
+    output = Path(output)
+    source_root = Path(source_root)
+    source_inventory_path = Path(source_inventory_path)
+    if output.exists() or output.is_symlink():
+        raise MigrationError(f"refusing to overwrite active payload: {output}")
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise MigrationError(f"source root must be a real directory: {source_root}")
+    resolved_source = source_root.resolve()
+    try:
+        output.parent.resolve().relative_to(resolved_source)
+    except ValueError:
+        pass
+    else:
+        raise MigrationError("active payload must be outside the source volume")
+    try:
+        inventory = json.loads(source_inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"could not read source volume inventory: {exc}") from exc
+    if (
+        not isinstance(inventory, dict)
+        or inventory.get("schema") != SOURCE_INVENTORY_SCHEMA
+        or inventory.get("status") != "complete"
+        or inventory.get("blocked_roots") != []
+        or inventory.get("source_root") != str(resolved_source)
+    ):
+        raise MigrationError("source volume inventory is incomplete or mismatched")
+    entries = inventory.get("entries")
+    if not isinstance(entries, list):
+        raise MigrationError("source volume inventory entries are missing")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    counts = {"directories": 0, "regular_files": 0, "symlinks": 0, "bytes": 0}
+    try:
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("disposition") != "activate":
+                continue
+            source_path_text = entry.get("path")
+            if not isinstance(source_path_text, str):
+                raise MigrationError("active source inventory path is invalid")
+            source_relative = PurePosixPath(source_path_text)
+            payload_relative = payload_path_for_source(source_relative)
+            if payload_relative is None:
+                raise MigrationError(
+                    f"active source path has no payload mapping: {source_path_text}"
+                )
+            source_path = resolved_source / Path(source_relative.as_posix())
+            destination = staging / Path(payload_relative.as_posix())
+            kind = entry.get("kind")
+            mode = entry.get("mode")
+            size = entry.get("size")
+            expected_sha256 = entry.get("sha256")
+            link_target = entry.get("link_target")
+            if kind == "directory":
+                if source_path.is_symlink() or not source_path.is_dir():
+                    raise MigrationError(
+                        f"active source directory changed: {source_path_text}"
+                    )
+                if stat.S_IMODE(source_path.stat().st_mode) != mode:
+                    raise MigrationError(
+                        f"active source directory mode changed: {source_path_text}"
+                    )
+                destination.mkdir(parents=True, exist_ok=True)
+                destination.chmod(mode)
+                counts["directories"] += 1
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "file":
+                if source_path.is_symlink() or not source_path.is_file():
+                    raise MigrationError(
+                        f"active source file changed: {source_path_text}"
+                    )
+                source_stat = source_path.stat()
+                if (
+                    source_stat.st_size != size
+                    or stat.S_IMODE(source_stat.st_mode) != mode
+                    or _sha256(source_path) != expected_sha256
+                ):
+                    raise MigrationError(
+                        f"active source file metadata changed: {source_path_text}"
+                    )
+                shutil.copy2(source_path, destination, follow_symlinks=False)
+                counts["regular_files"] += 1
+                counts["bytes"] += source_stat.st_size
+                continue
+            if kind == "symlink":
+                if not source_path.is_symlink():
+                    raise MigrationError(
+                        f"active source symlink changed: {source_path_text}"
+                    )
+                actual_target = os.readlink(source_path)
+                if (
+                    actual_target != link_target
+                    or len(actual_target.encode("utf-8")) != size
+                    or hashlib.sha256(actual_target.encode("utf-8")).hexdigest()
+                    != expected_sha256
+                ):
+                    raise MigrationError(
+                        f"active source symlink metadata changed: {source_path_text}"
+                    )
+                destination.symlink_to(actual_target)
+                counts["symlinks"] += 1
+                continue
+            raise MigrationError(f"active source entry is invalid: {source_path_text}")
+        staging.replace(output)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {"status": "complete", **counts}
 
 
 def inventory_source_sites(

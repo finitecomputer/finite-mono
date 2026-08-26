@@ -59,6 +59,10 @@ in the organization Brain or a mode-0700 operator evidence directory.
 - Restored homes can contain chains of absolute `/home/node` symlinks. Resolve
   each hop against the restored root; host-path resolution creates false
   escapes, while accepting a chain without following it can hide a real one.
+- Do not copy an admitted root wholesale after classifying its contents.
+  Project-local virtualenvs and caches can sit below `dev/`; build the active
+  payload from `activate` inventory entries and validate it against that same
+  inventory before sealing the bundle.
 
 ## Accepted limits
 

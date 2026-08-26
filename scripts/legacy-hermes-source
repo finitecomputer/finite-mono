@@ -3,7 +3,7 @@ set -euo pipefail
 
 command_name="${1:-}"
 case "$command_name" in
-  source-export|source-memory-snapshot|source-volume-inventory|source-sites-inventory|source-integrations-inventory)
+  source-export|source-memory-snapshot|source-volume-inventory|source-active-payload|source-sites-inventory|source-integrations-inventory)
     shift
     ;;
   *)

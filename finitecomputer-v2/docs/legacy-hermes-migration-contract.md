@@ -88,6 +88,12 @@ contract cannot be proven. External symlinks below known generated or
 quarantined roots are retained as inert link metadata in the sealed snapshot
 and assigned `rebuild` or `quarantine`; they are never followed or activated.
 
+The source tool builds the active payload directly from the inventory. It
+copies every `activate` file and contained symlink, omits every other
+disposition, and rechecks metadata and hashes while copying. The manifest then
+rejects any active payload entry that is absent from, changed from, or has a
+non-`activate` disposition in the source inventory.
+
 ## Bundle boundary
 
 `finite.legacy-hermes-migration.v2` contains:

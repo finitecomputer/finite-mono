@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import socket
 import sqlite3
 import sys
@@ -205,6 +206,25 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         )
         (source_home / ".brain/agent.json").write_text(
             '{"identity":"synthetic-brain-identity"}\n', encoding="utf-8"
+        )
+        for payload_relative, source_relative in (
+            ("hermes/memories", ".hermes/memories"),
+            ("hermes/skills", ".hermes/skills"),
+            ("hermes/scripts", ".hermes/scripts"),
+            ("home/workspace", "workspace"),
+            ("home/dev", "dev"),
+            ("home/uploads", "uploads"),
+        ):
+            shutil.copytree(
+                self.payload / payload_relative,
+                source_home / source_relative,
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+        (source_home / ".hermes/cron").mkdir(exist_ok=True)
+        shutil.copy2(
+            self.payload / "hermes/cron/jobs.json",
+            source_home / ".hermes/cron/jobs.json",
         )
         migration.inventory_source_volume(
             self.bundle / "source-volume-inventory.json", source_home
@@ -580,6 +600,17 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         ):
             self.build_manifest()
 
+    def test_manifest_rejects_uninventoried_active_payload(self) -> None:
+        (self.payload / "home/dev/project/uninventoried.txt").write_text(
+            "must not become active\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "active payload does not match source inventory",
+        ):
+            self.build_manifest()
+
     def test_manifest_rejects_an_unapproved_source_hermes_version(self) -> None:
         metadata = self.metadata()
         unsupported = migration.SourceMetadata(
@@ -603,6 +634,7 @@ class LegacyHermesMigrationTests(unittest.TestCase):
         self.assertIn("legacy_hermes_source.py", runbook)
         self.assertIn("legacy_hermes_target.py", runbook)
         self.assertIn("source-volume-inventory", runbook)
+        self.assertIn("source-active-payload", runbook)
         self.assertIn("source-sites-inventory", runbook)
         self.assertIn("source-integrations-inventory", runbook)
         self.assertIn("--source-volume-inventory-sha256", runbook)
@@ -889,6 +921,57 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             {path: dispositions[path] for path in generated_links},
             {path: "rebuild" for path in generated_links},
         )
+
+    def test_source_active_payload_stages_only_inventory_activated_entries(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        (source / "dev/project/.venv/bin").mkdir(parents=True)
+        (source / "dev/project/app.py").write_text(
+            "print('active')\n", encoding="utf-8"
+        )
+        (source / "dev/project/app-link").symlink_to("app.py")
+        (source / "dev/project/.venv/bin/python").symlink_to(
+            "/nix/store/legacy-python/bin/python"
+        )
+        (source / ".brain").mkdir()
+        (source / ".brain/identity.json").write_text(
+            "quarantined\n", encoding="utf-8"
+        )
+        (source / "custom-data").mkdir()
+        (source / "custom-data/archive.txt").write_text(
+            "preserved only\n", encoding="utf-8"
+        )
+        inventory = self.root / "active-payload-inventory.json"
+        migration.inventory_source_volume(inventory, source)
+        output = self.root / "active-payload"
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = migration.main(
+                [
+                    "source-active-payload",
+                    "--source-root",
+                    str(source),
+                    "--source-volume-inventory",
+                    str(inventory),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+        self.assertEqual(
+            (output / "home/dev/project/app.py").read_text(encoding="utf-8"),
+            "print('active')\n",
+        )
+        self.assertEqual(
+            (output / "home/dev/project/app-link").readlink(), Path("app.py")
+        )
+        self.assertFalse((output / "home/dev/project/.venv").exists())
+        self.assertFalse((output / ".brain").exists())
+        self.assertFalse((output / "custom-data").exists())
 
     def test_source_volume_inventory_rebuilds_cocod_runtime_socket(self) -> None:
         socket_root = tempfile.TemporaryDirectory(dir="/tmp", prefix="lhm-")

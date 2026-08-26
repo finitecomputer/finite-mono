@@ -30,6 +30,7 @@ from legacy_hermes_source import (
     inventory_source_sites as inventory_source_sites,
     inventory_source_volume as inventory_source_volume,
     snapshot_source_memory as snapshot_source_memory,
+    stage_source_active_payload as stage_source_active_payload,
 )
 from legacy_hermes_target import install_bundle as install_bundle
 
@@ -57,6 +58,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     inventory.add_argument("--source-root", type=Path, required=True)
     inventory.add_argument("--output", type=Path, required=True)
+
+    active_payload = subparsers.add_parser(
+        "source-active-payload",
+        help="stage every inventory-approved active source entry",
+    )
+    active_payload.add_argument("--source-root", type=Path, required=True)
+    active_payload.add_argument(
+        "--source-volume-inventory", type=Path, required=True
+    )
+    active_payload.add_argument("--output", type=Path, required=True)
 
     sites = subparsers.add_parser(
         "source-sites-inventory",
@@ -141,6 +152,12 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "blocked_roots",
                 )
             }
+        elif args.command == "source-active-payload":
+            result = stage_source_active_payload(
+                args.output,
+                args.source_root,
+                args.source_volume_inventory,
+            )
         elif args.command == "source-sites-inventory":
             result = inventory_source_sites(
                 args.output,

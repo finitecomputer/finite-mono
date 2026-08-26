@@ -41,6 +41,15 @@ ALLOWED_PAYLOAD_ROOTS = (
     PurePosixPath("home/dev"),
     PurePosixPath("home/uploads"),
 )
+SOURCE_ACTIVE_PAYLOAD_MAPPINGS = (
+    (PurePosixPath(".hermes/memories"), PurePosixPath("hermes/memories")),
+    (PurePosixPath(".hermes/skills"), PurePosixPath("hermes/skills")),
+    (PurePosixPath(".hermes/scripts"), PurePosixPath("hermes/scripts")),
+    (PurePosixPath(".hermes/cron/jobs.json"), PurePosixPath("hermes/cron/jobs.json")),
+    (PurePosixPath("workspace"), PurePosixPath("home/workspace")),
+    (PurePosixPath("dev"), PurePosixPath("home/dev")),
+    (PurePosixPath("uploads"), PurePosixPath("home/uploads")),
+)
 PRESERVED_INERT = {
     "default": "every non-activated source entry remains in source-home.tar",
     "quarantined": [
@@ -75,6 +84,57 @@ INTEGRATION_MIGRATION_POLICIES = frozenset(
 
 class MigrationError(RuntimeError):
     """A fail-closed migration contract violation."""
+
+
+def payload_path_for_source(relative: PurePosixPath) -> PurePosixPath | None:
+    for source_root, payload_root in SOURCE_ACTIVE_PAYLOAD_MAPPINGS:
+        if relative == source_root:
+            return payload_root
+        if relative.is_relative_to(source_root):
+            return payload_root / relative.relative_to(source_root)
+    return None
+
+
+def source_path_for_payload(relative: PurePosixPath) -> PurePosixPath | None:
+    for source_root, payload_root in SOURCE_ACTIVE_PAYLOAD_MAPPINGS:
+        if relative == payload_root:
+            return source_root
+        if relative.is_relative_to(payload_root):
+            return source_root / relative.relative_to(payload_root)
+    return None
+
+
+def _validate_active_payload_records(
+    records: list[dict[str, Any]], inventory: dict[str, Any]
+) -> None:
+    source_entries = {
+        entry["path"]: entry
+        for entry in inventory["entries"]
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    for record in records:
+        payload_relative = PurePosixPath(record["path"])
+        source_relative = source_path_for_payload(payload_relative)
+        if source_relative is None:
+            continue
+        expected = source_entries.get(source_relative.as_posix())
+        if expected is None or expected.get("disposition") != "activate":
+            raise MigrationError("active payload does not match source inventory")
+        comparable = {
+            "kind": expected.get("kind"),
+            "size": expected.get("size"),
+            "mode": expected.get("mode"),
+            "sha256": expected.get("sha256"),
+            "link_target": expected.get("link_target"),
+        }
+        if comparable != {
+            "kind": record.get("kind"),
+            "size": record.get("size"),
+            "mode": record.get("mode"),
+            "sha256": record.get("sha256"),
+            "link_target": record.get("link_target"),
+        }:
+            raise MigrationError("active payload does not match source inventory")
 
 
 @dataclass(frozen=True)
@@ -1015,6 +1075,7 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
                 "link_target": link_target,
             }
         )
+    _validate_active_payload_records(records, inventory)
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "source": asdict(source),

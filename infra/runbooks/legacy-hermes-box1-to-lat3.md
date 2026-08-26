@@ -448,30 +448,18 @@ ssh lat3 "sudo sha256sum '$TRANSPORT_ARCHIVE'"
 ssh lat3 "sudo sh -c 'umask 077; zstd -T0 -d -c \
   \"$TRANSPORT_ARCHIVE\" \
   >\"$BUNDLE/payload/source-home.tar\"'"
-HERMES_PAYLOAD_PATHS="$(ssh box1 "sudo bash -c '
-  set -euo pipefail
-  cd \"\$1\"
-  for path in memories skills cron/jobs.json scripts; do
-    [[ ! -e \"\$path\" && ! -L \"\$path\" ]] || printf \"%s\\n\" \"\$path\"
-  done
-' _ '$SOURCE_PV_PATH/.hermes'")"
-if [[ -n "$HERMES_PAYLOAD_PATHS" ]]; then
-  ssh box1 "sudo tar -C '$SOURCE_PV_PATH/.hermes' -cpf - \
-    $HERMES_PAYLOAD_PATHS" \
-    | ssh lat3 "sudo tar -C '$BUNDLE/payload/hermes' -xpf -"
-fi
-HOME_PAYLOAD_PATHS="$(ssh box1 "sudo bash -c '
-  set -euo pipefail
-  cd \"\$1\"
-  for path in workspace dev uploads; do
-    [[ ! -e \"\$path\" && ! -L \"\$path\" ]] || printf \"%s\\n\" \"\$path\"
-  done
-' _ '$SOURCE_PV_PATH'")"
-if [[ -n "$HOME_PAYLOAD_PATHS" ]]; then
-  ssh box1 "sudo tar -C '$SOURCE_PV_PATH' -cpf - \
-    $HOME_PAYLOAD_PATHS" \
-    | ssh lat3 "sudo tar -C '$BUNDLE/payload/home' -xpf -"
-fi
+ssh box1 "sudo ctr --namespace k8s.io run --rm \
+  --user 0:0 \
+  --mount 'type=bind,src=$SOURCE_PV_PATH,dst=/source,options=rbind:ro' \
+  --mount 'type=bind,src=$BOX1_STAGE,dst=/migration,options=rbind:rw' \
+  --mount 'type=bind,src=$BOX1_STAGE/tool,dst=/opt/migration,options=rbind:ro' \
+  '$SOURCE_IMAGE_REFERENCE' 'legacy-hermes-active-payload' \
+  /opt/migration/legacy-hermes-source source-active-payload \
+  --source-root /source \
+  --source-volume-inventory /migration/source-volume-inventory.json \
+  --output /migration/active-payload"
+ssh box1 "sudo tar -C '$BOX1_STAGE/active-payload' -cpf - ." \
+  | ssh lat3 "sudo tar -C '$BUNDLE/payload' -xpf -"
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - sessions.jsonl" \
   | ssh lat3 "sudo tar -C '$BUNDLE/payload' -xpf -"
 ssh box1 "sudo tar -C '$BOX1_STAGE' -cpf - memory_store.db" \
@@ -496,6 +484,9 @@ state, a missing path, or a digest mismatch, stop and fix the fleet policy or
 source condition in review. Credentials, old identity,
 cron output, raw databases, venvs, logs, and caches are present only inside the
 root-only `source-home.tar`; they never receive active target mappings.
+The manifest verifies every active payload file and symlink against an
+`activate` inventory entry. A manually added, changed, quarantined, or
+rebuild-only payload entry fails closed.
 
 Seal and verify the bundle with the reviewed tool mounted read-only into the
 existing target image:
