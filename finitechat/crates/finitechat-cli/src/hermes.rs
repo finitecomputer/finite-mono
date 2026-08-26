@@ -92,11 +92,20 @@ const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 /// How long a leased inbox entry stays owned by its consumer before the
-/// sidecar returns it to `Pending` and re-delivers it. Generous on purpose:
-/// a lease only expires when a consumer took an entry and neither acked nor
-/// released it (a crash mid-turn), so the ceiling need only be larger than a
-/// normal turn. Override with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
-const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 15 * 60 * 1000;
+/// sidecar returns it to `Pending` and re-delivers it. Generous on purpose,
+/// because this is a two-sided trade-off:
+///
+/// - **Too short** re-delivers an entry *mid-turn* whenever a consumer's turn
+///   runs longer than the TTL (deep agent tasks regularly exceed 15 minutes),
+///   producing duplicate replies; ack settles by key, not lease_id, so nothing
+///   fences the stale delivery.
+/// - **Too long** extends how long a crashed consumer's entry stays silent:
+///   after a crash mid-turn, redelivery waits out the whole TTL.
+///
+/// 45 minutes keeps the duplicate window closed for realistic turns while
+/// bounding worst-case crash-stranded silence at 45 minutes. Operators can
+/// override per host with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
+const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 45 * 60 * 1000;
 const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
 /// Policy for a `thread_id` that resolves to no conversation or segment in the
 /// agent store. Unset (the default) routes unknown threads to Core's Home
