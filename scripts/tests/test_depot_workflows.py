@@ -137,7 +137,7 @@ class DepotWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("\n  deploy:\n", workflow)
         self.assertNotIn("FINITE_PRODUCTION_SSH_KEY", workflow)
 
-    def test_closure_workflows_require_full_origin_main_ancestry(self) -> None:
+    def test_closure_workflows_require_full_github_main_ancestry(self) -> None:
         for name in ("lat1-nixos-closure.yml", "lat3-nixos-closure.yml"):
             workflow = self.workflow(name)
             with self.subTest(path=name):

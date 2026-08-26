@@ -58,7 +58,7 @@ class Lat3ClosureArtifactTests(unittest.TestCase):
                     {
                         "schema": "finite.lat3.nixos-closure.v1",
                         "host": "finite-lat-3",
-                        "repository": "finite-co/finite-mono",
+                        "repository": "finitecomputer/finite-mono",
                         "rev": "a" * 40,
                         "system": "/nix/store/"
                         + "b" * 32

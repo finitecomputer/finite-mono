@@ -44,7 +44,7 @@ RUN curl -fsSL \
 FROM vllm/vllm-openai:v0.25.1@sha256:f0b9a0dc75a9fca3b6811e3279367b2d6a448055a000bfd13859587d74cef268
 
 ARG FINITE_MONO_REV
-LABEL org.opencontainers.image.source="https://origin.cursor.com/finite-co/finite-mono" \
+LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono" \
       org.opencontainers.image.revision="$FINITE_MONO_REV" \
       org.opencontainers.image.base.name="docker.io/vllm/vllm-openai:v0.25.1" \
       org.opencontainers.image.base.digest="sha256:f0b9a0dc75a9fca3b6811e3279367b2d6a448055a000bfd13859587d74cef268" \

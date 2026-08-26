@@ -507,7 +507,7 @@ it to GHCR.
 - Understanding: each release should answer what changed, what was tested, and
   which runtime image digest was proven.
 
-Historical CI shape (removed at the Origin/Depot Hard Cutover):
+Historical CI shape (removed during the GitHub/Depot CI cutover):
 
 - The former GitHub CI workflow pinned the adapter test environment to the
   root flake's Nix Hermes runtime.

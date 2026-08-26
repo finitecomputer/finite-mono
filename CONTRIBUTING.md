@@ -10,8 +10,8 @@ Everything is pinned by Nix — do not install Rust/Node/Postgres yourself.
 
 1. Install Nix (with flakes enabled) — https://nixos.org/download
 2. Install direnv — https://direnv.net
-3. After receiving `finite-co` access, run
-   `origin repo clone finite-co/finite-mono && cd finite-mono`
+3. After receiving repository access, run
+   `gh repo clone finitecomputer/finite-mono && cd finite-mono`
 4. `direnv allow` — the flake dev shell provides rustc/cargo, just,
    process-compose, Postgres, and friends.
 
@@ -118,9 +118,9 @@ just dev smoke       # portable services-only integration smoke (Linux CI)
 just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing
 ```
 
-Native Depot CI (`.depot/workflows/ci.yml`) runs fmt/clippy/tests against real Postgres,
-dashboard lint/test/build, the finitechat Hermes bridge suite, and
-skills/search checks on every Origin PR.
+Native Depot CI (`.depot/workflows/ci.yml`) runs fmt/clippy/tests against real
+Postgres, dashboard lint/test/build, the finitechat Hermes bridge suite, and
+skills/search checks on every GitHub PR.
 
 ## Rules worth repeating
 

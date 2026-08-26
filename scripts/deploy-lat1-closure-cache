@@ -68,7 +68,6 @@ expected_schema = "finite.lat1.nixos-closure.v1"
 if data.get("schema") != expected_schema:
     raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
 if data.get("repository") not in {
-    "finite-co/finite-mono",
     "finitecomputer/finite-mono",
 }:
     raise SystemExit(f"unexpected repository: {data.get('repository')!r}")

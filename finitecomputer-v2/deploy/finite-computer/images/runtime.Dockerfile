@@ -43,7 +43,7 @@ ARG GWS_VERSION=0.22.5
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="Finite Computer v2 Agent Runtime"
-LABEL org.opencontainers.image.source="https://origin.cursor.com/finite-co/finite-mono"
+LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono"
 LABEL org.opencontainers.image.revision="${FINITE_MONO_REV}"
 LABEL computer.finite.runtime.hermes-agent-version="${HERMES_AGENT_VERSION}"
 LABEL computer.finite.runtime.hermes-agent-nix-attr="${HERMES_AGENT_NIX_ATTR}"
