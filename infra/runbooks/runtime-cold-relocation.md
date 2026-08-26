@@ -104,6 +104,12 @@ Locate the deployed Runner binary from
 `systemctl cat finite-saas-runner.service`. Use that exact binary on both
 hosts so the manifest algorithm is identical:
 
+Resolve `FC_RUNNER_WORK_ROOT` independently on each host from the deployed
+Runner environment. Do not infer one host's path from another host: fleet
+hosts may use different storage layouts even when they run the same Runner
+artifact. Record `SOURCE_WORK_ROOT` and `TARGET_WORK_ROOT` separately and
+substitute those exact values below.
+
 ```sh
 sudo <runner-bin> state-manifest \
   --path '<source-work-root>/kata/<durable-state-id>'
@@ -138,6 +144,12 @@ ssh <source-host> \
 
 Do not add `--dereference`. Do not use a recursive copy that can cross into
 another Runtime.
+
+Time this exact transfer during rehearsal. A durable tree with many small
+files can take much longer than its compressed byte count suggests, even on a
+fast host-to-host link. Base the maintenance estimate on the measured
+metadata-preserving transfer plus manifest time, not on bytes divided by link
+speed.
 
 On the target, compute `TARGET_MANIFEST` using its deployed Runner binary:
 
@@ -205,6 +217,13 @@ state is never used as the secret transport.
 - The target has a named recovery archive for post-relocation writes, or the
   canary remains inside the explicitly bounded observation window while
   scheduled off-host coverage is completed.
+- The creation and control queues have zero claimable requests before normal
+  Runner timers are restored on both hosts. Verify both timers are active and
+  enabled after restoration.
+- If recovery or relocation minted more than one active Runtime/model API key,
+  keep the final target-scoped key and revoke superseded keys through Core's
+  audited operator surface only after the target passes health and identity
+  checks. Record key IDs and statuses, never key material.
 
 Observe the canary before broad use. Record request ID, both manifests, exact
 source/target bindings, Borg archive name, timestamps, and verification result;

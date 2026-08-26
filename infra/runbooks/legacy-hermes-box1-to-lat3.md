@@ -689,6 +689,12 @@ root. If break-glass cleanup has already removed the canonical container, leave
 the durable root untouched and roll back to box1. Do not reconstruct the
 container by hand or treat Core's recorded `Online` state as live-compute proof.
 
+A later retry may use the reviewed absent-compute variant in
+`runtime-cold-relocation.md`: preserve a scoped archive, prove container and
+task absence, recover the exact durable tree to a healthy stopped Runtime,
+then perform a normal cold relocation. That is a new Core-recorded recovery
+transaction, not an extension of the failed restart.
+
 Complete the receipt status in the retained operator evidence, not by editing
 the receipt inside `/data`. Record IDs, digests, hashes, counts, timestamps,
 and outcomes; record no token, key, message content, or secret value.
