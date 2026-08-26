@@ -35,6 +35,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md) | Coordinated Hosted Web Device + Finite Chat + SaaS Core snapshot and empty-target drill |
 | [litestream-chat-replication.md](litestream-chat-replication.md) | Continuous chat + Brain SQLite replication to Latitude object storage + restore drill (DR-only) |
 | [chats-appear-missing.md](chats-appear-missing.md) | Read-only-first continuity incident diagnosis; never creates replacement state |
+| [platform-rollout.md](platform-rollout.md) | **The manual cross-component wave** — ordering (runners before Core), gates, layered verify ritual, and lifecycle-rollback sequencing across the deploy runbooks below |
 | [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
