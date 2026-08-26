@@ -936,8 +936,8 @@ mod tests {
     /// Every invocation form below is copied from a real caller: the
     /// embedded Hermes Python adapter (integrations/hermes/finitechat/
     /// adapter.py), the canary/docker smoke scripts under finitechat/
-    /// scripts/, .github/workflows/runtime-image.yml, and current local
-    /// integration docs. If one of these stops parsing, operator
+    /// scripts/, .depot/workflows/runtime-image.yml, and
+    /// current local integration docs. If one of these stops parsing, operator
     /// tooling breaks — keep them green.
 
     #[test]

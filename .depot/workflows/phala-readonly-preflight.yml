@@ -1,9 +1,3 @@
-# Depot CI Migration
-# Source: .github/workflows/phala-readonly-preflight.yml
-#
-# Changes made:
-# - Changed GitHub runs-on labels to their Depot equivalents
-
 name: Phala read-only preflight
 run-name: Phala read-only preflight (${{ github.ref_name }})
 on:

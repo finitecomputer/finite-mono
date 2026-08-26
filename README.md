@@ -36,10 +36,11 @@ the fast web-design loop or the prerequisite-backed complete SaaS stack.
 ## Releases
 
 Component-scoped tags on this repo: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
-`fbrain/vX.Y.Z` (see `.github/workflows/release-*.yml`). Container images
+`fbrain/vX.Y.Z` (see `.depot/workflows/release-*.yml`). Container images
 (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
 `finite-private-limiter`) build via workflow dispatch, digest-pinned to GHCR.
-Legacy per-repo release URLs keep working via mirror releases until retired.
+Public CLI assets and rolling aliases live in
+`finitecomputer/finite-releases`; this source repository is not a Release Host.
 Compatible Finite Skills Revisions are separately promotable product artifacts:
 each skills-only promotion records a new Finite Product Release manifest while
 reusing unchanged service, binary, and Runtime image digests.

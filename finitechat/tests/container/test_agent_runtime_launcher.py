@@ -5,7 +5,7 @@ These exercise `containers/agent/run_hermes_gateway.sh` and
 binaries. Both files ship in the one canonical Agent Runtime image
 (`finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile`); the
 Docker-level proof of that image is `scripts/hermes-durable-home-docker-smoke.py`
-run by `.github/workflows/hermes-runtime-smoke.yml` and `runtime-image.yml`.
+run by `.depot/workflows/hermes-runtime-smoke.yml` and `runtime-image.yml`.
 """
 
 from __future__ import annotations

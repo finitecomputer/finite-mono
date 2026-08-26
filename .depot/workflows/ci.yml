@@ -14,6 +14,8 @@ permissions:
   contents: read
 env:
   CACHIX_CACHE_NAME: finite
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
   # Depot CI sandboxes do not populate USER. Actions run as the unprivileged
   # runner account, so Cachix must target that account's Nix configuration.
   USER: runner
@@ -184,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            echo "::error::set CACHIX_AUTH_TOKEN as a Depot CI secret"
             exit 1
           fi
       - name: Configure Cachix trusted cache
@@ -360,6 +362,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Brain product language check
         run: nix develop --command just brain-language-check
+      - name: Origin and Depot Hard Cutover contract
+        run: nix develop --command just origin-depot-hard-cutover-contract
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
       - name: Finite Private DeepSeek production candidate contract
@@ -427,7 +431,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            echo "::error::set CACHIX_AUTH_TOKEN as a Depot CI secret"
             exit 1
           fi
       - name: Configure Cachix trusted cache

@@ -14,6 +14,11 @@ on:
         required: true
         default: false
         type: boolean
+      canary_publish:
+        description: Allow the bounded cutover canary while normal publication remains disabled
+        required: true
+        default: false
+        type: boolean
       release_tag:
         description: Historical component tag for alias-only promotion; leave blank for a normal release
         required: false
@@ -79,7 +84,7 @@ jobs:
           if-no-files-found: ignore
   publish:
     needs: build
-    if: vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
+    if: (vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && vars.FINITE_RELEASE_CANARY_PUBLISH_ENABLED == 'true' && inputs.canary_publish == true)) && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +106,7 @@ jobs:
             --assets-dir release-assets \
             --repository finitecomputer/finite-releases
   promote-alias:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && (vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' || (vars.FINITE_RELEASE_CANARY_PUBLISH_ENABLED == 'true' && inputs.canary_publish == true))
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

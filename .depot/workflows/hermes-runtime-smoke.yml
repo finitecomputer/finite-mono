@@ -1,12 +1,7 @@
-# Depot CI Migration
-# Source: .github/workflows/hermes-runtime-smoke.yml
-#
-# No changes were necessary.
-
 name: Hermes runtime smoke
 # Ported from finitechat's pre-mono Docker smoke. It now builds and proves the
 # one canonical finite-mono Agent Runtime image. This workflow never publishes
-# a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
+# a second Hermes-only runtime; `.depot/workflows/runtime-image.yml` is the
 # sole publication path.
 #
 # Dispatch-only while the production-image proof stays explicit. Keep the
@@ -54,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            echo "::error::set CACHIX_AUTH_TOKEN as a Depot CI secret"
             exit 1
           fi
       - uses: cachix/cachix-action@v17

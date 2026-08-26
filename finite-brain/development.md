@@ -39,7 +39,7 @@ Current production service:
 
 Repository and releases:
 
-- Source: `https://github.com/finitecomputer/finite-mono/tree/main/finite-brain`
+- Source: `finite-co/finite-mono/finite-brain` in the private Cursor Origin repository
 - Release downloads: `https://github.com/finitecomputer/finite-releases/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
 
 ## Crate Layout
@@ -188,7 +188,7 @@ cargo build --locked --release --package finite-brain-cli --bin fbrain
 ## Release Shape
 
 Component tags named `fbrain/vX.Y.Z` trigger
-`.github/workflows/release-fbrain.yml` from the monorepo root. The workflow
+`.depot/workflows/release-fbrain.yml` from the monorepo root. The workflow
 publishes the versioned release and refreshes the `fbrain-latest` rolling alias.
 
 The release workflow currently packages:

@@ -47,6 +47,7 @@ GLOBAL_EXACT_PATHS = {
 GLOBAL_PREFIXES = (
     ".cargo/",
     ".github/actions/",
+    ".depot/workflows/",
 )
 
 GLOBAL_SUFFIXES = (
@@ -107,6 +108,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/build-lat1-nixos-closure-artifact",
     "scripts/deploy-lat1-closure-cache",
     "scripts/publish-lat1-nixos-cachix-closure",
+    "scripts/fetch_depot_nixos_closure.py",
     "scripts/build-lat3-nixos-closure-artifact",
     "scripts/deploy-lat3-closure-cache",
     "scripts/build-lat4-nixos-closure-artifact",
@@ -126,6 +128,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_lat3_closure_artifact.py",
     "scripts/tests/test_lat2_closure_artifact.py",
     "scripts/tests/test_lat4_closure_artifact.py",
+    "scripts/tests/test_depot_closure_artifact.py",
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",

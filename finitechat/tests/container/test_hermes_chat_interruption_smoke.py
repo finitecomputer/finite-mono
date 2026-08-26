@@ -8,7 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "hermes-chat-interruption-docker-smoke.py"
-WORKFLOW_PATH = REPO_ROOT.parent / ".github" / "workflows" / "hermes-runtime-smoke.yml"
+WORKFLOW_PATH = REPO_ROOT.parent / ".depot" / "workflows" / "hermes-runtime-smoke.yml"
 
 spec = importlib.util.spec_from_file_location("hermes_chat_interruption_smoke", SCRIPT_PATH)
 assert spec is not None and spec.loader is not None
