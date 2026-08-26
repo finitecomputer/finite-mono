@@ -22,6 +22,9 @@ env:
 jobs:
   changes:
     name: Detect required CI harnesses
+    # Native Depot CI owns validation for this migration branch while its
+    # workflow is being proven. Keep legacy GitHub CI active everywhere else.
+    if: github.head_ref != 'alex/origin-depot-migration'
     runs-on: depot-ubuntu-24.04
     outputs:
       run_rust: ${{ steps.detect.outputs.run_rust }}
@@ -725,7 +728,7 @@ jobs:
 
   ci-gate:
     name: CI gate
-    if: ${{ always() }}
+    if: ${{ always() && github.head_ref != 'alex/origin-depot-migration' }}
     needs:
       - changes
       - rust

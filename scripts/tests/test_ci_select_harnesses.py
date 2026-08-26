@@ -42,6 +42,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
         self.assertNotIn("run_electron_alpha", workflow)
         self.assertNotIn("runs-on: macos-", workflow)
 
+    def test_github_ci_is_parked_only_for_the_migration_branch(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        migration_guard = "github.head_ref != 'alex/origin-depot-migration'"
+
+        self.assertEqual(workflow.count(migration_guard), 2)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),

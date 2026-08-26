@@ -106,6 +106,12 @@ class DepotWorkflowContractTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertIn("  USER: root\n", workflow)
 
+    def test_ci_pull_requests_use_cachix_read_only(self) -> None:
+        workflow = self.workflow("ci.yml")
+
+        self.assertNotIn("PR_HEAD_REPO", workflow)
+        self.assertEqual(workflow.count("push|merge_group)"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

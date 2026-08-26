@@ -160,8 +160,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Select Cachix push mode
         id: cachix
-        env:
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
@@ -169,11 +167,6 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             push|merge_group)
               push_enabled=true
-              ;;
-            pull_request)
-              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-                push_enabled=true
-              fi
               ;;
           esac
 
@@ -410,8 +403,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Select Cachix push mode
         id: cachix
-        env:
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
@@ -419,11 +410,6 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             push|merge_group)
               push_enabled=true
-              ;;
-            pull_request)
-              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-                push_enabled=true
-              fi
               ;;
           esac
 
