@@ -87,14 +87,20 @@ must report `server_contract_version`, `server_version`, the Nix-derived
    ```
 
 3. No app/TestFlight build ships while the gate fails — that is the point.
-4. systemd now restarts hosted-device with the server; still curl both `http://127.0.0.1:8788/health` and `http://127.0.0.1:38918/healthz`.
+4. systemd now restarts hosted-device with the server; curl Chat liveness at
+   `http://127.0.0.1:8788/health`, semantic serving readiness at
+   `http://127.0.0.1:8788/readyz`, and hosted-device health at
+   `http://127.0.0.1:38918/healthz`.
 
 ### ROLLBACK
 
 `ssh root@64.34.82.77 nixos-rebuild switch --rollback` (or
 build/download/deploy the previous known-good rev's exact closure artifact),
 then verify `/run/current-system` against the selected rollback path and re-run
-the gate.
+the gate. The additive `http_readiness_probe` table is ignored by older server
+binaries and needs no data rollback. If the selected server predates
+`/readyz`, roll the dedicated monitoring receiver back to its `/health` target
+as well so monitoring-version skew does not masquerade as a Chat outage.
 Data rollback (SQLite) comes from the coordinated Hosted Web Chat recovery
 set. FLAG: the rsync.net repository has a verified first archive and its
 offsite-health jobs passed the 2026-07-18 live inventory, but the complete

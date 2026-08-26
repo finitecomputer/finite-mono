@@ -51,6 +51,7 @@ let
       name,
       target,
       module ? "http_200",
+      scrapeInterval ? null,
     }:
     {
       job_name = name;
@@ -64,6 +65,9 @@ let
       ];
       relabel_configs = blackboxRelabelConfigs;
       metric_relabel_configs = probeMetricRelabelConfigs;
+    }
+    // lib.optionalAttrs (scrapeInterval != null) {
+      scrape_interval = scrapeInterval;
     };
 
   blackboxConfig = (pkgs.formats.yaml { }).generate "blackbox.yml" {
@@ -85,6 +89,19 @@ let
         http = {
           method = "GET";
           valid_status_codes = [ 404 ];
+          follow_redirects = true;
+          preferred_ip_protocol = "ip4";
+        };
+      };
+
+      # /readyz performs a committed delivery-store probe with a 1s server
+      # budget. Treat a slow edge-to-store result as unavailable too.
+      chat_ready = {
+        prober = "http";
+        timeout = "1500ms";
+        http = {
+          method = "GET";
+          valid_status_codes = [ 200 ];
           follow_redirects = true;
           preferred_ip_protocol = "ip4";
         };
@@ -121,7 +138,9 @@ in
       })
       (publicProbe {
         name = "chat.finite.computer";
-        target = "https://chat.finite.computer/health";
+        target = "https://chat.finite.computer/readyz";
+        module = "chat_ready";
+        scrapeInterval = "1m";
       })
       (publicProbe {
         name = "brain.finite.computer";

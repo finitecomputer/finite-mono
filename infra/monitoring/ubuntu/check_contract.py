@@ -103,6 +103,7 @@ def check_caddy() -> None:
 
 def check_prometheus() -> None:
     prometheus = read(UBUNTU / "prometheus.yml")
+    blackbox = read(UBUNTU / "blackbox.yml")
     for job in [
         "finite.computer",
         "chat.finite.computer",
@@ -112,6 +113,15 @@ def check_prometheus() -> None:
     ]:
         require_contains(prometheus, f"job_name: {job}", "Prometheus public probes")
     require_contains(prometheus, "replacement: 127.0.0.1:9115", "Prometheus blackbox target")
+    require_contains(
+        prometheus,
+        "targets: [https://chat.finite.computer/readyz]",
+        "Chat semantic readiness target",
+    )
+    require_contains(prometheus, "module: [chat_ready]", "Chat readiness probe module")
+    require_contains(prometheus, "scrape_interval: 1m", "Chat readiness cadence")
+    require_contains(blackbox, "chat_ready:", "Chat readiness probe module")
+    require_contains(blackbox, "timeout: 1500ms", "Chat readiness latency budget")
     require("blackbox-exporter:9115" not in prometheus, "Prometheus must not use Compose service DNS")
 
 
