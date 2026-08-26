@@ -6,6 +6,41 @@ server-side deploys, Agent Runtime eligibility, and existing-Agent migration.
 
 ## Language
 
+**Source Authority**:
+The repository whose branches, tags, and reviewed commits are authoritative
+for Finite development and delivery.
+_Avoid_: Canonical repo, main repo
+
+**Public Mirror**:
+A publicly readable projection of the Source Authority that is not itself an
+authoritative path for accepting or releasing changes.
+_Avoid_: Source Authority, backup
+
+**Release Host**:
+The system that durably publishes Product Release assets and their stable
+download locations.
+_Avoid_: Source Authority, CI artifact store
+
+**Release Repository**:
+A repository used only to publish Product Release metadata and assets, without
+being a Source Authority or accepting product implementation changes.
+_Avoid_: Source Authority, Public Mirror
+
+**Artifact Registry**:
+The system that durably publishes immutable server and Agent Runtime images
+for deployment by digest.
+_Avoid_: Release Host, build cache
+
+**Shadow Run**:
+A non-authoritative delivery execution used to compare a candidate path with
+the current path without publishing artifacts or mutating production.
+_Avoid_: Dry run, canary deploy
+
+**Hard Cutover**:
+The validated transition after which the successor path is authoritative and
+the superseded execution path is removed rather than operated in parallel.
+_Avoid_: Shadow Run, gradual rollout
+
 **Product Release**:
 A signed, user-consumable product artifact published for installation or
 download.

@@ -6,6 +6,10 @@ workspace AGENTS.md, WORKSPACE_INVENTORY.md, and finitecomputer-v2's
 README/AGENTS/service-dependencies docs. Those statements described the
 pre-mono world and are void.
 
+The GitHub/Depot CI boundary was adopted 2026-08-25 in ADR-0007. GitHub remains
+the Source Authority while Depot becomes the CI execution and check-reporting
+control plane.
+
 ## Product safety maxims
 
 1. **Don't Break Chat!** Chat availability and durable history are Finite's
@@ -31,33 +35,39 @@ are recorded in
 
 ## The doctrine
 
-1. **finite-mono is the single company repository.** All first-party code —
+1. **finite-mono on GitHub is the single company repository and Source
+   Authority.** All first-party code —
    product CLIs, servers, the SaaS control plane, apps (dashboard, iOS,
    Electron), protocols, skills, and infrastructure definitions — lives here.
-   Work lands here first; there is no "sync back to the source repo."
+   Work lands in `finitecomputer/finite-mono` first; there is no "sync back" to
+   the old per-component repositories.
 2. **The old per-component repos are import provenance, not homes.** Each was
    snapshot-imported (no git history; SHAs recorded in
    `docs/monorepo-migration-log.md` and `scripts/import-sync.toml`). After
    cutover they are archived read-only with a README pointer here. If a stray
    commit lands on one before it is archived, `scripts/import-sync <name>`
    merges it in safely.
-3. **Releases are component-scoped tags on this repo**: `finitechat/vX.Y.Z`,
-   `fsite/vX.Y.Z`, `fbrain/vX.Y.Z`, plus dispatch-versioned images
+3. **Product source releases are component-scoped tags on the Source
+   Authority**: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`, `fbrain/vX.Y.Z`, plus
+   dispatch-versioned images
    (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
-   `finite-private-limiter`). One repo, many independently versioned
-   artifacts. Release asset names are product contracts — never rename them.
-4. **finite-mono is the only release host (hard cut, 2026-07-08).** With no
-   live users, legacy release URLs were cut over rather than mirrored: every
-   installer, README, and manifest points at finite-mono. Because one repo
-   hosts many components, `releases/latest` is meaningless — installers use
+   `finite-private-limiter`). The public `finitecomputer/finite-releases`
+   Release Repository receives corresponding release-only tags and assets; it
+   is not a source repository. Release asset names are product contracts —
+   never rename them.
+4. **`finitecomputer/finite-releases` is the public Release Host (adopted
+   2026-08-25).** Because it hosts several components,
+   repository-wide `releases/latest` is meaningless. Installers use
    per-component rolling alias releases (`finitechat-latest`, `fsite-latest`,
-   `fbrain-latest`) that the release workflows refresh on every versioned
-   release. Legacy repos are archived once their first mono-built release is
-   verified installed (see infra/runbooks/release-cli.md).
+   `fbrain-latest`) that Depot refreshes only after the immutable versioned
+   assets are verified. GitHub `finite-mono` release assets are backfilled and
+   then retained for historical releases; new publication uses the dedicated
+   Release Repository (see infra/runbooks/release-cli.md).
 5. **`infra/` is the single deploy root.** Nothing is built on a prod box;
    images are CI-built and digest-pinned; deploys are scripts/runbooks in this
    tree. See `infra/README.md`.
-6. **This repo is public.** No secret values, ever — names and locations only.
+6. **The Source Authority is public and remains secret-free.** Git history is
+   not a safe secret store. No secret values, ever — names and locations only.
    Rotate first, then delete, if one slips in.
 
 ## What stays outside, and why
@@ -70,9 +80,9 @@ are recorded in
 - **Tinfoil satellite repos** (`confidential-kimi-k2-6`,
   `finite-searxng-tinfoil`, `tinfoil-agent-runtime-canary`) — Tinfoil enclave
   measurement requires `tinfoil-config.yml` at the ROOT of a repo, one config
-  per repo, so they cannot fold into mono even though mono is public. They
-  stay thin: their inputs (image digests, configs) are produced and pinned by
-  mono CI. See `infra/tinfoil/README.md`.
+  per repo, so they cannot fold into mono even though source is centralized.
+  They stay thin: their inputs (image digests, configs) are produced and pinned
+  by mono CI. See `infra/tinfoil/README.md`.
 - **finite-fable** — Paul's meta/strategy notes; not a git repo by design.
 - **Spikes and stale checkouts** (hermes-agent forks, darkmatter, finitesmol,
   finitechat-old, finite-site, …) — archive aggressively; nothing imports them.

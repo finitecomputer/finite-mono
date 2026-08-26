@@ -1,0 +1,228 @@
+name: Agent Runtime Image
+run-name: Build agent runtime ${{ inputs.version }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Image version tag, for example 2026-07-08.1
+        required: true
+        type: string
+      publish_production:
+        description: Promote the verified saved build to production version tags
+        required: true
+        default: false
+        type: boolean
+concurrency:
+  group: agent-runtime-image-${{ inputs.version }}
+env:
+  CACHIX_CACHE_NAME: finite
+  HERMES_AGENT_VERSION: "0.20.0"
+  USER: runner
+jobs:
+  publish:
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Reject production promotion until its cutover gate is open
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED != 'true'
+        run: |
+          echo "::error::FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED is not true"
+          exit 1
+      - name: Require Cachix token
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error::set CACHIX_AUTH_TOKEN in Depot CI"
+            exit 1
+          fi
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build, save, pull, and validate the runtime image
+        id: build
+        env:
+          IMAGE: ghcr.io/finitecomputer/agent-runtime
+          VERSION: ${{ inputs.version }}
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
+          FC_RUNTIME_IMAGE_ENGINE: depot
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITE_PRIVATE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
+          FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
+          FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
+        run: |
+          version_ref="$IMAGE:$VERSION"
+          test -z "$(git status --porcelain)"
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID in Depot CI"
+            exit 1
+          fi
+          finitecomputer-v2/scripts/build_runtime_image.py \
+            --image-ref "$version_ref" \
+            --hermes-agent-version "$HERMES_AGENT_VERSION" \
+            --platform linux/amd64 \
+            --save \
+            --metadata-file finitecomputer-v2/runtime-image-depot.json \
+            --report finitecomputer-v2/runtime-image-report.json
+
+          local_image_id="$(docker image inspect "$version_ref" --format '{{.Id}}')"
+          test -n "$local_image_id"
+          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$local_image_id"
+          docker run --rm --entrypoint /bin/sh "$version_ref" -ec '
+            test -n "$HERMES_AGENT_STORE_PATH"
+            test -n "$HERMES_AGENT_PYTHON_PATH"
+            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
+            test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
+            test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
+            test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
+            test -n "$PLAYWRIGHT_BROWSERS_PATH"
+            test -n "$AGENT_RUNTIME_TOOLCHAIN_BINS"
+            for bin in $AGENT_RUNTIME_TOOLCHAIN_BINS; do
+              test "$(command -v "$bin")" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/$bin"
+              "$bin" --version >/dev/null
+            done
+            test -d "$PLAYWRIGHT_BROWSERS_PATH"
+            find "$PLAYWRIGHT_BROWSERS_PATH" -iname "*chrom*" | grep -q .
+            /runtime/bin/finitechat --help >/dev/null
+            /runtime/bin/finite-agentd --help >/dev/null
+            /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
+            /runtime/bin/fbrain --help >/dev/null
+            test -x /runtime/bin/finite
+            python3 -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
+            python3 -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
+            python3 -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
+            python3 -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
+            test -f /runtime/hermes-plugin/finitechat/plugin.yaml
+            find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
+            test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
+            test "$FINITECHAT_HERMES_INBOUND_STREAM" = "1"
+          '
+          (
+            cd finitechat
+            python3 -m unittest \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_connect_accepts_hermes_018_reconnect_keyword \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_env_uses_strict_loop_even_before_service_is_ready \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_strict_stream_service_failure_never_falls_back_to_cli \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_reconnects_and_catches_up_without_poll_fallback
+          )
+          if [ -z "$FINITE_PRIVATE_API_KEY" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::the durable Runtime smoke requires FINITE_PRIVATE_SMOKE_API_KEY or OPENROUTER_API_KEY"
+            exit 1
+          fi
+          finitechat/scripts/hermes-durable-home-docker-smoke.py \
+            --image "$local_image_id" \
+            --report target/runtime-image-durable-smoke/report.json
+          test "$(python3 -c 'import json; print(json.load(open("finitechat/target/runtime-image-durable-smoke/report.json"))["facts"]["image_id"])')" = "$local_image_id"
+
+          build_id="$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-depot.json"))["depot.build"]["buildID"])')"
+          project_id="$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-depot.json"))["depot.build"]["projectID"])')"
+          source_digest="$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-depot.json"))["containerimage.digest"])')"
+          test -n "$build_id"
+          test -n "$project_id"
+          test -n "$source_digest"
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "project_id=$project_id" >> "$GITHUB_OUTPUT"
+          echo "source_digest=$source_digest" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR for canary publication
+        env:
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - name: Publish and verify the non-production canary
+        id: canary
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.source_digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project_id }}
+        run: |
+          canary_ref="$IMAGE:canary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$canary_ref" "$BUILD_ID"
+          docker pull "$canary_ref" >/dev/null
+          destination_digest="$(docker image inspect "$canary_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n "s#^$IMAGE@##p" | head -n 1)"
+          python3 scripts/delivery.py verify-image-promotion --source-digest "$SOURCE_DIGEST" --destination-digest "$destination_digest"
+          docker buildx imagetools inspect --raw "$IMAGE@$destination_digest" > runtime-image-index.json
+          python3 scripts/delivery.py verify-image-index \
+            --manifest runtime-image-index.json \
+            --platform linux/amd64 \
+            --require-attestation
+          echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$IMAGE@$destination_digest" >> "$GITHUB_OUTPUT"
+      - name: Prove anonymous GHCR pull
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          docker logout ghcr.io
+          docker image rm "$PINNED" >/dev/null 2>&1 || true
+          docker pull "$PINNED" >/dev/null
+      - name: Promote the same saved build to production tags
+        id: production
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          VERSION: ${{ inputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+          SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project_id }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          version_ref="$IMAGE:$VERSION"
+          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
+          for ref in "$version_ref" "$sha_ref"; do
+            docker pull "$ref" >/dev/null
+            digest="$(docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n "s#^$IMAGE@##p" | head -n 1)"
+            python3 scripts/delivery.py verify-image-promotion --source-digest "$SOURCE_DIGEST" --destination-digest "$digest"
+          done
+          echo "pinned=$version_ref@$SOURCE_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Record publication status
+        env:
+          CANARY: ${{ steps.canary.outputs.pinned }}
+          PRODUCTION: ${{ steps.production.outputs.pinned }}
+        run: |
+          python3 - finitecomputer-v2/runtime-image-report.json "$CANARY" "$PRODUCTION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report_path = Path(sys.argv[1])
+          canary, production = sys.argv[2:]
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          report["status"] = "verified_canary"
+          report["pushed"] = True
+          report["publication"] = {"canary": canary, "production": production or None}
+          report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          PY
+      - name: Upload build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-image-report
+          path: |
+            finitecomputer-v2/runtime-image-depot.json
+            finitecomputer-v2/runtime-image-report.json
+            finitechat/target/runtime-image-durable-smoke/report.json
+            runtime-image-index.json
+      - name: Summarize
+        env:
+          CANARY: ${{ steps.canary.outputs.pinned }}
+          PRODUCTION: ${{ steps.production.outputs.pinned }}
+        run: |
+          echo "Verified anonymous canary: \`$CANARY\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PRODUCTION" ]; then
+            echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"

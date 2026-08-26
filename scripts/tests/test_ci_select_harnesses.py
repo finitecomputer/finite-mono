@@ -35,6 +35,13 @@ def selected(*paths: str) -> set[str]:
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
+    def test_github_ci_does_not_reference_parked_electron_harness(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("electron-alpha", workflow)
+        self.assertNotIn("run_electron_alpha", workflow)
+        self.assertNotIn("runs-on: macos-", workflow)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),
@@ -110,31 +117,22 @@ class CiHarnessSelectionTests(unittest.TestCase):
         )
 
     def test_ci_workflow_selects_every_active_harness(self) -> None:
-        values = selection_for(".github/workflows/ci.yml")
+        values = selection_for(".depot/workflows/ci.yml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_unknown_root_file_selects_every_active_harness(self) -> None:
         values = selection_for("pnpm-workspace.yaml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_unknown_root_script_selects_every_active_harness(self) -> None:
         values = selection_for("scripts/new_domain_helper.py")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_dashboard_lib_change_skips_browser_e2e(self) -> None:
         self.assertEqual(
@@ -277,10 +275,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection.values()
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
         args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
@@ -289,10 +284,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
         self.assertEqual(paths, [".github/workflows/README.md"])
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
         prefixed = argparse.Namespace(changed_files=["./justfile"])

@@ -1,5 +1,4 @@
 name: CI
-
 on:
   pull_request:
   merge_group:
@@ -8,17 +7,16 @@ on:
     branches:
       - main
       - migration-integration
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
-
 permissions:
   contents: read
-
 env:
   CACHIX_CACHE_NAME: finite
-
+  # Depot CI sandboxes do not populate USER. Actions run as the unprivileged
+  # runner account, so Cachix must target that account's Nix configuration.
+  USER: runner
 jobs:
   changes:
     name: Detect required CI harnesses
@@ -41,7 +39,6 @@ jobs:
         with:
           fetch-depth: 0
           filter: blob:none
-
       - name: Detect required harnesses
         id: detect
         env:
@@ -55,7 +52,6 @@ jobs:
           scripts/ci/select-harnesses \
             --github-output "$GITHUB_OUTPUT" \
             --summary "$GITHUB_STEP_SUMMARY"
-
   rust:
     name: Rust workspace
     needs: changes
@@ -66,7 +62,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
-
       - name: Install Rust
         # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
         # crates, and floating stable (1.96 today) trips new let-chain lints
@@ -77,24 +72,19 @@ jobs:
         with:
           toolchain: "1.93.1"
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Select Rust package scope
         id: rust_scope
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
-
       - name: Check formatting
         run: cargo fmt --all -- --check
-
       - name: Clippy
         env:
           RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
         run: cargo clippy --locked $RUST_CI_CARGO_ARGS --all-targets -- -D warnings
-
       - name: Test workspace
         env:
           RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
@@ -102,7 +92,6 @@ jobs:
           nix develop .#rust-ci --command bash -euxo pipefail -c '
             cargo run --quiet --locked -p devfinity -- run -- cargo test --locked "$@"
           ' bash $RUST_CI_CARGO_ARGS
-
   dashboard:
     name: Dashboard
     needs: changes
@@ -113,40 +102,31 @@ jobs:
         working-directory: finitecomputer-v2/apps/dashboard
     steps:
       - uses: actions/checkout@v4
-
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.28.0
-
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: finitecomputer-v2/apps/dashboard/pnpm-lock.yaml
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
       - name: Lint dashboard
         run: pnpm run lint
-
       - name: Typecheck dashboard and TSX tooling
         # `next build` checks only the application graph. This project-wide
         # tsc invocation also covers scripts/ and browser/ files run by tsx.
         run: pnpm run typecheck
-
       - name: Test dashboard
         run: pnpm test
-
       - name: Test dashboard product flows
         if: needs.changes.outputs.run_dashboard_browser == 'true'
         run: pnpm run test:browser
-
       - name: Build dashboard
         run: pnpm run build
-
   hermes-bridge:
     name: finitechat Hermes bridge
     needs: changes
@@ -162,33 +142,24 @@ jobs:
       # Nix package instead of downloading GitHub archives during CI.
       HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
       HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
-      NIX_CONFIG: |
-        access-tokens = github.com=${{ github.token }}
       # The hermes scripts resolve reports and built binaries relative to the
       # finitechat/ working directory (target/...); point cargo there too so
       # the two agree, exactly like the pre-mono repo layout.
       CARGO_TARGET_DIR: ${{ github.workspace }}/finitechat/target
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - uses: DeterminateSystems/nix-installer-action@v16
-
       - name: Select Cachix push mode
         id: cachix
-        env:
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
@@ -197,22 +168,15 @@ jobs:
             push|merge_group)
               push_enabled=true
               ;;
-            pull_request)
-              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-                push_enabled=true
-              fi
-              ;;
           esac
 
           echo "push_enabled=$push_enabled" >> "$GITHUB_OUTPUT"
-
       - name: Configure Cachix read-only cache
         if: steps.cachix.outputs.push_enabled != 'true'
         uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
-
       - name: Require Cachix token for trusted cache push
         if: steps.cachix.outputs.push_enabled == 'true'
         env:
@@ -223,7 +187,6 @@ jobs:
             echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
             exit 1
           fi
-
       - name: Configure Cachix trusted cache
         if: steps.cachix.outputs.push_enabled == 'true'
         uses: cachix/cachix-action@v17
@@ -231,10 +194,8 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
-
       - name: Hermes CLI round-trip smoke
         run: scripts/hermes-sidecar-smoke.sh
-
       - name: Build Hermes Agent runtime
         id: hermes_agent_runtime
         working-directory: ${{ github.workspace }}
@@ -295,7 +256,6 @@ jobs:
             echo "legacy_python_path=$legacy_hermes_agent_python"
             echo "legacy_python=$legacy_hermes_agent_python/bin/python3"
           } >> "$GITHUB_OUTPUT"
-
       - name: Push Hermes Agent runtime closure
         if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths == 'true'
         working-directory: ${{ github.workspace }}
@@ -311,22 +271,17 @@ jobs:
           closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
           echo "Pushing $closure_count Hermes Agent runtime closure paths to $CACHIX_CACHE_NAME"
           xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
-
       - name: Skip Cachix push for fully substituted Hermes Agent runtime
         if: steps.cachix.outputs.push_enabled == 'true' && steps.hermes_agent_runtime.outputs.built_paths != 'true'
         run: echo "Nix dry-run found no Hermes Agent runtime derivations to build; skipping Cachix push."
-
       - name: Ruff format
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check .
-
       - name: Ruff check
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check .
-
       - name: BasedPyright
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
-
       - name: Chat reliability fast gate (Hermes adapter)
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
@@ -334,7 +289,6 @@ jobs:
           "$HERMES_AGENT_PYTHON" scripts/hermes-adapter-regression-report.py \
             --python "$HERMES_AGENT_PYTHON" \
             --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
-
       - name: Upload Hermes adapter regression report
         if: always()
         uses: actions/upload-artifact@v4
@@ -342,13 +296,11 @@ jobs:
           name: hermes-adapter-regressions-${{ github.run_attempt }}
           path: ${{ env.CARGO_TARGET_DIR }}/hermes-adapter-regressions/report.json
           if-no-files-found: error
-
       - name: Hermes platform adapter tests
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
-
       - name: Legacy Hermes mixed-version migration tests
         working-directory: ${{ github.workspace }}
         env:
@@ -358,7 +310,6 @@ jobs:
           "$HERMES_AGENT_PYTHON" -m unittest \
             scripts.tests.test_legacy_hermes_migration \
             finitechat.tests.hermes.test_legacy_hermes_migration
-
   skills-check:
     name: Skills static check
     needs: changes
@@ -369,7 +320,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Skills check
         run: nix develop --command just skills check
-
   search-check:
     name: Search static check
     needs: changes
@@ -380,7 +330,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Search check
         run: nix develop --command just search check
-
   monitoring-nixos-contract:
     name: Monitoring NixOS contract
     needs: changes
@@ -391,7 +340,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Monitoring NixOS contract
         run: nix develop --command just monitoring-nixos-contract
-
   finite-status-contract:
     name: Finite status contract
     needs: changes
@@ -402,15 +350,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
-
   nix-checks:
     name: Nix static contracts
     needs: changes
     if: needs.changes.outputs.run_nix_checks == 'true'
     runs-on: depot-ubuntu-24.04
-    env:
-      NIX_CONFIG: |
-        access-tokens = github.com=${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -444,7 +388,6 @@ jobs:
         run: nix develop --command just production-deploy-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
-
   nix-service-packages:
     name: Nix service packages
     needs: changes
@@ -460,8 +403,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Select Cachix push mode
         id: cachix
-        env:
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
@@ -469,11 +410,6 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             push|merge_group)
               push_enabled=true
-              ;;
-            pull_request)
-              if [[ "$PR_HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-                push_enabled=true
-              fi
               ;;
           esac
 
@@ -657,7 +593,6 @@ jobs:
           if [[ -e "$CHECKOUT_PATH" ]]; then
             sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
           fi
-
   devfinity-smoke:
     name: devfinity services-only smoke
     needs:
@@ -695,7 +630,6 @@ jobs:
             echo "===== $f ====="
             tail -50 "$f" || true
           done
-
   brain-product-matrix:
     name: Brain acceptance matrix
     needs:
@@ -722,10 +656,9 @@ jobs:
           name: brain-product-matrix
           path: target/brain-product-matrix
           if-no-files-found: error
-
   ci-gate:
     name: CI gate
-    if: always()
+    if: ${{ always() }}
     needs:
       - changes
       - rust
