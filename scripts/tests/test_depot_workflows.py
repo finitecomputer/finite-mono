@@ -27,14 +27,36 @@ class DepotWorkflowContractTests(unittest.TestCase):
         workflow = self.workflow("release-finitechat.yml")
         self.assertNotIn("electron:", workflow)
         self.assertNotIn("APPLE_", workflow)
-        self.assertIn("cargo zigbuild", workflow)
         self.assertIn("secrets.FINITE_RELEASES_GITHUB_TOKEN", workflow)
         self.assertIn("finitecomputer/finite-releases", workflow)
 
-    def test_finitechat_x86_release_avoids_the_zig_hyper_relocation_bug(self) -> None:
-        workflow = self.workflow("release-finitechat.yml")
-        self.assertIn("profile_opt_level: 1", workflow)
-        self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL", workflow)
+    def test_release_workflows_build_only_linux_until_the_mac_lane_returns(
+        self,
+    ) -> None:
+        for name, asset_name in (
+            ("release-finitechat.yml", "finitechat-linux-x86_64"),
+            ("release-fbrain.yml", "fbrain-linux-x86_64"),
+            ("release-fsite.yml", "fsite-linux-x86_64"),
+        ):
+            workflow = self.workflow(name)
+            with self.subTest(path=name):
+                self.assertEqual(workflow.count("- asset_name:"), 1)
+                self.assertIn(f"asset_name: {asset_name}", workflow)
+                self.assertIn("target: x86_64-unknown-linux-gnu", workflow)
+                self.assertIn("rustup toolchain install 1.88.0 --profile minimal", workflow)
+                self.assertNotIn("apple-darwin", workflow)
+                self.assertNotIn("zigbuild", workflow)
+                self.assertNotIn("release-ci", workflow)
+
+        flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        delivery = (ROOT / "scripts" / "delivery.py").read_text(encoding="utf-8")
+        brain_manifest = (
+            ROOT / "finite-brain" / "crates" / "finite-brain-cli" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("releaseRustToolchain", flake)
+        self.assertNotIn("cargo-zigbuild", flake)
+        self.assertNotIn("macos-matrix", delivery)
+        self.assertIn('notify = "8.2.0"', brain_manifest)
 
     def test_release_workflows_reject_a_tag_that_does_not_match_the_crate(self) -> None:
         for name in (

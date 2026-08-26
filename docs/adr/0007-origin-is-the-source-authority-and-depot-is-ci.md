@@ -27,12 +27,11 @@ pullable when the source repository becomes private. Publication authority is
 proved with canary tags and digest comparisons before repository privacy
 changes.
 
-The current macOS CLI asset contracts remain. Depot Linux cross-compiles the
-existing arm64 and x86_64 binaries with a pinned SDK-free Zig toolchain and the
-binaries are validated on a real Mac. A universal binary may be added later but
-does not replace the existing thin assets. The inactive Electron build,
-Developer ID signing, and notarization lane are deferred and are not migration
-requirements.
+The Depot release workflows publish Linux x86_64 CLI assets only. macOS CLI
+builds and the inactive Electron signing/notarization lane are deferred until a
+dedicated macOS execution path is selected. Existing versioned macOS assets are
+retained, but this migration does not cross-build, replace, or claim to refresh
+them.
 
 Production planning and validation move to Depot, but production mutation
 remains disabled until a separate decision replaces GitHub environments and
@@ -55,14 +54,19 @@ operated indefinitely in parallel.
   couple release availability to product availability.
 - **Retain the Electron Mac lane through Buildkite:** rejected for this
   migration because Electron distribution is inactive and explicitly deferred.
+- **Cross-build macOS CLI binaries on Depot Linux:** rejected for this
+  migration because it expands the cutover into a new toolchain and
+  platform-compatibility project.
 
 ## Consequences
 
 - `docs/monorepo-doctrine.md` no longer treats GitHub `finite-mono` as the only
   release host or as a permanently public repository.
-- Origin tag delivery, Origin required checks, Depot manual dispatch, SDK-free
-  Mac cross-compilation, GHCR publication, and anonymous pulls are cutover
-  gates, not assumptions.
+- Origin tag delivery, Origin required checks, Depot manual dispatch, Linux CLI
+  publication, GHCR publication, and anonymous pulls are cutover gates, not
+  assumptions.
+- macOS CLI and Electron releases remain paused until a separate macOS lane is
+  designed and qualified.
 - GitHub remains a runtime dependency for public Releases and containers until
   a later ADR replaces those services.
 - The proposed GitHub-based production deployment design in ADR-0006 remains

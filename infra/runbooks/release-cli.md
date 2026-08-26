@@ -14,10 +14,10 @@ alias rather than GitHub's repository-wide `releases/latest` pointer:
 | fsite | `fsite/vX.Y.Z` | `.depot/workflows/release-fsite.yml` | `fsite-latest` |
 | fbrain | `fbrain/vX.Y.Z` | `.depot/workflows/release-fbrain.yml` | `fbrain-latest` |
 
-Every CLI release has Linux x86_64, macOS arm64, and macOS x86_64 archives,
-each with a `.sha256` sibling. Depot cross-compiles both thin macOS binaries on
-Linux with the pinned `release-ci` Nix shell. The Electron app is deferred and
-is not built or published by these workflows.
+The migrated Depot workflows currently publish Linux x86_64 archives and their
+`.sha256` siblings only. macOS CLI and Electron publication are paused until a
+dedicated macOS release lane is reintroduced. Existing versioned macOS assets
+remain available, but a new release must not claim to refresh them.
 
 Install URL shape:
 
@@ -66,7 +66,7 @@ Install URL shape:
      --input alias_only=false
    ```
 
-4. **TODO (publisher canary):** Wait for all three build rows and `publish` to
+4. **TODO (publisher canary):** Wait for the Linux build row and `publish` to
    finish. Publication records a metadata commit in `finite-releases`, creates
    the matching component tag, checksum-verifies every versioned asset after
    upload, and only then refreshes the rolling alias. A retry reuses the already
@@ -79,18 +79,15 @@ Install URL shape:
 2. Repeat through the rolling alias.
 3. Run the component README's clean-install block away from this checkout and
    confirm `--version`.
-4. On Apple Silicon, run the arm64 slice natively and the x86_64 slice through
-   Rosetta. For `fbrain`, also exercise representative local filesystem watch
-   behavior.
-5. Confirm `release.json` names the Origin source SHA and Depot run ID.
+4. Confirm `release.json` names the Origin source SHA and Depot run ID.
 
 Example alias verification:
 
 ```sh
 base=https://github.com/finitecomputer/finite-releases/releases/download/finitechat-latest
-curl -fsSLO "$base/finitechat-macos-aarch64.tar.gz"
-curl -fsSLO "$base/finitechat-macos-aarch64.tar.gz.sha256"
-shasum -a 256 -c finitechat-macos-aarch64.tar.gz.sha256
+curl -fsSLO "$base/finitechat-linux-x86_64.tar.gz"
+curl -fsSLO "$base/finitechat-linux-x86_64.tar.gz.sha256"
+sha256sum -c finitechat-linux-x86_64.tar.gz.sha256
 ```
 
 ## ROLLBACK

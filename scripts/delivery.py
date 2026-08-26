@@ -23,10 +23,6 @@ COMPONENT_MANIFESTS = {
     "fbrain": Path("finite-brain/crates/finite-brain-cli/Cargo.toml"),
     "fsite": Path("finite-sites/crates/fsite-cli/Cargo.toml"),
 }
-MACOS_TARGETS = (
-    ("aarch64", "aarch64-apple-darwin"),
-    ("x86_64", "x86_64-apple-darwin"),
-)
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\Z")
@@ -112,18 +108,6 @@ def build_release_metadata(
             for path in paths
         ],
     }
-
-
-def macos_cli_builds(component: str) -> list[dict[str, str]]:
-    if component not in COMPONENTS:
-        raise DeliveryError(f"unsupported release component: {component}")
-    return [
-        {
-            "asset_name": f"{component}-macos-{architecture}",
-            "target": target,
-        }
-        for architecture, target in MACOS_TARGETS
-    ]
 
 
 def verify_component_version(component: str, version: str, repository_root: Path) -> None:
@@ -823,9 +807,6 @@ def build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--assets-dir", type=Path, required=True)
     metadata.add_argument("--output", type=Path, required=True)
 
-    macos = commands.add_parser("macos-matrix")
-    macos.add_argument("--component", required=True, choices=sorted(COMPONENTS))
-
     component_version = commands.add_parser("verify-component-version")
     component_version.add_argument(
         "--component", required=True, choices=sorted(COMPONENTS)
@@ -881,8 +862,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(metadata, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        elif args.command == "macos-matrix":
-            print(json.dumps({"include": macos_cli_builds(args.component)}))
         elif args.command == "verify-component-version":
             verify_component_version(
                 args.component,

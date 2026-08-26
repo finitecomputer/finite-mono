@@ -29,14 +29,12 @@ jobs:
     runs-on: depot-ubuntu-24.04
     strategy:
       fail-fast: false
+      # Native Depot CI has no macOS runner. Restore the Darwin rows only with
+      # a dedicated macOS execution lane; do not cross-build them on Linux.
       matrix:
         include:
           - asset_name: fsite-linux-x86_64
             target: x86_64-unknown-linux-gnu
-          - asset_name: fsite-macos-aarch64
-            target: aarch64-apple-darwin
-          - asset_name: fsite-macos-x86_64
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - name: Validate component version
@@ -46,16 +44,13 @@ jobs:
             *) echo "::error::release workflow must run at an fsite/v* tag"; exit 1 ;;
           esac
           python3 scripts/delivery.py verify-component-version --component fsite --version "$version"
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Build fsite
-        env:
-          TARGET: ${{ matrix.target }}
+      - name: Install Rust
         run: |
-          if [[ "$TARGET" == *-apple-darwin ]]; then
-            nix develop .#release-ci --command cargo zigbuild --locked --release --target "$TARGET" --package fsite-cli --bin fsite
-          else
-            nix develop .#release-ci --command cargo build --locked --release --target "$TARGET" --package fsite-cli --bin fsite
-          fi
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
+      - name: Build fsite
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package fsite-cli --bin fsite
       - name: Package fsite
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
@@ -68,7 +63,7 @@ jobs:
       - name: Build finitesitesd
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          nix develop .#release-ci --command cargo build --locked --release --target x86_64-unknown-linux-gnu --package finitesitesd --bin finitesitesd
+          cargo build --locked --release --target x86_64-unknown-linux-gnu --package finitesitesd --bin finitesitesd
           mkdir -p dist-daemon
           cp target/x86_64-unknown-linux-gnu/release/finitesitesd dist-daemon/finitesitesd
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist-daemon -czf finitesitesd-linux-x86_64.tar.gz finitesitesd

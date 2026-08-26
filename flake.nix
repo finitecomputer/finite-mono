@@ -189,12 +189,6 @@
             ];
           };
           rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
-          releaseRustToolchain = pkgs.rust-bin.stable."1.88.0".default.override {
-            targets = [
-              "aarch64-apple-darwin"
-              "x86_64-apple-darwin"
-            ];
-          };
           rustBasePackages = with pkgs; [
             curl
             git
@@ -248,18 +242,6 @@
 
             rust-ci = pkgs.mkShell {
               packages = rustCiPackages;
-            };
-
-            # Release builds run only on Linux. Zig supplies the Darwin linker
-            # while cargo-zigbuild preserves the existing thin macOS assets.
-            release-ci = pkgs.mkShell {
-              packages = with pkgs; [
-                cargo-zigbuild
-                git
-                jq
-                releaseRustToolchain
-                zig
-              ];
             };
 
             devfinity-ci = pkgs.mkShell {

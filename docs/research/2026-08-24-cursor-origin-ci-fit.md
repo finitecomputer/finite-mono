@@ -2,9 +2,9 @@
 
 Date: 2026-08-24
 
-Status: historical research. ADR-0007 supersedes its initial Buildkite/Mac
-recommendation after Electron was explicitly deferred and Linux-to-Darwin CLI
-cross-compilation became an accepted cutover gate.
+Status: historical research. ADR-0007 takes the smaller migration path: Depot
+publishes Linux CLI assets, while macOS CLI and Electron releases are deferred
+until a dedicated macOS lane is selected.
 
 ## Question
 

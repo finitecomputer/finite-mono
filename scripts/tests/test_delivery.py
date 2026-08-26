@@ -82,21 +82,6 @@ class DeliveryTests(unittest.TestCase):
                     assets_dir=assets,
                 )
 
-    def test_macos_plan_keeps_existing_thin_asset_contracts(self) -> None:
-        self.assertEqual(
-            delivery.macos_cli_builds("fbrain"),
-            [
-                {
-                    "asset_name": "fbrain-macos-aarch64",
-                    "target": "aarch64-apple-darwin",
-                },
-                {
-                    "asset_name": "fbrain-macos-x86_64",
-                    "target": "x86_64-apple-darwin",
-                },
-            ],
-        )
-
     def test_component_version_matches_the_package_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

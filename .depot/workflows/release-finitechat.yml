@@ -29,18 +29,12 @@ jobs:
     runs-on: depot-ubuntu-24.04
     strategy:
       fail-fast: false
+      # Native Depot CI has no macOS runner. Restore the Darwin rows only with
+      # a dedicated macOS execution lane; do not cross-build them on Linux.
       matrix:
         include:
           - asset_name: finitechat-linux-x86_64
             target: x86_64-unknown-linux-gnu
-            profile_opt_level: 3
-          - asset_name: finitechat-macos-aarch64
-            target: aarch64-apple-darwin
-            profile_opt_level: 3
-          - asset_name: finitechat-macos-x86_64
-            target: x86_64-apple-darwin
-            # Work around rust-cross/cargo-zigbuild#338 (hyper bad relocation).
-            profile_opt_level: 1
     steps:
       - uses: actions/checkout@v4
       - name: Validate component version
@@ -50,17 +44,13 @@ jobs:
             *) echo "::error::release workflow must run at a finitechat/v* tag"; exit 1 ;;
           esac
           python3 scripts/delivery.py verify-component-version --component finitechat --version "$version"
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Build finitechat CLI
-        env:
-          TARGET: ${{ matrix.target }}
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ matrix.profile_opt_level }}
+      - name: Install Rust
         run: |
-          if [[ "$TARGET" == *-apple-darwin ]]; then
-            nix develop .#release-ci --command cargo zigbuild --locked --release --target "$TARGET" --package finitechat-cli --bin finitechat
-          else
-            nix develop .#release-ci --command cargo build --locked --release --target "$TARGET" --package finitechat-cli --bin finitechat
-          fi
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
+      - name: Build finitechat CLI
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package finitechat-cli --bin finitechat
       - name: Package finitechat CLI
         env:
           ASSET_NAME: ${{ matrix.asset_name }}

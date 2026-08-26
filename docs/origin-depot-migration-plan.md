@@ -104,7 +104,7 @@ be run locally and tested against synthetic targets.
 | `production-deploy-plan.yml` | Replace GitHub PR comments and `gh run` lookup; publish an Origin check and a Depot artifact. |
 | `production-deploy.yml` | Port validation only; force `mutation_enabled = false`; do not emulate GitHub approval with an unreviewed secret. |
 | `service-images.yml`, `runtime-image.yml`, `deepseek-v4-vllm-image.yml` | Build/save in Depot and promote the exact manifest to public GHCR with the dedicated package credential. |
-| Component release workflows | Cross-compile/package in Depot and publish to `finite-releases`; omit Electron. |
+| Component release workflows | Build/package Linux x86_64 in Depot and publish to `finite-releases`; defer macOS CLI and Electron. |
 
 The first pass may continue using supported Marketplace Actions, but remove
 GitHub event/API/token assumptions. Vendor or replace critical Actions and
@@ -134,28 +134,21 @@ Do not make a GitHub check authoritative in Origin or an Origin check
 authoritative in the legacy GitHub repository; the two systems do not share
 check identity.
 
-## Phase 4: preserve the macOS CLI contracts without a Mac builder
+## Phase 4: defer macOS release lanes
 
-1. Pin Zig and `cargo-zigbuild` in the Nix development/CI environment.
-2. Cross-build `aarch64-apple-darwin` and `x86_64-apple-darwin` separately for
-   `finitechat`, `fbrain`, and `fsite` on Depot Linux.
-3. Remove `fbrain`'s Apple-framework dependency by selecting the kqueue or
-   polling watcher backend, with focused watcher behavior tests.
-4. Package the six existing thin asset names and checksums unchanged. Do not
-   replace them with a universal asset; a universal binary contains the same
-   two compiled slices and changes the installer contract.
-5. On one real Apple Silicon Mac, execute each arm64 binary natively and each
-   x86_64 binary through Rosetta; verify `--version` and representative local
-   filesystem behavior for `fbrain`.
-
-If any slice fails, stop the release-lane cutover and explicitly pause that Mac
-asset. Do not retain GitHub Actions only to conceal a failed cross-build.
+1. Keep the Depot release matrices Linux x86_64-only.
+2. Do not add a Linux-to-Darwin toolchain or change product dependencies to
+   accommodate cross-compilation in this migration.
+3. Retain existing versioned macOS assets without claiming that Depot can
+   rebuild or refresh them.
+4. Reintroduce macOS CLI and Electron releases in a separate change with an
+   explicit macOS executor, signing boundary, and qualification plan.
 
 ## Phase 5: cut Releases to `finite-releases`
 
 For each component version:
 
-1. Build and checksum assets in Depot.
+1. Build and checksum the enabled Linux assets in Depot.
 2. Create a small release-only metadata commit in `finite-releases` containing
    component, version, Origin source commit, build run, asset names, sizes, and
    SHA-256 checksums.
@@ -172,7 +165,8 @@ itself remains disabled.
 
 Release cutover gate:
 
-- Install every CLI/architecture from the versioned Release and rolling alias.
+- Install every published Linux CLI from the versioned Release and rolling
+  alias.
 - Prove a deliberately corrupted asset fails checksum verification.
 - Prove tag retry is idempotent and cannot replace a verified versioned asset
   with different bytes.
@@ -239,7 +233,8 @@ The migration is complete only when one evidence bundle records:
 - authoritative Origin branch/tag inventory and protections;
 - Depot PR success, failure, cancellation, retry, branch push, and dispatch;
 - component-tag trigger or the documented dispatch fallback;
-- Mac CLI cross-build checksums and real-Mac execution results;
+- Linux CLI release checksums and explicit evidence that macOS publication is
+  still deferred;
 - `finite-releases` backfill inventory and clean installs;
 - Depot-to-GHCR digest equality and anonymous pull results before and after
   source-repository privacy;
@@ -250,7 +245,8 @@ The migration is complete only when one evidence bundle records:
 
 ## Deferred work
 
-- Electron signing, notarization, updater migration, and a Mac release executor.
+- macOS CLI builds, Electron signing/notarization, updater migration, and a Mac
+  release executor.
 - Moving the issue tracker away from GitHub.
 - Replacing `finite-releases` and GHCR with GitHub-independent services.
 - Full cold-build operation during a total GitHub outage, including vendoring

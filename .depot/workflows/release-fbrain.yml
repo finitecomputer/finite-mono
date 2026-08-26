@@ -29,14 +29,12 @@ jobs:
     runs-on: depot-ubuntu-24.04
     strategy:
       fail-fast: false
+      # Native Depot CI has no macOS runner. Restore the Darwin rows only with
+      # a dedicated macOS execution lane; do not cross-build them on Linux.
       matrix:
         include:
           - asset_name: fbrain-linux-x86_64
             target: x86_64-unknown-linux-gnu
-          - asset_name: fbrain-macos-aarch64
-            target: aarch64-apple-darwin
-          - asset_name: fbrain-macos-x86_64
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - name: Validate component version
@@ -46,16 +44,13 @@ jobs:
             *) echo "::error::release workflow must run at an fbrain/v* tag"; exit 1 ;;
           esac
           python3 scripts/delivery.py verify-component-version --component fbrain --version "$version"
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Build fbrain
-        env:
-          TARGET: ${{ matrix.target }}
+      - name: Install Rust
         run: |
-          if [[ "$TARGET" == *-apple-darwin ]]; then
-            nix develop .#release-ci --command cargo zigbuild --locked --release --target "$TARGET" --package finite-brain-cli --bin fbrain
-          else
-            nix develop .#release-ci --command cargo build --locked --release --target "$TARGET" --package finite-brain-cli --bin fbrain
-          fi
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
+      - name: Build fbrain
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-cli --bin fbrain
       - name: Package fbrain
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
@@ -68,7 +63,7 @@ jobs:
       - name: Build finite-brain server
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          nix develop .#release-ci --command cargo build --locked --release --target x86_64-unknown-linux-gnu --package finite-brain-app --bin finite-brain
+          cargo build --locked --release --target x86_64-unknown-linux-gnu --package finite-brain-app --bin finite-brain
           mkdir -p dist-server
           cp target/x86_64-unknown-linux-gnu/release/finite-brain dist-server/finite-brain
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist-server -czf finite-brain-linux-x86_64.tar.gz finite-brain
