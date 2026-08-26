@@ -42,7 +42,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/finitecomputer/finite-mono.git"
+repository = "https://github.com/finitecomputer/finite-mono"
 rust-version = "1.88"
 
 [workspace.dependencies]
