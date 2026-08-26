@@ -551,6 +551,11 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
         runner["model_variable"],
     }
     raw["runner_environment"] = {}
+    # Which environment files were actually readable. Projections need this to
+    # tell "the environment was read and this key is genuinely absent" apart
+    # from "we never got the environment" (see the FC_RUNNER_RUNTIME_ARTIFACT_ID
+    # projection below).
+    raw["runner_environment_files_read"] = []
     # Match systemd EnvironmentFile ordering: the operator file loads last and
     # may deliberately override the Nix-rendered shared role.
     for path_key, result_key in (
@@ -561,6 +566,7 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             values = read_environment_values(Path(runner[path_key]), runner_keys)
             raw[result_key] = values
             raw["runner_environment"].update(values)
+            raw["runner_environment_files_read"].append(result_key)
         except CollectionError as error:
             raw[result_key] = {}
             raw["errors"].append(str(error))
@@ -1201,10 +1207,25 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
     else:
         drain_status = "green" if drain.lower() == "false" else "red"
     pin = runner_env.get(runner_contract["artifact_variable"])
-    if not pin or not target_id:
+    # Status/state pair, mirroring finite_private_model_status/_state below.
+    # An absent FC_RUNNER_RUNTIME_ARTIFACT_ID is a halt-new-agents condition
+    # (the Runner fails closed without a pin), so once the environment itself
+    # was readable it must render red/"absent" — never the same plain unknown
+    # an unprobeable host gets. Legacy inputs predating
+    # runner_environment_files_read keep the conservative unknown.
+    if not pin:
+        if raw.get("runner_environment_files_read"):
+            pin_status = "red"
+            pin_state = "absent"
+        else:
+            pin_status = "unknown"
+            pin_state = "unresolved"
+    elif not target_id:
         pin_status = "unknown"
+        pin_state = "unresolved"
     else:
         pin_status = "green" if pin == target_id else "red"
+        pin_state = "matched" if pin == target_id else "mismatched"
     finite_private_base_url = runner_env.get(runner_contract["base_url_variable"])
     if finite_private_base_url is None:
         finite_private_base_url_status = "unknown"
@@ -1266,6 +1287,7 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
         "artifact_pin": pin,
         "target_artifact_id": target_id,
         "pin_status": pin_status,
+        "pin_state": pin_state,
         "finite_private_base_url": finite_private_base_url,
         "finite_private_base_url_status": finite_private_base_url_status,
         "finite_private_model": finite_private_model,
@@ -1643,10 +1665,15 @@ def render_human(report: dict[str, Any]) -> str:
             f"Kata VMs {containers.get('kata_running')}/{containers.get('kata_total')} running"
         )
         runner = health["runner"]
+        # Only a CONFIRMED absence reads as unset; an unprobeable environment
+        # stays honest about never having seen the value.
+        pin_display = runner["artifact_pin"] or (
+            "unset" if runner["pin_state"] == "absent" else "unknown"
+        )
         lines.append(
             f"  runner: timer {badge(runner['timer_status'])}; drain={runner['drain'] or 'unknown'} "
-            f"{badge(runner['drain_status'])}; pin={runner['artifact_pin'] or 'unknown'} "
-            f"{badge(runner['pin_status'])}"
+            f"{badge(runner['drain_status'])}; pin={pin_display} "
+            f"{badge(runner['pin_status'])} ({runner['pin_state']})"
         )
         lines.append(
             f"    Finite Private: model={runner['finite_private_model'] or 'unknown'} "
