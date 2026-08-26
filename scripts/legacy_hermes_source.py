@@ -323,8 +323,19 @@ def _is_below(relative: Path, root: Path) -> bool:
     return relative == root or relative.is_relative_to(root)
 
 
+def _is_generated_dev_virtualenv(relative: Path) -> bool:
+    parts = relative.parts
+    return (
+        len(parts) >= 3
+        and parts[0] == "dev"
+        and any(part in {".venv", "venv"} for part in parts[1:])
+    )
+
+
 def _source_inventory_classification(relative: Path) -> str:
-    if any(_is_below(relative, root) for root in SOURCE_REBUILD_ROOTS):
+    if any(
+        _is_below(relative, root) for root in SOURCE_REBUILD_ROOTS
+    ) or _is_generated_dev_virtualenv(relative):
         return "rebuild"
     if any(_is_below(relative, root) for root in SOURCE_ACTIVATE_ROOTS):
         return "activate"

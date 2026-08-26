@@ -816,6 +816,50 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             {path: "rebuild" for path in generated_links},
         )
 
+    def test_source_volume_inventory_cli_rebuilds_nested_dev_virtualenv_links(
+        self,
+    ) -> None:
+        source = self.root / "source-home"
+        generated_links = {
+            "dev/browser-harness/.venv/bin/python": (
+                "/nix/store/legacy-python/bin/python"
+            ),
+            "dev/published-site/venv/bin/python": (
+                "/nix/store/legacy-python/bin/python"
+            ),
+        }
+        for relative, target in generated_links.items():
+            candidate = source / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.symlink_to(target)
+
+        inventory_path = self.root / "nested-dev-venv-inventory.json"
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(stdout):
+            exit_code = migration.main(
+                [
+                    "source-volume-inventory",
+                    "--source-root",
+                    str(source),
+                    "--output",
+                    str(inventory_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual(printed["status"], "complete")
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        dispositions = {
+            entry["path"]: entry["disposition"] for entry in inventory["entries"]
+        }
+        self.assertEqual(
+            {path: dispositions[path] for path in generated_links},
+            {path: "rebuild" for path in generated_links},
+        )
+
     def test_source_volume_inventory_rebuilds_cocod_runtime_socket(self) -> None:
         socket_root = tempfile.TemporaryDirectory(dir="/tmp", prefix="lhm-")
         self.addCleanup(socket_root.cleanup)

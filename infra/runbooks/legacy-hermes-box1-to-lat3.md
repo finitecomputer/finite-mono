@@ -62,6 +62,9 @@ authentication, desired state, or source fails closed.
 
 Inventory every symlink. Links contained within an admitted data root may be
 preserved. Links from generated or quarantined trees remain inert metadata.
+Python environments named `.venv` or `venv` anywhere below `dev/` are generated
+state: preserve them in the complete snapshot, classify them as `rebuild`, and
+never activate their external interpreter links on the target.
 Any new escaping symlink in an active or unclassified path is a hard stop, not
 an instruction to add `--dereference`.
 

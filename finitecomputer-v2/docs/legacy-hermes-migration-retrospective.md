@@ -53,6 +53,9 @@ in the organization Brain or a mode-0700 operator evidence directory.
 - Display defaults can change between Hermes versions. Record the owner's
   commentary and voice-transcript preferences rather than assuming legacy
   behavior.
+- Generated Python environments appear under project-specific paths, not one
+  fixed directory. Classify nested `dev/**/.venv` and `dev/**/venv` trees as
+  rebuildable while keeping arbitrary escaping project links fail-closed.
 
 ## Accepted limits
 
