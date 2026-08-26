@@ -1,0 +1,24 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
+default: check
+
+check:
+    corepack yarn typecheck
+    corepack yarn app:build
+
+test:
+    corepack yarn test
+
+app-build:
+    corepack yarn app:build
+
+app-plan:
+    corepack yarn twenty plan
+
+app-apply:
+    corepack yarn twenty apply
+
+[positional-arguments]
+agent *args:
+    corepack yarn build:agent
+    node dist/agent/cli.js "$@"

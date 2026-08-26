@@ -1,0 +1,107 @@
+# Finite Commercial Register
+
+Finite's private Twenty application for structured organizations, contacts,
+opportunities, purchases, payments, and recurring revenue. FiniteBrain remains
+the source for meeting notes, Organization Wants, and narrative context.
+
+This is intentionally not Salesforce and not a general ledger. The MVP answers:
+
+- Who is the organization and who matters there?
+- What did it buy, under what actual terms, and what is it receiving now?
+- What did it pay Finite, independently of what Finite charged?
+- What follow-on opportunity remains?
+- What is current MRR, without counting one-time or bundled lines twice?
+
+The domain language and authority boundaries live in
+[`docs/commercial-relationships/CONTEXT.md`](../docs/commercial-relationships/CONTEXT.md).
+The decision to use Twenty is recorded in
+[`ADR-0008`](../docs/adr/0008-use-twenty-for-structured-commercial-relationships.md).
+
+## MVP shape
+
+Twenty's standard Company, Person, and Opportunity objects supply the familiar
+organization, contact, and small-pipeline UI. The app adds this purchase chain:
+
+```text
+Company -> Commercial Account -> Commercial Arrangement
+                                      |
+                                      v
+                               Purchased Package -> Offering Line
+                                      |
+                                      v
+                                   Charge -> Incoming Payment
+```
+
+Charges and Incoming Payments are deliberately separate. A Package owns one
+shared price, so included Offering Lines do not invent extra revenue. The app
+also installs the Organization directory, Current customers, and Open
+opportunities views.
+
+The first implemented path is the simple NED case: one organization, one
+account, a won Agent Camp purchase, and a separate exploring follow-on
+opportunity. Sponsorship, payment allocation, supplier-cost attribution,
+contributions, and accounting remain later slices.
+
+## Developer commands
+
+Run these from the monorepo root; the recipes enter the pinned Nix environment:
+
+```console
+just commercial check
+just commercial test
+just commercial app-build
+```
+
+After configuring a Twenty CLI remote, preview every schema change before
+applying it:
+
+```console
+just commercial app-plan
+just commercial app-apply
+```
+
+Do not use `--force` for ordinary app application. This repository declares no
+production Twenty deployment yet; a pinned deployment, export, backup, and
+empty-target restore test are gates before Twenty becomes the sole authority.
+
+## Agent interface
+
+The command accepts a versioned JSON update document. It searches only within
+the obvious parent scope, creates or updates matching records, rejects
+ambiguous matches, never deletes records omitted from the document, rebuilds
+derived totals from stored records, and prints a change report.
+
+Two environment variables are required. Store their values outside git:
+
+- `FINITE_COMMERCIAL_TWENTY_URL`: private Twenty base URL
+- `FINITE_COMMERCIAL_TWENTY_API_KEY`: API key assigned to an appropriately
+  scoped Twenty role
+
+Apply an update from a file or standard input:
+
+```console
+just commercial agent apply --file update.json
+just commercial agent apply --file - < update.json
+```
+
+Read the current organization summary:
+
+```console
+just commercial agent show --organization NED
+```
+
+[`tests/fixtures/ned-update.json`](tests/fixtures/ned-update.json) is an
+executable, explicitly synthetic contract example. Its contact and amounts are
+not real NED facts and must never be used to seed the live register. Real
+financial records require their actual Source Reference; incomplete facts use
+the inline reconciliation marker rather than an invented value.
+
+Recurring Package updates require an effective start, a real price, and a
+monthly, quarterly, or annual cadence. USD MRR is derived automatically. A
+non-USD recurring term must supply its sourced USD monthly normalization.
+Incoming digital-asset payments preserve native amount and asset code plus an
+optional receipt-time USD value; later exchange-rate changes do not rewrite it.
+
+The command's API credential is never printed. It uses Twenty's generated
+`/rest/` record endpoints; the versioned app remains the only schema mutation
+path.
