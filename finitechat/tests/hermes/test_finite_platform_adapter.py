@@ -554,8 +554,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         # With no route signal at all (no Topic/Chat and no Hermes thread id)
         # the adapter refuses without a send. A present-but-unknown thread id is
-        # the sidecar's fail-closed responsibility (a typed error), covered by
-        # the Rust resolver tests.
+        # the sidecar's responsibility: it logs a Home fallback by default, and
+        # strict mode (`FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`) fails
+        # closed with a typed error — covered by the Rust resolver tests.
         result = asyncio.run(
             adapter.send_clarify(
                 chat_id="room-agent-1",
