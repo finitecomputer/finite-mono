@@ -682,7 +682,7 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
       - name: Readiness contract, notification cursor, supervisor discovery, and collaboration acceptance
-        run: nix develop --accept-flake-config --command just brain-product-matrix
+        run: nix develop --command just brain-product-matrix
       - name: Upload collaboration report and failure logs
         if: always()
         uses: actions/upload-artifact@v4

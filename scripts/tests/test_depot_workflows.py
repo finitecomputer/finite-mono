@@ -161,6 +161,17 @@ class DepotWorkflowContractTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertIn("  USER: runner\n", workflow)
 
+    def test_depot_cachix_does_not_trust_repository_flake_config(self) -> None:
+        flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        self.assertNotIn("extra-substituters", flake)
+        self.assertNotIn("extra-trusted-public-keys", flake)
+
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            with self.subTest(path=path.name):
+                self.assertNotIn(
+                    "--accept-flake-config", path.read_text(encoding="utf-8")
+                )
+
     def test_every_depot_nix_job_configures_cachix(self) -> None:
         job_pattern = re.compile(
             r"^  (?P<name>[A-Za-z0-9_-]+):\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
