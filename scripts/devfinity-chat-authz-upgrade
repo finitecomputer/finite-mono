@@ -1,0 +1,747 @@
+#!/usr/bin/env bash
+# devfinity-chat-authz-upgrade — end-to-end acceptance for the chat-authz
+# owner-npubs stack (branch chat-authz/owner-npubs).
+#
+# Simulates the production upgrade on the local docker-saas lane:
+#   1. Launch an agent the OLD way (Core API directly, no ownerChatAccountId,
+#      so the lease spec carries no FINITECHAT_OWNER_NPUBS).
+#   2. Establish durable chat state (owner <-> agent profile chat + messages).
+#   3. Prove the stranger-self-admission vulnerability: a fresh identity can
+#      create-room + add-member the agent and the old-style agent auto-joins.
+#   4. "Upgrade": recreate the same runtime container with
+#      FINITECHAT_OWNER_NPUBS=<owner hex> added, bind-mounting the same /data.
+#   5. Assert: history intact, owner still served, owner welcomes accepted,
+#      pre-upgrade stranger blocked at the adapter, fresh stranger's Welcome
+#      denied (agent never joins).
+#
+# Requires a RUNNING devfinity docker-saas stack; reads the same env the
+# smoke scripts consume. Run against a live stack with:
+#
+#   nix run .#devfinity -- --state-dir <state> exec -- scripts/devfinity-chat-authz-upgrade
+#
+# or source <state>/runs/default/env first. Needs: docker, curl, node, and a
+# release finitechat CLI built from this checkout (target/release/finitechat).
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+
+core_url="${FC_CORE_URL:?}"
+dashboard_url="${FC_DASHBOARD_URL:?}"
+dashboard_origin="${dashboard_url%/dashboard}"
+chat_url="${FINITECHAT_SERVER_URL:?}"
+state_dir="${DEVFINITY_STATE_DIR:?}"
+finitechat_bin="${FINITECHAT_BIN:-$repo_root/target/release/finitechat}"
+run_id="chat-authz-$(date +%s)-$$"
+
+# --- safety: this script drives real account/room mutations; loopback only ---
+for url in "$core_url" "$dashboard_origin" "$chat_url" "${FC_HOSTED_WEB_DEVICE_URL:?}"; do
+  case "$url" in
+    http://127.0.0.1:* | http://localhost:* | http://[::1]:*) ;;
+    *)
+      echo "refusing to run against non-loopback URL: $url" >&2
+      exit 64
+      ;;
+  esac
+done
+
+need() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 127
+  fi
+}
+need curl
+need node
+need docker
+if [[ ! -x "$finitechat_bin" ]]; then
+  echo "missing release finitechat CLI at $finitechat_bin" >&2
+  echo "build it with: ./scripts/with-dev-env cargo build --release -p finitechat-cli" >&2
+  exit 127
+fi
+
+work="$state_dir/chat-authz-upgrade"
+mkdir -p "$work"
+me_json="$work/me.json"
+chat_state_json="$work/chat-state.json"
+chat_action_json="$work/chat-action.json"
+evidence="$work/evidence.log"
+: >"$evidence"
+
+note() {
+  echo "$*" | tee -a "$evidence"
+}
+
+fail() {
+  note "FAIL: $*"
+  exit 1
+}
+
+curl_auth() {
+  local token_file="$1"
+  shift
+  local config_file
+  config_file="$work/curl-auth-$$-$RANDOM.conf"
+  umask 077
+  printf 'header = "authorization: Bearer %s"\n' \
+    "$(tr -d '\n' <"$token_file")" >"$config_file"
+  local status=0
+  curl -fsS --config "$config_file" "$@" || status=$?
+  rm -f "$config_file"
+  return "$status"
+}
+
+curl_customer() {
+  curl_auth "$state_dir/workos-fixture/dashboard-customer.jwt" "$@"
+}
+
+wait_http() {
+  local name="$1" url="$2" timeout_secs="${3:-120}" started
+  started="$(date +%s)"
+  until curl -fsS --max-time 3 "$url" >/dev/null 2>&1; do
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      fail "$name did not become ready at $url within ${timeout_secs}s"
+    fi
+    sleep 1
+  done
+}
+
+read_core_me() {
+  curl_customer "$core_url/api/core/v1/me" >"$me_json"
+}
+
+runtime_fields() {
+  node - "$me_json" <<'JS'
+const fs = require("node:fs");
+const me = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const visible = (me.projects || []).find((entry) => entry.runtime);
+if (!visible) process.exit(1);
+const runtime = visible.runtime;
+const contact = new URL(runtime.contact_endpoint);
+contact.pathname = contact.pathname.replace(/\/contact\/?$/, "");
+process.stdout.write([
+  visible.project.id,
+  runtime.id,
+  contact.toString().replace(/\/$/, ""),
+].join("\t"));
+JS
+}
+
+chat_state() {
+  curl -fsS --max-time 30 \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/state" \
+    >"$chat_state_json"
+}
+
+start_chat_updates() {
+  curl -fsS --no-buffer \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/updates" \
+    >/dev/null 2>&1 &
+  updates_pid=$!
+}
+
+wait_for_connected_chat() {
+  local started
+  started="$(date +%s)"
+  while true; do
+    if chat_state && node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.exit((state.rooms || []).some((room) => room.is_agent_chat && room.state === "Connected") ? 0 : 1);
+JS
+    then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= 240 )); then
+      fail "Hosted Web Device did not establish the agent chat within 240s"
+    fi
+    sleep 2
+  done
+}
+
+selected_chat_route() {
+  node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+const room = (state.rooms || []).find((candidate) =>
+  candidate.room_id === roomId && candidate.state === "Connected"
+);
+const topics = (state.topics || []).filter((candidate) =>
+  candidate.room_id === room?.room_id && !candidate.archived
+);
+const topic = topics.find((candidate) => candidate.topic_id === state.selected_topic_id)
+  || topics.find((candidate) => candidate.topic_id === "home");
+const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id)
+  || topic?.chats?.find((candidate) => candidate.active)
+  || topic?.chats?.[0];
+if (!room || !topic || !chat) throw new Error("canonical Home chat is unavailable");
+process.stdout.write([room.room_id, topic.topic_id, chat.chat_id].join("\t"));
+JS
+}
+
+send_chat_message() {
+  local text="$1"
+  node - "$chat_state_json" "$text" >"$chat_action_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const text = process.argv[3];
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+const room = (state.rooms || []).find((candidate) =>
+  candidate.room_id === roomId && candidate.state === "Connected"
+);
+const topics = (state.topics || []).filter((candidate) =>
+  candidate.room_id === room.room_id && !candidate.archived
+);
+const topic = topics.find((candidate) => candidate.topic_id === state.selected_topic_id)
+  || topics.find((candidate) => candidate.topic_id === "home");
+const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id)
+  || topic?.chats?.find((candidate) => candidate.active)
+  || topic?.chats?.[0];
+if (!topic || !chat) throw new Error("canonical Home chat is unavailable");
+process.stdout.write(JSON.stringify({
+  SendChatMessage: {
+    room_id: room.room_id,
+    topic_id: topic.topic_id,
+    chat_id: chat.chat_id,
+    text,
+  },
+}));
+JS
+  curl -fsS --max-time 30 \
+    -H 'content-type: application/json' \
+    --data-binary "@$chat_action_json" \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/actions" \
+    >"$chat_state_json"
+}
+
+transcript_has_marker() {
+  local marker="$1"
+  node - "$chat_state_json" "$marker" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const marker = process.argv[3];
+process.exit((state.messages || []).some((message) =>
+  String(message.display_content || message.text || "").includes(marker)
+) ? 0 : 1);
+JS
+}
+
+owner_account_id() {
+  node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const accountId = String(state.identity?.account_id || "");
+if (!/^[0-9a-f]{64}$/u.test(accountId)) {
+  throw new Error("Hosted Web Device did not expose the authenticated human account id");
+}
+process.stdout.write(accountId);
+JS
+}
+
+runtime_agent_npub() {
+  curl -fsS --max-time 5 "$runtime_url/healthz" | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const value = JSON.parse(body);
+      const npub = String(value.agent_npub || value.npub || "");
+      if (!value.ready || !npub.startsWith("npub1")) process.exit(1);
+      process.stdout.write(npub);
+    });
+  '
+}
+
+runtime_container_id() {
+  docker ps --format '{{.ID}}' --filter "label=computer.finite.v2.project_id=$project_id"
+}
+
+# The Hermes gateway log lives on the durable /data mount (it survives the
+# container recreation); it records every inbound dispatch decision.
+gateway_log() {
+  docker exec "$container_id" cat /data/agent/hermes-home/logs/gateway.log 2>/dev/null || true
+}
+
+# wait_gateway_log <pattern> <timeout_secs>: poll the gateway log for a line.
+wait_gateway_log() {
+  local pattern="$1" timeout_secs="$2" started
+  started="$(date +%s)"
+  while true; do
+    if gateway_log | grep -q "$pattern"; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      return 1
+    fi
+    sleep 3
+  done
+}
+
+# finitechat app CLI against the LOCAL server with an isolated identity.
+stranger_cli() {
+  local home="$1"
+  shift
+  FINITE_HOME="$home" "$finitechat_bin" app \
+    --data-dir "$home/app" \
+    --server "$chat_url" \
+    "$@"
+}
+
+stranger_account_id() {
+  # `app identity` mints the shared identity on first use; extract only the
+  # public account id (the JSON also carries the secret — never log it).
+  stranger_cli "$1" identity | node -e '
+      let body = "";
+      process.stdin.on("data", (chunk) => body += chunk);
+      process.stdin.on("end", () => process.stdout.write(JSON.parse(body).account_id));
+    '
+}
+
+# Room id created by the most recent create-room, identified by display name.
+stranger_room_by_name() {
+  local home="$1" name="$2"
+  stranger_cli "$home" state | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const name = process.argv[1];
+      const state = JSON.parse(body);
+      const room = (state.rooms || []).find((entry) => entry.display_name === name);
+      if (!room) process.exit(1);
+      process.stdout.write(room.room_id);
+    });
+  ' -- "$name"
+}
+
+stranger_room_transcript() {
+  local home="$1" room_id="$2"
+  stranger_cli "$home" state --room-id "$room_id" >"$work/stranger-state.json"
+  node - "$work/stranger-state.json" "$room_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const roomId = process.argv[3];
+const own = state.identity?.account_id;
+const rows = (state.messages || [])
+  .filter((message) => message.room_id === roomId)
+  .map((message) => ({
+    from_self: message.sender_account_id === own,
+    text: String(message.display_content || message.text || ""),
+  }));
+process.stdout.write(JSON.stringify(rows));
+JS
+}
+
+# Agent-side read-only room probe inside the runtime container.
+agent_room_status() {  docker exec "$container_id" \
+    finitechat hermes --home /data/agent room-status --room-id "$1" --json 2>/dev/null \
+    | node -e '
+      let body = "";
+      process.stdin.on("data", (chunk) => body += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const value = JSON.parse(body);
+          process.stdout.write([
+            value.status || "",
+            String(value.connected ?? ""),
+            String(value.member_count ?? ""),
+          ].join("\t"));
+        } catch {
+          process.stdout.write("parse_error\t\t");
+        }
+      });
+    '
+}
+
+wait_agent_room_connected() {
+  local room_id="$1" timeout_secs="$2" started status_line
+  started="$(date +%s)"
+  while true; do
+    status_line="$(agent_room_status "$room_id")"
+    if [[ "$(cut -f2 <<<"$status_line")" == "true" ]]; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      return 1
+    fi
+    sleep 3
+  done
+}
+
+note "== chat-authz upgrade acceptance $run_id =="
+
+# --- Phase 1: launch the agent OLD style (no ownerChatAccountId) ------------
+
+if read_core_me && runtime_fields >/dev/null 2>&1; then
+  IFS=$'\t' read -r project_id machine_id runtime_url <<<"$(runtime_fields)"
+  note "reusing existing runtime project=$project_id runtime=$machine_id"
+else
+  issue_json="$work/issued-launch-code.json"
+  curl_auth "$state_dir/workos-fixture/operator.jwt" \
+    -H 'content-type: application/json' \
+    --data '{"name":"chat-authz upgrade acceptance","codeCount":1,"expiresInHours":24}' \
+    "$core_url/api/core/v1/admin/launch-code-batches" >"$issue_json"
+  launch_code="$(node - "$issue_json" <<'JS'
+const fs = require("node:fs");
+const code = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))?.codes?.[0]?.code;
+if (typeof code !== "string" || !code) throw new Error("Core did not return a Launch Code");
+process.stdout.write(code);
+JS
+)"
+  rm -f "$issue_json"
+  # Core API directly: no ownerChatAccountId field at all. This is the
+  # pre-fix dashboard behavior (legacy allow-all admission).
+  node - "$launch_code" "$run_id" >"$work/creation-request.json" <<'JS'
+const [code, runId] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  displayName: `chat-authz upgrade ${runId}`,
+  launchCode: code,
+  idempotencyKey: `chat-authz-upgrade-${runId}`,
+  hostingTier: "standard",
+}));
+JS
+  curl_customer \
+    -H 'content-type: application/json' \
+    --data-binary "@$work/creation-request.json" \
+    "$core_url/api/core/v1/me/agent-creation-requests" >"$work/creation-result.json"
+  rm -f "$work/creation-request.json"
+  note "submitted old-style agent creation request (no ownerChatAccountId)"
+
+  started="$(date +%s)"
+  while true; do
+    read_core_me
+    if fields="$(runtime_fields)"; then
+      IFS=$'\t' read -r project_id machine_id runtime_url <<<"$fields"
+      break
+    fi
+    if (( "$(date +%s)" - started >= 600 )); then
+      fail "Core did not report a launched docker runtime within 600s"
+    fi
+    sleep 2
+  done
+fi
+
+wait_http "Agent Runtime" "$runtime_url/healthz" 240
+container_id="$(runtime_container_id)"
+[[ -n "$container_id" ]] || fail "no runtime container for project $project_id"
+note "runtime container: $container_id"
+
+# The leased container env must NOT carry FINITECHAT_OWNER_NPUBS (old style).
+if docker inspect "$container_id" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep -q '^FINITECHAT_OWNER_NPUBS='; then
+  fail "old-style runtime unexpectedly has FINITECHAT_OWNER_NPUBS"
+fi
+docker inspect "$container_id" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^FINITECHAT_ALLOW_ALL_USERS=' | sed 's/^/spec env: /' >>"$evidence"
+note "PASS: leased spec env lacks FINITECHAT_OWNER_NPUBS (legacy allow-all spec)"
+
+agent_npub_before="$(runtime_agent_npub)"
+note "agent npub: $agent_npub_before"
+agent_hex="$(docker exec "$container_id" finitechat auth status \
+  | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => process.stdout.write(JSON.parse(body).account_id));
+  ')"
+[[ "$agent_hex" =~ ^[0-9a-f]{64}$ ]] || fail "could not resolve agent account id"
+note "agent account id: $agent_hex"
+
+# --- Phase 2: establish existing chat state ---------------------------------
+
+# The dashboard agent form normally authorizes the hosted-device agent binding
+# at creation time. This script deliberately bypasses the form (old-style
+# launch), so authorize the binding explicitly through the same dashboard
+# recovery route a browser would use after an interrupted setup.
+if ! chat_state 2>/dev/null; then
+  curl -fsS --max-time 30 -X POST \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/recover-binding" \
+    >"$chat_state_json" \
+    || fail "hosted-device binding authorization (recover-binding) failed"
+  note "authorized hosted-device agent binding via recover-binding"
+fi
+start_chat_updates
+wait_for_connected_chat
+marker_pre="owner-pre-upgrade-$run_id"
+chat_state
+send_chat_message "$marker_pre"
+chat_state
+transcript_has_marker "$marker_pre" \
+  || fail "owner pre-upgrade message did not land in the transcript"
+note "PASS: owner pre-upgrade message landed in the canonical room transcript"
+owner_hex="$(owner_account_id)"
+note "owner account id: $owner_hex"
+
+# --- Phase 3: reproduce the vulnerability pre-upgrade -----------------------
+
+stranger1="$work/stranger1"
+marker_s1="stranger1-pre-upgrade-$run_id"
+stranger1_hex="$(stranger_account_id "$stranger1")"
+note "stranger1 account id: $stranger1_hex"
+stranger_cli "$stranger1" create-room --display-name "s1-$run_id" >/dev/null
+s1_room="$(stranger_room_by_name "$stranger1" "s1-$run_id")"
+[[ -n "$s1_room" ]] || fail "stranger1 room not found after create-room"
+note "stranger1 room: $s1_room"
+stranger_cli "$stranger1" add-member --room-id "$s1_room" --account-id "$agent_hex" >/dev/null
+stranger_cli "$stranger1" send --room-id "$s1_room" --text "$marker_s1" >/dev/null
+
+if wait_agent_room_connected "$s1_room" 120; then
+  note "PASS(vuln repro): old-style agent auto-joined stranger1's room (status: $(agent_room_status "$s1_room"))"
+else
+  fail "old-style agent did NOT auto-join stranger1's room; the rig does not reproduce the bug"
+fi
+# The vuln is not just membership: the stranger's message must be dispatched
+# to the agent and answered in-room.
+if wait_gateway_log "inbound message: platform=finitechat user=$stranger1_hex" 90; then
+  note "PASS(vuln repro): gateway dispatched the stranger's message to the agent:"
+  gateway_log | grep "inbound message: platform=finitechat user=$stranger1_hex" | tail -1 \
+    | sed 's/^/  /' >>"$evidence"
+else
+  fail "gateway never dispatched stranger1's message pre-upgrade"
+fi
+if wait_gateway_log "Sending response .* to $s1_room" 60; then
+  note "PASS(vuln repro): agent answered the stranger in-room:"
+  gateway_log | grep "Sending response .* to $s1_room" | tail -1 | sed 's/^/  /' >>"$evidence"
+else
+  fail "agent never answered stranger1's room pre-upgrade"
+fi
+
+# --- Phase 4: "upgrade" — same runtime, owner-scoped env, same /data --------
+
+inspect_json="$work/container-inspect.json"
+docker inspect "$container_id" >"$inspect_json"
+node - "$inspect_json" "$owner_hex" >"$work/docker-run.sh" <<'JS'
+const fs = require("node:fs");
+const inspect = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))[0];
+const owner = process.argv[3];
+const env = inspect.Config.Env.filter((entry) => !entry.startsWith("FINITECHAT_OWNER_NPUBS="));
+env.push(`FINITECHAT_OWNER_NPUBS=${owner}`);
+const args = ["docker", "run", "-d", "--name", inspect.Name.replace(/^\//, "")];
+const restart = inspect.HostConfig.RestartPolicy?.Name;
+if (restart) args.push("--restart", restart);
+for (const host of inspect.HostConfig.ExtraHosts || []) args.push("--add-host", host);
+const binds = inspect.HostConfig.Binds || [];
+for (const bind of binds) args.push("-v", bind);
+const ports = inspect.HostConfig.PortBindings || {};
+for (const [containerPort, bindings] of Object.entries(ports)) {
+  for (const binding of bindings || []) {
+    args.push("-p", `${binding.HostIp}:${binding.HostPort}:${containerPort.replace(/\/tcp$/, "")}`);
+  }
+}
+for (const [key, value] of Object.entries(inspect.Config.Labels || {})) {
+  args.push("--label", `${key}=${value}`);
+}
+for (const entry of env) args.push("--env", entry);
+args.push(inspect.Config.Image);
+const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+process.stdout.write(args.map(q).join(" ") + "\n");
+JS
+# Prove the durable mount is reused, never recreated.
+data_mount="$(node -e '
+  const inspect = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))[0];
+  process.stdout.write((inspect.HostConfig.Binds || []).find((b) => b.endsWith(":/data")) || "");
+' -- "$inspect_json")"
+[[ -n "$data_mount" ]] || fail "runtime container has no /data bind mount"
+note "reusing durable mount: $data_mount"
+
+docker rm -f "$container_id" >/dev/null
+bash "$work/docker-run.sh" >/dev/null
+container_id="$(runtime_container_id)"
+[[ -n "$container_id" ]] || fail "upgraded runtime container not found"
+wait_http "Agent Runtime after upgrade" "$runtime_url/healthz" 240
+agent_npub_after="$(runtime_agent_npub)"
+[[ "$agent_npub_after" == "$agent_npub_before" ]] \
+  || fail "Agent Principal changed across the upgrade ($agent_npub_before -> $agent_npub_after)"
+note "PASS: same Agent Principal after upgrade ($agent_npub_after)"
+
+# The gateway script must translate FINITECHAT_OWNER_NPUBS into the adapter
+# allowlist (gateway process) and agentd must derive the sidecar's Welcome
+# allowlist. Note the sidecar legitimately inherits the container's
+# FINITECHAT_ALLOW_ALL_USERS=true: only the Hermes gateway reads that flag,
+# and run_hermes_gateway.sh actively unsets it for the gateway process.
+docker exec "$container_id" sh -c '
+  for p in /proc/[0-9]*; do
+    c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
+    case "$c" in
+      *"sh -c"*) continue ;;
+      *finitechat\ hermes*serve*) echo "== sidecar"; tr "\0" "\n" <"$p/environ" 2>/dev/null ;;
+      *gateway\ run*) echo "== gateway"; tr "\0" "\n" <"$p/environ" 2>/dev/null ;;
+    esac
+  done' >"$work/gateway-env.txt" 2>/dev/null || true
+sidecar_env="$(sed -n '/^== sidecar/,/^== /p' "$work/gateway-env.txt")"
+gateway_env="$(sed -n '/^== gateway/,$p' "$work/gateway-env.txt")"
+if ! grep -q "^FINITECHAT_WELCOME_ALLOWLIST=$owner_hex\$" <<<"$sidecar_env"; then
+  fail "upgraded sidecar env lacks FINITECHAT_WELCOME_ALLOWLIST=$owner_hex"
+fi
+note "PASS: sidecar (finitechat hermes serve) env has WELCOME_ALLOWLIST=owner"
+if ! grep -q "^FINITECHAT_ALLOWED_USERS=$owner_hex\$" <<<"$gateway_env"; then
+  fail "upgraded gateway env lacks FINITECHAT_ALLOWED_USERS=$owner_hex"
+fi
+if grep -q "^FINITECHAT_ALLOW_ALL_USERS=" <<<"$gateway_env"; then
+  fail "upgraded gateway process env still carries FINITECHAT_ALLOW_ALL_USERS"
+fi
+note "PASS: gateway env has ALLOWED_USERS=owner and no ALLOW_ALL"
+# --- Phase 5: post-upgrade assertions ----------------------------------------
+
+start_chat_updates
+wait_for_connected_chat
+
+# 5a. history intact + owner still served.
+chat_state
+transcript_has_marker "$marker_pre" \
+  || fail "pre-upgrade owner message missing after upgrade (history lost)"
+note "PASS(6a/history): pre-upgrade owner message still in the transcript"
+marker_post="owner-post-upgrade-$run_id"
+# The gateway may still be in startup restore when the owner sends; drained
+# messages are logged with an empty preview, so assert on a NEW inbound
+# dispatch line for the owner rather than on the message text.
+gateway_log >"$work/gateway-log-before-6a.txt"
+send_chat_message "$marker_post"
+chat_state
+transcript_has_marker "$marker_post" \
+  || fail "owner post-upgrade message did not land"
+note "PASS(6a/send): owner post-upgrade message landed in the transcript"
+owner_dispatch_line=""
+started="$(date +%s)"
+while true; do
+  owner_dispatch_line="$(
+    comm -13 <(sort "$work/gateway-log-before-6a.txt") <(gateway_log | sort) \
+      | grep "inbound message: platform=finitechat user=$owner_hex" | tail -1 || true
+  )"
+  if [[ -n "$owner_dispatch_line" ]]; then
+    break
+  fi
+  if (( "$(date +%s)" - started >= 150 )); then
+    fail "gateway never dispatched the owner's post-upgrade message (allowlist blocked the owner?)"
+  fi
+  sleep 3
+done
+note "PASS(6a/dispatch): gateway dispatched the owner's post-upgrade message to the agent:"
+sed 's/^/  /' <<<"$owner_dispatch_line" >>"$evidence"
+
+# 5b. owner can add the agent to a NEW room (allowlisted Welcome accepted).
+# The dashboard's chat-actions proxy deliberately supports only a narrow
+# action set, so create+invite through the hosted device's own action API
+# (same owner identity, service token from the generated devfinity env).
+hosted_device_action() {
+  curl -fsS --max-time 30 \
+    -H "authorization: Bearer ${FINITECHAT_HOSTED_API_TOKEN:?}" \
+    -H "x-finite-workos-user-id: $(hosted_workos_user_id)" \
+    -H 'content-type: application/json' \
+    --data-binary "@$1" \
+    "${FC_HOSTED_WEB_DEVICE_URL:?}/v1/app/actions"
+}
+hosted_workos_user_id() {
+  curl_customer "$core_url/api/core/v1/me" | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => process.stdout.write(JSON.parse(body).workos_user_id));
+  '
+}
+chat_state
+node - "$chat_state_json" "$agent_hex" "$agent_npub_after" "$run_id" >"$chat_action_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [agentHex, agentNpub, runId] = process.argv.slice(3);
+const profile = (state.profiles || []).find((entry) => entry.account_id === agentHex) || {
+  account_id: agentHex,
+  npub: agentNpub,
+  display_name: "Finite Agent",
+  about: null,
+  picture: null,
+  stale: false,
+  is_agent: true,
+};
+fs.writeFileSync(
+  `/tmp/chat-authz-profile-${runId}.json`,
+  JSON.stringify(profile)
+);
+process.stdout.write(JSON.stringify({
+  CreateRoom: { display_name: `owner-new-room-${runId}` },
+}));
+JS
+hosted_device_action "$chat_action_json" >"$chat_state_json"
+new_room="$(node - "$chat_state_json" "$run_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const room = (state.rooms || []).find((entry) =>
+  entry.display_name === `owner-new-room-${process.argv[3]}`
+);
+if (!room) process.exit(1);
+process.stdout.write(room.room_id);
+JS
+)"
+[[ -n "$new_room" ]] || fail "owner's new room not visible in hosted-device state"
+node - "$new_room" "/tmp/chat-authz-profile-$run_id.json" >"$chat_action_json" <<'JS'
+const fs = require("node:fs");
+const roomId = process.argv[2];
+const profile = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+process.stdout.write(JSON.stringify({
+  AddRoomMembers: { room_id: roomId, profiles: [profile] },
+}));
+JS
+rm -f "/tmp/chat-authz-profile-$run_id.json"
+hosted_device_action "$chat_action_json" >/dev/null
+if wait_agent_room_connected "$new_room" 120; then
+  note "PASS(6b): agent accepted the owner's Welcome into new room $new_room (status: $(agent_room_status "$new_room"))"
+else
+  fail "agent did not join the owner's new room (allowlisted Welcome rejected?)"
+fi
+
+# 5c. pre-upgrade stranger is now blocked at the adapter.
+marker_s1_post="stranger1-post-upgrade-$run_id"
+gateway_log >"$work/gateway-log-before-6c.txt"
+stranger_cli "$stranger1" send --room-id "$s1_room" --text "$marker_s1_post" >/dev/null
+sleep 45
+gateway_log >"$work/gateway-log-after-6c.txt"
+s1_transcript="$(stranger_room_transcript "$stranger1" "$s1_room")"
+if node - "$s1_transcript" "$marker_s1_post" <<'JS'
+const rows = JSON.parse(process.argv[2]);
+const marker = process.argv[3];
+const index = rows.findIndex((row) => row.text.includes(marker));
+// Any agent (non-self) message after the stranger's post-upgrade send means
+// the stranger's message was dispatched and answered.
+process.exit(index >= 0 && rows.slice(index + 1).some((row) => !row.from_self) ? 0 : 1);
+JS
+then
+  fail "stranger1 received an agent reply AFTER the upgrade (adapter did not block)"
+fi
+if grep "inbound message: platform=finitechat user=$stranger1_hex" "$work/gateway-log-after-6c.txt" \
+    | grep -q "msg='$marker_s1_post'"; then
+  fail "gateway dispatched stranger1's post-upgrade message (FINITECHAT_ALLOWED_USERS not enforced)"
+fi
+note "PASS(6c): stranger1's post-upgrade message was never dispatched and never answered"
+if grep -q "Unauthorized user" "$work/gateway-log-after-6c.txt"; then
+  note "PASS(6c): gateway logged the authz block:"
+  grep "Unauthorized user" "$work/gateway-log-after-6c.txt" | tail -1 | sed 's/^/  /' >>"$evidence"
+fi
+
+# 5d. a fresh stranger's Welcome is denied: the agent never joins.
+stranger2="$work/stranger2"
+stranger2_hex="$(stranger_account_id "$stranger2")"
+note "stranger2 account id: $stranger2_hex"
+stranger_cli "$stranger2" create-room --display-name "s2-$run_id" >/dev/null
+s2_room="$(stranger_room_by_name "$stranger2" "s2-$run_id")"
+stranger_cli "$stranger2" add-member --room-id "$s2_room" --account-id "$agent_hex" >/dev/null
+stranger_cli "$stranger2" send --room-id "$s2_room" --text "stranger2-ctf-$run_id" >/dev/null
+sleep 45
+s2_status="$(agent_room_status "$s2_room")"
+if [[ "$(cut -f2 <<<"$s2_status")" == "true" ]]; then
+  fail "upgraded agent joined stranger2's room (Welcome allowlist not enforced)"
+fi
+note "PASS(6d): agent never joined stranger2's room (room-status: $s2_status)"
+if gateway_log | grep -q "verified joiner admitted: $stranger2_hex"; then
+  fail "upgraded adapter admitted stranger2 as a verified joiner"
+fi
+if gateway_log | grep -q "inbound message: platform=finitechat user=$stranger2_hex"; then
+  fail "gateway dispatched stranger2's message despite the denied Welcome"
+fi
+note "PASS(6d): gateway log shows no joiner admission and no dispatch for stranger2"
+s2_transcript="$(stranger_room_transcript "$stranger2" "$s2_room")"
+node - "$s2_transcript" <<'JS'
+const rows = JSON.parse(process.argv[2]);
+if (rows.some((row) => !row.from_self)) {
+  throw new Error("stranger2 received an agent message despite the denied Welcome");
+}
+JS
+note "PASS(6d): stranger2 received no agent reply"
+
+note "== all chat-authz upgrade assertions passed =="
+note "project_id=$project_id runtime_id=$machine_id container=$container_id room_pre=$s1_room room_new=$new_room"
