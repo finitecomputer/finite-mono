@@ -115,6 +115,8 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 "scripts/production_cd_setup.py",
                 "scripts/verify-production-cd-setup",
                 "scripts/tests/test_production_cd_setup.py",
+                "scripts/production_deploy.py",
+                "scripts/tests/test_production_deploy.py",
             ),
             {"run_nix_checks"},
         )
@@ -127,6 +129,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(value, "false")
             else:
                 self.assertEqual(value, "true", key)
+
+    def test_non_ci_workflow_selects_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(".github/workflows/production-deploy.yml"),
+            {"run_nix_checks"},
+        )
 
     def test_unknown_root_file_selects_every_active_harness(self) -> None:
         values = selection_for("pnpm-workspace.yaml")
@@ -292,17 +300,15 @@ class CiHarnessSelectionTests(unittest.TestCase):
             else:
                 self.assertEqual(value, "true", key)
 
-    def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
-        args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
+    def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
+        args = argparse.Namespace(changed_files=[".github/workflows/production-deploy.yml"])
         selection, _reason, paths = select_harnesses.select_harnesses(args)
-        values = selection.values()
 
-        self.assertEqual(paths, [".github/workflows/README.md"])
-        for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+        self.assertEqual(paths, [".github/workflows/production-deploy.yml"])
+        self.assertEqual(
+            {key for key, value in selection.values().items() if value == "true"},
+            {"run_nix_checks"},
+        )
 
     def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
         prefixed = argparse.Namespace(changed_files=["./justfile"])
