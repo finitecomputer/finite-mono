@@ -87,6 +87,16 @@ pub struct DaemonConfig {
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
     pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+    /// Welcome-allowlist seed derived for the supervised Finite Chat sidecar
+    /// (`finitechat hermes serve`) from the Core-injected
+    /// `FINITECHAT_OWNER_NPUBS`. The sidecar is spawned by agentd, not by
+    /// `run_hermes_gateway.sh`, so the gateway script's
+    /// `FINITECHAT_WELCOME_ALLOWLIST` export never reaches it; without this
+    /// derivation an owner-locked runtime would still auto-accept stranger
+    /// Welcomes. `None` when an explicit `FINITECHAT_WELCOME_ALLOWLIST` is
+    /// already set (the sidecar inherits it) or when no owner list exists
+    /// (legacy allow-all).
+    pub sidecar_welcome_allowlist: Option<String>,
     /// How long startup waits for the Finite Chat bridge to serve readiness
     /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
     /// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides it.
@@ -184,6 +194,12 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             )?,
+            sidecar_welcome_allowlist: sidecar_welcome_allowlist_from_values(
+                std::env::var("FINITECHAT_WELCOME_ALLOWLIST")
+                    .ok()
+                    .as_deref(),
+                std::env::var("FINITECHAT_OWNER_NPUBS").ok().as_deref(),
+            ),
             bridge_ready_timeout: bridge_ready_timeout_from_value(
                 std::env::var(BRIDGE_READY_TIMEOUT_ENV).ok().as_deref(),
             )?,
@@ -1059,7 +1075,26 @@ fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
     Ok(DeviceRef::new(config.account_id, config.device_id))
 }
 
+fn sidecar_welcome_allowlist_from_values(
+    welcome_allowlist: Option<&str>,
+    owner_npubs: Option<&str>,
+) -> Option<String> {
+    // An explicit sidecar allowlist is inherited by the sidecar unchanged;
+    // nothing to derive.
+    if welcome_allowlist.is_some_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    owner_npubs
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
+    let mut environment = BTreeMap::new();
+    if let Some(allowlist) = &config.sidecar_welcome_allowlist {
+        environment.insert("FINITECHAT_WELCOME_ALLOWLIST".to_owned(), allowlist.clone());
+    }
     ProcessSpec {
         name: "finitechat",
         program: config.finitechat_bin.clone(),
@@ -1078,7 +1113,7 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
                 .to_string(),
             "--json".to_owned(),
         ],
-        environment: BTreeMap::new(),
+        environment,
     }
 }
 
@@ -1313,6 +1348,7 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             specialization_bundle: None,
+            sidecar_welcome_allowlist: None,
             bridge_ready_timeout: Duration::from_secs(1),
         };
         clear_boot_scoped_health_evidence(&config);
@@ -1327,6 +1363,59 @@ mod tests {
         clear_boot_scoped_health_evidence(&config);
         config.agent_home = home.path().join("missing-agent-home");
         clear_boot_scoped_health_evidence(&config);
+    }
+
+    #[test]
+    fn sidecar_welcome_allowlist_derives_from_owner_npubs_only_when_unset() {
+        let owner = "a".repeat(64);
+        assert_eq!(
+            sidecar_welcome_allowlist_from_values(None, Some(&owner)),
+            Some(owner.clone())
+        );
+        // An explicit sidecar allowlist wins and is inherited unchanged.
+        assert_eq!(
+            sidecar_welcome_allowlist_from_values(Some("b".repeat(64).as_str()), Some(&owner)),
+            None
+        );
+        // No owner list: legacy allow-all, nothing injected.
+        assert_eq!(sidecar_welcome_allowlist_from_values(None, None), None);
+        assert_eq!(
+            sidecar_welcome_allowlist_from_values(None, Some("  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn sidecar_spec_injects_derived_welcome_allowlist() {
+        let owner = "c".repeat(64);
+        let mut config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/bin/finitechat"),
+            prepare_command: PathBuf::from("/bin/true"),
+            hermes_command: PathBuf::from("/bin/true"),
+            hermes_probe_python: PathBuf::from("python"),
+            hermes_probe_script: PathBuf::from("/opt/probe_hermes_vision.py"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            specialization_bundle: None,
+            sidecar_welcome_allowlist: Some(owner.clone()),
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        let spec = sidecar_spec(&config);
+        assert_eq!(
+            spec.environment.get("FINITECHAT_WELCOME_ALLOWLIST"),
+            Some(&owner)
+        );
+        config.sidecar_welcome_allowlist = None;
+        assert!(
+            !sidecar_spec(&config)
+                .environment
+                .contains_key("FINITECHAT_WELCOME_ALLOWLIST")
+        );
     }
 
     #[test]

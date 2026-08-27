@@ -85,8 +85,13 @@ if [[ -n "${FINITECHAT_OWNER_NPUBS:-}" ]]; then
     # allowlist mode must actively unset it here rather than rely on a
     # default change.
     export FINITECHAT_ALLOWED_USERS="$FINITECHAT_OWNER_NPUBS"
-    # The chat sidecar seeds its Welcome allowlist from this at boot; it
-    # accepts the same comma-separated 64-hex (or npub1…) form.
+    # The gateway-side seed for the chat Welcome allowlist. Under the
+    # production topology finite-agentd spawns the chat sidecar
+    # (`finitechat hermes serve`) itself and never sees this export, so
+    # agentd independently derives the sidecar's FINITECHAT_WELCOME_ALLOWLIST
+    # from FINITECHAT_OWNER_NPUBS (finite-agentd/src/daemon.rs
+    # sidecar_welcome_allowlist_from_values). This export still covers any
+    # sidecar launched under this script's own process tree.
     export FINITECHAT_WELCOME_ALLOWLIST="$FINITECHAT_OWNER_NPUBS"
     unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
 else
