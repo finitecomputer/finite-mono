@@ -163,6 +163,11 @@ struct CachedReadiness {
 pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 1_200;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
 
+/// Cap on tracked client buckets; past it, each check sweeps expired
+/// windows so a spray of spoofed/one-shot IPs cannot grow the map without
+/// bound.
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
+
 /// Hand-rolled fixed-window per-IP rate limiter for the public mutating
 /// routes (KeyPackages, pairing sessions, uploads, push-wake drains). A
 /// `Mutex<HashMap<IpAddr, (window_start, count)>>` is enough at the current
@@ -171,6 +176,7 @@ pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
 pub(crate) struct PublicRouteRateLimiter {
     max_requests: u32,
     window: Duration,
+    max_entries: usize,
     windows: Mutex<HashMap<IpAddr, (Instant, u32)>>,
 }
 
@@ -179,6 +185,7 @@ impl PublicRouteRateLimiter {
         Self {
             max_requests,
             window: Duration::from_secs(window_seconds),
+            max_entries: MAX_RATE_LIMIT_ENTRIES,
             windows: Mutex::new(HashMap::new()),
         }
     }
@@ -190,6 +197,9 @@ impl PublicRouteRateLimiter {
             .windows
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if windows.len() >= self.max_entries {
+            windows.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        }
         match windows.get_mut(&ip) {
             Some((started, count)) if now.duration_since(*started) < self.window => {
                 if *count >= self.max_requests {
@@ -4540,6 +4550,47 @@ fn key_package_claim_inventory_records(
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::PublicRouteRateLimiter;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    fn len(limiter: &PublicRouteRateLimiter) -> usize {
+        limiter.windows.lock().expect("windows").len()
+    }
+
+    #[test]
+    fn expired_windows_are_evicted_once_the_map_hits_the_cap() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 0);
+        limiter.max_entries = 2;
+
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        assert_eq!(len(&limiter), 2);
+        // The third distinct IP triggers the sweep; with a zero-length window
+        // every entry is stale, so the map shrinks instead of growing.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 1);
+    }
+
+    #[test]
+    fn live_windows_survive_the_sweep() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 60);
+        limiter.max_entries = 2;
+
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        // All entries are live, so the sweep evicts nothing and the cap is a
+        // soft bound for genuinely concurrent clients.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 3);
+    }
 }
 
 #[cfg(test)]

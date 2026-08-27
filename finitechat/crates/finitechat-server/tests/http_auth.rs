@@ -290,7 +290,7 @@ async fn rate_limit_tracks_client_ips_independently() {
     )
     .await;
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
-    // A different X-Forwarded-For first hop has its own allowance.
+    // A different client IP has its own allowance.
     let other_ip = post_raw(
         app,
         "/key-packages/inventory",
@@ -300,6 +300,50 @@ async fn rate_limit_tracks_client_ips_independently() {
     )
     .await;
     assert_eq!(other_ip.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn rate_limit_ignores_spoofed_first_hops_of_the_forwarded_header() {
+    let state = HttpServerState::default().with_rate_limit(1, 60);
+    let app = http_router(state);
+    let inventory = KeyPackageInventoryRequest {
+        owner: MemberId::new(b"inventory-owner".to_vec()),
+    };
+    let body = serde_json::to_vec(&inventory).expect("json body");
+
+    // The harness drives the router in-process, so the peer resolves to
+    // loopback and X-Forwarded-For is trusted — as it is behind host-local
+    // Caddy, which appends the observed client address as the LAST hop.
+    let first = post_raw(
+        app.clone(),
+        "/key-packages/inventory",
+        body.clone(),
+        None,
+        Some("198.51.100.1, 203.0.113.9"),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    // A fresh spoofed first hop must not buy a fresh bucket: the last hop
+    // (the address the proxy observed) is what keys the limiter.
+    let spoofed = post_raw(
+        app.clone(),
+        "/key-packages/inventory",
+        body.clone(),
+        None,
+        Some("198.51.100.2, 203.0.113.9"),
+    )
+    .await;
+    assert_eq!(spoofed.status(), StatusCode::TOO_MANY_REQUESTS);
+    // A genuinely different client (different last hop) still has allowance.
+    let other_client = post_raw(
+        app,
+        "/key-packages/inventory",
+        body,
+        None,
+        Some("198.51.100.1, 203.0.113.10"),
+    )
+    .await;
+    assert_eq!(other_client.status(), StatusCode::OK);
 }
 
 #[tokio::test]

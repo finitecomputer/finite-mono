@@ -140,27 +140,75 @@ async fn rate_limit_public_routes(
     (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response()
 }
 
-/// Client IP behind the edge proxy: the first X-Forwarded-For hop when
-/// present, else the direct peer address.
+/// Client IP for rate limiting. The edge proxy (Caddy) is host-local, so
+/// X-Forwarded-For is only trusted when the direct peer is loopback; the
+/// trusted value is the LAST hop, the address Caddy observed and appended —
+/// the first hop is attacker-controlled whenever the client supplies the
+/// header. A non-loopback peer is the client itself; XFF is ignored.
 fn client_ip(request: &Request) -> IpAddr {
-    if let Some(value) = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        && let Some(first) = value
-            .split(',')
-            .next()
-            .map(str::trim)
-            .filter(|hop| !hop.is_empty())
-        && let Ok(ip) = first.parse()
-    {
-        return ip;
+    client_ip_from(
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip()),
+        request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+fn client_ip_from(peer: Option<IpAddr>, x_forwarded_for: Option<&str>) -> IpAddr {
+    let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if !peer.is_loopback() {
+        return peer;
     }
-    request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    x_forwarded_for
+        .and_then(|value| value.split(',').next_back())
+        .map(str::trim)
+        .filter(|hop| !hop.is_empty())
+        .and_then(|hop| hop.parse().ok())
+        .unwrap_or(peer)
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::client_ip_from;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn loopback_peer_trusts_only_the_last_forwarded_hop() {
+        // Caddy appends the observed peer to any client-supplied header, so
+        // the last hop is the real client even when the first is spoofed.
+        assert_eq!(
+            client_ip_from(
+                Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Some("198.51.100.1, 203.0.113.9"),
+            ),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))
+        );
+    }
+
+    #[test]
+    fn non_loopback_peer_ignores_forwarded_header() {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+        assert_eq!(client_ip_from(Some(peer), Some("203.0.113.9")), peer);
+        assert_eq!(client_ip_from(Some(peer), None), peer);
+    }
+
+    #[test]
+    fn loopback_peer_without_header_uses_peer() {
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), None),
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        );
+        // An unparsable header falls back to the peer rather than a fresh
+        // bucket per garbage value.
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some("not-an-ip")),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
