@@ -30,3 +30,4 @@ runbook-facts-contract:
 # Production deploy conductor manifest/classifier contract.
 production-deploy-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_production_deploy.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_production_cd_setup.py'

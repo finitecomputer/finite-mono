@@ -11,6 +11,8 @@ from unittest.mock import patch
 from scripts import production_deploy
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
 VALID_MANIFEST = {
     "environment": "production",
     "scope": "lat1-nixos",
@@ -181,6 +183,20 @@ class ProductionDeployTests(unittest.TestCase):
                 )
             self.assertEqual(exit_code, 2)
             self.assertFalse(output_path.exists())
+
+    def test_workflows_keep_mvp_deploy_conductor_shape(self) -> None:
+        deploy = (ROOT / ".github/workflows/production-deploy.yml").read_text(
+            encoding="utf-8"
+        )
+        plan = (ROOT / ".github/workflows/production-deploy-plan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("environment: production", deploy)
+        self.assertIn("if: needs.prepare.outputs.mutation_enabled == 'true'", deploy)
+        self.assertIn("Stage status collector on lat1", deploy)
+        self.assertIn("finite-status-before.json", deploy)
+        self.assertIn("python3 -m json.tool", deploy)
+        self.assertNotIn("require-production-disabled", plan)
 
 
 if __name__ == "__main__":
