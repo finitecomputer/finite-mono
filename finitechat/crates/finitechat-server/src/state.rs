@@ -182,6 +182,11 @@ pub struct HttpServerState {
     /// Canonical externally reachable origin used in durable blob references.
     /// Request-derived hosts remain the local-development fallback only.
     public_url: Option<String>,
+    /// Mixed-version rollout gate for NIP-98 request auth on account-scoped
+    /// routes. When false, requests without an `Authorization` header are
+    /// still accepted (old clients); a present-but-invalid header is always
+    /// rejected. When true, a missing header is rejected too.
+    require_signed_requests: bool,
     ops_since_snapshot: Arc<Mutex<u64>>,
     /// True while a snapshot persist runs on its background thread; op
     /// triggers that land in the meantime skip instead of stacking threads.
@@ -277,6 +282,7 @@ impl HttpServerState {
             blob_meta: Arc::new(Mutex::new(BTreeMap::new())),
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
@@ -291,6 +297,19 @@ impl HttpServerState {
     ) -> Result<Self, HttpServerConfigurationError> {
         self.public_url = Some(normalize_public_url(public_url.as_ref())?);
         Ok(self)
+    }
+
+    pub fn with_require_signed_requests(mut self, require_signed_requests: bool) -> Self {
+        self.require_signed_requests = require_signed_requests;
+        self
+    }
+
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
+    }
+
+    pub(crate) fn require_signed_requests(&self) -> bool {
+        self.require_signed_requests
     }
 
     pub fn from_sqlite_path(path: impl AsRef<Path>) -> Result<Self, DurableStoreError> {
@@ -377,6 +396,7 @@ impl HttpServerState {
             blob_meta: Arc::new(Mutex::new(blob_meta)),
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),

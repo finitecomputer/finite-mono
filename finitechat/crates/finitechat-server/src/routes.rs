@@ -42,6 +42,7 @@ use finitechat_proto::{
 };
 use serde::Serialize;
 
+use crate::auth::SignedJson;
 use crate::state::{
     HttpServerState, READINESS_BUDGET_MILLIS, ReadinessCheckResult, ServerReadiness,
     SyncStreamCursors, SyncStreamInboxCursor, SyncStreamLoop, SyncStreamRoomCursor,
@@ -238,7 +239,7 @@ fn non_empty_build_value(value: Option<&'static str>) -> Option<String> {
 
 async fn append_application_event(
     State(state): State<HttpServerState>,
-    Json(request): Json<AppendApplicationEventRequest>,
+    SignedJson(request): SignedJson<AppendApplicationEventRequest>,
 ) -> Result<Json<EventAccepted>, ServerHttpError> {
     let response = state.append_application_event(request)?;
     state.note_op_for_snapshot();
@@ -261,7 +262,7 @@ async fn get_application_effect_counts(
 
 async fn append_ephemeral_activity(
     State(state): State<HttpServerState>,
-    Json(request): Json<AppendEphemeralActivityRequest>,
+    SignedJson(request): SignedJson<AppendEphemeralActivityRequest>,
 ) -> Result<Json<EphemeralActivityAccepted>, ServerHttpError> {
     let response = state.append_ephemeral_activity(request)?;
     state.wake.notify_waiters();
@@ -270,7 +271,7 @@ async fn append_ephemeral_activity(
 
 async fn get_ephemeral_activities(
     State(state): State<HttpServerState>,
-    Json(request): Json<GetEphemeralActivitiesRequest>,
+    SignedJson(request): SignedJson<GetEphemeralActivitiesRequest>,
 ) -> Result<Json<GetEphemeralActivitiesResponse>, ServerHttpError> {
     Ok(Json(state.get_ephemeral_activities(request)?))
 }
@@ -306,7 +307,7 @@ async fn download_blob_object(
 
 async fn submit_commit(
     State(state): State<HttpServerState>,
-    Json(request): Json<SubmitCommitRequest>,
+    SignedJson(request): SignedJson<SubmitCommitRequest>,
 ) -> Result<Json<CommitAccepted>, ServerHttpError> {
     let response = state.submit_commit(request)?;
     state.note_op_for_snapshot();
@@ -434,7 +435,7 @@ async fn sync_wait(
 
 async fn revoke_device(
     State(state): State<HttpServerState>,
-    Json(request): Json<RevokeDeviceRequest>,
+    SignedJson(request): SignedJson<RevokeDeviceRequest>,
 ) -> Result<Json<RevokeDeviceResponse>, ServerHttpError> {
     let response = state.revoke_device(request)?;
     Ok(Json(response))
@@ -442,7 +443,7 @@ async fn revoke_device(
 
 async fn observe_device_liveness(
     State(state): State<HttpServerState>,
-    Json(request): Json<ObserveDeviceLivenessRequest>,
+    SignedJson(request): SignedJson<ObserveDeviceLivenessRequest>,
 ) -> Result<Json<DeviceLivenessRecord>, ServerHttpError> {
     let response = state.observe_device_liveness(request)?;
     Ok(Json(response))
@@ -450,7 +451,7 @@ async fn observe_device_liveness(
 
 async fn get_device_liveness(
     State(state): State<HttpServerState>,
-    Json(request): Json<GetDeviceLivenessRequest>,
+    SignedJson(request): SignedJson<GetDeviceLivenessRequest>,
 ) -> Result<Json<GetDeviceLivenessResponse>, ServerHttpError> {
     let response = state.get_device_liveness(request)?;
     Ok(Json(response))
@@ -458,7 +459,7 @@ async fn get_device_liveness(
 
 async fn put_nostr_profile(
     State(state): State<HttpServerState>,
-    Json(request): Json<PutNostrProfileRequest>,
+    SignedJson(request): SignedJson<PutNostrProfileRequest>,
 ) -> Result<Json<PutNostrProfileResponse>, ServerHttpError> {
     let response = state.put_nostr_profile(request)?;
     Ok(Json(response))
@@ -579,7 +580,7 @@ async fn expire_pairing_session(
 
 async fn save_account_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<SaveAccountRoomRequest>,
+    SignedJson(request): SignedJson<SaveAccountRoomRequest>,
 ) -> Result<Json<SaveAccountRoomResponse>, ServerHttpError> {
     let response = state.save_account_room(request)?;
     Ok(Json(response))
@@ -587,7 +588,7 @@ async fn save_account_room(
 
 async fn bootstrap_account_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<BootstrapAccountRoomRequest>,
+    SignedJson(request): SignedJson<BootstrapAccountRoomRequest>,
 ) -> Result<Json<BootstrapAccountRoomResponse>, ServerHttpError> {
     let response = state.bootstrap_account_room(request)?;
     Ok(Json(response))
@@ -595,7 +596,7 @@ async fn bootstrap_account_room(
 
 async fn list_account_rooms(
     State(state): State<HttpServerState>,
-    Json(request): Json<ListAccountRoomDirectoryRequest>,
+    SignedJson(request): SignedJson<ListAccountRoomDirectoryRequest>,
 ) -> Result<Json<ListAccountRoomDirectoryResponse>, ServerHttpError> {
     let page = state.list_account_rooms(request)?;
     Ok(Json(page))
@@ -603,7 +604,7 @@ async fn list_account_rooms(
 
 async fn register_push_token(
     State(state): State<HttpServerState>,
-    Json(request): Json<RegisterPushTokenRequest>,
+    SignedJson(request): SignedJson<RegisterPushTokenRequest>,
 ) -> Result<Json<RegisterPushTokenResponse>, ServerHttpError> {
     let response = state.register_push_token(request)?;
     Ok(Json(response))
@@ -611,7 +612,7 @@ async fn register_push_token(
 
 async fn remove_push_token(
     State(state): State<HttpServerState>,
-    Json(request): Json<RemovePushTokenRequest>,
+    SignedJson(request): SignedJson<RemovePushTokenRequest>,
 ) -> Result<Json<RemovePushTokenResponse>, ServerHttpError> {
     let response = state.remove_push_token(request)?;
     Ok(Json(response))
@@ -643,7 +644,7 @@ async fn fail_push_wake(
 
 async fn leave_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<LeaveRoomRequest>,
+    SignedJson(request): SignedJson<LeaveRoomRequest>,
 ) -> Result<Json<LeaveRoomResponse>, ServerHttpError> {
     let response = state.leave_room(request)?;
     Ok(Json(response))
@@ -651,7 +652,7 @@ async fn leave_room(
 
 async fn update_room_admins(
     State(state): State<HttpServerState>,
-    Json(request): Json<UpdateRoomAdminsRequest>,
+    SignedJson(request): SignedJson<UpdateRoomAdminsRequest>,
 ) -> Result<Json<UpdateRoomAdminsResponse>, ServerHttpError> {
     let response = state.update_room_admins(request)?;
     Ok(Json(response))
@@ -659,7 +660,7 @@ async fn update_room_admins(
 
 async fn report_invalid_commit(
     State(state): State<HttpServerState>,
-    Json(request): Json<ReportInvalidCommitRequest>,
+    SignedJson(request): SignedJson<ReportInvalidCommitRequest>,
 ) -> Result<Json<ReportInvalidCommitResponse>, ServerHttpError> {
     let response = state.report_invalid_commit(request)?;
     Ok(Json(response))

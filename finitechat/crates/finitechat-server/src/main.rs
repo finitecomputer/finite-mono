@@ -60,6 +60,9 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(public_url) = public_url {
         state = state.with_public_url(public_url)?;
     }
+    if options.require_signed_requests {
+        state = state.with_require_signed_requests(true);
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("finitechat-server: listening on http://{addr}");
     axum::serve(listener, http_router(state)).await?;
@@ -92,6 +95,7 @@ struct ServeOptions {
     addr: String,
     sqlite_path: Option<String>,
     public_url: Option<String>,
+    require_signed_requests: bool,
 }
 
 impl ServeOptions {
@@ -131,6 +135,12 @@ impl ServeOptions {
             addr: addr.unwrap_or_else(|| "127.0.0.1:8787".to_owned()),
             sqlite_path,
             public_url,
+            // Mixed-version gate: old deployed clients send no NIP-98
+            // Authorization header, so signed requests are opt-in until the
+            // fleet upgrades.
+            require_signed_requests: env::var("FINITECHAT_REQUIRE_SIGNED_REQUESTS")
+                .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
+                .unwrap_or(false),
         })
     }
 }
