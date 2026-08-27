@@ -10,6 +10,8 @@ permissions:
   actions: read
   contents: read
   deployments: write
+env:
+  CACHIX_CACHE_NAME: finite
 jobs:
   prepare:
     name: Prepare production deploy
@@ -25,6 +27,11 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'production' || github.sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Resolve source and comparison commits
         id: inputs
         env:
@@ -142,6 +149,11 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Download deployment plan
         uses: actions/download-artifact@v4
         with:

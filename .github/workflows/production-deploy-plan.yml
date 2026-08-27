@@ -7,6 +7,8 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+env:
+  CACHIX_CACHE_NAME: finite
 jobs:
   plan:
     name: Plan production deploy
@@ -17,6 +19,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Build deployment plan
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

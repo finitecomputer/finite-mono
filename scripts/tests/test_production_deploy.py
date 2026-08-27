@@ -191,11 +191,21 @@ class ProductionDeployTests(unittest.TestCase):
         plan = (ROOT / ".github/workflows/production-deploy-plan.yml").read_text(
             encoding="utf-8"
         )
+        lat1_closure = (ROOT / ".github/workflows/lat1-nixos-closure.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("environment: production", deploy)
         self.assertIn("if: needs.prepare.outputs.mutation_enabled == 'true'", deploy)
         self.assertIn("ci_push_before=\"\"", deploy)
         self.assertIn("git merge-base --is-ancestor \"$source_sha\" origin/main", deploy)
         self.assertIn("--push-before \"$ci_push_before\"", deploy)
+        self.assertIn("CACHIX_CACHE_NAME: finite", deploy)
+        self.assertGreaterEqual(deploy.count("Configure Cachix read-only cache"), 2)
+        self.assertGreaterEqual(deploy.count("skipPush: true"), 2)
+        self.assertIn("Configure Cachix read-only cache", plan)
+        self.assertIn("skipPush: true", plan)
+        self.assertIn("Configure Cachix read-only cache", lat1_closure)
+        self.assertIn("skipPush: true", lat1_closure)
         self.assertIn("Stage status collector on lat1", deploy)
         self.assertIn("finite-status-before.json", deploy)
         self.assertIn("python3 -m json.tool", deploy)
