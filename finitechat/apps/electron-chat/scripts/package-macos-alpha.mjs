@@ -23,9 +23,9 @@ const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
 // electron-updater (generic provider) feed: the rolling alias release hosts
 // latest-mac.yml, whose entries pin artifact URLs to the immutable
 // finitechat/vX.Y.Z release. Keep in sync with
-// the future Electron release workflow and
+// .github/workflows/release-finitechat.yml and
 // scripts/generate-macos-update-manifest.mjs.
-const updateFeedUrl = "https://github.com/finitecomputer/finite-releases/releases/download/finitechat-latest/";
+const updateFeedUrl = "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/";
 
 requireDirectory(electronApp, "Electron runtime");
 requireExecutable(daemonBinary, "finitechatd release binary");

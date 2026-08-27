@@ -40,7 +40,7 @@ Current production service:
 Repository and releases:
 
 - Source: `https://github.com/finitecomputer/finite-mono/tree/main/finite-brain`
-- Release downloads: `https://github.com/finitecomputer/finite-releases/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
+- Release downloads: `https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
 
 ## Crate Layout
 

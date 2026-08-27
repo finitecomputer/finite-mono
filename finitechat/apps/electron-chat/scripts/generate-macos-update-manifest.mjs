@@ -21,7 +21,7 @@ export function buildMacosUpdateManifest({ version, assetUrl, assetFile, publish
     throw new Error("Finite Chat update asset must use GitHub HTTPS");
   }
   const expectedPath =
-    `/finitecomputer/finite-releases/releases/download/finitechat/v${version}/${electronAssetName}`;
+    `/finitecomputer/finite-mono/releases/download/finitechat/v${version}/${electronAssetName}`;
   if (parsedAssetUrl.pathname !== expectedPath || parsedAssetUrl.search || parsedAssetUrl.hash) {
     throw new Error("Finite Chat update asset URL does not match the versioned release");
   }
