@@ -10137,10 +10137,17 @@ mod tests {
 
         let requests = server.join().unwrap();
         assert!(requests[0].contains("/v1/brains/brain/export"));
+        // A fresh Working Tree has no cached bootstrap, so it catches up
+        // through the bounded bootstrap instead of replaying records from 0.
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/v1/brains/brain/sync/records?after=0"))
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/records"))
         );
 
         let state = read_agent_state(&tree).unwrap();
@@ -10225,6 +10232,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([8; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/daemon.md", "# Daemon\n");
 
         let mut env = env_for(&tmp);
@@ -12835,6 +12843,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([4; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/remote.md", "# Remote\n");
 
         let mut env = env_for(&tmp);
@@ -12886,6 +12895,562 @@ mod tests {
             !requests
                 .iter()
                 .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
+        );
+    }
+
+    fn write_cached_sync_evidence(tree: &Path, latest_sequence: u64, export_grants: &[Value]) {
+        fs::create_dir_all(tree.join(".finitebrain/encrypted-sync")).unwrap();
+        let export: Value = serde_json::from_str(&export_body(export_grants)).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/encrypted-sync/export.json"),
+            &export,
+        )
+        .unwrap();
+        write_cached_bootstrap_at_cursor(tree, latest_sequence);
+    }
+
+    fn write_cached_bootstrap_at_cursor(tree: &Path, latest_sequence: u64) {
+        fs::create_dir_all(tree.join(".finitebrain/encrypted-sync")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &serde_json::json!({
+                "latestSequence": latest_sequence,
+                "objects": [],
+                "controlRecords": []
+            }),
+        )
+        .unwrap();
+    }
+
+    fn start_cached_export_incremental_sync_server(
+        ciphertext: String,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 8,
+                            "records": [{
+                                "sequence": 8,
+                                "recordEventId": "evt-remote-8",
+                                "recordType": "folder_object_revision",
+                                "folderId": "general",
+                                "objectId": "obj_remote000001",
+                                "revision": 1,
+                                "actorNpub": "npub-remote",
+                                "clientCreatedAt": "2026-06-24T20:46:36Z",
+                                "payloadJson": remote_revision_payload_json(&ciphertext),
+                                "recordEventKind": APP_SPECIFIC_KIND
+                            }],
+                            "count": 1,
+                            "hasMore": false,
+                            "nextSequence": 8
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/metadata") {
+                    (
+                        "200 OK",
+                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sync_now_with_cached_export_pulls_only_incremental_records() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let tree = setup_incremental_tree(&tmp, 7);
+        let ciphertext = remote_page_ciphertext(&folder_key, "compiled/remote.md", "# Remote\n");
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        write_cached_sync_evidence(&tree, 7, &[export_grant]);
+        let (server_url, server) = start_cached_export_incremental_sync_server(ciphertext);
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["status"], "applied-remote-records");
+        assert_eq!(json["latestSequence"], 8);
+        assert_eq!(
+            fs::read_to_string(tree.join("General/compiled/remote.md")).unwrap(),
+            "# Remote\n"
+        );
+        let tree_state = read_working_tree_state(&tree).unwrap();
+        assert_eq!(tree_state.sync.latest_sequence, 8);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/records?after=7"))
+        );
+        assert!(!requests.iter().any(|request| request.contains("/export")));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/bootstrap"))
+        );
+    }
+
+    fn start_record_grant_sync_server(
+        grant: Value,
+        ciphertext: String,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 8,
+                            "records": [{
+                                "sequence": 8,
+                                "recordEventId": "evt-grant-8",
+                                "recordType": "folder_key_grant",
+                                "folderId": "general",
+                                "objectId": null,
+                                "revision": null,
+                                "actorNpub": grant["issuerNpub"],
+                                "clientCreatedAt": "2026-06-24T20:46:36Z",
+                                "payloadJson": grant.to_string(),
+                                "recordEventKind": APP_SPECIFIC_KIND
+                            }],
+                            "count": 1,
+                            "hasMore": false,
+                            "nextSequence": 8
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/sync/bootstrap") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "latestSequence": 8,
+                            "objects": [{
+                                "folderId": "general",
+                                "objectId": "obj_remote000001",
+                                "revision": 1,
+                                "ciphertext": ciphertext,
+                                "deleted": false
+                            }],
+                            "controlRecords": []
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/metadata") {
+                    (
+                        "200 OK",
+                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sync_now_materializes_post_sync_folder_grant_from_incremental_records() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let tree = setup_incremental_tree(&tmp, 7);
+        // The member holds the Folder root but cannot read it yet; the cached
+        // export predates the grant, so no key grants are on disk.
+        let mut state = read_working_tree_state(&tree).unwrap();
+        state.folder_roots[0].can_read = false;
+        write_working_tree_state(&tree, &state).unwrap();
+        let ciphertext = remote_page_ciphertext(&folder_key, "compiled/granted.md", "# Granted\n");
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let grant = export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        write_cached_sync_evidence(&tree, 7, &[]);
+        let (server_url, server) = start_record_grant_sync_server(grant, ciphertext);
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tree.join("General/compiled/granted.md")).unwrap(),
+            "# Granted\n"
+        );
+        let tree_state = read_working_tree_state(&tree).unwrap();
+        assert_eq!(tree_state.sync.latest_sequence, 8);
+        assert!(
+            tree_state
+                .folder_roots
+                .iter()
+                .any(|root| root.folder_id == "general" && root.can_read)
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/records?after=7"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
+        );
+        assert!(!requests.iter().any(|request| request.contains("/export")));
+    }
+
+    fn start_access_change_refresh_sync_server(
+        export_grants: Vec<Value>,
+        ciphertext: String,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 8,
+                            "records": [{
+                                "sequence": 8,
+                                "recordEventId": "evt-access-8",
+                                "recordType": "brain_admin_access_change",
+                                "folderId": null,
+                                "objectId": null,
+                                "revision": null,
+                                "actorNpub": "npub-admin",
+                                "clientCreatedAt": "2026-06-24T20:46:36Z",
+                                "payloadJson": "{\"version\":\"finite-brain-admin-access-change-v1\",\"brainId\":\"brain\",\"changeId\":\"change-1\",\"action\":\"set-folder-access-mode\",\"adminNpub\":\"npub-admin\",\"createdAt\":\"2026-06-24T20:46:36Z\"}",
+                                "recordEventKind": APP_SPECIFIC_KIND
+                            }],
+                            "count": 1,
+                            "hasMore": false,
+                            "nextSequence": 8
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/sync/bootstrap") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "latestSequence": 8,
+                            "objects": [{
+                                "folderId": "general",
+                                "objectId": "obj_remote000001",
+                                "revision": 1,
+                                "ciphertext": ciphertext,
+                                "deleted": false
+                            }],
+                            "controlRecords": []
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/export") {
+                    ("200 OK", export_body(&export_grants))
+                } else if request_line.contains("/metadata") {
+                    (
+                        "200 OK",
+                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sync_now_with_cached_export_refreshes_export_after_control_record_rebootstrap() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let tree = setup_incremental_tree(&tmp, 7);
+        let ciphertext =
+            remote_page_ciphertext(&folder_key, "compiled/refreshed.md", "# Refreshed\n");
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        write_cached_sync_evidence(&tree, 7, std::slice::from_ref(&export_grant));
+        let (server_url, server) =
+            start_access_change_refresh_sync_server(vec![export_grant], ciphertext);
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["latestSequence"], 8);
+        assert_eq!(
+            fs::read_to_string(tree.join("General/compiled/refreshed.md")).unwrap(),
+            "# Refreshed\n"
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/records?after=7"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/export"))
+        );
+    }
+
+    fn start_large_records_page_sync_server(
+        records: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && started.elapsed() < Duration::from_secs(15) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                // The accepted socket inherits the listener's nonblocking
+                // mode; the multi-MB records page needs blocking writes.
+                stream.set_nonblocking(false).unwrap();
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 10,
+                            "records": records,
+                            "count": 3,
+                            "hasMore": false,
+                            "nextSequence": 10
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/metadata") {
+                    (
+                        "200 OK",
+                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sync_now_applies_records_page_larger_than_the_generic_json_cap() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let tree = setup_incremental_tree(&tmp, 7);
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        write_cached_sync_evidence(&tree, 7, std::slice::from_ref(&export_grant));
+
+        // Three ~3.8 MB pages in one records page: the response body is
+        // ~11 MB, over the generic 10 MB JSON cap that used to brick
+        // catch-up sync for large Brains.
+        let filler = "a".repeat(3_800_000);
+        let records: Vec<Value> = (1..=3u64)
+            .map(|i| {
+                let object_id = format!("obj_bigpage00000{i}");
+                let page_path = format!("compiled/big-{i}.md");
+                let markdown = format!("# Big page {i}\n\n{filler}\n");
+                let plaintext = encode_folder_object_page_plaintext(
+                    &SafeRelativePath::new("page_path", &page_path).unwrap(),
+                    &markdown,
+                )
+                .unwrap();
+                let aad = FolderObjectAad {
+                    brain_id: BrainId::new("brain").unwrap(),
+                    folder_id: FolderId::new("general").unwrap(),
+                    object_id: ObjectId::new(object_id.clone()).unwrap(),
+                    key_version: 1,
+                };
+                let ciphertext = encrypt_folder_object(&folder_key, &aad, &plaintext)
+                    .unwrap()
+                    .canonical_json();
+                serde_json::json!({
+                    "sequence": 7 + i,
+                    "recordEventId": format!("evt-big-{i}"),
+                    "recordType": "folder_object_revision",
+                    "folderId": "general",
+                    "objectId": object_id,
+                    "revision": 1,
+                    "actorNpub": "npub-remote",
+                    "clientCreatedAt": "2026-06-24T20:46:36Z",
+                    "payloadJson": remote_revision_payload_json_for_object(&object_id, &ciphertext),
+                    "recordEventKind": APP_SPECIFIC_KIND
+                })
+            })
+            .collect();
+        let (server_url, server) = start_large_records_page_sync_server(records);
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["status"], "applied-remote-records");
+        assert_eq!(json["latestSequence"], 10);
+        for i in 1..=3 {
+            let content =
+                fs::read_to_string(tree.join(format!("General/compiled/big-{i}.md"))).unwrap();
+            assert!(content.starts_with(&format!("# Big page {i}\n")));
+            assert!(content.len() > 3_800_000);
+        }
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/records?after=7"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/bootstrap"))
         );
     }
 
@@ -12974,6 +13539,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([7; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/summary.md", "# Summary\n");
 
         let mut env = env_for(&tmp);
@@ -13017,6 +13583,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([5; 32]);
         let tree = setup_incremental_tree(&tmp, 2);
+        write_cached_bootstrap_at_cursor(&tree, 2);
         let ciphertext =
             remote_page_ciphertext(&folder_key, "compiled/rebootstrap.md", "# Bootstrap\n");
 
@@ -13067,6 +13634,7 @@ mod tests {
         let agent_b_config = tmp.path().join("agent-b-config");
         let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
         let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
+        write_cached_bootstrap_at_cursor(&agent_a_tree, 0);
         let env_a = CliEnvironment {
             cwd: agent_a_tree.clone(),
             config_dir: agent_a_config.clone(),
@@ -13442,10 +14010,11 @@ mod tests {
         assert!(text.contains("conflicts: none"));
 
         let requests = server.join().unwrap();
+        // No cached bootstrap yet: the fresh tree catches up via bootstrap.
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/v1/brains/brain/sync/records?after=0"))
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
         );
     }
 
