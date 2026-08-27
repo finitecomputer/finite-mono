@@ -1,5 +1,4 @@
 name: Hermes runtime smoke
-
 # Ported from finitechat's pre-mono Docker smoke. It now builds and proves the
 # one canonical finite-mono Agent Runtime image. This workflow never publishes
 # a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
@@ -8,9 +7,7 @@ name: Hermes runtime smoke
 # Dispatch-only while the production-image proof stays explicit. Keep the
 # production-image proof explicit until it has enough green history to become
 # a normal main-branch gate.
-
 run-name: Hermes runtime smoke (${{ github.ref_name }})
-
 on:
   workflow_dispatch:
     inputs:
@@ -24,17 +21,13 @@ on:
         required: false
         type: boolean
         default: true
-
 env:
   CACHIX_CACHE_NAME: finite
   FINITE_HERMES_AGENT_VERSION: "0.20.0"
-  NIX_CONFIG: |
-    access-tokens = github.com=${{ github.token }}
-
+  USER: runner
 permissions:
   contents: read
   id-token: write
-
 jobs:
   docker-runtime-smoke:
     name: Docker runtime smoke
@@ -49,9 +42,7 @@ jobs:
       - uses: depot/setup-action@v1
         with:
           oidc: true
-
       - uses: DeterminateSystems/nix-installer-action@v16
-
       - name: Require Cachix token
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -61,23 +52,19 @@ jobs:
             echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
             exit 1
           fi
-
       - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Set runtime image ref
         run: |
           image_ref="finite-agent-runtime-smoke:${GITHUB_SHA}"
           echo "RUNTIME_IMAGE_REF=$image_ref" >> "$GITHUB_ENV"
           echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
-
       - name: Build canonical runtime image
         env:
           DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
@@ -93,7 +80,6 @@ jobs:
             --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
             --platform linux/amd64 \
             --report target/hermes-docker-smoke/image-build.json
-
       - name: Durable home Docker smoke
         if: ${{ inputs.durable_home_docker_smoke }}
         env:
@@ -110,7 +96,6 @@ jobs:
           scripts/hermes-durable-home-docker-smoke.py \
             --image "$RUNTIME_IMAGE_REF" \
             --report target/hermes-durable-home-docker-smoke/report.json
-
       - name: In-flight chat interruption and restore smoke
         if: ${{ inputs.chat_interruption_smoke }}
         run: |
@@ -120,11 +105,9 @@ jobs:
             scripts/hermes-chat-interruption-docker-smoke.py \
             --image "$RUNTIME_IMAGE_REF" \
             --report target/hermes-chat-interruption-docker-smoke/report.json
-
       - name: Build hardening evidence audit
         if: always()
         run: scripts/hermes-hardening-audit.py --report target/hermes-hardening-audit.json
-
       - name: Prepare Docker runtime smoke artifacts
         if: always()
         run: |
@@ -132,7 +115,6 @@ jobs:
             sudo chown -R "$(id -u):$(id -g)" target/hermes-docker-smoke
             chmod -R u+rwX,go+rX target/hermes-docker-smoke
           fi
-
       - name: Upload Docker runtime smoke report
         if: always()
         uses: actions/upload-artifact@v4

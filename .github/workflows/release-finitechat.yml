@@ -1,271 +1,113 @@
-name: Release finitechat
-
-# Component-scoped release: tag `finitechat/vX.Y.Z` on finite-mono.
-# Asset names are a product contract; do not rename.
-# Because this repo hosts releases for several components, the repo-wide
-# `releases/latest` URL is meaningless — installers use the rolling alias
-# release `finitechat-latest`, whose assets this workflow refreshes on every
-# versioned release:
-#   https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/<asset>
-# (Hard-cut decision 2026-07-08: no mirror releases to the archived legacy
-# repos; installers point only at finite-mono.)
-
+name: Release finitechat CLI
 on:
   push:
-    tags:
-      - "finitechat/v*"
-
-permissions:
-  contents: write
-
+    tags: ["finitechat/v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after all build rows pass
+        required: true
+        default: false
+        type: boolean
+      alias_only:
+        description: Repoint the rolling alias from existing versioned assets without rebuilding
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Historical component tag for alias-only promotion; leave blank for a normal release
+        required: false
+        default: ""
+concurrency:
+  group: release-finitechat
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.alias_only != true
+    runs-on: depot-ubuntu-24.04
     strategy:
       fail-fast: false
+      # This delivery contract currently publishes Linux CLI assets only.
+      # Restore Darwin/Electron rows with a dedicated macOS release lane.
       matrix:
         include:
-          - runs_on: ubuntu-latest
-            asset_name: finitechat-linux-x86_64
+          - asset_name: finitechat-linux-x86_64
             target: x86_64-unknown-linux-gnu
-          - runs_on: macos-14
-            asset_name: finitechat-macos-aarch64
-            target: aarch64-apple-darwin
-          - runs_on: macos-14
-            asset_name: finitechat-macos-x86_64
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
-
+      - name: Validate component version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            finitechat/v*) version="${GITHUB_REF_NAME#finitechat/v}" ;;
+            *) echo "::error::release workflow must run at a finitechat/v* tag"; exit 1 ;;
+          esac
+          python3 scripts/delivery.py verify-component-version --component finitechat --version "$version"
       - name: Install Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           rustup target add "${{ matrix.target }}"
-
-      - name: Build finitechat
+      - name: Build finitechat CLI
         run: cargo build --locked --release --target "${{ matrix.target }}" --package finitechat-cli --bin finitechat
-
-      - name: Package finitechat
-        shell: bash
+      - name: Package finitechat CLI
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/finitechat" dist/finitechat
-          tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" finitechat
-          shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
-
+          cp "target/$TARGET/release/finitechat" dist/finitechat
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist -czf "$ASSET_NAME.tar.gz" finitechat
+          sha256sum "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.tar.gz.sha256
-
-  electron:
-    name: Signed + notarized Electron (macOS arm64)
-    runs-on: macos-14
-    env:
-      FINITECHAT_CODESIGN_IDENTITY: "Developer ID Application: Paul Miller (JBLHZ83X6T)"
-      ELECTRON_APP_PATH: finitechat/apps/electron-chat/release/Finite Chat.app
-      ELECTRON_ASSET_PATH: finitechat-electron-macos-aarch64.zip
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Verify release version
-        run: |
-          version="$(node -p "require('./finitechat/apps/electron-chat/package.json').version")"
-          test "$GITHUB_REF_NAME" = "finitechat/v${version}"
-
-      - name: Import Developer ID certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
-        run: |
-          test -n "$CERTIFICATE_BASE64"
-          test -n "$CERTIFICATE_PASSWORD"
-          signing_keychain_path="$RUNNER_TEMP/finitechat-signing.keychain-db"
-          signing_certificate_path="$RUNNER_TEMP/finitechat-developer-id.p12"
-          echo "FINITECHAT_CODESIGN_KEYCHAIN=$signing_keychain_path" >> "$GITHUB_ENV"
-          echo "SIGNING_CERTIFICATE_PATH=$signing_certificate_path" >> "$GITHUB_ENV"
-          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$signing_certificate_path"
-          keychain_password="$(openssl rand -hex 24)"
-          security create-keychain -p "$keychain_password" "$signing_keychain_path"
-          security set-keychain-settings -lut 21600 "$signing_keychain_path"
-          security unlock-keychain -p "$keychain_password" "$signing_keychain_path"
-          security import "$signing_certificate_path" \
-            -P "$CERTIFICATE_PASSWORD" \
-            -A \
-            -t cert \
-            -f pkcs12 \
-            -k "$signing_keychain_path"
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s \
-            -k "$keychain_password" \
-            "$signing_keychain_path"
-          security list-keychains -d user -s "$signing_keychain_path"
-          security find-identity -v -p codesigning "$signing_keychain_path" \
-            | grep -F "$FINITECHAT_CODESIGN_IDENTITY"
-
-      - name: Device parity and Electron boundary gates
-        run: nix develop --command just chat-device-parity
-
-      - name: Build Developer ID-signed Electron app
-        run: nix develop --command just chat-electron-package
-
-      - name: Verify Developer ID signature
-        run: |
-          test -x "$ELECTRON_APP_PATH/Contents/Resources/finitechatd"
-          test ! -e "$ELECTRON_APP_PATH/Contents/Resources/app/dist"
-          test "$(node -p "require('./$ELECTRON_APP_PATH/Contents/Resources/app/package.json').finitechatAutoUpdate")" = true
-          ! otool -L "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" | grep -F '/nix/store/'
-          "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" --help >/dev/null
-          codesign --verify --deep --strict --verbose=2 "$ELECTRON_APP_PATH"
-          signature="$(codesign -dvv "$ELECTRON_APP_PATH" 2>&1)"
-          grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$signature"
-          grep -F 'TeamIdentifier=JBLHZ83X6T' <<<"$signature"
-          grep -F 'flags=0x10000(runtime)' <<<"$signature"
-          entitlements="$(codesign -d --entitlements - "$ELECTRON_APP_PATH" 2>/dev/null)"
-          grep -F 'com.apple.security.cs.allow-jit' <<<"$entitlements"
-          grep -F 'com.apple.security.device.audio-input' <<<"$entitlements"
-          if grep -E 'com\.apple\.security\.device\.(bluetooth|camera|print|usb)' <<<"$entitlements"; then
-            exit 1
-          fi
-          if grep -F 'com.apple.security.personal-information' <<<"$entitlements"; then
-            exit 1
-          fi
-          test "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$ELECTRON_APP_PATH/Contents/Info.plist")" = \
-            'Finite Chat uses the microphone when you choose to use voice features.'
-          daemon_signature="$(codesign -dvv "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" 2>&1)"
-          grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$daemon_signature"
-          grep -F 'TeamIdentifier=JBLHZ83X6T' <<<"$daemon_signature"
-          grep -F 'flags=0x10000(runtime)' <<<"$daemon_signature"
-          test -f "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
-          test -f "$ELECTRON_APP_PATH/Contents/Resources/app/electron/vendor/electron-updater.cjs"
-          grep -F 'provider: generic' "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
-          grep -F 'url: https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/' \
-            "$ELECTRON_APP_PATH/Contents/Resources/app-update.yml"
-
-      - name: Submit to Apple and staple ticket
-        env:
-          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          test -n "$APPLE_ID"
-          test -n "$APPLE_APP_PASSWORD"
-          test "$APPLE_TEAM_ID" = 'JBLHZ83X6T'
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$ELECTRON_APP_PATH" \
-            notarization-upload.zip
-          xcrun notarytool submit notarization-upload.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait \
-            --output-format json > notarization-result.json
-          jq -e '.status == "Accepted"' notarization-result.json
-          xcrun stapler staple "$ELECTRON_APP_PATH"
-          xcrun stapler validate "$ELECTRON_APP_PATH"
-          spctl --assess --type execute --verbose=2 "$ELECTRON_APP_PATH"
-
-      - name: Package Electron release asset
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$ELECTRON_APP_PATH" \
-            "$ELECTRON_ASSET_PATH"
-          shasum -a 256 "$ELECTRON_ASSET_PATH" > "$ELECTRON_ASSET_PATH.sha256"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: finitechat-electron-macos-aarch64
-          path: |
-            finitechat-electron-macos-aarch64.zip
-            finitechat-electron-macos-aarch64.zip.sha256
           if-no-files-found: error
-
-      - name: Remove signing material
-        if: always()
-        run: |
-          security delete-keychain "$FINITECHAT_CODESIGN_KEYCHAIN" 2>/dev/null || true
-          rm -f "$SIGNING_CERTIFICATE_PATH"
-
   publish:
-    needs:
-      - build
-      - electron
-    runs-on: ubuntu-latest
+    needs: build
+    if: vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-
-      - name: Create or update GitHub release
+      - name: Publish immutable version and rolling alias
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" \
-              --title "$tag" --generate-notes --latest=false
-          fi
-
-      - name: Generate macOS update feed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          version="$(node -p "require('./finitechat/apps/electron-chat/package.json').version")"
-          release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets,publishedAt)"
-          asset_url="$(jq -er '.assets[] | select(.name == "finitechat-electron-macos-aarch64.zip") | .url' <<<"$release_json")"
-          published_at="$(jq -er '.publishedAt' <<<"$release_json")"
-          node finitechat/apps/electron-chat/scripts/generate-macos-update-manifest.mjs \
+          version="${GITHUB_REF_NAME#finitechat/v}"
+          source_sha="$(git rev-parse HEAD)"
+          python3 scripts/delivery.py publish-release \
+            --component finitechat \
             --version "$version" \
-            --asset-url "$asset_url" \
-            --asset-file release-assets/finitechat-electron-macos-aarch64.zip \
-            --published-at "$published_at" \
-            --output release-assets/latest-mac.yml
-          grep -Fx "version: ${version}" release-assets/latest-mac.yml
-          grep -F "url: https://github.com/finitecomputer/finite-mono/releases/download/finitechat/v${version}/finitechat-electron-macos-aarch64.zip" \
-            release-assets/latest-mac.yml
-          grep -Ec '^    sha512: [A-Za-z0-9+/=]{80,}$' release-assets/latest-mac.yml >/dev/null
-          gh release upload "$tag" \
-            release-assets/latest-mac.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
-
-      - name: Refresh finitechat-latest rolling alias
+            --source-sha "$source_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --assets-dir release-assets \
+            --repository finitecomputer/finite-releases
+  promote-alias:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repoint rolling alias from verified immutable assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          alias=finitechat-latest
-          feed=release-assets/latest-mac.yml
-          notes="Rolling alias for the newest finitechat release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
-          if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$feed" -print | sort)
-            gh release upload "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release upload "$alias" "$feed" --repo "$GITHUB_REPOSITORY" --clobber
-            # nothing shipped: retire the legacy bespoke manifest asset (best-effort)
-            gh release delete-asset "$alias" finitechat-electron-macos-aarch64-releases.json \
-              --repo "$GITHUB_REPOSITORY" -y >/dev/null 2>&1 || true
-            gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
-            # best-effort: move the alias tag to this commit for provenance
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
-          else
-            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$feed" -print | sort)
-            gh release create "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" \
-              --title "finitechat (latest)" --notes "$notes" --latest=false
-            gh release upload "$alias" "$feed" --repo "$GITHUB_REPOSITORY"
-          fi
+          case "$RELEASE_TAG" in
+            finitechat/v*) version="${RELEASE_TAG#finitechat/v}" ;;
+            *) echo "::error::release_tag must be a finitechat/v* tag"; exit 1 ;;
+          esac
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          source_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          python3 scripts/delivery.py promote-release-alias \
+            --component finitechat \
+            --version "$version" \
+            --expected-source-sha "$source_sha" \
+            --repository finitecomputer/finite-releases

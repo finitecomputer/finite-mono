@@ -172,16 +172,15 @@ the runbook.
 
 ## Release Shape
 
-Tags named `v*` trigger `.github/workflows/release.yml`.
+Component tags named `fsite/vX.Y.Z` trigger
+`.github/workflows/release-fsite.yml` from the monorepo root.
 
-The GitHub release currently packages `fsite` binaries for:
+The release workflow currently packages:
 
 - `fsite-linux-x86_64`
-- `fsite-macos-aarch64`
-- `fsite-macos-x86_64`
+- `finitesitesd-linux-x86_64`
 
-The server binary `finitesitesd` is built locally or on the production host;
-it is not currently a GitHub release asset.
+macOS CLI assets are paused until a dedicated macOS release lane is restored.
 
 Before tagging:
 

@@ -18,16 +18,14 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finite-mono"
+repo="finitecomputer/finite-releases"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"
 
 case "$os:$arch" in
-  Darwin:arm64) asset="fsite-macos-aarch64" ;;
-  Darwin:x86_64) asset="fsite-macos-x86_64" ;;
   Linux:x86_64) asset="fsite-linux-x86_64" ;;
-  *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
+  *) echo "the guarded release currently publishes Linux x86_64 only: $os $arch" >&2; exit 1 ;;
 esac
 
 base="https://github.com/$repo/releases/download/fsite-latest"

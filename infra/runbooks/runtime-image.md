@@ -46,15 +46,17 @@ build it is not the promotion proof for the final digest.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
-   baseline, captures and cross-checks the immutable local image ID, and runs
-   the durable Add/Welcome chat plus `/home/node` restart smoke against that
-   image ID before any
-   push. Only after that smoke passes does it push `:$VERSION` +
-   `:sha-<sha>`, uploads `runtime-image-report.json`, and prints the pinned
-   `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
-   summary. The uploaded durable-smoke report is evidence for the exact image
-   that was tagged and pushed; copy the pinned ref — it is the only thing you
-   promote.
+   baseline, saves the OCI result, pulls that saved result back locally, and
+   runs the durable Add/Welcome chat plus `/home/node` restart smoke against
+   that exact image ID before any push. Only after that smoke passes does it
+   publish a non-production `canary-<run>-<attempt>` tag, verify the registry
+   digest against the saved-build digest, prove anonymous GHCR pull, upload
+   `runtime-image-report.json`, and print the pinned canary ref in the
+   summary. Production `:$VERSION` and `:sha-<sha>` tags are promoted from the
+   same saved build only when `publish_production=true` and
+   `FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED=true`. The uploaded durable-smoke
+   report is evidence for the exact image that was tagged; copy the pinned ref
+   — it is the only thing you promote.
 
 **Recovery boundary:** the canonical image now has the narrow, one-shot
 `recover_known_good` boot receiver and the snapshot-root contract covers all of
