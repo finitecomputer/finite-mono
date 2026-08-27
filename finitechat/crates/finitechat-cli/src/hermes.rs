@@ -11,7 +11,7 @@
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
@@ -37,7 +37,7 @@ use finitechat_blob::{
 use finitechat_client::{
     ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
     ReqwestHttpRuntimeTransport, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
-    StoredAppMessage, StoredAppRoom, StoredAppRoomState,
+    StoredAppMessage, StoredAppRoom, StoredAppRoomState, WelcomeAdmissionPolicy,
 };
 use finitechat_core::{
     AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
@@ -57,7 +57,7 @@ use finitechat_proto::{
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
     ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
     RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_encode,
+    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_decode, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,15 @@ const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
 /// other value) restores the strict typed error so a typo fails closed instead
 /// of silently rerouting replies.
 const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
+/// Comma-separated account ids (64-hex or `npub1…`) allowed to auto-admit
+/// this agent into rooms: a claimed Welcome from any other sender is
+/// discarded without being stored, activated, or acked, which closes
+/// stranger self-admission into agent rooms. Unset or empty keeps the legacy
+/// admit-everyone behavior so existing agents without the seed keep working;
+/// a present-but-malformed value is a hard boot error because an operator
+/// typo must never silently fail open. The agent's own account is always
+/// admitted (device link needs no allowlist entry).
+const WELCOME_ALLOWLIST_ENV: &str = "FINITECHAT_WELCOME_ALLOWLIST";
 /// Bounded ring of recently-acked entry keys. It makes a post-restart
 /// duplicate ack a no-op and blocks a redelivery of an already-acked entry
 /// from durable recovery even if its seq is re-observed, so the sidecar is
@@ -444,6 +453,7 @@ async fn prepare_hermes_service(
         .local_addr()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
+    seed_welcome_allowlist(home)?;
     let runtime = open_agent_runtime(home)?;
     // Service readiness means this Device is actually reachable for the
     // Welcome-first product flow, not merely that its local SQLite file opens.
@@ -3753,6 +3763,69 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
+/// Parse `FINITECHAT_WELCOME_ALLOWLIST`: comma-separated account ids, each
+/// either 64 lowercase hex or a NIP-19 `npub1…`. Every entry must decode —
+/// one malformed entry fails the whole parse so a typo cannot shrink the
+/// allowlist (and silently fail open for the intended senders).
+fn parse_welcome_allowlist(raw: &str) -> Result<BTreeSet<String>, CliError> {
+    let mut senders = BTreeSet::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim().to_lowercase();
+        if entry.is_empty() {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} contains an empty entry"
+            )));
+        }
+        let account_id = if entry.len() == 64 && entry.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            entry
+        } else if entry.starts_with("npub1") {
+            npub_decode(&entry).map_err(|error| {
+                CliError::Hermes(format!("{WELCOME_ALLOWLIST_ENV} entry {entry:?}: {error}"))
+            })?
+        } else {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} entry {entry:?} is neither 64-hex nor an npub"
+            )));
+        };
+        senders.insert(account_id);
+    }
+    Ok(senders)
+}
+
+/// Seed the Welcome admission allowlist from the environment before the
+/// runtime starts. Absent or empty leaves the store untouched (legacy
+/// allow-all); a present value switches the device to allowlist mode and
+/// inserts the parsed senders. Must run before `open_agent_runtime`, which
+/// takes the store writer lease for the life of the process.
+fn seed_welcome_allowlist(home: &AgentHome) -> Result<(), CliError> {
+    let raw = match std::env::var(WELCOME_ALLOWLIST_ENV) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let senders = parse_welcome_allowlist(&raw)?;
+    let mut store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    store
+        .add_welcome_allowed_senders(&owner, &senders)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    Ok(())
+}
+
 /// The store handle for read-only status probes (the typed read/write
 /// command class at this dispatch boundary): constructible only through the
 /// read-only open mode, so a probe command cannot name the writer open —
@@ -5273,6 +5346,56 @@ mod tests {
         ));
         unsafe {
             std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+        }
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_accepts_hex_and_npub_entries() {
+        let hex_entry = "ab".repeat(32);
+        let npub = npub_encode(&"cd".repeat(32)).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry},{npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from(["ab".repeat(32), "cd".repeat(32)]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_trims_whitespace_and_lowercases() {
+        let parsed = parse_welcome_allowlist(
+            "  AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01 \n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            BTreeSet::from([
+                "ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_dedups_hex_and_npub_spellings() {
+        let hex_entry = "ef".repeat(32);
+        let npub = npub_encode(&hex_entry).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry}, {npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from([hex_entry]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_rejects_malformed_entries() {
+        for raw in [
+            // Too short to be an account id and not an npub.
+            "abcd",
+            // 64 chars but not hex.
+            &"zz".repeat(32),
+            // Not an npub bech32 payload.
+            "npub1notarealnpub",
+            // Empty entries (trailing/doubled commas) are operator typos.
+            &format!("{},", "ab".repeat(32)),
+            ",",
+        ] {
+            assert!(
+                parse_welcome_allowlist(raw).is_err(),
+                "malformed allowlist entry should fail closed: {raw:?}"
+            );
         }
     }
 
