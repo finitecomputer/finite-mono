@@ -2,8 +2,9 @@ use finitechat_delivery::{
     HttpClaimedKeyPackage, HttpKeyPackageId, HttpPublishTarget, HttpSequence,
 };
 use finitechat_proto::{
-    ApplicationDeliveryPolicy, DeviceRef, EphemeralActivityRecord, MembershipDeltaV1, RoomLogEntry,
-    RoomProtocol,
+    AppendApplicationEventRequest, AppendEphemeralActivityRequest, ApplicationDeliveryPolicy,
+    DeviceRef, EphemeralActivityRecord, MembershipDeltaV1, RoomLogEntry, RoomProtocol,
+    SubmitCommitRequest,
 };
 use finitechat_transport::transport::TransportMessage;
 use finitechat_transport::{GroupId, MemberId, MessageId};
@@ -592,4 +593,107 @@ pub struct PublishKeyPackageResponse {
 pub struct ErrorResponse {
     pub kind: String,
     pub error: String,
+}
+
+/// Binds an account-scoped request body to the account id its NIP-98-style
+/// `Authorization` header must be signed by. The server extractor rejects the
+/// request when the event signer does not match this id.
+pub trait AccountScopedRequest {
+    fn signer_account_id(&self) -> &str;
+}
+
+impl AccountScopedRequest for AppendApplicationEventRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.event.sender.account_id
+    }
+}
+
+impl AccountScopedRequest for SubmitCommitRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.sender.account_id
+    }
+}
+
+impl AccountScopedRequest for AppendEphemeralActivityRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.sender.account_id
+    }
+}
+
+impl AccountScopedRequest for GetEphemeralActivitiesRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.requester.account_id
+    }
+}
+
+impl AccountScopedRequest for RevokeDeviceRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.device.account_id
+    }
+}
+
+impl AccountScopedRequest for ObserveDeviceLivenessRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.device.account_id
+    }
+}
+
+impl AccountScopedRequest for GetDeviceLivenessRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.device.account_id
+    }
+}
+
+impl AccountScopedRequest for PutNostrProfileRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.profile.account_id
+    }
+}
+
+impl AccountScopedRequest for BootstrapAccountRoomRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.creator.account_id
+    }
+}
+
+impl AccountScopedRequest for SaveAccountRoomRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.account_id
+    }
+}
+
+impl AccountScopedRequest for ListAccountRoomDirectoryRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.account_id
+    }
+}
+
+impl AccountScopedRequest for RegisterPushTokenRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.device.account_id
+    }
+}
+
+impl AccountScopedRequest for RemovePushTokenRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.device.account_id
+    }
+}
+
+impl AccountScopedRequest for LeaveRoomRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.sender.account_id
+    }
+}
+
+impl AccountScopedRequest for UpdateRoomAdminsRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.sender.account_id
+    }
+}
+
+impl AccountScopedRequest for ReportInvalidCommitRequest {
+    fn signer_account_id(&self) -> &str {
+        &self.reporter.account_id
+    }
 }
