@@ -37,11 +37,12 @@ use crate::{
     APP_SPECIFIC_KIND, AdminAccessAction, AgentState, AgentSyncStatus, BrainMetadataView,
     CliEnvironment, CliError, CompletedWrapReport, ConflictEntry, ConflictState, LocalSigner,
     SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES, SessionFolderKeyring, SyncChangeReport, SyncOnceReport,
-    admin_access_change_event, current_tree_root, deterministic_id, folder_key_grant_request,
-    folder_required_recipients, load_signer, read_agent_state, read_json_file,
-    read_working_tree_state, server_url_for_command, sign_event, signed_json_request,
-    signed_json_request_to_server, signed_json_request_to_server_with_response_limit, tag_vec,
-    timestamp, timestamp_from_unix, unix_timestamp, write_agent_state, write_json_file,
+    admin_access_change_event, current_tree_root, deterministic_id,
+    encrypted_export_response_limit_bytes, folder_key_grant_request, folder_required_recipients,
+    load_signer, read_agent_state, read_json_file, read_working_tree_state, server_url_for_command,
+    sign_event, signed_json_request, signed_json_request_to_server,
+    signed_json_request_to_server_with_response_limit, signed_json_request_with_response_limit,
+    tag_vec, timestamp, timestamp_from_unix, unix_timestamp, write_agent_state, write_json_file,
     write_private_file_atomic, write_working_tree_state,
 };
 
@@ -70,7 +71,20 @@ pub(crate) fn run_working_tree_sync(
         .map_err(|error| sync_stage_error("read prior encrypted export", &root, error))?;
     let server_url = server_url_for_command(env, args)?;
     let auth = load_signer(env)?;
-    let export = fetch_encrypted_export(env, &server_url, &agent_state.brain_id)?;
+    let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
+        .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
+    // Routine sync reconciles against the cached export and pulls only the
+    // sync records after the last known sequence, so the response scales with
+    // new activity instead of total Brain size. The full export is fetched on
+    // first open, before local writes (current Folder Key versions must be
+    // authoritative), and whenever the incremental path escalates below.
+    let use_cached_export = pending_local_changes.is_empty()
+        && prior_tree_state.sync.latest_sequence > 0
+        && prior_export.is_some();
+    let mut export = match (use_cached_export, prior_export.clone()) {
+        (true, Some(cached)) => cached,
+        _ => fetch_encrypted_export(env, &server_url, &agent_state.brain_id)?,
+    };
     let has_known_mounts = prior_tree_state
         .folder_roots
         .iter()
@@ -94,26 +108,12 @@ pub(crate) fn run_working_tree_sync(
     for mounted in &mounted_exports {
         open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
     }
-    // Opportunistically deliver pending grant wraps before anything else:
-    // invitees waiting on a wrapped current Folder Key get their grants from
-    // any key-holding client that syncs. Never blocks; skipped quietly when
-    // this Home holds no usable key for a marked Folder.
-    let completed_wraps = complete_pending_grant_wraps_for_sync(
-        env,
-        args,
-        &agent_state.brain_id,
-        &auth,
-        &session_keys,
-        &export,
-    );
     let newly_readable_keys = newly_readable_session_key_count(
         &prior_tree_state,
         &export,
         &mounted_exports,
         &session_keys,
     );
-    let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
-        .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
     let mut preflight_remote_result = if !pending_local_changes.is_empty() {
         // Local submission is followed by a bootstrap so accepted writes can
         // be confirmed from the authoritative projection. Validate that this
@@ -142,7 +142,7 @@ pub(crate) fn run_working_tree_sync(
     let local_result = push_local_working_tree_changes(&push_context, &root, pending_local_changes)
         .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
-    let remote_result = if local_result.pushed_count > 0 {
+    let mut remote_result = if local_result.pushed_count > 0 {
         confirm_local_changes_from_preflight(
             env,
             &server_url,
@@ -178,6 +178,66 @@ pub(crate) fn run_working_tree_sync(
         )
         .map_err(|error| sync_stage_error("fetch incremental remote sync", &root, error))?
     };
+    if use_cached_export {
+        if remote_result.used_bootstrap {
+            // The incremental path escalated, which means the cached export
+            // may be stale exactly where it matters (Folder topology, access,
+            // key versions). Refresh it before materializing.
+            export = fetch_encrypted_export(env, &server_url, &agent_state.brain_id)
+                .map_err(|error| sync_stage_error("refresh encrypted export", &root, error))?;
+            open_export_folder_key_grants_into_session(&auth, &export, &mut session_keys)?;
+        } else {
+            // Grant records carry the same wrapped payload as export grants,
+            // so post-sync access reaches this member through the diff.
+            let opened_record_grants = open_sync_record_folder_key_grants(
+                &auth,
+                &export.brain.id,
+                &remote_result.records,
+                &mut session_keys,
+            )?;
+            let unknown_folder_grant = opened_record_grants.iter().any(|grant| {
+                !export
+                    .folders
+                    .iter()
+                    .any(|folder| folder.id == grant.folder_id)
+            });
+            let newly_readable_after_records = if opened_record_grants.is_empty() {
+                0
+            } else {
+                newly_readable_session_key_count(
+                    &prior_tree_state,
+                    &export,
+                    &mounted_exports,
+                    &session_keys,
+                )
+            };
+            if unknown_folder_grant || newly_readable_after_records > 0 {
+                let pulled_records = std::mem::take(&mut remote_result.records);
+                let reason = if unknown_folder_grant {
+                    // A granted Folder the cached export does not know means
+                    // the Folder topology changed; refresh the export so the
+                    // new Folder materializes instead of losing access.
+                    export = fetch_encrypted_export(env, &server_url, &agent_state.brain_id)
+                        .map_err(|error| {
+                            sync_stage_error("refresh encrypted export", &root, error)
+                        })?;
+                    open_export_folder_key_grants_into_session(&auth, &export, &mut session_keys)?;
+                    "folder key grant named a Folder outside the cached export; refreshed export and fetched bootstrap"
+                        .to_owned()
+                } else {
+                    "new folder keys were opened from sync records; fetched bootstrap for newly readable content"
+                        .to_owned()
+                };
+                let mut result =
+                    fetch_bootstrap_remote_sync(env, &server_url, &agent_state.brain_id, reason)
+                        .map_err(|error| {
+                            sync_stage_error("fetch remote bootstrap", &root, error)
+                        })?;
+                result.records = pulled_records;
+                remote_result = result;
+            }
+        }
+    }
     if !has_known_mounts {
         mounted_discovery = Some(fetch_mounted_folder_sync_contexts(
             env,
@@ -190,6 +250,26 @@ pub(crate) fn run_working_tree_sync(
             open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
         }
     }
+    // Opportunistically deliver pending grant wraps: invitees waiting on a
+    // wrapped current Folder Key get their grants from any key-holding client
+    // that syncs. The freshest wrap markers win: authoritative metadata is
+    // fetched every sync and carries them for admins, while the export this
+    // sync already trusts (possibly just refreshed) is the fallback when
+    // metadata is transiently unavailable. Never blocks; skipped quietly when
+    // this Home holds no usable key for a marked Folder.
+    let pending_wraps = mounted_discovery
+        .as_ref()
+        .and_then(|discovery| discovery.metadata.as_ref())
+        .map(|metadata| metadata.pending_wraps.as_slice())
+        .unwrap_or(export.pending_wraps.as_slice());
+    let completed_wraps = complete_pending_grant_wraps_for_sync(
+        env,
+        args,
+        &agent_state.brain_id,
+        &auth,
+        &session_keys,
+        pending_wraps,
+    );
     let opened_grants = session_keys.len();
     let mounted_materializations =
         fetch_mounted_folder_materializations(env, &server_url, mounted_exports)?;
@@ -293,10 +373,10 @@ pub(crate) fn run_working_tree_sync(
     })
 }
 
-/// Opportunistically complete pending grant wraps: the export tells
+/// Opportunistically complete pending grant wraps: the markers tell
 /// key-holding clients (Brain admin standing) which recipients still need a
 /// wrapped current Folder Key, and this Finite Home wraps every marked Folder
-/// Key it can open. Best-effort by contract — the field is absent for
+/// Key it can open. Best-effort by contract — the markers are empty for
 /// non-admins and older servers, a Folder whose key this Home cannot open is
 /// skipped, and a failed completion never blocks sync.
 fn complete_pending_grant_wraps_for_sync(
@@ -305,10 +385,10 @@ fn complete_pending_grant_wraps_for_sync(
     brain_id: &str,
     auth: &LocalSigner,
     session_keys: &SessionFolderKeyring,
-    export: &CliEncryptedBrainExport,
+    pending_wraps: &[CliPendingWrap],
 ) -> Vec<CompletedWrapReport> {
     let mut by_folder: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
-    for wrap in &export.pending_wraps {
+    for wrap in pending_wraps {
         by_folder
             .entry(wrap.folder_id.clone())
             .or_default()
@@ -379,7 +459,14 @@ pub(crate) fn open_brain_session_folder_keys(
     brain_id: &str,
 ) -> Result<SessionFolderKeyring, CliError> {
     let path = format!("/v1/brains/{brain_id}/export");
-    let response = signed_json_request(env, args, "GET", &path, None)?;
+    let response = signed_json_request_with_response_limit(
+        env,
+        args,
+        "GET",
+        &path,
+        None,
+        encrypted_export_response_limit_bytes(),
+    )?;
     let export: CliEncryptedBrainExport = serde_json::from_value(response)?;
     if export.brain.id != brain_id {
         return Err(CliError::InvalidInput(format!(
@@ -403,7 +490,14 @@ pub(crate) fn open_brain_session_folder_keys_for_collaboration(
     brain_id: &str,
 ) -> Result<SessionFolderKeyring, CliError> {
     let path = format!("/v1/brains/{brain_id}/export");
-    let response = signed_json_request(env, args, "GET", &path, None)?;
+    let response = signed_json_request_with_response_limit(
+        env,
+        args,
+        "GET",
+        &path,
+        None,
+        encrypted_export_response_limit_bytes(),
+    )?;
     let export: CliEncryptedBrainExport = serde_json::from_value(response)?;
     if export.brain.id != brain_id {
         return Err(CliError::InvalidInput(format!(
@@ -645,7 +739,14 @@ fn fetch_encrypted_export(
     brain_id: &str,
 ) -> Result<CliEncryptedBrainExport, CliError> {
     let path = format!("/v1/brains/{brain_id}/export");
-    let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
+    let response = signed_json_request_to_server_with_response_limit(
+        env,
+        server_url,
+        "GET",
+        &path,
+        None,
+        encrypted_export_response_limit_bytes(),
+    )?;
     serde_json::from_value(response).map_err(CliError::from)
 }
 
@@ -912,6 +1013,13 @@ fn apply_incremental_records_to_bootstrap(
             "brain_admin_access_change" if payload.is_folder_subtree_tombstone() => {
                 let deleted_folder_ids = folder_subtree_tombstone_ids(record, &payload)?;
                 objects.retain(|(folder_id, _), _| !deleted_folder_ids.contains(folder_id));
+                control_records.push(record.clone());
+            }
+            // Grant records do not change the object projection, but they are
+            // part of the control-record surface the server bootstrap serves;
+            // keeping them lets the routine diff path observe post-sync grants
+            // without forcing a rebootstrap.
+            "folder_key_grant" => {
                 control_records.push(record.clone());
             }
             other => {
@@ -1276,44 +1384,99 @@ fn opened_export_folder_key_grants(
     auth: &crate::LocalSigner,
     export: &CliEncryptedBrainExport,
 ) -> Result<Vec<CliFolderKeyGrantPlaintext>, CliError> {
+    let mut opened = Vec::new();
+    for grant in &export.key_grants {
+        if let Some(plaintext) = open_folder_key_grant_plaintext(auth, &export.brain.id, grant)? {
+            opened.push(plaintext);
+        }
+    }
+
+    Ok(opened)
+}
+
+/// Open one wrapped Folder Key grant addressed to this signer. Returns `None`
+/// for grants addressed to other recipients; a damaged or undecryptable grant
+/// addressed to this signer fails closed.
+fn open_folder_key_grant_plaintext(
+    auth: &crate::LocalSigner,
+    brain_id: &str,
+    grant: &CliFolderKeyGrant,
+) -> Result<Option<CliFolderKeyGrantPlaintext>, CliError> {
+    if grant.recipient_npub != auth.npub {
+        return Ok(None);
+    }
     let keys = auth.keys.clone();
     let recipient = NostrPublicKey::parse(&auth.npub)
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
     let validation = GiftWrapValidation::new(recipient);
+    let unusable_grant = || {
+        CliError::GrantOpening {
+        brain_id: brain_id.to_owned(),
+        folder_id: grant.folder_id.clone(),
+        key_version: grant.key_version,
+        reason: "the local signer could not validate and decrypt it; verify this Member Identity has a valid current grant"
+            .to_owned(),
+    }
+    };
+    let event = Event::from_json(grant.wrapped_event_json.clone()).map_err(|_| unusable_grant())?;
+    let opened_wrap = open_gift_wrap(&keys, &event, &validation).map_err(|_| unusable_grant())?;
+    let plaintext = serde_json::from_str::<CliFolderKeyGrantPlaintext>(&opened_wrap.rumor.content)
+        .map_err(|_| unusable_grant())?;
+    if plaintext.version != "finite-folder-key-grant-v1"
+        || plaintext.brain_id != brain_id
+        || plaintext.folder_id != grant.folder_id
+        || plaintext.key_version != grant.key_version
+        || plaintext.issuer_npub != grant.issuer_npub
+        || plaintext.recipient_npub != auth.npub
+    {
+        return Err(unusable_grant());
+    }
+    FolderKey::from_base64(&plaintext.folder_key).map_err(|_| unusable_grant())?;
+    Ok(Some(plaintext))
+}
+
+/// Open Folder Key grants delivered as incremental sync records into the
+/// session keyring. Grant records carry the same wrapped payload as export
+/// grants, so a post-sync grant reaches this member through the routine diff
+/// without a full export. Returns the plaintexts of newly inserted grants
+/// addressed to this signer.
+fn open_sync_record_folder_key_grants(
+    auth: &crate::LocalSigner,
+    brain_id: &str,
+    records: &[CliSyncRecord],
+    session_keys: &mut SessionFolderKeyring,
+) -> Result<Vec<CliFolderKeyGrantPlaintext>, CliError> {
     let mut opened = Vec::new();
-    for grant in &export.key_grants {
-        if grant.recipient_npub != auth.npub {
+    for record in records {
+        if record.record_type != "folder_key_grant" {
             continue;
         }
-        let unusable_grant = || {
-            CliError::GrantOpening {
-                brain_id: export.brain.id.clone(),
-                folder_id: grant.folder_id.clone(),
-                key_version: grant.key_version,
-                reason: "the local signer could not validate and decrypt it; verify this Member Identity has a valid current grant"
-                    .to_owned(),
-            }
+        let grant: CliFolderKeyGrant =
+            serde_json::from_str(&record.payload_json).map_err(|_| {
+                CliError::InvalidInput(format!(
+                    "folder key grant sync record {} payload did not parse",
+                    record.sequence
+                ))
+            })?;
+        let Some(plaintext) = open_folder_key_grant_plaintext(auth, brain_id, &grant)? else {
+            continue;
         };
-        let event =
-            Event::from_json(grant.wrapped_event_json.clone()).map_err(|_| unusable_grant())?;
-        let opened_wrap =
-            open_gift_wrap(&keys, &event, &validation).map_err(|_| unusable_grant())?;
-        let plaintext =
-            serde_json::from_str::<CliFolderKeyGrantPlaintext>(&opened_wrap.rumor.content)
-                .map_err(|_| unusable_grant())?;
-        if plaintext.version != "finite-folder-key-grant-v1"
-            || plaintext.brain_id != export.brain.id
-            || plaintext.folder_id != grant.folder_id
-            || plaintext.key_version != grant.key_version
-            || plaintext.issuer_npub != grant.issuer_npub
-            || plaintext.recipient_npub != auth.npub
-        {
-            return Err(unusable_grant());
+        let folder_key =
+            FolderKey::from_base64(&plaintext.folder_key).map_err(|_| CliError::GrantOpening {
+                brain_id: plaintext.brain_id.clone(),
+                folder_id: plaintext.folder_id.clone(),
+                key_version: plaintext.key_version,
+                reason: "opened grant did not contain a valid Folder Key".to_owned(),
+            })?;
+        if session_keys.insert(
+            brain_id,
+            plaintext.folder_id.clone(),
+            plaintext.key_version,
+            folder_key,
+        ) {
+            opened.push(plaintext);
         }
-        FolderKey::from_base64(&plaintext.folder_key).map_err(|_| unusable_grant())?;
-        opened.push(plaintext);
     }
-
     Ok(opened)
 }
 
@@ -3379,6 +3542,10 @@ struct CliBrainMetadata {
     personal_agent: Option<CliPersonalAgent>,
     #[serde(default)]
     mounted_folders: Vec<CliMountedFolder>,
+    /// Pending grant wraps, present only for key-holding (admin-standing)
+    /// requesters; older servers omit the field entirely.
+    #[serde(default)]
+    pending_wraps: Vec<CliPendingWrap>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -4038,6 +4205,7 @@ mod tests {
                 agent_npub: "npub-agent".to_owned(),
             }),
             mounted_folders: Vec::new(),
+            pending_wraps: Vec::new(),
         };
         assert_eq!(
             brain_role_for_actor(&brain, &metadata, "npub-owner"),
@@ -4246,6 +4414,57 @@ mod tests {
                 .unwrap()
                 .ciphertext,
             "legacy-bare-ciphertext"
+        );
+    }
+
+    #[test]
+    fn incremental_folder_key_grant_record_joins_control_records_without_rebootstrap() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        write_json_file(
+            &root.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &CliSyncBootstrap {
+                latest_sequence: 4,
+                objects: vec![CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: "obj_page00000001".to_owned(),
+                    revision: 1,
+                    ciphertext: "page-ciphertext".to_owned(),
+                    deleted: false,
+                }],
+                control_records: Vec::new(),
+            },
+        )
+        .unwrap();
+        let records = vec![CliSyncRecord {
+            sequence: 5,
+            record_event_id: "event-folder-grant".to_owned(),
+            record_type: "folder_key_grant".to_owned(),
+            folder_id: Some("home".to_owned()),
+            object_id: None,
+            revision: None,
+            actor_npub: "npub-admin".to_owned(),
+            client_created_at: "2026-08-04T00:00:00Z".to_owned(),
+            payload_json: serde_json::json!({
+                "folderId": "home",
+                "keyVersion": 1,
+                "issuerNpub": "npub-admin",
+                "recipientNpub": "npub-member",
+                "wrappedEventJson": "{}"
+            })
+            .to_string(),
+            record_event_kind: 30_101,
+        }];
+
+        let incremental = apply_incremental_records(root, 4, 5, &records).unwrap();
+
+        assert_eq!(incremental.latest_sequence, 5);
+        assert_eq!(incremental.objects.len(), 1);
+        assert_eq!(incremental.control_records.len(), 1);
+        assert_eq!(
+            incremental.control_records[0].record_type,
+            "folder_key_grant"
         );
     }
 

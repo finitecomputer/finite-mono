@@ -14,8 +14,26 @@ use crate::{
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
     "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST";
+pub(crate) const FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES_ENV: &str =
+    "FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES";
 const DEFAULT_JSON_RESPONSE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES: usize = SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES;
+
+/// Response cap for full encrypted Brain exports. Routine sync never fetches
+/// the export, so this bound only guards first-open/repair/re-import fetches;
+/// it tracks the bootstrap cap and can be raised via environment for
+/// exceptionally large Brains.
+pub(crate) fn encrypted_export_response_limit_bytes() -> usize {
+    parse_response_limit_bytes_env(std::env::var(FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES_ENV).ok())
+}
+
+fn parse_response_limit_bytes_env(value: Option<String>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES)
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,6 +264,25 @@ pub(crate) fn signed_json_request(
 ) -> Result<serde_json::Value, CliError> {
     let server_url = server_url_for_command(env, args)?;
     signed_json_request_to_server(env, &server_url, method, path, body)
+}
+
+pub(crate) fn signed_json_request_with_response_limit(
+    env: &CliEnvironment,
+    args: &[String],
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    response_limit_bytes: usize,
+) -> Result<serde_json::Value, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    signed_json_request_to_server_with_response_limit(
+        env,
+        &server_url,
+        method,
+        path,
+        body,
+        response_limit_bytes,
+    )
 }
 
 pub(crate) fn signed_json_request_to_server(
@@ -546,6 +583,26 @@ fn same_origin_text(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_response_limit_env_override_parses_or_falls_back() {
+        assert_eq!(
+            parse_response_limit_bytes_env(Some(" 2048 ".to_owned())),
+            2048
+        );
+        assert_eq!(
+            parse_response_limit_bytes_env(Some("not-a-number".to_owned())),
+            DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES
+        );
+        assert_eq!(
+            parse_response_limit_bytes_env(Some("0".to_owned())),
+            DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES
+        );
+        assert_eq!(
+            parse_response_limit_bytes_env(None),
+            DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES
+        );
+    }
 
     #[test]
     fn loopback_http_validation_rejects_malformed_bracketed_hosts() {
