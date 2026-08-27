@@ -846,6 +846,15 @@ fn setup_access_loss_tree(scratch: &TempDir) -> PathBuf {
     fs::remove_file(tree.join("General/strong-b.md")).unwrap();
     fs::remove_file(tree.join("General/removed.md")).unwrap();
     fs::remove_dir_all(tree.join("Research")).unwrap();
+    // Cache an empty bootstrap at the cursor so these scenarios exercise the
+    // incremental records path; without it sync bootstraps directly.
+    let bootstrap_path = tree.join(".finitebrain/encrypted-sync/bootstrap.json");
+    write_json(
+        &bootstrap_path,
+        &json!({ "latestSequence": 0, "objects": [] }),
+    );
+    #[cfg(unix)]
+    fs::set_permissions(&bootstrap_path, fs::Permissions::from_mode(0o600)).unwrap();
     let state_path = tree.join(".finitebrain/working-tree-state.json");
     let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     state["folderRoots"]

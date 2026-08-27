@@ -49,6 +49,55 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
+
+- Brain sync went incremental (#699): `fbrain sync`/`open` now reconcile
+  against the cached export and pull only sync records instead of downloading
+  the full encrypted export — unbricking every brain whose export exceeds the
+  10 MB response limit (currently `finitecomputer`). Bumped to 0.5.0
+  everywhere; `fbrain/v0.5.0` published and the rolling alias verified
+  (installed binary reports 0.5.0).
+- Agent Runtime `2026-08-27.2`
+  (`…@sha256:7f6d9ab354c40bcddb19ba6ef37769d4a864f87acadf19fad3d22a1d4d6f8368`,
+  source `bfe082a1`, carries the 0.5.0 CLI in the agent baseline) registered
+  and promoted in Core BEFORE host pins moved; canary then `--roll-all` per
+  host — **22/22 lat1, 30/30 lat3 verified** against `.2`.
+- Process note: the v0.5.0 tag briefly landed twice on an unmerged bump ref;
+  both premature builds were cancelled within a minute and nothing published.
+  Guard now required for any release tagging: GitHub `mergeStateStatus`
+  CLEAN, PR state MERGED, and the bump read back from main — in that order.
+
+### 2026-08-27 — Platform wave: lifecycle Core `0020–0022`, Agent Runtime `2026-08-27.1`, hermes delivery hardening
+
+- Deployed rev `b9254c81` to both NixOS closures (lat1 rebooted into kernel
+  6.18.39 mid-activation — see notes). Agent Runtime `2026-08-27.1`
+  (`ghcr.io/finitecomputer/agent-runtime:2026-08-27.1@sha256:c7130042…edf11`,
+  source `847fd818`, Hermes 0.20.0, Finite Skills tree `5d7f5618d4…`) was
+  registered and promoted in Core, then pinned per host.
+- Fleet upgraded via the reviewed prepare/execute wrapper: canary then
+  `--roll-all` per host — **22/22 lat1, 30/30 lat3 verified**; the only
+  non-target record is the known artifact-less `smoke` row (zero drift
+  exceptions).
+- Shipped: canonical runtime-control lifecycle vocabulary + forward-only
+  offboarding phase machine (Core migrations `0020–0022`, applied cleanly —
+  post-migration status census matches pre-wave sums exactly), standing
+  readiness health reports, hermes delivery moved onto the Rust sidecar's
+  leased inbox (45-min lease TTL default; unresolvable reply threads warn and
+  fall back Home instead of being consumed silently), finitechat `/readyz`
+  semantic readiness probes (#678) now answering on production.
+- CLI releases cut and rolling aliases sha256-verified: `finitechat/v0.2.0`,
+  `fsite/v0.5.1`, `fbrain/v0.4.0`.
+- Operational notes folded into runbooks: promote into Core BEFORE flipping
+  host pins (unregistered pin ⇒ runner cycles fail closed, HTTP 404); a closure
+  with a kernel bump reboots during activation (expect the dark window);
+  recovery-snapshot gate can transiently cancel a queued job — immediate
+  systemd retry succeeds.
+- Rollback anchors captured pre-wave: pins
+  `finite-agent-runtime-2026-08-20.1`; `lat3-nixos-closure-6fcea1bb…` artifact +
+  prior lat1 system generation path; named `pg_dump`
+  `finite_core_pre_platform_rollout_2026-08-27T0140Z.dump`; reverse-vocabulary
+  rescue gated by `scripts/rollout_preflight.py`.
+
 ### 2026-08-20 — Agent Runtime `2026-08-20.1` rolled to the full fleet
 
 - Normalizes the legacy `glm-5-2` model name to `deepseek-v4-flash-0731` at the

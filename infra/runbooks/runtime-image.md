@@ -77,7 +77,7 @@ template: `infra/hosts/lat1/systemd/runner.env.example`). The pin is:
   the promoted artifact **kind, reference, and state schema from Core**
   using this ID.
 
-So promotion is two steps:
+So promotion is two steps — **in this order**:
 
 1. Register the new pinned image as an artifact in Core.
    Use Core's service-authenticated runtime-artifact registration endpoint;
@@ -94,6 +94,12 @@ So promotion is two steps:
    required`) if it is missing. No restart needed: the timer re-invokes the
    runner with the new env (set `FC_RUNNER_DRAIN=true` first if you want
    in-flight launches to settle).
+
+> **Order matters (learned 2026-08-27):** finish step 1 before touching any
+> host pin. A pin referencing an id Core does not know makes every runner
+> cycle fail closed with `HTTP 404 {"error":"runtime artifact is not
+> configured"}` — reverting the pin to the previous registered id restores
+> capacity immediately.
 
 When introducing the artifact-capability column, drain new Kata creation before
 the Core/Runner generation switch, register the new recovery-capable digest
