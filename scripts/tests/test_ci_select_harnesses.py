@@ -109,6 +109,16 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_production_cd_setup_files_run_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/production_cd_setup.py",
+                "scripts/verify-production-cd-setup",
+                "scripts/tests/test_production_cd_setup.py",
+            ),
+            {"run_nix_checks"},
+        )
+
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
 

@@ -34,6 +34,11 @@ The git branch whose tip represents the source revision intended for the
 production environment.
 _Avoid_: Release branch, deploy queue
 
+**Production Bootstrap**:
+The hard-cut setup act that establishes the Production Branch and GitHub
+production governance as authoritative from a named source revision.
+_Avoid_: Rollback, migration, evidence of previous production state
+
 **Deployment Record**:
 The durable evidence left by a deployment attempt, including the intended
 source revision, observed production state, verification results, and outcome.

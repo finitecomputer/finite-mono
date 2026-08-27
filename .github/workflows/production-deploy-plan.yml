@@ -17,7 +17,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Build and guard deployment plan
+      - name: Build deployment plan
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -30,8 +30,6 @@ jobs:
             --head "$HEAD_SHA" \
             --output target/production-deploy/deployment-plan.json \
             --summary target/production-deploy/deployment-plan.md
-          python3 scripts/delivery.py require-production-disabled \
-            --manifest target/production-deploy/deployment-plan.json
       - name: Build lat1 closure artifact
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

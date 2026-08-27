@@ -80,7 +80,13 @@ current routine deploy path is the CI-built closure artifact documented in
 
 ### Every deploy after that
 
-The routine deploy path is:
+The protected CD path is the `main` to `production` pull request described in
+[`../runbooks/production-cd.md`](../runbooks/production-cd.md). That workflow
+builds the same `lat1-nixos-closure-REV` artifact and, once
+`mutation_enabled` is explicitly enabled, deploys it after GitHub production
+environment approval.
+
+The underlying deploy primitive remains:
 
 1. Dispatch `.github/workflows/lat1-nixos-closure.yml` for the exact reviewed
    `origin/main` revision. The workflow runs on `depot-ubuntu-24.04` by default,
