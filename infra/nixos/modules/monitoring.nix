@@ -82,6 +82,44 @@ in
         "finite-saas-runner.service"
       ]
     );
+    hostIncidentLogSources = [
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=0";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=1";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=2";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=3";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=4";
+      }
+      {
+        source = "systemd";
+        matches = "SYSLOG_IDENTIFIER=systemd";
+      }
+      {
+        source = "nixos-activation";
+        matches = "SYSLOG_IDENTIFIER=nixos";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sshd";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sudo";
+      }
+    ];
     staticVersionMetrics = lib.concatMapStrings versionMetric [
       {
         component = "finite-saas-core";

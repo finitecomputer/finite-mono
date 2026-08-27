@@ -59,6 +59,44 @@ in
       "systemd-networkd-persistent-storage.service"
       "wireguard-wg-finite.service"
     ];
+    hostIncidentLogSources = [
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=0";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=1";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=2";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=3";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=4";
+      }
+      {
+        source = "systemd";
+        matches = "SYSLOG_IDENTIFIER=systemd";
+      }
+      {
+        source = "nixos-activation";
+        matches = "SYSLOG_IDENTIFIER=nixos";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sshd";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sudo";
+      }
+    ];
     staticVersionMetrics = ''
       finite_component_build_info{host="finite-lat-3",component="finite-saas-runner",version="${finitePackages.finite-saas-runner.version}",git_sha="${revision}",image_digest="",source="nix"} 1
       finite_component_version_mismatch{host="finite-lat-3",component="finite-saas-runner"} 0

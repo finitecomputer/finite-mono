@@ -57,6 +57,7 @@ let
       labels        = {
         host = ${builtins.toJSON config.networking.hostName},
         role = ${builtins.toJSON cfg.logRole},
+        source = "service",
       }
     }
   '';
@@ -65,12 +66,38 @@ let
       builtins.length cfg.journalLogUnits
     )
   );
-  logPipeline = lib.optionalString (cfg.journalLogUnits != [ ]) ''
+  hostIncidentSourceFor = index: source: ''
+    loki.source.journal "finite_host_incident_${toString index}" {
+      forward_to    = [loki.write.finite_monitoring_logs.receiver]
+      matches       = ${builtins.toJSON source.matches}
+      max_age       = "10m"
+      relabel_rules = loki.relabel.finite_journal.rules
+      labels        = {
+        host = ${builtins.toJSON config.networking.hostName},
+        role = ${builtins.toJSON cfg.logRole},
+        source = ${builtins.toJSON source.source},
+      }
+    }
+  '';
+  hostIncidentSources = lib.concatStringsSep "\n" (
+    builtins.genList (
+      index: hostIncidentSourceFor index (builtins.elemAt cfg.hostIncidentLogSources index)
+    ) (builtins.length cfg.hostIncidentLogSources)
+  );
+  logsEnabled = cfg.journalLogUnits != [ ] || cfg.hostIncidentLogSources != [ ];
+  logPipeline = lib.optionalString logsEnabled ''
     loki.relabel "finite_journal" {
       forward_to = []
 
       rule {
         source_labels = ["__journal__systemd_unit"]
+        regex         = "(.+)"
+        target_label  = "unit"
+      }
+
+      rule {
+        source_labels = ["__journal_unit"]
+        regex         = "(.+)"
         target_label  = "unit"
       }
 
@@ -81,6 +108,7 @@ let
     }
 
     ${journalSources}
+    ${hostIncidentSources}
 
     loki.write "finite_monitoring_logs" {
       endpoint {
@@ -142,6 +170,24 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       description = "Explicit systemd unit allowlist for journald log shipping.";
+    };
+    hostIncidentLogSources = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            source = lib.mkOption {
+              type = lib.types.str;
+              description = "Low-cardinality Loki source label for this host incident stream.";
+            };
+            matches = lib.mkOption {
+              type = lib.types.str;
+              description = "journald match expression for this host incident stream.";
+            };
+          };
+        }
+      );
+      default = [ ];
+      description = "Explicit journald source allowlist for host incident log shipping.";
     };
   };
 
@@ -211,7 +257,7 @@ in
             EnvironmentFile = [
               metricsRemoteWriteEnvironmentFile
             ]
-            ++ lib.optional (cfg.journalLogUnits != [ ]) cfg.logsWriteEnvironmentFile;
+            ++ lib.optional logsEnabled cfg.logsWriteEnvironmentFile;
             SupplementaryGroups = [
               "adm"
               "systemd-journal"
@@ -226,7 +272,13 @@ in
           }
           {
             assertion =
-              cfg.journalLogUnits == [ ] || cfg.logsWriteEnvironmentFile != metricsRemoteWriteEnvironmentFile;
+              (map (source: "${source.source}:${source.matches}") cfg.hostIncidentLogSources)
+              == lib.unique (map (source: "${source.source}:${source.matches}") cfg.hostIncidentLogSources);
+            message = "finite.metrics.hostIncidentLogSources must not contain duplicate source/match pairs";
+          }
+          {
+            assertion =
+              !logsEnabled || cfg.logsWriteEnvironmentFile != metricsRemoteWriteEnvironmentFile;
             message = "finite.metrics logs must use a separate Loki credential file";
           }
         ];
@@ -259,7 +311,7 @@ in
           };
         };
       })
-      (lib.mkIf (cfg.journalLogUnits != [ ]) {
+      (lib.mkIf logsEnabled {
         system.activationScripts.finite-lat-monitoring-secrets.text = ''
           ${latMonitoringSecretsCheck}/bin/check-lat-monitoring-secrets
         '';
