@@ -1025,8 +1025,10 @@ mod tests {
         ]);
         assert_eq!(bootstrap["bootstrapped"], true);
 
-        let mut delivery =
-            HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url.clone()));
+        let mut delivery = HttpRuntimeDelivery::new(
+            ReqwestHttpRuntimeTransport::new(server_url.clone())
+                .with_signer(CLI_LIVE_ALICE_SECRET),
+        );
         let upload = phone
             .upload_key_package_request("key-package-add-device")
             .expect("phone upload KeyPackage request");

@@ -1373,6 +1373,7 @@ fn cmd_init<W: Write>(
     } else {
         Some(publish_agent_profile(
             &config,
+            &secret,
             normalize_agent_profile_text("--agent-name", agent_name)?,
             normalize_agent_profile_text("--agent-about", agent_about)?,
             normalize_agent_profile_picture(agent_picture)?,
@@ -1404,6 +1405,7 @@ struct HermesAgentProfileSummary {
 
 fn publish_agent_profile(
     config: &AgentConfig,
+    secret: &NostrSecretKey,
     display_name: String,
     about: String,
     picture: String,
@@ -1421,8 +1423,10 @@ fn publish_agent_profile(
         fetched_at_ms: now,
         expires_at_ms: now + CREDENTIAL_VALIDITY_SECONDS * 1000,
     };
-    let mut delivery =
-        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(config.server_url.clone()));
+    let mut delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(config.server_url.clone())
+            .with_signer(*secret.as_bytes()),
+    );
     let response = delivery
         .put_nostr_profile(&profile)
         .map_err(|error| CliError::Hermes(format!("could not publish agent profile: {error}")))?;
@@ -2309,8 +2313,9 @@ fn wait_for_hermes_sync_hint(
         if target_wait_ms == 0 {
             break;
         }
-        let mut room_delivery =
-            HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url));
+        let mut room_delivery = HttpRuntimeDelivery::new(
+            ReqwestHttpRuntimeTransport::new(server_url).with_signer(*home.secret.as_bytes()),
+        );
         let wait = SyncWaitRequest {
             rooms,
             wait_ms: target_wait_ms,
@@ -3730,9 +3735,10 @@ fn open_agent(
     let device = store
         .load_device(config)
         .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let delivery = HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(
-        home.config.server_url.clone(),
-    ));
+    let delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(home.config.server_url.clone())
+            .with_signer(*home.secret.as_bytes()),
+    );
     // The store mutably borrows during ticks; return all three.
     Ok((store, device, delivery))
 }

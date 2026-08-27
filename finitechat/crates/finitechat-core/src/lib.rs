@@ -8233,7 +8233,11 @@ impl CoreState {
     }
 
     fn delivery_for(&self, server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-        delivery_for_with_client(server_url, shared_blocking_http_client())
+        delivery_for_with_client(
+            server_url,
+            shared_blocking_http_client(),
+            Some(*self.account_secret.as_bytes()),
+        )
     }
 
     fn generate_object_id(&mut self, prefix: &str) -> Result<String, FiniteChatCoreError> {
@@ -12492,14 +12496,20 @@ fn shared_blocking_http_client() -> reqwest::blocking::Client {
 }
 
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    delivery_for_with_client(server_url, shared_blocking_http_client())
+    delivery_for_with_client(server_url, shared_blocking_http_client(), None)
 }
 
 fn delivery_for_with_client(
     server_url: &str,
     client: reqwest::blocking::Client,
+    signer: Option<[u8; 32]>,
 ) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::with_client(server_url, client))
+    let transport = ReqwestHttpRuntimeTransport::with_client(server_url, client);
+    let transport = match signer {
+        Some(secret) => transport.with_signer(secret),
+        None => transport,
+    };
+    HttpRuntimeDelivery::new(transport)
 }
 
 fn device_room_counts<D: RuntimeDelivery>(
