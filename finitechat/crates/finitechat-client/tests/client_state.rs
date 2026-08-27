@@ -6,7 +6,7 @@ use finitechat_client::{
     HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
     ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
     RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
-    SqliteClientStoreOptions, run_link_fanout_tick, run_runtime_sync_tick,
+    SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick, run_runtime_sync_tick,
 };
 use finitechat_delivery::MAX_HTTP_SYNC_PAGE_ENTRIES;
 use finitechat_http::{SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
@@ -490,6 +490,207 @@ fn runtime_sync_tick_claims_and_acks_welcomes_over_finitechat_http_routes() {
     assert_eq!(replay.claimed_welcomes, 0);
     assert_eq!(replay.activated_welcome_acks_sent, 0);
     delivery.ack_welcome("welcome_http_runtime_alice").unwrap();
+}
+
+#[test]
+fn runtime_sync_tick_admits_welcome_from_allowlisted_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlisted_welcome");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let mut bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_http_allowlisted_sender");
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    alice_store.save_device_state(&alice).unwrap();
+    alice_store
+        .set_welcome_admission_policy(alice.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(alice.device_ref(), [bob.device_ref().account_id.clone()])
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    bob.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: bob.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice
+                .upload_key_package_request("kp_http_allowlisted_alice")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice.device_ref())
+        .unwrap()
+        .expect("alice package");
+    let prepared = bob
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_allowlisted_alice",
+            "commit_http_allowlisted_alice",
+        )
+        .unwrap();
+    let accepted = delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 0);
+    assert_eq!(report.activated_welcome_acks_sent, 1);
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 1);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), accepted.seq);
+    assert_eq!(alice.pending_welcome_count(), 0);
+    assert_eq!(alice.pending_welcome_ack_count(), 0);
+}
+
+#[test]
+fn runtime_sync_tick_denies_and_discards_welcome_from_unallowlisted_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_denied_welcome");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let mut bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_http_denied_sender");
+    let charlie = test_device(
+        CHARLIE_ACCOUNT_SECRET_BYTES,
+        "charlie_http_denied_bystander",
+    );
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    alice_store.save_device_state(&alice).unwrap();
+    // The allowlist names only Charlie; Bob's Welcome must be discarded.
+    alice_store
+        .set_welcome_admission_policy(alice.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(
+            alice.device_ref(),
+            [charlie.device_ref().account_id.clone()],
+        )
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    bob.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: bob.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice
+                .upload_key_package_request("kp_http_denied_alice")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice.device_ref())
+        .unwrap()
+        .expect("alice package");
+    let prepared = bob
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_denied_alice",
+            "commit_http_denied_alice",
+        )
+        .unwrap();
+    delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 1);
+    assert_eq!(report.activated_welcome_acks_sent, 0);
+    assert!(alice.group_epoch(ROOM_ID).is_err());
+    assert_eq!(alice.pending_welcome_count(), 0);
+    assert_eq!(alice.pending_welcome_ack_count(), 0);
+
+    // The discarded Welcome was claimed server-side, so the next tick does
+    // not re-deliver it (no redelivery loop) and still does not ack it.
+    let mut alice = alice_store.load_device(alice_config).unwrap();
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let replay =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(replay.claimed_welcomes, 0);
+    assert_eq!(replay.denied_welcomes, 0);
+    assert_eq!(replay.activated_welcome_acks_sent, 0);
+}
+
+#[test]
+fn runtime_sync_tick_admits_same_account_welcome_with_empty_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let phone_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlist_phone");
+    let mut phone_store = sqlite_client_store(dir.path().join("phone.sqlite3"), &phone_config);
+    let mut alice = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlist_desktop");
+    let mut alice_phone = FiniteChatDevice::new(phone_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    phone_store.save_device_state(&alice_phone).unwrap();
+    // Device-link regression guard: an allowlist policy with no entries must
+    // still admit a Welcome sent by the same account (linked device flow).
+    phone_store
+        .set_welcome_admission_policy(alice_phone.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    alice.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: alice.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice_phone
+                .upload_key_package_request("kp_http_allowlist_phone")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice_phone.device_ref())
+        .unwrap()
+        .expect("alice phone package");
+    let prepared = alice
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_allowlist_phone",
+            "commit_http_allowlist_phone",
+        )
+        .unwrap();
+    delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut phone_store, &mut alice_phone, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 0);
+    assert_eq!(report.activated_welcome_acks_sent, 1);
+    assert_eq!(alice_phone.group_epoch(ROOM_ID).unwrap(), 1);
+    assert_eq!(alice_phone.pending_welcome_count(), 0);
+    assert_eq!(alice_phone.pending_welcome_ack_count(), 0);
 }
 
 #[test]

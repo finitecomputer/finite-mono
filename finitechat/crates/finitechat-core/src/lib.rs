@@ -431,6 +431,8 @@ pub struct SyncResult {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
     pub activated_welcome_acks_sent: u32,
+    #[serde(default)]
+    pub denied_welcomes: u32,
     pub sync_pages: u32,
     pub messages: Vec<ChatMessage>,
 }
@@ -9392,6 +9394,10 @@ impl CoreSyncProjection {
             .result
             .activated_welcome_acks_sent
             .saturating_add(report.activated_welcome_acks_sent);
+        self.result.denied_welcomes = self
+            .result
+            .denied_welcomes
+            .saturating_add(report.denied_welcomes);
         self.result.sync_pages = self.result.sync_pages.saturating_add(report.sync_pages);
         for entry in report.applied_entries {
             match entry.entry {

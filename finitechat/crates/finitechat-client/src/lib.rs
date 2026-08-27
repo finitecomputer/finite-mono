@@ -266,6 +266,35 @@ pub struct PendingWelcomeAckState {
     pub commit_seq: u64,
 }
 
+/// Admission policy applied to claimed Welcomes before any of them is
+/// stored, activated, or acked. A device with no persisted policy row admits
+/// every Welcome ([`WelcomeAdmissionPolicy::AllowAll`], the pre-allowlist
+/// behavior); [`WelcomeAdmissionPolicy::Allowlist`] admits only senders in
+/// the device's allowlist, plus the device's own account (device link).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAdmissionPolicy {
+    AllowAll,
+    Allowlist,
+}
+
+impl WelcomeAdmissionPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowAll => "allow_all",
+            Self::Allowlist => "allowlist",
+        }
+    }
+
+    fn from_mode(mode: &str) -> Self {
+        match mode {
+            "allow_all" => Self::AllowAll,
+            // Fail closed: anything but an explicit allow-all admits through
+            // the allowlist (the schema CHECK keeps this unreachable).
+            _ => Self::Allowlist,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkFanoutState {
     pub fanout_id: String,
@@ -392,6 +421,10 @@ pub struct RuntimeSyncReport {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
     pub activated_welcome_acks_sent: u32,
+    /// Welcomes claimed but discarded because the sender is not admitted by
+    /// the device's Welcome admission policy (never stored, activated, or
+    /// acked).
+    pub denied_welcomes: u32,
     pub sync_pages: u32,
     pub applied_entries: Vec<RuntimeAppliedEntry>,
 }
@@ -1005,6 +1038,14 @@ impl RuntimeSyncReport {
     fn record_welcome_ack(&mut self) -> Result<(), ClientError> {
         self.activated_welcome_acks_sent = self
             .activated_welcome_acks_sent
+            .checked_add(1)
+            .ok_or(ClientError::RuntimeCounterOverflow)?;
+        Ok(())
+    }
+
+    fn record_denied_welcome(&mut self) -> Result<(), ClientError> {
+        self.denied_welcomes = self
+            .denied_welcomes
             .checked_add(1)
             .ok_or(ClientError::RuntimeCounterOverflow)?;
         Ok(())
@@ -4474,6 +4515,103 @@ impl SqliteClientStore {
         self.save_device_state(device)
     }
 
+    /// The device's Welcome admission policy. An absent row means
+    /// [`WelcomeAdmissionPolicy::AllowAll`], the backwards-compatible
+    /// default for devices which never configured an allowlist.
+    pub fn welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<WelcomeAdmissionPolicy, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mode = self.conn.query_row(
+            r#"
+            SELECT mode
+            FROM client_welcome_admission_policy
+            WHERE account_id = ?1 AND device_id = ?2
+            "#,
+            params![&owner.account_id, &owner.device_id],
+            |row| row.get::<_, String>(0),
+        );
+        match mode {
+            Ok(mode) => Ok(WelcomeAdmissionPolicy::from_mode(&mode)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(WelcomeAdmissionPolicy::AllowAll),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn set_welcome_admission_policy(
+        &mut self,
+        owner: &DeviceRef,
+        mode: WelcomeAdmissionPolicy,
+    ) -> Result<(), ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO client_welcome_admission_policy (account_id, device_id, mode)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT (account_id, device_id) DO UPDATE SET mode = excluded.mode
+            "#,
+            params![&owner.account_id, &owner.device_id, mode.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_welcome_allowed_senders<I, S>(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_ids: I,
+    ) -> Result<(), ClientStoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        owner.validate_limits().map_err(ClientError::from)?;
+        for sender_account_id in sender_account_ids {
+            let sender_account_id = sender_account_id.as_ref();
+            validate_string_bytes(
+                "welcome_allowlist.sender_account_id",
+                sender_account_id,
+                MAX_ACCOUNT_ID_BYTES,
+            )
+            .map_err(ClientError::from)?;
+            self.conn.execute(
+                r#"
+                INSERT OR IGNORE INTO client_welcome_allowlist (
+                  account_id,
+                  device_id,
+                  sender_account_id
+                )
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn welcome_sender_allowed(
+        &self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_welcome_allowlist
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND sender_account_id = ?3
+                )
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
     pub fn store_pending_welcome_and_save(
         &mut self,
         device: &mut FiniteChatDevice,
@@ -5732,7 +5870,16 @@ pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: the claim consumes the Welcome server-side
+            // (claimed-but-unacked Welcomes are not re-delivered), so dropping
+            // it here leaves no redelivery loop. It is never stored, never
+            // activated, and never acked, so the sender's projection never
+            // marks this device as an active room member.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5794,7 +5941,12 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: see run_runtime_sync_setup_tick.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5834,6 +5986,27 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
         &mut report,
     )?;
     Ok(report)
+}
+
+/// Decide whether a claimed Welcome may be stored and activated. The
+/// `WelcomeRecord.sender` is server-asserted plaintext: the server binds it
+/// to the account/device which submitted the Add commit (and validates that
+/// submitter), so it is a trustworthy admission signal even though the
+/// Welcome payload itself is opaque to us until activation.
+fn welcome_admission_allows(
+    store: &SqliteClientStore,
+    owner: &DeviceRef,
+    welcome: &WelcomeRecord,
+) -> Result<bool, ClientStoreError> {
+    if store.welcome_admission_policy(owner)? == WelcomeAdmissionPolicy::AllowAll {
+        return Ok(true);
+    }
+    // Device-link exemption: a Welcome from the same account is the account
+    // adding one of its own linked devices to a room, never a stranger.
+    if welcome.sender.account_id == owner.account_id {
+        return Ok(true);
+    }
+    store.welcome_sender_allowed(owner, &welcome.sender.account_id)
 }
 
 fn activate_pending_welcomes(
@@ -7254,6 +7427,21 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
             source_device_id,
             chunk_index
           );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_admission_policy (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          mode TEXT NOT NULL
+            CHECK (mode IN ('allow_all', 'allowlist')),
+          PRIMARY KEY (account_id, device_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_allowlist (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          sender_account_id TEXT NOT NULL,
+          PRIMARY KEY (account_id, device_id, sender_account_id)
+        );
         "#,
     )?;
     Ok(())
