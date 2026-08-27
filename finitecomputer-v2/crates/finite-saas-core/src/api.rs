@@ -88,6 +88,12 @@ pub struct CreateAgentRequest {
     pub hosting_tier: Option<crate::HostingTier>,
     #[serde(default)]
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 hex), pre-minted by the dashboard via
+    /// the hosted-device app state so the lease-time runtime spec can carry
+    /// `FINITECHAT_OWNER_NPUBS`. Missing is accepted (legacy allow-all chat
+    /// admission); malformed is rejected with 400.
+    #[serde(default)]
+    pub owner_chat_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1756,6 +1762,7 @@ async fn create_agent_request(
                         input.hosting_tier.unwrap_or(crate::HostingTier::Standard),
                     ),
                     profile_picture_url: input.profile_picture_url,
+                    owner_chat_account_id: input.owner_chat_account_id,
                 },
             )
             .await?,
@@ -2545,6 +2552,7 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingAgentCreationRunnerId
             | CoreError::MissingAgentCreationLeaseToken
             | CoreError::InvalidAgentCreationLeaseDuration
+            | CoreError::InvalidOwnerChatAccountId
             | CoreError::MissingSourceMachineId
             | CoreError::MissingRuntimeArtifactId
             | CoreError::MissingRuntimeArtifactReference
@@ -4143,6 +4151,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_api_owner_chat_account_id_validation() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let app = router(store, test_auth());
+            let submit = |owner_chat_account_id: serde_json::Value, key: &str| {
+                let app = app.clone();
+                let store = db.store.clone();
+                let key = key.to_string();
+                async move {
+                    let launch_code = issue_test_launch_code(&store).await;
+                    app.oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/core/v1/me/agent-creation-requests")
+                            .header(
+                                "authorization",
+                                format!(
+                                    "Bearer {}",
+                                    access_token_with_subject(
+                                        "user_workos_owner_npub",
+                                        "owner-npub@finite.vip",
+                                        true,
+                                        None,
+                                    )
+                                ),
+                            )
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "displayName": "Owner Npub Agent",
+                                    "launchCode": launch_code,
+                                    "idempotencyKey": key,
+                                    "ownerChatAccountId": owner_chat_account_id,
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                }
+            };
+
+            // Malformed values are rejected with 400 before any durable state.
+            let response = submit(serde_json::json!("npub1qqqqqq"), "owner-npub-bad").await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            // Mixed-version contract the dashboard's fail-open retry keys on:
+            // a field the receiving Core does not know (a new dashboard
+            // posting `ownerChatAccountId` to a pre-owner-npub Core hits the
+            // same path) is a 422 JSON data rejection, never a 400.
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_owner_npub",
+                                    "owner-npub@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "displayName": "Unknown Field",
+                                "launchCode": "finite_test",
+                                "idempotencyKey": "owner-npub-unknown-field",
+                                "futureUnknownField": "x",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+            // Missing the field keeps the legacy allow-all admission path.
+            let response = submit(serde_json::Value::Null, "owner-npub-absent").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.request.owner_chat_account_id, None);
+
+            // A 64-hex account id is accepted, normalized, and persisted.
+            let owner_account_id = "b".repeat(64);
+            let response = submit(
+                serde_json::json!(owner_account_id.to_uppercase()),
+                "owner-npub-good",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                result.request.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn core_api_creates_self_serve_agent_request_with_launch_code() {
         with_isolated_postgres(|db| async move {
             let store = db.store.clone();
@@ -4156,6 +4279,7 @@ mod tests {
                 profile_picture_url: Some(
                     "https://chat.finite.computer/v1/blobs/profile".to_string(),
                 ),
+                owner_chat_account_id: None,
             })
             .unwrap();
 
@@ -4309,6 +4433,7 @@ mod tests {
                 idempotency_key: "browser-submit-2".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app
@@ -4473,6 +4598,7 @@ mod tests {
                 idempotency_key: "browser-submit-1".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app
@@ -4988,6 +5114,7 @@ mod tests {
                 idempotency_key: "browser-submit-1".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app

@@ -65,7 +65,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0021_runtime_lifecycle.sql"),
     "\n",
-    include_str!("../migrations/0022_runtime_health_reports.sql")
+    include_str!("../migrations/0022_runtime_health_reports.sql"),
+    "\n",
+    include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -673,6 +675,8 @@ pub enum CoreError {
     MissingAgentCreationIdempotencyKey,
     #[error("agent profile picture URL is invalid")]
     InvalidAgentProfilePictureUrl,
+    #[error("owner chat account id must be 64 lowercase hex characters")]
+    InvalidOwnerChatAccountId,
     #[error("runtime contact endpoint is invalid")]
     InvalidRuntimeContactEndpoint,
     #[error("agent runtime id is required")]
@@ -1252,6 +1256,12 @@ pub struct AgentCreationRequest {
     #[serde(default)]
     pub relocation: Option<RuntimeRelocationEnvelope>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 lowercase hex), submitted by the
+    /// dashboard at creation time. Injected into the lease-time runtime spec
+    /// environment as `FINITECHAT_OWNER_NPUBS`; absent keeps the legacy
+    /// allow-all chat admission for pre-existing requests.
+    #[serde(default)]
+    pub owner_chat_account_id: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
     pub agent_runtime_id: Option<String>,
@@ -1731,6 +1741,10 @@ pub struct AgentCreationConfiguration {
     /// agent state; provider placement remains Core-owned.
     pub requested_hosting_tier: Option<HostingTier>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 hex), pre-minted and submitted by the
+    /// dashboard so the lease-time runtime spec can carry
+    /// `FINITECHAT_OWNER_NPUBS`. Absent keeps legacy allow-all chat admission.
+    pub owner_chat_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2954,9 +2968,20 @@ pub(crate) fn runtime_operation_spec_v1(
     } else {
         current.secret_references.clone()
     };
-    let environment = refreshed_environment
-        .cloned()
-        .unwrap_or_else(|| current.environment.clone());
+    let environment = match refreshed_environment {
+        Some(configured) => {
+            let mut environment = configured.clone();
+            // The owner chat identity is per-request spec state, never part
+            // of the Core-global environment map, so an upgrade-time refresh
+            // must carry it forward verbatim. Dropping it here would silently
+            // revert an owner-locked runtime to allow-all chat admission.
+            if let Some(owner) = current.environment.get(OWNER_CHAT_NPUBS_ENV) {
+                environment.insert(OWNER_CHAT_NPUBS_ENV.to_string(), owner.clone());
+            }
+            environment
+        }
+        None => current.environment.clone(),
+    };
     build_runtime_spec_v1(
         identity,
         desired_artifact,
@@ -3111,6 +3136,32 @@ pub(crate) fn normalize_profile_picture_url(value: Option<&str>) -> CoreResult<O
         return Err(CoreError::InvalidAgentProfilePictureUrl);
     }
     Ok(Some(value))
+}
+
+/// Lease-time spec-environment key carrying the owner chat account id list
+/// (comma-separated 64-hex account ids). The runtime image derives the Hermes
+/// adapter allowlist and the sidecar Welcome allowlist from it. Deliberately
+/// not a reserved key: it is Core-managed per-request spec state, not
+/// Core-global operator configuration.
+pub(crate) const OWNER_CHAT_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
+
+/// The dashboard submits the hosted-device `identity.account_id`, which is the
+/// account's 64-hex public key; the Hermes adapter's `user_id` and the chat
+/// sidecar Welcome allowlist both consume that same hex form, so Core stores
+/// the canonical lowercase hex and accepts nothing else.
+pub(crate) fn normalize_owner_chat_account_id(value: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    if normalized.len() != 64
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CoreError::InvalidOwnerChatAccountId);
+    }
+    Ok(Some(normalized))
 }
 
 pub(crate) fn normalize_runtime_contact_endpoint(
@@ -3899,6 +3950,104 @@ mod tests {
             let parsed = parse_time(&stamp).unwrap();
             assert_eq!(parsed.nanosecond() % 1_000, 0, "{stamp}");
         }
+    }
+
+    #[test]
+    fn upgrade_environment_refresh_preserves_owner_chat_account_id() {
+        let artifact = RuntimeArtifact {
+            id: "artifact-v1".to_string(),
+            kind: RuntimeArtifactKind::OciImage,
+            reference: format!(
+                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                "a".repeat(64)
+            ),
+            version_label: "v1".to_string(),
+            source_git_sha: None,
+            finitec_version: None,
+            hermes_source_ref: None,
+            finite_platform_plugin_ref: None,
+            state_schema_version: "state-v1".to_string(),
+            base_image: None,
+            recover_known_good_chat: false,
+            created_at: NOW.to_string(),
+            promoted_at: Some(NOW.to_string()),
+            retired_at: None,
+        };
+        let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+        let current_environment = BTreeMap::from([
+            (
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            ),
+            (OWNER_CHAT_NPUBS_ENV.to_string(), "a".repeat(64)),
+        ]);
+        let current = build_runtime_spec_v1(
+            RuntimeSpecIdentity {
+                operation_id: "creation-request",
+                project_id: "project-1",
+                agent_runtime_id: "runtime-1",
+                placement,
+            },
+            &artifact,
+            "runtime-1",
+            current_environment,
+            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+            RuntimeBootIntent::Normal,
+        )
+        .unwrap();
+
+        // Upgrade refreshes the Core-global environment; the per-request owner
+        // chat identity rides along or the runtime would silently revert to
+        // allow-all chat admission on its next image upgrade.
+        let refreshed = BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "https://api-v2.finite.chat".to_string(),
+        )]);
+        let upgraded = runtime_operation_spec_v1(
+            &current,
+            RuntimeSpecIdentity {
+                operation_id: "upgrade-request",
+                project_id: "project-1",
+                agent_runtime_id: "runtime-1",
+                placement,
+            },
+            &artifact,
+            &artifact,
+            RuntimeBootIntent::Normal,
+            Some(&refreshed),
+            None,
+        )
+        .unwrap();
+        let spec = runtime_spec_v1(&upgraded);
+        assert_eq!(
+            spec.environment.get(OWNER_CHAT_NPUBS_ENV),
+            Some(&"a".repeat(64))
+        );
+        assert_eq!(
+            spec.environment.get("FINITE_SITES_API"),
+            Some(&"https://api-v2.finite.chat".to_string())
+        );
+
+        // Non-upgrade operations carry the whole current environment forward.
+        let restarted = runtime_operation_spec_v1(
+            &current,
+            RuntimeSpecIdentity {
+                operation_id: "restart-request",
+                project_id: "project-1",
+                agent_runtime_id: "runtime-1",
+                placement,
+            },
+            &artifact,
+            &artifact,
+            RuntimeBootIntent::Normal,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            runtime_spec_v1(&restarted).environment,
+            runtime_spec_v1(&current).environment
+        );
     }
 
     fn stored_health(ready: bool, reported_at: &str, interval_seconds: i64) -> StoredRuntimeHealth {
@@ -4978,6 +5127,7 @@ mod tests {
                         profile_picture_url: Some(
                             "https://chat.finite.computer/v1/blobs/profile".to_string(),
                         ),
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -10358,6 +10508,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 ).await
                 .unwrap();
