@@ -209,6 +209,7 @@ let
   };
 
   finitechatServerSourcePaths = [
+    "finite-nostr"
     "finitechat/crates/finitechat-blob"
     "finitechat/crates/finitechat-delivery"
     "finitechat/crates/finitechat-http"
