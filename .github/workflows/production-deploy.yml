@@ -33,14 +33,20 @@ jobs:
         run: |
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
+          ci_push_before=""
           if [[ "$EVENT_NAME" == push && "$PUSH_BEFORE" =~ ^[0-9a-f]{40}$ && "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]]; then
             base_sha="$PUSH_BEFORE"
+            ci_push_before="$base_sha"
           else
             base_sha="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
+            git fetch origin main --prune
+            if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+              ci_push_before="$base_sha"
+            fi
           fi
           python3 scripts/production_deploy.py ci-source \
             --source "$source_sha" \
-            --push-before "$base_sha" \
+            --push-before "$ci_push_before" \
             --github-output "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
