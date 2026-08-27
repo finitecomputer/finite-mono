@@ -1,5 +1,7 @@
 name: Phala read-only preflight
+
 run-name: Phala read-only preflight (${{ github.ref_name }})
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,28 +10,35 @@ on:
         required: true
         type: boolean
         default: false
+
 permissions:
   contents: read
+
 jobs:
   preflight:
     name: Pinned API and inventory preflight
     if: ${{ inputs.confirm_read_only }}
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: phala-staging
     env:
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID: ${{ vars.PHALA_EXPECTED_WORKSPACE_ID }}
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG: ${{ vars.PHALA_EXPECTED_WORKSPACE_SLUG }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
+
       - name: Require the non-secret identity fence
         run: |
           test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID"
           test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG"
+
       - name: Run fake-server and fixture contract tests
         run: cargo test --locked --package finite-saas-runner phala
+
       - name: Run typed GET-only preflight
         env:
           FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -37,6 +46,7 @@ jobs:
           test -n "$FC_RUNNER_PHALA_API_KEY"
           cargo run --locked --quiet --package finite-saas-runner -- phala-preflight \
             > phala-preflight.json
+
       - name: Validate the redacted summary contract
         run: |
           python3 - <<'PY'
@@ -77,6 +87,7 @@ jobs:
           if report["billableFiniteResourceCount"] > 1:
               raise SystemExit("Phala billable-resource cap is exceeded")
           PY
+
       - name: Upload redacted preflight summary
         uses: actions/upload-artifact@v4
         with:
@@ -84,6 +95,7 @@ jobs:
           path: phala-preflight.json
           if-no-files-found: error
           retention-days: 14
+
       - name: Summarize safe facts
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"

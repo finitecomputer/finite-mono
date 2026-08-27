@@ -14,12 +14,11 @@ alias rather than GitHub's repository-wide `releases/latest` pointer:
 | fsite | `fsite/vX.Y.Z` | `.github/workflows/release-fsite.yml` | `fsite-latest` |
 | fbrain | `fbrain/vX.Y.Z` | `.github/workflows/release-fbrain.yml` | `fbrain-latest` |
 
-The guarded release workflows currently publish Linux x86_64 CLI archives and
-their `.sha256` siblings only. `fsite` also publishes `finitesitesd`; `fbrain`
-also publishes `finite-brain`. macOS CLI and Electron publication are paused
-until dedicated macOS release lanes are reintroduced under the same immutable
-asset contract. Existing versioned macOS and Electron assets remain available,
-but a new release must not claim to refresh them.
+The release workflows publish CLI archives for linux-x86_64, macos-aarch64,
+and macos-x86_64, each with a `.sha256` sibling. `fsite` also publishes
+`finitesitesd` for linux-x86_64; `fbrain` also publishes `finite-brain` for
+linux-x86_64. The Electron experiment is on hold and is not part of the CLI CD
+release path.
 
 Install URL shape:
 
@@ -34,7 +33,21 @@ Install URL shape:
   it unset for shadow runs so disposable tags cannot publish.
 - The version is newer than `git tag -l '<component>/v*'`, and the matching
   release-repository tag does not already identify different metadata.
-- The release does not depend on macOS or Electron packaging.
+- The release does not depend on Electron packaging.
+
+## Release-host backfill
+
+The `finite-releases` cutover is backfilled from the old finite-mono releases
+with:
+
+```sh
+python3 scripts/backfill_releases.py
+```
+
+The script copies versioned non-Electron assets first, then refreshes each
+rolling alias once to the newest copied version. Use `--dry-run` before a
+mutation and repeated `--tag <component>/vX.Y.Z` arguments for a targeted
+repair.
 
 ## Steps
 

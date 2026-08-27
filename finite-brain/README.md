@@ -24,8 +24,10 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 case "$os:$arch" in
+  Darwin:arm64) asset="fbrain-macos-aarch64" ;;
+  Darwin:x86_64) asset="fbrain-macos-x86_64" ;;
   Linux:x86_64) asset="fbrain-linux-x86_64" ;;
-  *) echo "the guarded release currently publishes Linux x86_64 only: $os $arch" >&2; exit 1 ;;
+  *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
 base="https://github.com/finitecomputer/finite-releases/releases/download/fbrain-latest"

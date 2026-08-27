@@ -25,8 +25,10 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 case "$os:$arch" in
+  Darwin:arm64) asset="finitechat-macos-aarch64" ;;
+  Darwin:x86_64) asset="finitechat-macos-x86_64" ;;
   Linux:x86_64) asset="finitechat-linux-x86_64" ;;
-  *) echo "the guarded release currently publishes Linux x86_64 only: $os $arch" >&2; exit 1 ;;
+  *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
 base="https://github.com/$repo/releases/download/finitechat-latest"
@@ -358,12 +360,11 @@ nix develop ..#hermes-bridge-ci --command bash -lc \
 ### Releases
 
 Pushing a `finitechat/vX.Y.Z` tag runs
-`.github/workflows/release-finitechat.yml`, which currently builds the guarded
-Linux x86_64 CLI archive and publishes it to `finitecomputer/finite-releases`.
-macOS CLI and Electron release lanes are paused until they are reintroduced
-under the same immutable asset contract. The install block at the top of this
-README consumes the refreshed `finitechat-latest` alias from the release
-repository.
+`.github/workflows/release-finitechat.yml`, which builds the CLI archives for
+linux-x86_64, macos-aarch64, and macos-x86_64 and publishes them to
+`finitecomputer/finite-releases`. The Electron experiment is on hold and is not
+part of this release workflow. The install block at the top of this README
+consumes the refreshed `finitechat-latest` alias from the release repository.
 
 ### Publish Safety
 

@@ -6,6 +6,12 @@ from scripts import backfill_releases
 
 
 class BackfillReleaseTests(unittest.TestCase):
+    def test_release_facts_parses_component_version_and_sort_key(self) -> None:
+        self.assertEqual(
+            backfill_releases.release_facts("fbrain/v0.5.0"),
+            ("fbrain", "0.5.0", (0, 5, 0)),
+        )
+
     def test_selects_versioned_releases_oldest_first(self) -> None:
         releases = [
             {"tag_name": "fsite-latest"},

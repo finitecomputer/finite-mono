@@ -193,11 +193,11 @@ publishes the versioned release and refreshes the `fbrain-latest` rolling alias.
 The release workflow currently packages:
 
 - `fbrain-linux-x86_64`
+- `fbrain-macos-aarch64`
+- `fbrain-macos-x86_64`
 - `finite-brain-linux-x86_64`
 
 Each asset is uploaded as `.tar.gz` with a matching `.sha256` file.
-
-macOS CLI assets are paused until a dedicated macOS release lane is restored.
 Normal production deployment builds the server through Nix from the exact
 monorepo revision.
 

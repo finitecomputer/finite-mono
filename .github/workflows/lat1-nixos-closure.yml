@@ -1,4 +1,5 @@
 name: Lat1 NixOS Closure
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,19 +7,29 @@ on:
         description: "Exact finite-mono commit to build"
         required: true
         type: string
+      runs_on_json:
+        description: "GitHub runner label JSON string or labels array"
+        required: true
+        default: '"depot-ubuntu-24.04"'
+        type: string
+
 concurrency:
   group: lat1-nixos-closure-${{ inputs.rev }}
+
 permissions:
   contents: read
+
 jobs:
   build:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs_on_json) }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.rev }}
           fetch-depth: 1
+
       - uses: DeterminateSystems/nix-installer-action@v16
+
       - name: Build and package closure
         env:
           REV: ${{ inputs.rev }}
@@ -29,6 +40,7 @@ jobs:
           scripts/build-lat1-nixos-closure-artifact \
             "$REV" \
             target/lat1-nixos-closure
+
       - name: Upload closure artifact
         uses: actions/upload-artifact@v4
         with:

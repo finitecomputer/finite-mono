@@ -178,9 +178,9 @@ Component tags named `fsite/vX.Y.Z` trigger
 The release workflow currently packages:
 
 - `fsite-linux-x86_64`
+- `fsite-macos-aarch64`
+- `fsite-macos-x86_64`
 - `finitesitesd-linux-x86_64`
-
-macOS CLI assets are paused until a dedicated macOS release lane is restored.
 
 Before tagging:
 

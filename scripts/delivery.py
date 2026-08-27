@@ -88,7 +88,7 @@ def build_release_metadata(
     if not paths:
         raise DeliveryError("release has no assets")
     if component == "finitechat" and any("electron" in path.name for path in paths):
-        raise DeliveryError("Electron assets are deferred and must not be published")
+        raise DeliveryError("Electron assets are outside the CLI release path")
 
     _validate_checksum_pairs(paths)
 
@@ -581,6 +581,7 @@ def publish_release(
     run_id: str,
     assets_dir: Path,
     repository: str,
+    refresh_alias: bool = True,
     command_runner: CommandRunner = subprocess.run,
 ) -> None:
     metadata = build_release_metadata(
@@ -611,13 +612,14 @@ def publish_release(
         remote_names=existing_remote_names,
         command_runner=command_runner,
     ):
-        promote_release_alias(
-            component=component,
-            version=version,
-            expected_source_sha=source_sha,
-            repository=repository,
-            command_runner=command_runner,
-        )
+        if refresh_alias:
+            promote_release_alias(
+                component=component,
+                version=version,
+                expected_source_sha=source_sha,
+                repository=repository,
+                command_runner=command_runner,
+            )
         return
 
     with tempfile.TemporaryDirectory(prefix="finite-release-") as directory:
@@ -715,23 +717,24 @@ def publish_release(
             downloaded_dir=verified_dir,
         )
 
-        _ensure_tag(
-            repository=repository,
-            tag=alias_tag,
-            commit_sha=metadata_commit,
-            movable=True,
-            command_runner=command_runner,
-        )
-        _publish_alias(
-            repository=repository,
-            component=component,
-            version_tag=version_tag,
-            alias_tag=alias_tag,
-            source_sha=source_sha,
-            run_id=run_id,
-            local_assets=local_assets,
-            command_runner=command_runner,
-        )
+        if refresh_alias:
+            _ensure_tag(
+                repository=repository,
+                tag=alias_tag,
+                commit_sha=metadata_commit,
+                movable=True,
+                command_runner=command_runner,
+            )
+            _publish_alias(
+                repository=repository,
+                component=component,
+                version_tag=version_tag,
+                alias_tag=alias_tag,
+                source_sha=source_sha,
+                run_id=run_id,
+                local_assets=local_assets,
+                command_runner=command_runner,
+            )
 
 
 def verify_image_promotion(source_digest: str, destination_digest: str) -> None:

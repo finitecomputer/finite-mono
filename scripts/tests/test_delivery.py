@@ -288,6 +288,42 @@ class DeliveryTests(unittest.TestCase):
                     )
                 )
 
+    def test_backfill_can_publish_versioned_release_without_alias_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory)
+            archive = assets / "fsite-linux-x86_64.tar.gz"
+            archive.write_bytes(b"already published")
+            checksum = assets / "fsite-linux-x86_64.tar.gz.sha256"
+            checksum.write_text(
+                f"{delivery.sha256_file(archive)}  {archive.name}\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(
+                    delivery,
+                    "_release_assets",
+                    return_value={archive.name, checksum.name, "release.json"},
+                ),
+                mock.patch.object(
+                    delivery,
+                    "_versioned_release_is_complete",
+                    return_value=True,
+                ),
+                mock.patch.object(delivery, "promote_release_alias") as promote_alias,
+            ):
+                delivery.publish_release(
+                    component="fsite",
+                    version="1.2.3",
+                    source_sha="a" * 40,
+                    run_id="github-release-backfill:123",
+                    assets_dir=assets,
+                    repository="finitecomputer/finite-releases",
+                    refresh_alias=False,
+                )
+
+            promote_alias.assert_not_called()
+
     def test_missing_github_release_is_available_for_creation(self) -> None:
         runner = mock.Mock(
             return_value=mock.Mock(
