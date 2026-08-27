@@ -12,6 +12,41 @@ and durable message state.
 The production server is `https://chat.finite.computer`. Use it unless you are
 intentionally targeting a local development server.
 
+## Install Finite Chat for macOS
+
+The desktop app currently supports Apple Silicon Macs:
+
+```sh
+base="https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest"
+curl -fsSLO "$base/finitechat-electron-macos-aarch64.zip"
+curl -fsSLO "$base/finitechat-electron-macos-aarch64.zip.sha256"
+shasum -a 256 -c finitechat-electron-macos-aarch64.zip.sha256
+ditto -x -k finitechat-electron-macos-aarch64.zip .
+open "Finite Chat.app"
+```
+
+The app is Developer ID-signed and Apple-notarized. Electron is a
+remote-dashboard shell: it loads only the configured trusted dashboard origin
+and packages no local web renderer. A sandboxed, versioned preload connects that
+dashboard to the bundled local daemon, which keeps encrypted chat state and
+account material on the Mac.
+
+Developer ID release builds check the `finitechat-latest` GitHub release for a
+new signed app shortly after launch and every six hours while running. An
+available update downloads in the background and is applied by Electron's
+built-in macOS updater after Finite Chat exits, so the next launch uses the new
+version. Development and ad-hoc-signed builds do not contact the update feed.
+
+After dashboard sign-in, Electron links a distinct, revocable Device
+automatically through `/api/device-links/account-binding`,
+`/api/device-links/approve`, and `/api/device-links/status`. The account secret
+is claimed over the encrypted device-link channel and committed to macOS secure
+storage before the local daemon starts; there is no separate approval page.
+For each linked Room still missing authoritative local metadata, the daemon's
+shared Rust runtime accepts either a complete, verified, multi-chunk history
+transfer or no history. Electron initially renders a bounded transcript window
+and pages older messages from that committed local history.
+
 ## Install `finitechat`
 
 Install the latest release binary:
@@ -19,7 +54,7 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finite-releases"
+repo="finitecomputer/finite-mono"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"

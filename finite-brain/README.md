@@ -30,7 +30,7 @@ case "$os:$arch" in
   *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
-base="https://github.com/finitecomputer/finite-releases/releases/download/fbrain-latest"
+base="https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest"
 curl -fsSL "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz"
 curl -fsSL "$base/$asset.tar.gz.sha256" -o "$tmp/$asset.tar.gz.sha256"
 

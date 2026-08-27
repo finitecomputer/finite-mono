@@ -1,116 +1,108 @@
 # Cutting a CLI release (finitechat / fsite / fbrain)
 
-GitHub `finitecomputer/finite-mono` is the source authority. Native Depot CI
-builds the release and publishes it to the public
-`finitecomputer/finite-releases` GitHub repository.
-The release repository contains metadata and binary assets only; it never
-contains the product source.
+Component-scoped tags on finite-mono build and publish the binaries. Asset
+names are product contracts — never rename them (`docs/monorepo-doctrine.md`
+§3–4). **Hard-cut model (2026-07-08): finite-mono is the only release host**
+— no mirror releases; the legacy repos are archived. Because this repo hosts
+several components, the repo-wide `releases/latest` URL is meaningless;
+installers use the per-component **rolling alias release**, which the publish
+workflow refreshes on every versioned release.
 
-Asset names are product contracts. Installers use the per-component rolling
-alias rather than GitHub's repository-wide `releases/latest` pointer:
+| Component | Tag | Workflow | Builds | Rolling alias |
+|---|---|---|---|---|
+| finitechat | `finitechat/vX.Y.Z` | `release-finitechat.yml` | `finitechat-cli` → bin `finitechat`; signed + notarized Electron app (macOS arm64) | `finitechat-latest` |
+| fsite | `fsite/vX.Y.Z` | `release-fsite.yml` | `fsite-cli` → bin `fsite`; + `finitesitesd` (linux) | `fsite-latest` |
+| fbrain | `fbrain/vX.Y.Z` | `release-fbrain.yml` | `finite-brain-cli` → bin `fbrain`; + `finite-brain` server (linux) | `fbrain-latest` |
 
-| Component | Source tag | Depot workflow | Rolling alias |
-|---|---|---|---|
-| finitechat | `finitechat/vX.Y.Z` | `.depot/workflows/release-finitechat.yml` | `finitechat-latest` |
-| fsite | `fsite/vX.Y.Z` | `.depot/workflows/release-fsite.yml` | `fsite-latest` |
-| fbrain | `fbrain/vX.Y.Z` | `.depot/workflows/release-fbrain.yml` | `fbrain-latest` |
+Install URL shape (what READMEs and agents use):
+`https://github.com/finitecomputer/finite-mono/releases/download/<alias>/<asset>.tar.gz`
 
-The migrated Depot workflows currently publish Linux x86_64 archives and their
-`.sha256` siblings only. macOS CLI and Electron publication are paused until a
-dedicated macOS release lane is reintroduced. Existing versioned macOS assets
-remain available, but a new release must not claim to refresh them.
-
-Install URL shape:
-
-`https://github.com/finitecomputer/finite-releases/releases/download/<alias>/<asset>.tar.gz`
+Assets per release: `<name>-linux-x86_64.tar.gz`, `<name>-macos-aarch64.tar.gz`,
+`<name>-macos-x86_64.tar.gz` (+ the linux server binaries for fsite/fbrain),
+each with a `.sha256` sibling. Built on GitHub-hosted runners (Rust 1.88.0,
+`--locked`) — no self-hosted runner dependency for CLI releases.
+Finitechat releases additionally publish
+`finitechat-electron-macos-aarch64.zip` and its `.sha256` sibling after the app
+passes Device parity, Developer ID signing, Apple notarization, stapling, and
+Gatekeeper assessment.
 
 ## PRECONDITIONS
 
-- The exact source commit is on GitHub `main` and `CI gate` is green.
-- Depot holds `FINITE_RELEASES_GITHUB_TOKEN`, scoped only to Contents write on
-  `finitecomputer/finite-releases`.
-- Depot variable `FINITE_RELEASE_PUBLISH_ENABLED` is exactly `true`. It remains
-  unset during Shadow Runs so disposable tags cannot publish.
-- The version is newer than `git tag -l '<component>/v*'` and the corresponding
-  release-repository tag does not identify different metadata.
-- The release does not depend on Electron packaging.
+- The release commit is on `main` and CI is green.
+- You know which fielded versions exist: `gh release list --repo
+  finitecomputer/finite-mono` (or `git tag -l '<component>/v*'`) before
+  choosing the version. The tags are the only record of what shipped.
 
 ## STEPS
 
-> **TODO (cutover canary):** These steps remain proposed until a GitHub tag or
-> an explicit tag-ref dispatch has exercised the scoped credential, all build
-> rows, the publisher, and the rolling alias end to end. Record that run in
-> `docs/migrations/github-depot/evidence-2026-08-25.md`, then remove the TODO
-> labels from the exercised path.
-
-1. **TODO (GitHub source authority):** Merge the release changes to GitHub
-   `main` and prove the required Depot check is green.
-2. **TODO (GitHub tag event):** Create the component-scoped tag at that exact
-   commit and push it to GitHub:
+1. Pick the version `vX.Y.Z` (semver against the latest existing
+   `<component>/v*` tag).
+2. If the release changes the server-compatibility story (a client the server
+   must keep accepting, a protocol change, a deprecation), record that promise
+   in `infra/deployment-changelog.md` in the same PR as the final release
+   changes. A release that changes nothing about compatibility needs no
+   record beyond its tag. Merge to `main`.
+3. Tag the merge commit on `main` and push:
 
    ```sh
    git tag finitechat/vX.Y.Z <main-sha>
    git push origin finitechat/vX.Y.Z
    ```
 
-3. **TODO (Depot dispatch semantics):** If GitHub tag events are connected to
-   Depot, watch the matching release workflow. If they are not, dispatch that
-   workflow at the fully qualified GitHub tag. The workflow derives and checks
-   both version and source SHA from that ref:
-
-   ```sh
-   depot ci dispatch \
-     --repo finitecomputer/finite-mono \
-     --workflow release-finitechat.yml \
-     --ref refs/tags/finitechat/vX.Y.Z \
-     --input publish=true \
-     --input alias_only=false
-   ```
-
-4. **TODO (publisher canary):** Wait for the Linux build row and `publish` to
-   finish. Publication records a metadata commit in `finite-releases`, creates
-   the matching component tag, checksum-verifies every versioned asset after
-   upload, and only then refreshes the rolling alias. A retry reuses the already
-   verified immutable assets rather than rebuilding them.
+   (same shape with `fsite/` or `fbrain/` prefixes.)
+4. Watch the workflow: `build` (3 targets) → `publish` (versioned release,
+   then the rolling-alias refresh step). Both steps must succeed — a
+   versioned release without the alias refresh means installers silently
+   keep getting the previous version; re-run the publish job if the alias
+   step failed.
 
 ## VERIFY
 
-1. Download the versioned archive and checksum from `finite-releases`; verify
-   the checksum.
-2. Repeat through the rolling alias.
-3. Run the component README's clean-install block away from this checkout and
-   confirm `--version`.
-4. Confirm `release.json` names the source SHA and Depot run ID.
+1. Alias URL serves the new build with a matching sha256:
 
-Example alias verification:
+   ```sh
+   base=https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest
+   curl -fsSLO "$base/finitechat-macos-aarch64.tar.gz"
+   shasum -a 256 -c <(curl -fsSL "$base/finitechat-macos-aarch64.tar.gz.sha256")
+   ```
 
-```sh
-base=https://github.com/finitecomputer/finite-releases/releases/download/finitechat-latest
-curl -fsSLO "$base/finitechat-linux-x86_64.tar.gz"
-curl -fsSLO "$base/finitechat-linux-x86_64.tar.gz.sha256"
-sha256sum -c finitechat-linux-x86_64.tar.gz.sha256
-```
+2. Field-style install — run the exact install block from the component's
+   README on a machine that is not your dev checkout; confirm
+   `--version` reports the new version.
+3. For finitechat, download the Electron ZIP from the alias, verify its
+   checksum, and confirm `codesign`, `stapler`, and Gatekeeper accept the
+   extracted app.
+4. The versioned release page exists (`finitechat/vX.Y.Z`) and the alias
+   release notes name that version (the refresh step writes them).
+
+## First-release-from-mono acceptance test
+
+The first time each component releases from mono, additionally:
+
+- exercise the installed binary against production (e.g. finitechat against
+  `https://chat.finite.computer`, respecting the contract gate in
+  [deploy-finitechat-server.md](deploy-finitechat-server.md));
+- update the component's README install block if anything about it proved
+  wrong (it now points at the alias URL);
+- **then** Paul archives the legacy repo — a mono-built release installed
+  and working is the archive gate (doctrine §2).
 
 ## ROLLBACK
 
-Versioned releases are immutable. Prefer a patch release. If the rolling alias
-must move back before a patch is ready, use the alias-only workflow path. It
-runs from `main` (where the workflow exists), fetches and resolves the requested
-historical GitHub tag, downloads the previous versioned release, verifies every
-asset against `release.json` and its checksum sibling, and moves the alias
-without rebuilding:
+Releases are additive; prefer rolling forward with a patch release
+(`vX.Y.Z+1`) over deleting — cutting the patch automatically re-points the
+alias.
 
-```sh
-depot ci dispatch \
-  --repo finitecomputer/finite-mono \
-  --workflow release-finitechat.yml \
-  --ref main \
-  --input publish=true \
-  --input alias_only=true \
-  --input release_tag=finitechat/vPREVIOUS
-```
+1. If the released binary is actively harmful and a patch can't wait:
+   re-run the **previous** version's publish job (re-push its tag or use
+   workflow re-run) so the alias refresh step re-clobbers the alias assets
+   with the good build; or delete the bad versioned release for hygiene:
 
-**TODO (rollback rehearsal):** Exercise this against a non-current historical
-version, verify the alias, then return it to the intended current version with
-the same alias-only path. Do not delete a versioned release or overwrite its
-assets.
+   ```sh
+   gh release delete finitechat/vX.Y.Z --repo finitecomputer/finite-mono
+   ```
+
+   Deleting the versioned release does NOT fix the alias — the alias assets
+   are copies. Always re-point the alias explicitly.
+2. Note the withdrawal in `infra/deployment-changelog.md` so nobody treats
+   the deleted version as fielded.

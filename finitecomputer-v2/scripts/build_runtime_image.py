@@ -234,16 +234,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platform", help="optional image build platform, e.g. linux/amd64")
     parser.add_argument("--no-cache", action="store_true", help="disable the engine build cache")
     parser.add_argument("--push", action="store_true", help="push image after a successful build")
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="save a Depot build before loading it for exact-byte promotion",
-    )
-    parser.add_argument(
-        "--metadata-file",
-        type=Path,
-        help="Depot build metadata path; required with --save",
-    )
     parser.add_argument("--report", type=Path, help="optional build report JSON path")
     return parser.parse_args()
 
@@ -301,41 +291,12 @@ def build_image(
     build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
     if args.no_cache:
         build.append("--no-cache")
-    if args.engine == "depot" and args.save:
-        args.metadata_file.parent.mkdir(parents=True, exist_ok=True)
-        build.extend(
-            [
-                "--save",
-                "--provenance=true",
-                "--metadata-file",
-                str(args.metadata_file),
-            ]
-        )
-    elif args.engine == "depot":
+    if args.engine == "depot":
+        # The release workflow must run local Docker smokes against the exact
+        # image that will be tagged and pushed after the proof passes.
         build.append("--load")
     build.append(str(context))
     run(build, timeout=7200, capture=False)
-
-    depot_build: dict[str, Any] | None = None
-    if args.engine == "depot" and args.save:
-        try:
-            build_metadata = json.loads(args.metadata_file.read_text(encoding="utf-8"))
-            depot_build = build_metadata["depot.build"]
-            build_id = depot_build["buildID"]
-            project_id = depot_build["projectID"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
-            raise SystemExit(f"invalid Depot saved-build metadata: {error}") from error
-        if not isinstance(build_id, str) or not build_id:
-            raise SystemExit("Depot saved-build metadata has no build ID")
-        if not isinstance(project_id, str) or not project_id:
-            raise SystemExit("Depot saved-build metadata has no project ID")
-        # Pulling from the saved build makes the local smoke and later
-        # `depot push` operate on one persisted OCI result.
-        run(
-            ["depot", "pull", "--project", project_id, build_id],
-            timeout=3600,
-            capture=False,
-        )
 
     if args.push:
         if args.engine in {"docker", "depot"}:
@@ -348,8 +309,6 @@ def build_image(
         image_metadata = docker_image_metadata(args.image_ref)
     else:
         image_metadata = apple_image_metadata(args.image_ref)
-    if depot_build is not None:
-        image_metadata["depot_build"] = depot_build
     image_metadata["hermes_nix_runtime"] = {
         "attr": hermes_runtime.attr,
         "python_attr": hermes_runtime.python_attr,
@@ -390,10 +349,6 @@ def main() -> int:
             "--hermes-agent-version is release-pinned to "
             f"{DEFAULT_HERMES_AGENT_VERSION}, got {args.hermes_agent_version}"
         )
-    if args.save and args.engine != "depot":
-        raise SystemExit("--save is supported only with --engine depot")
-    if args.save != bool(args.metadata_file):
-        raise SystemExit("--save and --metadata-file must be provided together")
 
     source_facts = repo_metadata("finite-mono", MONOREPO_ROOT)
     mono_sha = source_facts.pop("head", None)

@@ -11,7 +11,7 @@ const manifestModuleUrl = pathToFileURL(
 ).href;
 
 const versionedAssetUrl = (version) =>
-  `https://github.com/finitecomputer/finite-releases/releases/download/finitechat/v${version}/finitechat-electron-macos-aarch64.zip`;
+  `https://github.com/finitecomputer/finite-mono/releases/download/finitechat/v${version}/finitechat-electron-macos-aarch64.zip`;
 
 async function buildManifest(input) {
   const { buildMacosUpdateManifest } = await import(manifestModuleUrl);
@@ -69,9 +69,9 @@ test("macOS update feed rejects mutable or cross-repository assets", async () =>
     for (const assetUrl of [
       "http://github.com/finitecomputer/finite-mono/releases/download/finitechat/v0.1.9/finitechat-electron-macos-aarch64.zip",
       "https://evil.example/finitechat-electron-macos-aarch64.zip",
-      "https://github.com/finitecomputer/finite-releases/releases/download/finitechat-latest/finitechat-electron-macos-aarch64.zip",
-      "https://github.com/finitecomputer/finite-releases/releases/download/finitechat/v0.1.8/finitechat-electron-macos-aarch64.zip",
-      "https://github.com/finitecomputer/finite-releases/releases/download/finitechat/v0.1.9/other.zip",
+      "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/finitechat-electron-macos-aarch64.zip",
+      "https://github.com/finitecomputer/finite-mono/releases/download/finitechat/v0.1.8/finitechat-electron-macos-aarch64.zip",
+      "https://github.com/finitecomputer/finite-mono/releases/download/finitechat/v0.1.9/other.zip",
     ]) {
       await assert.rejects(buildManifest({ ...base, assetUrl }));
     }
