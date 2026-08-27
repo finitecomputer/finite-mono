@@ -5,8 +5,9 @@ Operational procedures for everything Finite runs. The 2026-07-08 files under
 roles live in `infra/README.md`; executable NixOS configuration is authority
 for declared NixOS state; a fresh read-only inventory is authority for physical
 state. These runbooks must name which source they rely on rather than silently
-promoting an old capture. This repo is public: **no secret values, ever** — env
-var names and locations only (`infra/README.md`, secrets policy).
+promoting an old capture. Source privacy is not a secret boundary: **no secret
+values, ever** — env var names and locations only (`infra/README.md`, secrets
+policy).
 
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
@@ -57,8 +58,8 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 1. **Every release and promotion edits exactly one source of truth.** What
    is out in the field is read from where it is pinned, never from a copy:
-   release tags and the rolling alias releases for the CLIs and the Electron
-   app; Core's promoted runtime-artifact record plus
+   source tags and the rolling alias releases for the CLIs; Core's promoted
+   runtime-artifact record plus
    `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata
    host for the Agent Runtime image (existing Agents keep their launch-time
    image); the NixOS closure — `infra/nixos/modules/dashboard.nix` for the

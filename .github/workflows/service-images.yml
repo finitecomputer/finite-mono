@@ -1,16 +1,10 @@
 name: Service Images
-
-# Builds the control-plane service images from this repo in CI and pushes them
-# digest-pinned to GHCR. This replaces the deprecated on-host `podman build`
-# flow on finite-lat-1 (see infra/hosts/lat1/deploy.md).
-
-run-name: Publish ${{ inputs.image }} ${{ inputs.version }}
-
+run-name: Build ${{ inputs.image }} ${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Which image to build"
+        description: Which image to build
         required: true
         type: choice
         options:
@@ -19,26 +13,32 @@ on:
           - private-limiter
           - specialization-worker
       version:
-        description: "Image version tag, for example 2026-07-08.1"
+        description: Image version tag, for example 2026-07-08.1
         required: true
         type: string
-
+      publish_production:
+        description: Promote the verified saved build to production version tags
+        required: true
+        default: false
+        type: boolean
 concurrency:
   group: service-image-${{ inputs.image }}-${{ inputs.version }}
-
 jobs:
   publish:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
-      packages: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
         with:
           oidc: true
-
+      - name: Reject production promotion until its cutover gate is open
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED != 'true'
+        run: |
+          echo "::error::FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED is not true"
+          exit 1
       - name: Resolve image parameters
         id: params
         run: |
@@ -47,74 +47,110 @@ jobs:
               echo "name=finite-saas-core" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/core.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
               ;;
             dashboard)
               echo "name=finite-saas-dashboard" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/dashboard.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
               ;;
             private-limiter)
-              # mono-owned package; the legacy finite-private-limiter package is
-              # write-locked to the archived finitecomputer repo and stays frozen
-              # serving the currently-deployed pinned digest.
               echo "name=private-limiter" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=FINITE_MONO_REV=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
               ;;
             specialization-worker)
               echo "name=finite-specialization-worker" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/specialization-worker.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
+              echo "build_args=" >> "$GITHUB_OUTPUT"
               ;;
           esac
-
-      - name: Log in to GHCR
+      - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Build and push
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - name: Build and save
         id: build
+        uses: depot/build-push-action@v1
+        with:
+          project: ${{ vars.DEPOT_SERVICE_IMAGES_PROJECT_ID || secrets.DEPOT_SERVICE_IMAGES_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          context: ${{ steps.params.outputs.context }}
+          file: ${{ steps.params.outputs.dockerfile }}
+          platforms: linux/amd64
+          build-args: ${{ steps.params.outputs.build_args }}
+          provenance: true
+          save: true
+      - name: Publish and verify the non-production canary
+        id: canary
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ steps.params.outputs.name }}
-          VERSION: ${{ inputs.version }}
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_SERVICE_IMAGES_PROJECT_ID || secrets.DEPOT_SERVICE_IMAGES_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          DEPOT_DISABLE_OTEL: "1"
+          IMAGE: ghcr.io/finitecomputer/${{ steps.params.outputs.name }}
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
         run: |
-          if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::set DEPOT_SERVICE_IMAGES_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
-            exit 1
-          fi
-          BUILD_ARGS=()
-          if [ "${{ inputs.image }}" = "private-limiter" ]; then
-            BUILD_ARGS+=(--build-arg "FINITE_MONO_REV=$GITHUB_SHA")
-          fi
-          depot build \
+          canary_ref="$IMAGE:canary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test -n "$BUILD_ID"
+          test -n "$SOURCE_DIGEST"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$canary_ref" "$BUILD_ID"
+          docker pull "$canary_ref" >/dev/null
+          destination_digest="$(
+            docker image inspect "$canary_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s#^$IMAGE@##p" \
+              | head -n 1
+          )"
+          python3 scripts/delivery.py verify-image-promotion \
+            --source-digest "$SOURCE_DIGEST" \
+            --destination-digest "$destination_digest"
+          docker buildx imagetools inspect --raw "$IMAGE@$destination_digest" > image-index.json
+          python3 scripts/delivery.py verify-image-index \
+            --manifest image-index.json \
             --platform linux/amd64 \
-            "${BUILD_ARGS[@]}" \
-            --file "${{ steps.params.outputs.dockerfile }}" \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-${GITHUB_SHA::12}" \
-            --metadata-file image-metadata.json \
-            --push \
-            "${{ steps.params.outputs.context }}"
-          DIGEST="$(jq -r '."containerimage.digest"' image-metadata.json)"
-          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::depot build did not return an image digest"
-            cat image-metadata.json
-            exit 1
-          fi
+            --require-attestation
           if [ "${{ inputs.image }}" = "private-limiter" ]; then
-            docker pull "$IMAGE@$DIGEST" >/dev/null
-            test "$(docker image inspect "$IMAGE@$DIGEST" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+            test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           fi
-          echo "pinned=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_OUTPUT"
-
+          echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$IMAGE@$destination_digest" >> "$GITHUB_OUTPUT"
+      - name: Prove anonymous GHCR pull
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          docker logout ghcr.io
+          docker image rm "$PINNED" >/dev/null 2>&1 || true
+          docker pull "$PINNED" >/dev/null
+      - name: Promote the same saved build to production tags
+        id: production
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
+        env:
+          IMAGE: ghcr.io/finitecomputer/${{ steps.params.outputs.name }}
+          VERSION: ${{ inputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          version_ref="$IMAGE:$VERSION"
+          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
+          for ref in "$version_ref" "$sha_ref"; do
+            docker pull "$ref" >/dev/null
+            digest="$(docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n "s#^$IMAGE@##p" | head -n 1)"
+            python3 scripts/delivery.py verify-image-promotion --source-digest "$SOURCE_DIGEST" --destination-digest "$digest"
+          done
+          echo "pinned=$version_ref@$SOURCE_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Summarize
         env:
-          PINNED: ${{ steps.build.outputs.pinned }}
+          CANARY: ${{ steps.canary.outputs.pinned }}
+          PRODUCTION: ${{ steps.production.outputs.pinned }}
         run: |
-          echo "Pinned image (source commit ${GITHUB_SHA}):" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified anonymous canary: \`$CANARY\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PRODUCTION" ]; then
+            echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"

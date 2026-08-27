@@ -19,7 +19,7 @@ Newest first. Never record a secret value.
 | Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat1 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
 | Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat1, lat3) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
-| CLI and Electron releases (`finitechat`, `fsite`, `fbrain`) | component-scoped release tags and the rolling alias releases (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-mono`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
+| CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
 | Server binaries on lat1 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
 | Finite Private (Tinfoil) | [`runbooks/finite-private-deepseek-production-update.md`](runbooks/finite-private-deepseek-production-update.md) and [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `infra/nixos/modules/finite-saas-phala-runner.nix` | the unit environment is the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
@@ -30,18 +30,18 @@ the sources above cannot carry lands here.
 
 ## Standing promises
 
-- The finitechat server keeps accepting every fielded CLI and Electron client
-  until a deprecation is announced. The Electron app is a distinct, revocable
-  Device on the user's existing Finite Chat account.
+- The finitechat server keeps accepting every fielded CLI until a deprecation
+  is announced. The Electron experiment is on hold and is not part of the
+  current release path.
 - Hosted Agents pin their Runtime image at launch and do **not** auto-update.
   Kata launches the immutable digest through a promoted Core artifact;
   existing Agents are rolled serially through Core's guarded same-volume
   upgrade path, which preserves the Agent Principal and the durable `/data`
   mount.
-- Installers point only at the finite-mono rolling alias releases (hard cut
-  2026-07-08). Releases installed before the cut (`finitechat` v0.1.0–v0.1.3,
-  `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from the legacy repo URL; no
-  live users depend on it.
+- Installers point only at the public `finite-releases` rolling alias releases.
+  Releases installed before the 2026-07-08 monorepo cut (`finitechat`
+  v0.1.0–v0.1.3, `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from legacy repo
+  URLs; no live users depend on those URLs.
 - The historical `glm-5-2` request alias remains for mixed-version clients;
   `deepseek-v4-flash-0731` is the canonical model label everywhere else.
 - Runtime artifact ids promoted before 2026-08-05 (`2026-07-10.2` through

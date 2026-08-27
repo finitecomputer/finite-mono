@@ -127,7 +127,7 @@ skills/search checks on every PR.
 
 ## Rules worth repeating
 
-- **This repo is public. Never commit a secret value.** Names and locations
-  only (`infra/README.md` explains the secrets model).
-- Release asset names and legacy install URLs are product contracts.
+- **Never commit a secret value.** Names and locations only (`infra/README.md`
+  explains the secrets model).
+- Release asset names and install URL shapes are product contracts.
 - Deploy changes go in `infra/`, not in shell history.
