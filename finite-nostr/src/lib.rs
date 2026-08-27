@@ -17,7 +17,7 @@ use auth::payload_hash_hex;
 pub use auth::{
     HTTP_AUTH_KIND, HTTP_AUTH_SCHEME, HttpAuthEventRequest, HttpAuthValidation,
     decode_http_auth_header, encode_http_auth_header, sign_http_auth_event,
-    validate_http_auth_event,
+    sign_http_auth_header_with_secret, validate_http_auth_event,
 };
 pub use error::NostrPrimitiveError;
 pub use event::{EventIdHex, compute_event_id, verify_event_integrity};
@@ -184,6 +184,26 @@ mod tests {
             NostrPublicKey::from_protocol(keys.public_key())
         );
         assert_eq!(tag_content(&decoded, "nonce").as_deref(), Some("nonce-1"));
+    }
+
+    #[test]
+    fn signs_http_auth_header_from_raw_secret_bytes() {
+        let keys = test_keys();
+        let body = b"{\"name\":\"a\"}";
+        let request = HttpAuthEventRequest::new("POST", URL, NOW).with_body(body.to_vec());
+
+        let header =
+            sign_http_auth_header_with_secret(&keys.secret_key().secret_bytes(), &request)
+                .unwrap();
+        let decoded = decode_http_auth_header(&header).unwrap();
+        let expected = HttpAuthValidation::new("POST", URL, NOW, 60)
+            .with_body(body.to_vec())
+            .with_expected_signer(NostrPublicKey::from_protocol(keys.public_key()));
+
+        assert_eq!(
+            validate_http_auth_event(&decoded, &expected).unwrap(),
+            NostrPublicKey::from_protocol(keys.public_key())
+        );
     }
 
     #[test]
