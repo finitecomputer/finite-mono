@@ -10137,10 +10137,17 @@ mod tests {
 
         let requests = server.join().unwrap();
         assert!(requests[0].contains("/v1/brains/brain/export"));
+        // A fresh Working Tree has no cached bootstrap, so it catches up
+        // through the bounded bootstrap instead of replaying records from 0.
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/v1/brains/brain/sync/records?after=0"))
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/records"))
         );
 
         let state = read_agent_state(&tree).unwrap();
@@ -10225,6 +10232,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([8; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/daemon.md", "# Daemon\n");
 
         let mut env = env_for(&tmp);
@@ -12835,6 +12843,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([4; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/remote.md", "# Remote\n");
 
         let mut env = env_for(&tmp);
@@ -12897,6 +12906,11 @@ mod tests {
             &export,
         )
         .unwrap();
+        write_cached_bootstrap_at_cursor(tree, latest_sequence);
+    }
+
+    fn write_cached_bootstrap_at_cursor(tree: &Path, latest_sequence: u64) {
+        fs::create_dir_all(tree.join(".finitebrain/encrypted-sync")).unwrap();
         write_json_file(
             &tree.join(".finitebrain/encrypted-sync/bootstrap.json"),
             &serde_json::json!({
@@ -13525,6 +13539,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([7; 32]);
         let tree = setup_incremental_tree(&tmp, 0);
+        write_cached_bootstrap_at_cursor(&tree, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/summary.md", "# Summary\n");
 
         let mut env = env_for(&tmp);
@@ -13568,6 +13583,7 @@ mod tests {
         );
         let folder_key = FolderKey::from_bytes([5; 32]);
         let tree = setup_incremental_tree(&tmp, 2);
+        write_cached_bootstrap_at_cursor(&tree, 2);
         let ciphertext =
             remote_page_ciphertext(&folder_key, "compiled/rebootstrap.md", "# Bootstrap\n");
 
@@ -13618,6 +13634,7 @@ mod tests {
         let agent_b_config = tmp.path().join("agent-b-config");
         let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
         let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
+        write_cached_bootstrap_at_cursor(&agent_a_tree, 0);
         let env_a = CliEnvironment {
             cwd: agent_a_tree.clone(),
             config_dir: agent_a_config.clone(),
@@ -13993,10 +14010,11 @@ mod tests {
         assert!(text.contains("conflicts: none"));
 
         let requests = server.join().unwrap();
+        // No cached bootstrap yet: the fresh tree catches up via bootstrap.
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/v1/brains/brain/sync/records?after=0"))
+                .any(|request| request.contains("/v1/brains/brain/sync/bootstrap"))
         );
     }
 

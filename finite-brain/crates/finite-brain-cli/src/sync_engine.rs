@@ -792,6 +792,23 @@ fn fetch_incremental_remote_sync(
     brain_id: &str,
     after_sequence: u64,
 ) -> Result<RemoteSyncResult, CliError> {
+    // Incremental records apply onto the cached bootstrap at the same
+    // cursor. Without that base — a fresh or reset Working Tree, or lost
+    // cache — the pull would replay history the bounded bootstrap already
+    // projects (for a large Brain, many times the export's size across
+    // pages), so catch up through the bootstrap directly.
+    let has_cached_base = matches!(
+        read_cached_sync_bootstrap(root),
+        Ok(Some(cached)) if cached.latest_sequence == after_sequence
+    );
+    if !has_cached_base {
+        return fetch_bootstrap_remote_sync(
+            env,
+            server_url,
+            brain_id,
+            format!("no cached bootstrap at cursor {after_sequence}; fetched bootstrap"),
+        );
+    }
     let pull = match fetch_all_sync_records(env, server_url, brain_id, after_sequence) {
         Ok(pull) => pull,
         Err(error) if is_rebootstrap_required_error(&error) => {
