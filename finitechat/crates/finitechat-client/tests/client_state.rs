@@ -272,6 +272,53 @@ fn reqwest_http_runtime_delivery_claims_key_package_over_live_server() {
 }
 
 #[test]
+fn reqwest_http_runtime_delivery_signs_account_scoped_requests_over_live_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http-live-auth.sqlite3");
+    let state = HttpServerState::from_sqlite_path(&server_db)
+        .unwrap()
+        .with_require_signed_requests(true);
+    let server_url = spawn_live_http_server_with_state(state);
+    let alice = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_live_auth");
+    let profile = finitechat_http::NostrProfileRecord {
+        account_id: alice.device_ref().account_id.clone(),
+        name: Some("alice".to_owned()),
+        display_name: None,
+        about: None,
+        picture: None,
+        bot: None,
+        finite_role: None,
+        metadata_json: None,
+        fetched_at_ms: 1_000,
+        expires_at_ms: 60_000,
+    };
+
+    // Without a signer the account-scoped route rejects the request.
+    let mut unsigned =
+        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url.clone()));
+    let rejected = unsigned.put_nostr_profile(&profile);
+    assert!(
+        matches!(
+            rejected,
+            Err(HttpRuntimeDeliveryError::Transport(
+                ReqwestHttpRuntimeTransportError::Server {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..
+                }
+            ))
+        ),
+        "unsigned request must be rejected: {rejected:?}"
+    );
+
+    // The signed transport authenticates as the account named in the body.
+    let mut signed = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(server_url).with_signer(ALICE_ACCOUNT_SECRET_BYTES),
+    );
+    let saved = signed.put_nostr_profile(&profile).unwrap();
+    assert!(saved.saved);
+}
+
+#[test]
 fn reqwest_http_runtime_delivery_reads_sync_stream_hints_over_live_server() {
     let dir = tempfile::tempdir().unwrap();
     let server_db = dir.path().join("finitechat-http-live-sse.sqlite3");
@@ -2611,10 +2658,14 @@ impl std::fmt::Display for InProcessHttpTransportError {
 type TestHttpRuntimeDelivery = HttpRuntimeDelivery<InProcessHttpTransport>;
 
 fn spawn_live_http_server(path: &std::path::Path) -> String {
+    spawn_live_http_server_with_state(HttpServerState::from_sqlite_path(path).unwrap())
+}
+
+fn spawn_live_http_server_with_state(state: HttpServerState) -> String {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = http_router(HttpServerState::from_sqlite_path(path).unwrap());
+    let app = http_router(state);
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {

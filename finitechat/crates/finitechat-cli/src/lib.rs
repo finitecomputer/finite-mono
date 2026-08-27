@@ -523,6 +523,13 @@ fn execute_http_request<W: Write>(
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
+        let body = if status == reqwest::StatusCode::UNAUTHORIZED {
+            format!(
+                "{body}\nnote: account-scoped routes require NIP-98 signed requests; the raw 'http' subcommand does not sign"
+            )
+        } else {
+            body
+        };
         return Err(CliError::Server { status, body });
     }
     writeln!(output, "{body}").map_err(CliError::Output)
@@ -1026,8 +1033,7 @@ mod tests {
         assert_eq!(bootstrap["bootstrapped"], true);
 
         let mut delivery = HttpRuntimeDelivery::new(
-            ReqwestHttpRuntimeTransport::new(server_url.clone())
-                .with_signer(CLI_LIVE_ALICE_SECRET),
+            ReqwestHttpRuntimeTransport::new(server_url.clone()).with_signer(CLI_LIVE_ALICE_SECRET),
         );
         let upload = phone
             .upload_key_package_request("key-package-add-device")

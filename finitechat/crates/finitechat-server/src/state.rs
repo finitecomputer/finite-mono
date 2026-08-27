@@ -158,7 +158,9 @@ struct CachedReadiness {
 
 /// Default allowance for the public mutating routes: generous headroom over
 /// what a healthy device can produce, tight enough to blunt naive abuse.
-pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 120;
+/// Device-link export legitimately publishes and claims hundreds of
+/// KeyPackages per minute from one address, so the floor sits well above that.
+pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 1_200;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
 
 /// Hand-rolled fixed-window per-IP rate limiter for the public mutating
@@ -184,7 +186,10 @@ impl PublicRouteRateLimiter {
     /// Record one request from `ip`; false once the window allowance is spent.
     pub(crate) fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut windows = self.windows.lock().unwrap_or_else(|error| error.into_inner());
+        let mut windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         match windows.get_mut(&ip) {
             Some((started, count)) if now.duration_since(*started) < self.window => {
                 if *count >= self.max_requests {
@@ -203,7 +208,10 @@ impl PublicRouteRateLimiter {
 
 impl Default for PublicRouteRateLimiter {
     fn default() -> Self {
-        Self::new(DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+        Self::new(
+            DEFAULT_RATE_LIMIT_PER_WINDOW,
+            DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )
     }
 }
 
