@@ -68,13 +68,31 @@ export HERMES_HOME="$hermes_home"
 export FINITECHAT_BIN="$finitechat_bin"
 export FINITECHAT_HERMES_INBOUND_STREAM="${FINITECHAT_HERMES_INBOUND_STREAM:-1}"
 export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
-# Finite Chat inbound arrives over the authenticated relay binding, so its
-# platform-scoped allow-all is the intended delegation to that upstream.
+# Finite Chat inbound arrives over the authenticated relay binding. Legacy
+# agents (created before owner-npub granting) keep the platform-scoped
+# allow-all as the intended delegation to that upstream.
 # GATEWAY_ALLOW_ALL_USERS must never be set here: it is the gateway-global
 # switch and silently authorized every stranger on every other platform
 # (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
-export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
-unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+if [[ -n "${FINITECHAT_OWNER_NPUBS:-}" ]]; then
+    # Owner-scoped admission. FINITECHAT_OWNER_NPUBS is a comma-separated list
+    # of 64-hex account ids injected by Core into the lease-time runtime spec.
+    # FINITECHAT_ALLOWED_USERS entries are comma-separated and compared
+    # verbatim against the finitechat adapter's source.user_id (the sender's
+    # 64-hex account id) — verified against the pinned hermes-agent
+    # (flake.lock v2026.8.3) gateway/authz_mixin.py. The runner injects
+    # FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility, so
+    # allowlist mode must actively unset it here rather than rely on a
+    # default change.
+    export FINITECHAT_ALLOWED_USERS="$FINITECHAT_OWNER_NPUBS"
+    # The chat sidecar seeds its Welcome allowlist from this at boot; it
+    # accepts the same comma-separated 64-hex (or npub1…) form.
+    export FINITECHAT_WELCOME_ALLOWLIST="$FINITECHAT_OWNER_NPUBS"
+    unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+else
+    export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
+    unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+fi
 export FINITE_AGENT_ID="${FINITE_AGENT_ID:-agent_${device_id}}"
 export FINITE_AGENT_NAME="$agent_name"
 

@@ -499,6 +499,100 @@ exec {sys.executable!s} "$@"
                 existing_config_data = yaml.safe_load(existing_config)
             self.assertEqual(existing_config_data["model"], expected_model)
 
+    def _gateway_chat_authz_env(self, owner_npubs: str | None) -> dict[str, str]:
+        """Run the launcher with stub binaries and capture the chat-authz env
+        the gateway process would inherit. The runner always injects
+        FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility."""
+        launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            finitechat = fake_bin / "finitechat"
+            finitechat.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            finitechat.chmod(0o755)
+            env_capture = tmp / "gateway.env"
+            hermes = fake_bin / "hermes"
+            hermes.write_text(
+                "#!/usr/bin/env bash\n"
+                "for key in FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS"
+                " GATEWAY_ALLOW_ALL_USERS FINITECHAT_ALLOWED_USERS"
+                " FINITECHAT_WELCOME_ALLOWLIST FINITECHAT_OWNER_NPUBS; do\n"
+                "  if [[ -v $key ]]; then printf '%s=%s\\n' \"$key\" \"${!key}\""
+                f" >>{env_capture}; fi\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            hermes.chmod(0o755)
+            python = fake_bin / "python"
+            python.write_text(
+                f"#!/usr/bin/env bash\nexec {sys.executable!s} \"$@\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            agent_home = tmp / "agent"
+            hermes_home = agent_home / "hermes-home"
+            hermes_home.mkdir(parents=True)
+            (agent_home / "config.json").write_text("{}\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FINITECHAT_BIN": str(finitechat),
+                "FINITECHAT_HOME": str(agent_home),
+                "HERMES_HOME": str(hermes_home),
+                "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
+                "FINITE_AGENTD_SUPERVISED": "1",
+                "FINITECHAT_ALLOW_ALL_USERS": "true",
+                "FINITE_ALLOW_ALL_USERS": "true",
+                "GATEWAY_ALLOW_ALL_USERS": "true",
+                "FINITE_HERMES_CONFIG_RECONCILER": str(
+                    REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
+                ),
+            }
+            if owner_npubs is not None:
+                env["FINITECHAT_OWNER_NPUBS"] = owner_npubs
+            else:
+                env.pop("FINITECHAT_OWNER_NPUBS", None)
+
+            result = subprocess.run(
+                ["bash", str(launcher)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured: dict[str, str] = {}
+            if env_capture.exists():
+                for line in env_capture.read_text(encoding="utf-8").splitlines():
+                    key, _, value = line.partition("=")
+                    captured[key] = value
+            return captured
+
+    def test_gateway_launcher_owner_npubs_scope_chat_admission(self) -> None:
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(owner)
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
+        self.assertEqual(captured.get("FINITECHAT_WELCOME_ALLOWLIST"), owner)
+        self.assertEqual(captured.get("FINITECHAT_OWNER_NPUBS"), owner)
+        # The runner-injected allow-all flags must be actively unset so the
+        # allowlist is the only admission path.
+        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_without_owner_npubs_keeps_legacy_allow_all(self) -> None:
+        captured = self._gateway_chat_authz_env(None)
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
+        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
     def test_gateway_launcher_fails_closed_without_replacing_invalid_config(self) -> None:
         reconciler = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
         with tempfile.TemporaryDirectory() as raw_tmp:
