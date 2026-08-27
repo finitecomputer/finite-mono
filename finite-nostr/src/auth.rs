@@ -147,10 +147,11 @@ pub fn sign_http_auth_header_with_secret(
     secret_key_bytes: &[u8; 32],
     request: &HttpAuthEventRequest,
 ) -> Result<String, NostrPrimitiveError> {
-    let secret_key =
-        SecretKey::from_slice(secret_key_bytes).map_err(|_| NostrPrimitiveError::MalformedInput {
+    let secret_key = SecretKey::from_slice(secret_key_bytes).map_err(|_| {
+        NostrPrimitiveError::MalformedInput {
             field: "http_auth_secret_key",
-        })?;
+        }
+    })?;
     let event = sign_http_auth_event(&Keys::new(secret_key), request)?;
     Ok(encode_http_auth_header(&event))
 }

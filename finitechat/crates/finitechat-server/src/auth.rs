@@ -63,10 +63,9 @@ where
                     HTTP_AUTH_MAX_SKEW_SECONDS,
                 )
                 .with_body(bytes.to_vec());
-                let signer = finite_nostr::validate_http_auth_event(&event, &validation)
-                    .map_err(|error| {
-                        unauthorized(format!("invalid Nostr authorization: {error}"))
-                    })?;
+                let signer = finite_nostr::validate_http_auth_event(&event, &validation).map_err(
+                    |error| unauthorized(format!("invalid Nostr authorization: {error}")),
+                )?;
                 Some(signer.to_hex())
             }
         };
@@ -155,7 +154,10 @@ mod tests {
     fn absolute_url_falls_back_to_forwarded_scheme_and_host() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-proto", "https".parse().expect("header"));
-        headers.insert(header::HOST, "chat.finite.computer".parse().expect("header"));
+        headers.insert(
+            header::HOST,
+            "chat.finite.computer".parse().expect("header"),
+        );
         let uri: Uri = "http://127.0.0.1:8787/activities/get".parse().expect("uri");
 
         assert_eq!(

@@ -193,8 +193,7 @@ mod tests {
         let request = HttpAuthEventRequest::new("POST", URL, NOW).with_body(body.to_vec());
 
         let header =
-            sign_http_auth_header_with_secret(&keys.secret_key().secret_bytes(), &request)
-                .unwrap();
+            sign_http_auth_header_with_secret(&keys.secret_key().secret_bytes(), &request).unwrap();
         let decoded = decode_http_auth_header(&header).unwrap();
         let expected = HttpAuthValidation::new("POST", URL, NOW, 60)
             .with_body(body.to_vec())

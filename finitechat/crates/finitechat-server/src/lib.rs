@@ -81,7 +81,7 @@ mod auth;
 mod legacy_store;
 mod projections;
 mod routes;
-mod state;// The normalized SQLite delivery engine (storage rewrite, Core PR 3). Nothing
+mod state; // The normalized SQLite delivery engine (storage rewrite, Core PR 3). Nothing
 // is routed to it yet: the server still runs the legacy op-log engine, and the
 // engine is proven by the upstream conformance suite in its unit tests. The
 // `allow(dead_code)` comes off when the server switches engines.
@@ -320,11 +320,9 @@ impl IntoResponse for ServerHttpError {
                 "delivery_store".to_owned(),
                 error.to_string(),
             ),
-            Self::Unauthorized { reason } => (
-                StatusCode::UNAUTHORIZED,
-                "unauthorized".to_owned(),
-                reason,
-            ),
+            Self::Unauthorized { reason } => {
+                (StatusCode::UNAUTHORIZED, "unauthorized".to_owned(), reason)
+            }
             Self::IdempotencyConflict { idempotency_key } => (
                 StatusCode::CONFLICT,
                 "idempotency_conflict".to_owned(),

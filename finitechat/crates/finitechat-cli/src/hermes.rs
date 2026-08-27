@@ -1424,8 +1424,7 @@ fn publish_agent_profile(
         expires_at_ms: now + CREDENTIAL_VALIDITY_SECONDS * 1000,
     };
     let mut delivery = HttpRuntimeDelivery::new(
-        ReqwestHttpRuntimeTransport::new(config.server_url.clone())
-            .with_signer(*secret.as_bytes()),
+        ReqwestHttpRuntimeTransport::new(config.server_url.clone()).with_signer(*secret.as_bytes()),
     );
     let response = delivery
         .put_nostr_profile(&profile)
