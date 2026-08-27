@@ -394,6 +394,39 @@ export async function hostedDeviceState(
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/state");
 }
 
+const HOSTED_CHAT_ACCOUNT_ID_PATTERN = /^[0-9a-f]{64}$/u;
+
+/**
+ * The owner's hosted-chat account id (64 hex) for agent-creation granting.
+ * Reading app state pre-mints the hosted chat identity on first contact, so a
+ * runner lease can never race the mint. Fail-open by contract: any transport,
+ * config, or shape problem returns null (with a warning) because agent
+ * creation must never be bricked by chat identity availability; Core simply
+ * leases the runtime without FINITECHAT_OWNER_NPUBS in that case.
+ */
+export async function hostedDeviceOwnerChatAccountId(
+  config: HostedDeviceConfig | null,
+  account: AccountAuthContext
+): Promise<string | null> {
+  if (!config) {
+    return null;
+  }
+  try {
+    const state = await hostedDeviceState(config, account);
+    const accountId = state.identity?.account_id?.trim().toLowerCase() ?? "";
+    if (!HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId)) {
+      console.warn("Hosted chat identity had no usable account id for agent creation");
+      return null;
+    }
+    return accountId;
+  } catch (error) {
+    console.warn("Could not pre-mint the hosted chat identity for agent creation", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 export async function hostedDeviceBrainIdentityProvider(
   config: HostedDeviceConfig,
   account: AccountAuthContext,

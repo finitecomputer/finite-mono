@@ -13,6 +13,7 @@ import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   hostedDeviceAuthorizeAgentBinding,
   hostedDeviceConfig,
+  hostedDeviceOwnerChatAccountId,
 } from "@/lib/hosted-web-device";
 import { workosBaseUrl } from "@/lib/workos-auth";
 
@@ -53,6 +54,12 @@ export async function GET(request: Request) {
       idempotencyKey: draft.idempotencyKey,
       hostingTier: draft.hostingTier,
       profilePictureUrl: draft.profilePictureUrl,
+      // Same fail-open pre-mint as the direct launch path: chat identity
+      // availability must never block a paid agent creation.
+      ownerChatAccountId: await hostedDeviceOwnerChatAccountId(
+        hostedDeviceConfig(),
+        account
+      ),
     });
     if (creation.project.id !== creation.request.project_id) {
       throw new Error("Agent creation returned inconsistent project identity.");
