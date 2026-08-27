@@ -90,7 +90,10 @@ mod store;
 mod validate;
 
 pub use routes::http_router;
-pub use state::{HttpServerState, WelcomeClaimState};
+pub use state::{
+    DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState,
+    WelcomeClaimState,
+};
 
 #[derive(Debug, Error)]
 pub enum HttpServerConfigurationError {

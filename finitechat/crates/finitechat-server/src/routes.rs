@@ -2,12 +2,14 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -54,32 +56,13 @@ use crate::validate::{
 use crate::{MAX_HTTP_BLOB_UPLOAD_BODY_BYTES, ServerHttpError};
 
 pub fn http_router(state: HttpServerState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/readyz", get(readyz))
-        .route("/events", post(append_application_event))
-        .route("/application-effects/get", post(get_application_effect))
-        .route(
-            "/application-effects/counts",
-            post(get_application_effect_counts),
-        )
-        .route("/activities", post(append_ephemeral_activity))
-        .route("/activities/get", post(get_ephemeral_activities))
+    // Stranger-accessible mutating routes (no account secret exists to sign
+    // them with) get a per-IP fixed-window rate limit instead of NIP-98 auth.
+    let public_mutating = Router::new()
         .route(
             "/upload",
             put(upload_blob_object).layer(DefaultBodyLimit::max(MAX_HTTP_BLOB_UPLOAD_BODY_BYTES)),
         )
-        .route("/blobs/{sha256}", get(download_blob_object))
-        .route("/commits", post(submit_commit))
-        .route("/sync/group", post(sync_group))
-        .route("/sync/inbox", post(sync_inbox))
-        .route("/sync/stream", post(sync_stream))
-        .route("/sync/wait", post(sync_wait))
-        .route("/devices/revoke", post(revoke_device))
-        .route("/devices/liveness", post(observe_device_liveness))
-        .route("/devices/liveness/get", post(get_device_liveness))
-        .route("/profiles/nostr", post(put_nostr_profile))
-        .route("/profiles/nostr/get", post(get_nostr_profiles))
         .route(
             "/key-packages/availability",
             post(get_key_package_availability),
@@ -102,20 +85,82 @@ pub fn http_router(state: HttpServerState) -> Router {
         .route("/pairing-sessions/response", post(publish_pairing_response))
         .route("/pairing-sessions/complete", post(publish_pairing_complete))
         .route("/pairing-sessions/expire", post(expire_pairing_session))
+        .route("/push-wakes/claim", post(claim_push_wakes))
+        .route("/push-wakes/ack", post(ack_push_wake))
+        .route("/push-wakes/fail", post(fail_push_wake))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_public_routes,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/readyz", get(readyz))
+        .route("/events", post(append_application_event))
+        .route("/application-effects/get", post(get_application_effect))
+        .route(
+            "/application-effects/counts",
+            post(get_application_effect_counts),
+        )
+        .route("/activities", post(append_ephemeral_activity))
+        .route("/activities/get", post(get_ephemeral_activities))
+        .route("/blobs/{sha256}", get(download_blob_object))
+        .route("/commits", post(submit_commit))
+        .route("/sync/group", post(sync_group))
+        .route("/sync/inbox", post(sync_inbox))
+        .route("/sync/stream", post(sync_stream))
+        .route("/sync/wait", post(sync_wait))
+        .route("/devices/revoke", post(revoke_device))
+        .route("/devices/liveness", post(observe_device_liveness))
+        .route("/devices/liveness/get", post(get_device_liveness))
+        .route("/profiles/nostr", post(put_nostr_profile))
+        .route("/profiles/nostr/get", post(get_nostr_profiles))
         .route("/account-rooms/bootstrap", post(bootstrap_account_room))
         .route("/account-rooms", post(save_account_room))
         .route("/account-rooms/list", post(list_account_rooms))
         .route("/push-tokens", post(register_push_token))
         .route("/push-tokens/remove", post(remove_push_token))
-        .route("/push-wakes/claim", post(claim_push_wakes))
-        .route("/push-wakes/ack", post(ack_push_wake))
-        .route("/push-wakes/fail", post(fail_push_wake))
         .route("/rooms/leave", post(leave_room))
         .route("/rooms/admins", post(update_room_admins))
         .route("/rooms/report-invalid-commit", post(report_invalid_commit))
         .route("/welcomes/claim", post(claim_welcomes))
         .route("/welcomes/ack", post(ack_welcome))
+        .merge(public_mutating)
         .with_state(state)
+}
+
+async fn rate_limit_public_routes(
+    State(state): State<HttpServerState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.check_public_route_rate_limit(client_ip(&request)) {
+        return next.run(request).await;
+    }
+    (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response()
+}
+
+/// Client IP behind the edge proxy: the first X-Forwarded-For hop when
+/// present, else the direct peer address.
+fn client_ip(request: &Request) -> IpAddr {
+    if let Some(value) = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        && let Some(first) = value
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|hop| !hop.is_empty())
+        && let Ok(ip) = first.parse()
+    {
+        return ip;
+    }
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
 async fn health() -> Json<HealthResponse> {

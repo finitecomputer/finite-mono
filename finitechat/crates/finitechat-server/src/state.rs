@@ -2,6 +2,7 @@
 //! server-side record types they operate on.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
@@ -155,6 +156,57 @@ struct CachedReadiness {
     result: ServerReadiness,
 }
 
+/// Default allowance for the public mutating routes: generous headroom over
+/// what a healthy device can produce, tight enough to blunt naive abuse.
+pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 120;
+pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
+
+/// Hand-rolled fixed-window per-IP rate limiter for the public mutating
+/// routes (KeyPackages, pairing sessions, uploads, push-wake drains). A
+/// `Mutex<HashMap<IpAddr, (window_start, count)>>` is enough at the current
+/// fleet size and adds no dependency.
+#[derive(Debug)]
+pub(crate) struct PublicRouteRateLimiter {
+    max_requests: u32,
+    window: Duration,
+    windows: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+}
+
+impl PublicRouteRateLimiter {
+    pub(crate) fn new(max_requests: u32, window_seconds: u64) -> Self {
+        Self {
+            max_requests,
+            window: Duration::from_secs(window_seconds),
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one request from `ip`; false once the window allowance is spent.
+    pub(crate) fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut windows = self.windows.lock().unwrap_or_else(|error| error.into_inner());
+        match windows.get_mut(&ip) {
+            Some((started, count)) if now.duration_since(*started) < self.window => {
+                if *count >= self.max_requests {
+                    return false;
+                }
+                *count += 1;
+                true
+            }
+            _ => {
+                windows.insert(ip, (now, 1));
+                true
+            }
+        }
+    }
+}
+
+impl Default for PublicRouteRateLimiter {
+    fn default() -> Self {
+        Self::new(DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HttpServerState {
     service: Arc<Mutex<HttpDeliveryService>>,
@@ -187,6 +239,7 @@ pub struct HttpServerState {
     /// still accepted (old clients); a present-but-invalid header is always
     /// rejected. When true, a missing header is rejected too.
     require_signed_requests: bool,
+    rate_limiter: Arc<PublicRouteRateLimiter>,
     ops_since_snapshot: Arc<Mutex<u64>>,
     /// True while a snapshot persist runs on its background thread; op
     /// triggers that land in the meantime skip instead of stacking threads.
@@ -283,6 +336,7 @@ impl HttpServerState {
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
@@ -302,6 +356,17 @@ impl HttpServerState {
     pub fn with_require_signed_requests(mut self, require_signed_requests: bool) -> Self {
         self.require_signed_requests = require_signed_requests;
         self
+    }
+
+    pub fn with_rate_limit(mut self, max_requests: u32, window_seconds: u64) -> Self {
+        self.rate_limiter = Arc::new(PublicRouteRateLimiter::new(max_requests, window_seconds));
+        self
+    }
+
+    /// Record one request to a public mutating route from `ip`; false once
+    /// the per-IP window allowance is spent.
+    pub(crate) fn check_public_route_rate_limit(&self, ip: IpAddr) -> bool {
+        self.rate_limiter.check(ip)
     }
 
     pub(crate) fn public_url(&self) -> Option<&str> {
@@ -397,6 +462,7 @@ impl HttpServerState {
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
