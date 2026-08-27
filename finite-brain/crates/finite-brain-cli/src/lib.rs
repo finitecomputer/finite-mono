@@ -13298,6 +13298,148 @@ mod tests {
         );
     }
 
+    fn start_large_records_page_sync_server(
+        records: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && started.elapsed() < Duration::from_secs(15) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                // The accepted socket inherits the listener's nonblocking
+                // mode; the multi-MB records page needs blocking writes.
+                stream.set_nonblocking(false).unwrap();
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 10,
+                            "records": records,
+                            "count": 3,
+                            "hasMore": false,
+                            "nextSequence": 10
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/metadata") {
+                    (
+                        "200 OK",
+                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn sync_now_applies_records_page_larger_than_the_generic_json_cap() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let tree = setup_incremental_tree(&tmp, 7);
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        write_cached_sync_evidence(&tree, 7, std::slice::from_ref(&export_grant));
+
+        // Three ~3.8 MB pages in one records page: the response body is
+        // ~11 MB, over the generic 10 MB JSON cap that used to brick
+        // catch-up sync for large Brains.
+        let filler = "a".repeat(3_800_000);
+        let records: Vec<Value> = (1..=3u64)
+            .map(|i| {
+                let object_id = format!("obj_bigpage00000{i}");
+                let page_path = format!("compiled/big-{i}.md");
+                let markdown = format!("# Big page {i}\n\n{filler}\n");
+                let plaintext = encode_folder_object_page_plaintext(
+                    &SafeRelativePath::new("page_path", &page_path).unwrap(),
+                    &markdown,
+                )
+                .unwrap();
+                let aad = FolderObjectAad {
+                    brain_id: BrainId::new("brain").unwrap(),
+                    folder_id: FolderId::new("general").unwrap(),
+                    object_id: ObjectId::new(object_id.clone()).unwrap(),
+                    key_version: 1,
+                };
+                let ciphertext = encrypt_folder_object(&folder_key, &aad, &plaintext)
+                    .unwrap()
+                    .canonical_json();
+                serde_json::json!({
+                    "sequence": 7 + i,
+                    "recordEventId": format!("evt-big-{i}"),
+                    "recordType": "folder_object_revision",
+                    "folderId": "general",
+                    "objectId": object_id,
+                    "revision": 1,
+                    "actorNpub": "npub-remote",
+                    "clientCreatedAt": "2026-06-24T20:46:36Z",
+                    "payloadJson": remote_revision_payload_json_for_object(&object_id, &ciphertext),
+                    "recordEventKind": APP_SPECIFIC_KIND
+                })
+            })
+            .collect();
+        let (server_url, server) = start_large_records_page_sync_server(records);
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["status"], "applied-remote-records");
+        assert_eq!(json["latestSequence"], 10);
+        for i in 1..=3 {
+            let content =
+                fs::read_to_string(tree.join(format!("General/compiled/big-{i}.md"))).unwrap();
+            assert!(content.starts_with(&format!("# Big page {i}\n")));
+            assert!(content.len() > 3_800_000);
+        }
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/v1/brains/brain/sync/records?after=7"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/bootstrap"))
+        );
+    }
+
     #[test]
     fn sync_now_removes_a_permanently_deleted_folder_projection() {
         let tmp = TempDir::new().unwrap();

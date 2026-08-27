@@ -48,7 +48,10 @@ use crate::{
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
 const FOLDER_OBJECT_PAGE_VERSION: &str = "finite-folder-object-page-v1";
-const SYNC_RECORDS_PAGE_LIMIT: u64 = 1_000;
+// Record pages are bounded by count, and each record is bounded by the
+// asset/page payload limits, so 100 records stays far under the 128 MB
+// sync-surface response cap even for maximal payloads.
+const SYNC_RECORDS_PAGE_LIMIT: u64 = 100;
 const MAX_WORKING_TREE_FILE_COUNT: usize = 10_000;
 const MAX_WORKING_TREE_RECURSION_DEPTH: usize = 32;
 
@@ -912,7 +915,17 @@ fn fetch_sync_records_page(
     let path = format!(
         "/v1/brains/{brain_id}/sync/records?after={after_sequence}&limit={SYNC_RECORDS_PAGE_LIMIT}"
     );
-    let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
+    // Record pages carry full ciphertext payloads, so a catch-up page scales
+    // with batch activity, not with the generic JSON cap: a busy window on a
+    // large Brain would otherwise brick every sync behind the cursor.
+    let response = signed_json_request_to_server_with_response_limit(
+        env,
+        server_url,
+        "GET",
+        &path,
+        None,
+        SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES,
+    )?;
     serde_json::from_value(response).map_err(CliError::from)
 }
 
