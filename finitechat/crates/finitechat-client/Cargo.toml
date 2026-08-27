@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+finite-nostr.workspace = true
 finitechat-transport.workspace = true
 finitechat-http = { path = "../finitechat-http" }
 finitechat-mls = { path = "../finitechat-mls" }

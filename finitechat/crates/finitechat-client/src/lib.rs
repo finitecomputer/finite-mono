@@ -4834,10 +4834,18 @@ pub trait HttpRuntimeTransport {
         R: DeserializeOwned;
 }
 
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReqwestHttpRuntimeTransport {
     base_url: String,
     client: reqwest::blocking::Client,
+    signer: Option<[u8; 32]>,
 }
 
 /// Default bounds for every runtime-transport HTTP call. The connect bound
@@ -4898,7 +4906,16 @@ impl ReqwestHttpRuntimeTransport {
         Self {
             base_url: base_url.into(),
             client,
+            signer: None,
         }
+    }
+
+    /// Attach the raw 32-byte account secret so every request carries a
+    /// NIP-98-style `Authorization: Nostr <base64>` header binding the method,
+    /// absolute URL, and exact body bytes to the account key.
+    pub fn with_signer(mut self, secret: [u8; 32]) -> Self {
+        self.signer = Some(secret);
+        self
     }
 
     pub fn base_url(&self) -> &str {
@@ -4913,14 +4930,46 @@ impl ReqwestHttpRuntimeTransport {
         )
     }
 
+    fn auth_header(
+        &self,
+        url: &str,
+        body: &[u8],
+    ) -> Result<Option<String>, ReqwestHttpRuntimeTransportError> {
+        let Some(secret) = self.signer else {
+            return Ok(None);
+        };
+        let request = finite_nostr::HttpAuthEventRequest::new("POST", url, current_unix_seconds())
+            .with_body(body.to_vec());
+        finite_nostr::sign_http_auth_header_with_secret(&secret, &request)
+            .map(Some)
+            .map_err(ReqwestHttpRuntimeTransportError::AuthSign)
+    }
+
+    fn signed_post(
+        &self,
+        url: &str,
+        body_bytes: Vec<u8>,
+    ) -> Result<reqwest::blocking::RequestBuilder, ReqwestHttpRuntimeTransportError> {
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body_bytes.clone());
+        if let Some(header) = self.auth_header(url, &body_bytes)? {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        Ok(request)
+    }
+
     pub fn sync_stream(
         &mut self,
         request: &SyncStreamRequest,
     ) -> Result<ReqwestSyncHintStream, ReqwestHttpRuntimeTransportError> {
+        let url = self.route_url("/sync/stream");
+        let body_bytes =
+            serde_json::to_vec(request).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url("/sync/stream"))
-            .json(request)
+            .signed_post(&url, body_bytes)?
             .timeout(sync_stream_read_timeout(request))
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
@@ -4946,10 +4995,11 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
         T: Serialize,
         R: DeserializeOwned,
     {
+        let url = self.route_url(uri);
+        let body_bytes =
+            serde_json::to_vec(body).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url(uri))
-            .json(body)
+            .signed_post(&url, body_bytes)?
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
         let status = response.status();
@@ -4968,6 +5018,8 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
 #[derive(Debug)]
 pub enum ReqwestHttpRuntimeTransportError {
     Request(reqwest::Error),
+    Encode(serde_json::Error),
+    AuthSign(finite_nostr::NostrPrimitiveError),
     Server {
         status: reqwest::StatusCode,
         body: String,
@@ -4984,6 +5036,12 @@ impl fmt::Display for ReqwestHttpRuntimeTransportError {
                     error_message_with_sources(error)
                 )
             }
+            Self::Encode(error) => {
+                write!(formatter, "HTTP runtime request encode failed: {error}")
+            }
+            Self::AuthSign(error) => {
+                write!(formatter, "HTTP runtime auth signing failed: {error}")
+            }
             Self::Server { status, body } => {
                 write!(formatter, "server returned {status}: {body}")
             }
@@ -4995,6 +5053,8 @@ impl StdError for ReqwestHttpRuntimeTransportError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Request(error) => Some(error),
+            Self::Encode(error) => Some(error),
+            Self::AuthSign(error) => Some(error),
             Self::Server { .. } => None,
         }
     }
