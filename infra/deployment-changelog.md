@@ -49,6 +49,24 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
+
+- Brain sync went incremental (#699): `fbrain sync`/`open` now reconcile
+  against the cached export and pull only sync records instead of downloading
+  the full encrypted export — unbricking every brain whose export exceeds the
+  10 MB response limit (currently `finitecomputer`). Bumped to 0.5.0
+  everywhere; `fbrain/v0.5.0` published and the rolling alias verified
+  (installed binary reports 0.5.0).
+- Agent Runtime `2026-08-27.2`
+  (`…@sha256:7f6d9ab354c40bcddb19ba6ef37769d4a864f87acadf19fad3d22a1d4d6f8368`,
+  source `bfe082a1`, carries the 0.5.0 CLI in the agent baseline) registered
+  and promoted in Core BEFORE host pins moved; canary then `--roll-all` per
+  host — **22/22 lat1, 30/30 lat3 verified** against `.2`.
+- Process note: the v0.5.0 tag briefly landed twice on an unmerged bump ref;
+  both premature builds were cancelled within a minute and nothing published.
+  Guard now required for any release tagging: GitHub `mergeStateStatus`
+  CLEAN, PR state MERGED, and the bump read back from main — in that order.
+
 ### 2026-08-27 — Platform wave: lifecycle Core `0020–0022`, Agent Runtime `2026-08-27.1`, hermes delivery hardening
 
 - Deployed rev `b9254c81` to both NixOS closures (lat1 rebooted into kernel
