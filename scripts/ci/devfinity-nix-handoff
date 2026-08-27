@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Create and restore the same-run Devfinity Nix closure handoff."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SCHEMA = "finite.ci.devfinity-nix-handoff.v1"
+REPOSITORY = "finitecomputer/finite-mono"
+STORE_PATH = re.compile(r"/nix/store/[0-9a-z]{32}-[^/\s]+")
+REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+class HandoffError(Exception):
+    def __init__(self, message: str, exit_code: int = 65) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def valid_revision(value: str) -> str:
+    if not REVISION.fullmatch(value):
+        raise HandoffError(f"invalid source revision: {value!r}", 64)
+    return value
+
+
+def output_root(path: Path) -> str:
+    if not path.is_file():
+        raise HandoffError(f"Devfinity output path file is missing: {path}", 66)
+    roots = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if len(roots) != 1 or not STORE_PATH.fullmatch(roots[0]):
+        raise HandoffError(
+            f"expected exactly one valid Nix store path in {path}; got {roots!r}",
+            65,
+        )
+    return roots[0]
+
+
+def append_summary(path: Path | None, lines: list[str]) -> None:
+    if path is None:
+        return
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("\n".join(lines) + "\n")
+
+
+def run_nix(command: str, arguments: list[str]) -> None:
+    subprocess.run([command, *arguments], check=True)
+
+
+def create(args: argparse.Namespace) -> None:
+    revision = valid_revision(args.revision)
+    root = output_root(args.output_path_file)
+    artifact_dir: Path = args.artifact_dir
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise HandoffError(
+            f"refusing to replace existing artifact directory: {artifact_dir}", 73
+        ) from error
+
+    cache_dir = artifact_dir / "nix-cache"
+    cache_dir.mkdir()
+    run_nix(
+        args.nix_command,
+        [
+            "copy",
+            "--option",
+            "builders",
+            "",
+            "--to",
+            f"file://{cache_dir.resolve()}",
+            root,
+        ],
+    )
+    if not (cache_dir / "nix-cache-info").is_file() or not any(
+        cache_dir.glob("*.narinfo")
+    ):
+        raise HandoffError(
+            f"Nix did not create a complete file binary cache: {cache_dir}", 66
+        )
+
+    manifest = {
+        "schema": SCHEMA,
+        "repository": REPOSITORY,
+        "rev": revision,
+        "root": root,
+        "cache": "nix-cache",
+    }
+    manifest_path = artifact_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    append_summary(
+        args.summary,
+        [
+            "### Devfinity same-run Nix handoff",
+            "",
+            f"Produced a file binary cache for source revision `{revision}`.",
+            f"Handoff root: `{root}`.",
+        ],
+    )
+
+
+def read_manifest(artifact_dir: Path, expected_revision: str) -> tuple[Path, str]:
+    if not artifact_dir.is_dir():
+        raise HandoffError(f"handoff artifact directory is missing: {artifact_dir}", 66)
+    manifest_path = artifact_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise HandoffError(f"handoff manifest is missing: {manifest_path}", 66)
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise HandoffError(f"invalid handoff manifest: {error}", 65) from error
+
+    expected_keys = {"schema", "repository", "rev", "root", "cache"}
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise HandoffError("handoff manifest has an unexpected shape", 65)
+    if data["schema"] != SCHEMA:
+        raise HandoffError(f"unexpected handoff schema: {data['schema']!r}", 65)
+    if data["repository"] != REPOSITORY:
+        raise HandoffError(f"unexpected handoff repository: {data['repository']!r}", 65)
+    if data["rev"] != expected_revision:
+        raise HandoffError(
+            f"handoff revision mismatch: expected {expected_revision}, got {data['rev']!r}",
+            65,
+        )
+    if not isinstance(data["root"], str) or not STORE_PATH.fullmatch(data["root"]):
+        raise HandoffError(f"invalid handoff root: {data['root']!r}", 65)
+    if data["cache"] != "nix-cache":
+        raise HandoffError(f"invalid handoff cache directory: {data['cache']!r}", 65)
+
+    cache_dir = artifact_dir / data["cache"]
+    if not (cache_dir / "nix-cache-info").is_file() or not any(
+        cache_dir.glob("*.narinfo")
+    ):
+        raise HandoffError(
+            f"handoff file binary cache is missing or incomplete: {cache_dir}", 66
+        )
+    return cache_dir, data["root"]
+
+
+def restore(args: argparse.Namespace) -> None:
+    revision = valid_revision(args.revision)
+    cache_dir, root = read_manifest(args.artifact_dir, revision)
+    run_nix(
+        args.nix_command,
+        [
+            "copy",
+            "--no-check-sigs",
+            "--option",
+            "builders",
+            "",
+            "--from",
+            f"file://{cache_dir.resolve()}",
+            root,
+        ],
+    )
+    append_summary(
+        args.summary,
+        [
+            "### Devfinity same-run Nix handoff",
+            "",
+            f"Restored the file binary cache for source revision `{revision}`.",
+            f"Restored root: `{root}`.",
+        ],
+    )
+    print(f"restored Devfinity Nix closure for {revision}: {root}")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    subparsers = result.add_subparsers(dest="operation", required=True)
+
+    create_parser = subparsers.add_parser("create")
+    create_parser.add_argument("--artifact-dir", type=Path, required=True)
+    create_parser.add_argument("--output-path-file", type=Path, required=True)
+    create_parser.add_argument("--revision", required=True)
+    create_parser.add_argument("--summary", type=Path)
+    create_parser.add_argument("--nix-command", default="nix")
+    create_parser.set_defaults(handler=create)
+
+    restore_parser = subparsers.add_parser("restore")
+    restore_parser.add_argument("--artifact-dir", type=Path, required=True)
+    restore_parser.add_argument("--revision", required=True)
+    restore_parser.add_argument("--summary", type=Path)
+    restore_parser.add_argument("--nix-command", default="nix")
+    restore_parser.set_defaults(handler=restore)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        args.handler(args)
+    except HandoffError as error:
+        print(f"devfinity Nix handoff: {error}", file=sys.stderr)
+        return error.exit_code
+    except subprocess.CalledProcessError as error:
+        print(
+            f"devfinity Nix handoff: Nix command failed with exit code {error.returncode}",
+            file=sys.stderr,
+        )
+        return error.returncode or 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
