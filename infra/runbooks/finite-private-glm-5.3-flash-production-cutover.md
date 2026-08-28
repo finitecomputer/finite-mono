@@ -269,6 +269,43 @@ Any new/worsened fleet red or unknown, serving error, unsettled rollout-era
 reservation, unavailable rollback artifact, or identity mismatch stops the
 window.
 
+## Named pre-existing fleet exceptions
+
+Two `fleet_convergence` findings are pre-existing on this fleet. They were
+present before this runbook was written, they are identical on the DeepSeek
+baseline, and neither is caused by or causal to this model swap. They are
+named here so the window starts from an honest baseline instead of a gate
+that cannot go green:
+
+1. **Every active Runtime reports readiness `unknown`.** The runner-ferried
+   standing-readiness feature (deployed 2026-08-27) registers a health-report
+   target only when a Runtime completes a fresh launch or relocation
+   (`finite-saas-runner/src/lib.rs` calls `record_target` only on launch
+   completion; the upgrade path's `refresh_target_endpoint` is a no-op without
+   an existing registry entry, `finite-saas-runner/src/health_reports.rs`).
+   The entire fleet was upgraded in place, so no current Runtime can report
+   until it next launches. Carry this exception only while all of the
+   following hold in every `scripts/finite-status --json` run:
+   - the set of `health_unknown` runtime IDs is exactly the set in the
+     retained before report;
+   - `health_not_ready` is empty on every host;
+   - `health_ready_count` is zero or unchanged.
+   Any Runtime leaving `unknown` toward `not_ready`, any newly `unknown`
+   runtime, or any readiness change observed mid-window stops the window
+   immediately.
+2. **Distribution aggregate inconsistent with the detail snapshot.** The
+   aggregate query inner-joins `runtime_artifacts` while the detail snapshot
+   left-joins it, so rows without a runtime artifact appear only in the
+   snapshot (today, the single documented artifact-less `smoke` row,
+   `infra/deployment-changelog.md`). Carry this exception only while the
+   disagreement is explained entirely by such rows and their count matches
+   the before report.
+
+Anything else in `fleet_convergence` is judged against the acceptance
+contract exactly as written. The reporting gap in exception 1 must be fixed
+and the fleet observed reporting before any future runbook relies on
+readiness signals.
+
 ## Window procedure
 
 Every mutating command below requires the operator's explicit authorization for
@@ -608,8 +645,10 @@ scripts/finite-status --json \
 
 Any new or worsened red/unknown result, unsettled rollout-era reservation,
 container restart, resource exhaustion, or route failure means rollback
-immediately. Existing unrelated exceptions may carry through only when they
-were named in the before report and are unchanged.
+immediately. Only the exceptions in `Named pre-existing fleet exceptions` may
+carry through, and only while every one of their carry conditions still holds
+against the retained before report; a violated carry condition is a new
+finding and stops the window.
 
 ## Rollback
 

@@ -1,7 +1,6 @@
-# Preparation-only source for the model-independent `finite-private` Tinfoil
-# container. The checkpoint and upstream SGLang amd64 manifest are pinned, but
-# the generated modelwrap MPK and both Finite image digests remain explicit
-# stop markers. Publishing or deploying this file requires separate approval.
+# Release-ready source for the model-independent `finite-private` Tinfoil
+# container. The checkpoint, modelwrap artifact, and Finite images are pinned
+# to immutable identities for the authorized 2026-08-28 production window.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -10,7 +9,7 @@ gpus: 8
 models:
   - name: "glm-5-3-flash"
     repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"
-    mpk: "REPLACE_WITH_TINFOIL_MODELWRAP_MPK"
+    mpk: "54b2859aba423589c0d0d3bf48af25016c03d3b77db366a9061661e2df85ed79_328366215168_20a7ed6c-fd6a-54cb-98b4-8bfea86f829c"
 
 networks:
   model-net: {}
@@ -21,7 +20,7 @@ networks:
 
 containers:
   - name: "glm-5-3-flash"
-    image: "REPLACE_WITH_VERIFIED_GL53_SGLANG_IMAGE"
+    image: "ghcr.io/finitecomputer/glm-5-3-flash-sglang:2026-08-28.3@sha256:91f614789cedf42a4d332fa8c4744eebf5067ba953b546823cec389169ee8008"
     runtime: nvidia
     gpus: all
     ipc: host
@@ -29,7 +28,7 @@ containers:
     command:
       [
         "--model-path",
-        "/tinfoil/mpk/mpk-REPLACE_WITH_TINFOIL_ROOT_HASH",
+        "/tinfoil/mpk/mpk-54b2859aba423589c0d0d3bf48af25016c03d3b77db366a9061661e2df85ed79",
         "--served-model-name",
         "glm-5-3-flash",
         "--tp-size",
@@ -70,7 +69,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "REPLACE_WITH_VERIFIED_GL53_LIMITER_IMAGE"
+    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.3@sha256:95e8d90cbb1de783e24ade348a30c44a802c3e5038b7c7045608ad0b41aa05b4"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"
