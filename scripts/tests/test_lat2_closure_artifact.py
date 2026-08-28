@@ -199,6 +199,16 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         # Substitution from the artifact cache only: no build invocation.
         self.assertNotIn("nix build", source)
 
+    def test_capture_parser_peels_type_from_the_right(self) -> None:
+        # lsblk MODEL fields can contain spaces (SAMSUNG MZQL21T9HCJR-00A07);
+        # a fixed left-to-right split silently drops those disks and Gate B
+        # would refuse healthy hardware (lat4 hit this for real).
+        capture = (ROOT / "infra/nixos/scripts/capture-lat2-host-evidence").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('rpartition(" ")', capture)
+        self.assertNotIn("split(None, 4)", capture)
+
 
 if __name__ == "__main__":
     unittest.main()
