@@ -28,6 +28,13 @@ OUTPUT_NAMES = (
     "run_brain_product_matrix",
 )
 
+# The nix service package build is the CI long pole on a cold cargoArtifacts
+# cache (~30 minutes of crane release builds for 15 packages). It is a landing
+# concern: the Rust workspace job has already compiled and tested the diff, and
+# the landing run rebuilds and repushes Cachix for the next PR. Pull requests
+# run it only when the package graph itself changed (flake inputs / toolchain).
+PACKAGE_GRAPH_PR_PATHS = {"flake.nix", "flake.lock"}
+
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
     "Cargo.lock",
@@ -189,7 +196,11 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
     if args.changed_files is not None:
         paths = changed_paths.normalized_paths(args.changed_files)
         selection = select_for_paths(paths)
-        return selection, "changed-file override", paths
+        reason = "changed-file override"
+        note = apply_pull_request_packaging_gate(args.event, selection, paths)
+        if note:
+            reason = f"{reason}; {note}"
+        return selection, reason, paths
 
     if args.event == "merge_group":
         selection = HarnessSelection()
@@ -202,10 +213,29 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
         print(f"failed to compute changed files; selecting every harness: {error}", file=sys.stderr)
         selection = HarnessSelection()
         selection.select_all()
+        # Conservative fallback: the changed path set is unknown, so packaging
+        # stays selected.
         return selection, "could not compute changed files", []
 
     selection = select_for_paths(paths)
-    return selection, "selected from changed paths", paths
+    reason = "selected from changed paths"
+    note = apply_pull_request_packaging_gate(args.event, selection, paths)
+    if note:
+        reason = f"{reason}; {note}"
+    return selection, reason, paths
+
+
+def apply_pull_request_packaging_gate(
+    event: str, selection: HarnessSelection, paths: list[str]
+) -> str | None:
+    if event != "pull_request":
+        return None
+    if not selection.run_nix_service_packages:
+        return None
+    if any(path in PACKAGE_GRAPH_PR_PATHS for path in paths):
+        return None
+    selection.run_nix_service_packages = False
+    return "nix service packages deferred to landing events"
 
 
 def changed_files_for_event(args: argparse.Namespace) -> list[str]:
