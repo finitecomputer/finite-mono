@@ -226,6 +226,46 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn('boot.kernelModules = [ "kvm-amd" ]', host)
         self.assertIn("kvm-amd kernel module", host)  # the assertion message
 
+    def test_capture_by_id_filter_keeps_whole_namespaces_only(self) -> None:
+        # The by-id listing must keep whole NVMe namespace symlinks (the EUI
+        # identities Gate B commits) and drop -partN partitions and md-*
+        # entries. Behavior-tested by running the script's own awk program
+        # against a synthetic ls -l sample; the escaped-slash predecessor of
+        # this filter matched nothing at all.
+        capture = (ROOT / "infra/nixos/scripts/capture-lat2-host-evidence").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"awk '\$NF ~ /(.+?)/ \{print", capture)
+        assert match, "by-id awk program not found in capture script"
+        awk_program = match.group(1)
+
+        sample = "\n".join(
+            [
+                "lrwxrwxrwx 1 root root 33 Aug 28 22:30 "
+                "nvme-eui.000000000000000100a075244c213b3a -> ../../nvme0n1",
+                "lrwxrwxrwx 1 root root 33 Aug 28 22:30 "
+                "nvme-eui.3634473057c127620025385300000001 -> ../../nvme2n1",
+                "lrwxrwxrwx 1 root root 14 Aug 28 22:30 "
+                "nvme-eui.000000000000000100a075244c213b3a-part1 -> ../../nvme0n1p1",
+                "lrwxrwxrwx 1 root root 13 Aug 28 22:30 "
+                "md-uuid-3193acbf:4f88dd18:37a637dd:6220fcb6 -> ../../md126",
+            ]
+        )
+        result = subprocess.run(
+            ["awk", "$NF ~ /" + awk_program + "/ {print $9, \"->\", $NF}"],
+            input=sample,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kept = result.stdout.splitlines()
+        self.assertEqual(len(kept), 2)
+        self.assertIn("nvme-eui.000000000000000100a075244c213b3a", result.stdout)
+        self.assertIn("nvme-eui.3634473057c127620025385300000001", result.stdout)
+        self.assertNotIn("-part1", result.stdout)
+        self.assertNotIn("md-uuid", result.stdout)
+
     def test_capture_parser_handles_spaced_model_names(self) -> None:
         # Behavior contract for the geometry proof: lsblk columns are
         # whitespace-padded and MODEL can contain spaces (SAMSUNG

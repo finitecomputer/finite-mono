@@ -38,7 +38,10 @@ grep -E 'MemTotal' /proc/meminfo
 echo "### block devices (bytes)"
 lsblk -bndo NAME,SIZE,MODEL,SERIAL,TYPE 2>/dev/null | awk '$NF=="disk"'
 echo "### /dev/disk/by-id (whole disks only)"
-ls -l /dev/disk/by-id 2>/dev/null | awk '$NF ~ /\/nvme[0-9]+$/ {print $9, "->", $NF}'
+# Whole NVMe namespace targets only (../../nvme0n1): -partN and md-* symlink
+# targets fail the namespace predicate. Verified against this rescue env —
+# an earlier /\/nvme[0-9]+$/ form matched nothing on macOS awk.
+ls -l /dev/disk/by-id 2>/dev/null | awk '$NF ~ /nvme[0-9]+n[0-9]+$/ {print $9, "->", $NF}'
 echo "### nvme list (sudo, optional)"
 sudo -n nvme list 2>/dev/null || true
 echo "### current mdstat"
