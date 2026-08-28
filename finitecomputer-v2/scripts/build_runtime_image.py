@@ -291,9 +291,12 @@ def build_image(
         flush=True,
     )
 
-    dockerfile = (
-        context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
-    )
+    # The runtime-image contract greps this exact one-liner
+    # (check_runtime_image_contract.py), so keep it out of the formatter's
+    # reach.
+    # fmt: off
+    dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+    # fmt: on
     if args.engine == "docker":
         build = ["docker", "build"]
     elif args.engine == "depot":
