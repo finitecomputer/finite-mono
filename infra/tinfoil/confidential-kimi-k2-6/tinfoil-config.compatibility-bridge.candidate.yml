@@ -1,0 +1,46 @@
+# Preparation-only CPU compatibility bridge for the historical generated
+# hostname. Deploy this as external container `kimi-k2-6` only after the old
+# eight-H200 container has been replaced by `finite-private` and the new route
+# is healthy. It carries no model weights or secrets.
+cvm-version: 0.10.8
+cpus: 2
+memory: 2048
+
+networks:
+  finite-private-upstream:
+    egress: allowlist
+    allow:
+      - finite-private.finite.containers.tinfoil.dev
+
+containers:
+  - name: "finite-private-compatibility-bridge"
+    image: "caddy:2.10.2-alpine@sha256:d8c17a862962def15cde69863a3a463f25a2664942eafd7bdbf050e9c3116b83"
+    restart: always
+    command:
+      [
+        "caddy",
+        "reverse-proxy",
+        "--from",
+        ":8000",
+        "--to",
+        "https://finite-private.finite.containers.tinfoil.dev",
+        "--change-host-header",
+      ]
+    networks: [finite-private-upstream]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8000/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
+
+shim:
+  upstream-container: finite-private-compatibility-bridge
+  upstream-port: 8000
+  authenticated: false
+  paths:
+    - /v1/chat/completions
+    - /v1/responses
+    - /metrics
+    - /live
+    - /health
+    - /ready

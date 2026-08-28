@@ -26,6 +26,8 @@ pub struct LimiterConfig {
     pub upstream_base_url: String,
     pub vllm_internal_api_key: String,
     pub default_model: String,
+    pub upstream_model: Option<String>,
+    pub model_aliases: Vec<String>,
     pub dashboard_url: String,
     pub upstream_health_path: String,
     pub usage_api_health_path: String,
@@ -51,6 +53,8 @@ impl LimiterConfig {
             upstream_base_url,
             vllm_internal_api_key,
             default_model: DEFAULT_MODEL.to_string(),
+            upstream_model: None,
+            model_aliases: Vec::new(),
             dashboard_url,
             upstream_health_path: "/health".to_string(),
             usage_api_health_path: "/internal/finite-private/v1/health".to_string(),
@@ -99,6 +103,42 @@ pub enum LimiterConfigError {
     InvalidDuration(&'static str),
     #[error("failed to build HTTP client: {0}")]
     HttpClient(String),
+    #[error("invalid model routing: {0}")]
+    InvalidModelRouting(String),
+}
+
+impl LimiterConfig {
+    fn routed_model(&self, requested_model: &str) -> Option<String> {
+        let Some(upstream_model) = self.upstream_model.as_deref() else {
+            return Some(requested_model.to_string());
+        };
+        if requested_model == upstream_model
+            || requested_model == self.default_model
+            || self
+                .model_aliases
+                .iter()
+                .any(|alias| alias == requested_model)
+        {
+            Some(upstream_model.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn accepted_models(&self) -> Vec<String> {
+        let mut models = vec![self.default_model.clone()];
+        if let Some(upstream_model) = &self.upstream_model
+            && !models.contains(upstream_model)
+        {
+            models.push(upstream_model.clone());
+        }
+        for alias in &self.model_aliases {
+            if !models.contains(alias) {
+                models.push(alias.clone());
+            }
+        }
+        models
+    }
 }
 
 pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
@@ -165,6 +205,27 @@ fn validate_config(config: &LimiterConfig) -> Result<(), LimiterConfigError> {
                 "watchdog.failure_threshold",
             ));
         }
+    }
+    if config.upstream_model.is_none() && !config.model_aliases.is_empty() {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "model aliases require an upstream model".to_string(),
+        ));
+    }
+    if let Some(upstream_model) = &config.upstream_model
+        && upstream_model.trim().is_empty()
+    {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "upstream model must not be empty".to_string(),
+        ));
+    }
+    if config
+        .model_aliases
+        .iter()
+        .any(|alias| alias.trim().is_empty())
+    {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "model aliases must not contain an empty value".to_string(),
+        ));
     }
     Ok(())
 }
@@ -289,6 +350,8 @@ async fn check_component(
 fn public_config_snapshot(config: &LimiterConfig) -> PublicConfigSnapshot {
     PublicConfigSnapshot {
         default_model: config.default_model.clone(),
+        upstream_model: config.upstream_model.clone(),
+        accepted_models: config.accepted_models(),
         upstream_base_url: config.upstream_base_url.clone(),
         upstream_health_path: config.upstream_health_path.clone(),
         usage_api_base_url: config.finite_usage_api_url.clone(),
@@ -373,7 +436,16 @@ async fn proxy_openai(
     // value or the extracted facts instead of re-parsing. Unparseable bodies
     // decode to Null so they are still forwarded (fail-open).
     let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-    let facts = RequestFacts::from_value(&parsed_body, &state.config.default_model);
+    let mut facts = RequestFacts::from_value(&parsed_body, &state.config.default_model);
+    let Some(routed_model) = state.config.routed_model(&facts.model) else {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "The requested model is not available through Finite Private.",
+            "invalid_request_error",
+            "unsupported_model",
+        );
+    };
+    facts.model = routed_model.clone();
     let is_streaming = facts.streaming;
     if uri.path() == "/v1/responses" && is_streaming {
         return openai_error(
@@ -424,7 +496,13 @@ async fn proxy_openai(
         );
     };
 
-    let upstream_body = upstream_body_for_request(&uri, body, parsed_body, is_streaming);
+    let rewrite_model = state
+        .config
+        .upstream_model
+        .as_ref()
+        .map(|_| routed_model.as_str());
+    let upstream_body =
+        upstream_body_for_request(&uri, body, parsed_body, is_streaming, rewrite_model);
     if is_streaming {
         let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
             Ok(response) => response,
@@ -905,16 +983,28 @@ fn new_request_id() -> String {
     format!("fp_req_{millis}_{counter}")
 }
 
-fn upstream_body_for_request(uri: &Uri, body: Bytes, mut value: Value, streaming: bool) -> Bytes {
-    if uri.path() != "/v1/chat/completions" || !streaming {
+fn upstream_body_for_request(
+    uri: &Uri,
+    body: Bytes,
+    mut value: Value,
+    streaming: bool,
+    routed_model: Option<&str>,
+) -> Bytes {
+    let add_stream_usage = uri.path() == "/v1/chat/completions" && streaming;
+    if !add_stream_usage && routed_model.is_none() {
         return body;
     }
     let Some(object) = value.as_object_mut() else {
         return body;
     };
-    let stream_options = object.entry("stream_options").or_insert_with(|| json!({}));
-    if let Some(options) = stream_options.as_object_mut() {
-        options.insert("include_usage".to_string(), Value::Bool(true));
+    if add_stream_usage {
+        let stream_options = object.entry("stream_options").or_insert_with(|| json!({}));
+        if let Some(options) = stream_options.as_object_mut() {
+            options.insert("include_usage".to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(routed_model) = routed_model {
+        object.insert("model".to_string(), Value::String(routed_model.to_string()));
     }
     serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
 }
@@ -1154,6 +1244,8 @@ struct ComponentCheck {
 #[serde(rename_all = "camelCase")]
 struct PublicConfigSnapshot {
     default_model: String,
+    upstream_model: Option<String>,
+    accepted_models: Vec<String>,
     upstream_base_url: String,
     upstream_health_path: String,
     usage_api_base_url: String,
@@ -1407,6 +1499,80 @@ mod tests {
         assert_eq!(forwarded["stream_options"]["include_usage"], true);
         assert_eq!(forwarded["stream"], true);
         assert_eq!(forwarded["model"], "glm-5-2");
+    }
+
+    #[tokio::test]
+    async fn configured_model_aliases_route_to_one_upstream_model() {
+        let core = FakeCoreState::new("fpk_live_aliases", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_model = "glm-5-3-flash".to_string();
+        config.upstream_model = Some("glm-5-3-flash".to_string());
+        config.model_aliases = vec!["deepseek-v4-flash-0731".to_string(), "glm-5-2".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        for requested_model in ["glm-5-3-flash", "deepseek-v4-flash-0731", "glm-5-2"] {
+            let response = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_aliases")
+                .json(&json!({
+                    "model": requested_model,
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let bodies = upstream.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        for body in bodies.iter() {
+            let forwarded: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(forwarded["model"], "glm-5-3-flash");
+        }
+        let reservations = core.reservations.lock().unwrap();
+        assert_eq!(reservations.len(), 3);
+        assert!(
+            reservations
+                .iter()
+                .all(|reservation| reservation["model"] == "glm-5-3-flash")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_model_routing_rejects_unknown_model_before_reservation() {
+        let core = FakeCoreState::new("fpk_live_aliases", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_model = "glm-5-3-flash".to_string();
+        config.upstream_model = Some("glm-5-3-flash".to_string());
+        config.model_aliases = vec!["deepseek-v4-flash-0731".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_aliases")
+            .json(&json!({
+                "model": "some-other-model",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "unsupported_model");
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

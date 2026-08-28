@@ -28,7 +28,8 @@ disturb the currently serving `kimi-k2-6` production container.
 
 ## Durable Artifacts
 
-- Context updates: pending
+- Context updates: Tinfoil inventory, routing migration, candidate READMEs, and
+  image catalog updated without changing production defaults
 - ADRs: none; the stable Finite Private identity is already recorded in
   `infra/runbooks/finite-private-routing-migration.md`
 - Prototype source branch: not required
@@ -39,9 +40,10 @@ disturb the currently serving `kimi-k2-6` production container.
   an explicit operator handoff
 - Ticket sessions: local implementation in the isolated worktree
 - Agent briefs: none
-- Review packets: pending
+- Review packets: pending final two-axis review
 - Local CodeRabbit report: pending
-- PR URL: pending
+- PR URL: <https://github.com/finitecomputer/finite-mono/pull/721> (draft by
+  explicit operator request)
 
 ## Accepted Testing Seams
 
@@ -78,11 +80,11 @@ These are the preparation defaults pending any operator adjustment:
 
 | Slice | Type | Status | Review | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| Pin SGLang/checkpoint and create Tinfoil candidate | AFK | In progress | Pending | Pending | Pending |
-| Preserve mixed-version model labels through the limiter | AFK | In progress | Pending | Pending | Pending |
-| Add 120-user capacity and latency gate | AFK | Pending | Pending | Pending | Pending |
-| Prepare `finite-private` rename with historical-route bridge | AFK | Pending | Pending | Pending | Pending |
-| Write 03:00 cutover and rollback procedure | AFK | Pending | Pending | Pending | Pending |
+| Pin SGLang/checkpoint and create Tinfoil candidate | AFK | Complete | Pending | Pending | Preparation contract green; release contract blocked as designed |
+| Preserve mixed-version model labels through the limiter | AFK | Complete | Pending | Pending | 16 limiter tests green |
+| Add 120-user capacity, latency, and quality gates | AFK | Complete | Pending | Pending | 8 Python gate tests green |
+| Prepare `finite-private` rename with historical-route bridge | AFK | Complete | Pending | Pending | Candidate contract and ops tests green |
+| Write 03:00 cutover and rollback procedure | AFK | Complete | Pending | Pending | Static contract green |
 | Generate Tinfoil MPK and publish measured image pins | HITL/production access | Parked | N/A | Operator/Tinfoil action | No |
 | Execute production replacement and live load gate | HITL/production mutation | Parked | N/A | Explicit operator action | No |
 
@@ -99,7 +101,7 @@ These are the preparation defaults pending any operator adjustment:
 
 | Slice | Fixed point | Worker | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| Preparation PR | `9f9c81db6a991665bcc57f4bb7c26cc0b71dfe78` | Primary Codex worktree | Pending | Pending | Pending |
+| Preparation PR | `9f9c81db6a991665bcc57f4bb7c26cc0b71dfe78` | Primary Codex worktree | Pending final commit | Pending | `cargo test -p finite-private-limiter --locked`; 23 Python tests; candidate prep contract; YAML/shell syntax; `git diff --check` |
 
 ## Open Questions
 

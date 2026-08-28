@@ -1,0 +1,128 @@
+name: GLM-5.3-Flash SGLang Image
+run-name: Build GLM-5.3-Flash SGLang ${{ inputs.version }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable candidate version, for example 2026-08-27.1"
+        required: true
+        type: string
+      publish_production:
+        description: Promote the verified saved build to production version tags
+        required: true
+        default: false
+        type: boolean
+concurrency:
+  group: glm-5-3-flash-sglang-image-${{ inputs.version }}
+jobs:
+  publish:
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
+      - name: Reject production promotion until its cutover gate is open
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED != 'true'
+        run: |
+          echo "::error::FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED is not true"
+          exit 1
+      - name: Log in to GHCR for canary publication
+        env:
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - name: Build and save the source-labelled wrapper
+        id: build
+        uses: depot/build-push-action@v1
+        with:
+          project: ${{ vars.DEPOT_GL53_SGLANG_PROJECT_ID || secrets.DEPOT_GL53_SGLANG_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          context: .
+          file: infra/images/glm-5.3-flash-sglang.Dockerfile
+          platforms: linux/amd64
+          build-args: FINITE_MONO_REV=${{ github.sha }}
+          provenance: true
+          save: true
+      - name: Publish and verify the non-production canary
+        id: canary
+        env:
+          IMAGE: ghcr.io/finitecomputer/glm-5-3-flash-sglang
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
+        run: |
+          canary_ref="$IMAGE:canary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test -n "$BUILD_ID"
+          test -n "$SOURCE_DIGEST"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$canary_ref" "$BUILD_ID"
+          docker pull "$canary_ref" >/dev/null
+          destination_digest="$(
+            docker image inspect "$canary_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s#^$IMAGE@##p" \
+              | head -n 1
+          )"
+          python3 scripts/delivery.py verify-image-promotion \
+            --source-digest "$SOURCE_DIGEST" \
+            --destination-digest "$destination_digest"
+          docker buildx imagetools inspect --raw "$IMAGE@$destination_digest" > image-index.json
+          python3 scripts/delivery.py verify-image-index \
+            --manifest image-index.json \
+            --platform linux/amd64 \
+            --require-attestation
+          test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.base.digest"}}')" = "sha256:0836f0160fa785e424e68d13ef88ddd548f87e6e11ad9f0e4de982e4f9188aaf"
+          test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{json .Config.Entrypoint}}')" = '["/opt/nvidia/nvidia_entrypoint.sh","/usr/local/bin/finite-glm53-sglang-entrypoint"]'
+          echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$IMAGE@$destination_digest" >> "$GITHUB_OUTPUT"
+      - name: Prove the wrapper fails closed without its internal key
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          if docker run --rm "$PINNED" --help >without-key.log 2>&1; then
+            echo "::error::SGLang wrapper started without VLLM_API_KEY"
+            exit 1
+          fi
+          grep -F "VLLM_API_KEY is required" without-key.log
+      - name: Prove anonymous GHCR pull
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          docker logout ghcr.io
+          docker image rm "$PINNED" >/dev/null 2>&1 || true
+          docker pull "$PINNED" >/dev/null
+      - name: Promote the same saved build to production tags
+        id: production
+        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
+        env:
+          IMAGE: ghcr.io/finitecomputer/glm-5-3-flash-sglang
+          VERSION: ${{ inputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          version_ref="$IMAGE:$VERSION"
+          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
+          for ref in "$version_ref" "$sha_ref"; do
+            docker pull "$ref" >/dev/null
+            digest="$(docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n "s#^$IMAGE@##p" | head -n 1)"
+            python3 scripts/delivery.py verify-image-promotion --source-digest "$SOURCE_DIGEST" --destination-digest "$digest"
+          done
+          echo "pinned=$version_ref@$SOURCE_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Summarize
+        env:
+          CANARY: ${{ steps.canary.outputs.pinned }}
+          PRODUCTION: ${{ steps.production.outputs.pinned }}
+        run: |
+          echo "Verified anonymous canary: \`$CANARY\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PRODUCTION" ]; then
+            echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
+          fi
