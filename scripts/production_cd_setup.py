@@ -17,7 +17,7 @@ REQUIRED_ENVIRONMENT_SECRETS = {
     "FINITE_PRODUCTION_KNOWN_HOSTS",
     "FINITE_PRODUCTION_SSH_KEY",
 }
-REQUIRED_STATUS_CHECKS = {"CI gate", "Plan production deploy"}
+REQUIRED_STATUS_CHECKS = {"Plan production deploy"}
 REQUIRED_WORKFLOWS = {
     ".github/workflows/open-production-deploy-pr.yml",
     ".github/workflows/production-deploy-plan.yml",
@@ -130,6 +130,7 @@ def evaluate_ruleset(ruleset: dict[str, Any]) -> list[Check]:
     }
     contexts = required_check_contexts(ruleset)
     missing_contexts = sorted(REQUIRED_STATUS_CHECKS - contexts)
+    unexpected_contexts = sorted(contexts - REQUIRED_STATUS_CHECKS)
     return [
         Check(
             "production ruleset active",
@@ -153,10 +154,12 @@ def evaluate_ruleset(ruleset: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "production required checks",
-            not missing_contexts,
+            not missing_contexts and not unexpected_contexts,
             "missing: " + ", ".join(missing_contexts)
             if missing_contexts
-            else "all present",
+            else "unexpected: " + ", ".join(unexpected_contexts)
+            if unexpected_contexts
+            else "exactly Plan production deploy",
         ),
     ]
 
