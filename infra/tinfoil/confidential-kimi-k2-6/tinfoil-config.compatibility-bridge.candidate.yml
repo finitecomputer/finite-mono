@@ -1,7 +1,7 @@
 # Preparation-only CPU compatibility bridge for the historical generated
-# hostname. Deploy this as external container `kimi-k2-6` only after the old
-# eight-H200 container has been replaced by `finite-private` and the new route
-# is healthy. It carries no model weights or secrets.
+# hostname. Deploy this as external container `kimi-k2-6` immediately after the
+# old eight-H200 container has been replaced by `finite-private`; its healthcheck
+# follows the new route while GLM loads. It carries no model weights or secrets.
 cvm-version: 0.10.8
 cpus: 2
 memory: 2048

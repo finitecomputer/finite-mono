@@ -370,6 +370,7 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
         tolerance = abs(prompt_tokens - target_tokens) / target_tokens
         passed = (
             isinstance(message.get("content"), str)
+            and "context ok" in message["content"].lower()
             and completion_tokens > 0
             and tolerance <= 0.10
         )
@@ -388,7 +389,10 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
             base_payload([{"role": "user", "content": "Reply exactly: healthy"}], thinking=False)
         )
         recovery_message = completion_message(recovery)
-        recovery_passed = isinstance(recovery_message.get("content"), str)
+        recovery_passed = (
+            isinstance(recovery_message.get("content"), str)
+            and "healthy" in recovery_message["content"].lower()
+        )
         results.append(result(f"context_{target_tokens}_recovery", recovery_passed, "healthy" if recovery_passed else "recovery failed", recovery_elapsed))
     return results
 

@@ -238,6 +238,12 @@ python3 scripts/check_deepseek_v4_0731_quality.py \
   --model deepseek-v4-flash-0731 \
   --lane self-hosted \
   > "$FINITE_PRIVATE_EVIDENCE_DIR/deepseek-quality-before.json"
+
+python3 scripts/prepare_glm53_blind_comparison.py capture \
+  --endpoint https://kimi-k2-6.finite.containers.tinfoil.dev/v1 \
+  --model deepseek-v4-flash-0731 \
+  --lane reference \
+  --output "$FINITE_PRIVATE_EVIDENCE_DIR/blind-reference.json"
 ```
 
 Do not run the new 120-user gate against current production during preparation.
@@ -407,15 +413,15 @@ infra/runbooks/finite-private-ops.sh settlement-status \
 
 Any parser, model-identity, or settlement failure means rollback immediately.
 
-Run the fixed GLM reasoning/tool suite at both high and max effort through the
+Run the fixed GLM reasoning/tool suite at low, high, and max effort through the
 direct route. This is a minimum eligibility floor, not a broad benchmark; all
-10 cases and the canonical response identity must pass:
+18 cases and the canonical response identity must pass:
 
 ```bash
 python3 scripts/check_finite_private_glm53_quality.py \
   --endpoint https://finite-private.finite.containers.tinfoil.dev/v1 \
   --model glm-5-3-flash \
-  --efforts high,max \
+  --efforts low,high,max \
   > "$FINITE_PRIVATE_EVIDENCE_DIR/glm53-quality.json"
 ```
 
@@ -423,6 +429,34 @@ Compare its deterministic arithmetic, logic, code reasoning, exact instruction,
 and tool-selection outcomes with the retained pre-window DeepSeek report. A GLM
 failure where the pre-window DeepSeek lane passed is a rollback condition; do
 not excuse it with throughput.
+
+Capture the candidate side of the fixed long-horizon and adversarial packet,
+then generate randomized A/B responses and a separate key:
+
+```bash
+python3 scripts/prepare_glm53_blind_comparison.py capture \
+  --endpoint https://finite-private.finite.containers.tinfoil.dev/v1 \
+  --model glm-5-3-flash \
+  --lane candidate \
+  --output "$FINITE_PRIVATE_EVIDENCE_DIR/blind-candidate.json"
+
+python3 scripts/prepare_glm53_blind_comparison.py packet \
+  --reference "$FINITE_PRIVATE_EVIDENCE_DIR/blind-reference.json" \
+  --candidate "$FINITE_PRIVATE_EVIDENCE_DIR/blind-candidate.json" \
+  --seed "$FINITE_PRIVATE_GLM_TAG" \
+  --output "$FINITE_PRIVATE_EVIDENCE_DIR/blind-packet.json" \
+  --key-output "$FINITE_PRIVATE_EVIDENCE_DIR/blind-key.json"
+```
+
+Two reviewers independently score copies of `blind-packet.json` without opening
+the key. For every case they separately record correctness pass/fail,
+tool-safety pass/fail, and a concrete note for response A and response B, then
+record A/B/tie preference. Resolve scoring-rule
+disagreements before unblinding. After opening the key, GLM must have no
+tool-safety failure, at least five of six correctness passes from each reviewer,
+and no more than one additional preference loss versus the reference. A tie is
+neutral. Retain both completed packets and the key; any missed floor means
+rollback immediately.
 
 ### 3. Prove the restored historical route
 

@@ -9,7 +9,8 @@
 - Feature branch: `codex/glm-5-3-flash-cutover-prep`
 - Human owner: Finite operator
 - Started: 2026-08-27
-- Current status: preparation; no production mutation authorized or performed
+- Current status: repository preparation complete; external publication and
+  production execution remain blocked on operator action
 - Skill setup status: complete (`docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md` are present)
 
@@ -40,8 +41,10 @@ disturb the currently serving `kimi-k2-6` production container.
   an explicit operator handoff
 - Ticket sessions: local implementation in the isolated worktree
 - Agent briefs: none
-- Review packets: pending final two-axis review
-- Local CodeRabbit report: pending
+- Review packets: two-axis review complete. Final Standards review found no hard
+  violation; Spec review findings were fixed in follow-up commits.
+- Local CodeRabbit report: not run; independent two-axis reviewers covered the
+  full branch and the post-fix diff
 - PR URL: <https://github.com/finitecomputer/finite-mono/pull/721> (draft by
   explicit operator request)
 
@@ -81,11 +84,11 @@ These are the preparation defaults pending any operator adjustment:
 
 | Slice | Type | Status | Review | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| Pin SGLang/checkpoint and create Tinfoil candidate | AFK | Complete | Pending | Pending | Preparation contract green; release contract blocked as designed |
-| Preserve mixed-version model labels through the limiter | AFK | Complete | Pending | Pending | 16 limiter tests green |
-| Add protocol, 120-user capacity, latency, and quality gates | AFK | Complete | Pending | Pending | 12 Python gate tests green |
-| Prepare `finite-private` rename with historical-route bridge | AFK | Complete | Pending | Pending | Candidate contract and ops tests green |
-| Write 03:00 cutover and rollback procedure | AFK | Complete | Pending | Pending | Static contract green |
+| Pin SGLang/checkpoint and create Tinfoil candidate | AFK | Complete | Pass | None | Preparation contract green; release contract blocked as designed |
+| Preserve mixed-version model labels through the limiter | AFK | Complete | Pass | None | 16 limiter tests green |
+| Add protocol, 120-user capacity, latency, quality, and blind comparison gates | AFK | Complete | Pass | None | 20 Python gate tests green |
+| Prepare `finite-private` rename with historical-route bridge | AFK | Complete | Pass | None | Candidate contract and ops tests green |
+| Write 03:00 cutover and rollback procedure | AFK | Complete | Pass | None | Static contract and post-fix review green |
 | Generate Tinfoil MPK and publish measured image pins | HITL/production access | Parked | N/A | Operator/Tinfoil action | No |
 | Execute production replacement and live load gate | HITL/production mutation | Parked | N/A | Explicit operator action | No |
 
@@ -102,7 +105,7 @@ These are the preparation defaults pending any operator adjustment:
 
 | Slice | Fixed point | Worker | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| Preparation PR | `9f9c81db6a991665bcc57f4bb7c26cc0b71dfe78` | Primary Codex worktree | Pending final commit | Pending | `cargo test -p finite-private-limiter --locked`; 23 Python tests; candidate prep contract; YAML/shell syntax; `git diff --check` |
+| Preparation PR | `9f9c81db6a991665bcc57f4bb7c26cc0b71dfe78` | Primary Codex worktree | `3a3f5d28` plus final review fixes | Standards: no hard violations; Spec: all material findings fixed | `cargo test` and clippy for limiter; 29 Python tests; candidate prep/release-stop contracts; YAML/shell syntax; `git diff --check` |
 
 ## Remaining release blockers
 
