@@ -50,6 +50,22 @@ HOST_PANEL_TITLES = [
 
 LOG_PANEL_TITLES = [
     "LAT Recent Warning Logs",
+    "LAT Host Incident Logs",
+    "LAT Kernel Warning Logs",
+    "LAT Activation And Unit Lifecycle",
+    "LAT SSH And Sudo Logs",
+]
+
+HOST_INCIDENT_LOG_SOURCES = [
+    ("kernel", "_TRANSPORT=kernel PRIORITY=0"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=1"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=2"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=3"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=4"),
+    ("systemd", "SYSLOG_IDENTIFIER=systemd"),
+    ("nixos-activation", "SYSLOG_IDENTIFIER=nixos"),
+    ("auth", "SYSLOG_IDENTIFIER=sshd"),
+    ("auth", "SYSLOG_IDENTIFIER=sudo"),
 ]
 
 LAT_LOG_UNITS = {
@@ -259,13 +275,41 @@ def check_dashboard_contract() -> None:
         for target in panel_targets(panel):
             expression = target["expr"]
             require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
-            require_contains(
-                expression, 'priority=~"warning|error|crit|alert|emerg"', title
-            )
             require(
                 "finite-lat-2" not in expression,
                 f"{title} must not include finite-lat-2 in production log panels",
             )
+
+    require_contains(
+        panels_by_title["LAT Recent Warning Logs"]["targets"][0]["expr"],
+        'priority=~"warning|error|crit|alert|emerg"',
+        "LAT Recent Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Host Incident Logs"]["targets"][0]["expr"],
+        'source=~"kernel|systemd|nixos-activation|auth"',
+        "LAT Host Incident Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Kernel Warning Logs"]["targets"][0]["expr"],
+        'source="kernel"',
+        "LAT Kernel Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Kernel Warning Logs"]["targets"][0]["expr"],
+        'priority=~"warning|error|crit|alert|emerg"',
+        "LAT Kernel Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Activation And Unit Lifecycle"]["targets"][0]["expr"],
+        'source=~"systemd|nixos-activation"',
+        "LAT Activation And Unit Lifecycle",
+    )
+    require_contains(
+        panels_by_title["LAT SSH And Sudo Logs"]["targets"][0]["expr"],
+        'source="auth"',
+        "LAT SSH And Sudo Logs",
+    )
 
 
 def check_ubuntu_contract() -> None:
@@ -406,12 +450,15 @@ def main() -> int:
             'sys.env("FINITE_LOGS_WRITE_USERNAME")',
             'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
             'source_labels = ["__journal__systemd_unit"]',
+            'source_labels = ["__journal_unit"]',
+            'regex         = "(.+)"',
             'target_label  = "unit"',
             'source_labels = ["__journal_priority_keyword"]',
             'target_label  = "priority"',
             'max_age       = "10m"',
             f'host = "{host_name}"',
             f'role = "{LAT_ROLES[host_name]}"',
+            'source = "service"',
         ):
             require_contains(alloy_config, expected, f"{host_name} Alloy log config")
 
@@ -420,6 +467,23 @@ def main() -> int:
                 alloy_config,
                 f'matches       = "_SYSTEMD_UNIT={unit}"',
                 f"{host_name} journald allowlist",
+            )
+
+        for index, (source, matches) in enumerate(HOST_INCIDENT_LOG_SOURCES):
+            require_contains(
+                alloy_config,
+                f'loki.source.journal "finite_host_incident_{index}"',
+                f"{host_name} host incident journald source",
+            )
+            require_contains(
+                alloy_config,
+                f'matches       = "{matches}"',
+                f"{host_name} host incident journald source",
+            )
+            require_contains(
+                alloy_config,
+                f'source = "{source}"',
+                f"{host_name} host incident source label",
             )
 
     check_dashboard_contract()

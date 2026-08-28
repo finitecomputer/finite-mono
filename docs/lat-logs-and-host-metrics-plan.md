@@ -87,6 +87,7 @@ Initial Loki labels:
 - `unit`
 - `priority`
 - `role`
+- `source`
 
 Do not add labels derived from log message content.
 
@@ -101,6 +102,20 @@ Initial unit allowlist:
 - `finite-lat-2`: excluded from the production dashboard unless its role is
   updated. If explicitly monitored while decommissioning, label it
   `role="decommission"` and keep it out of production availability summaries.
+
+Separate host-incident sources:
+
+- Kernel warning-or-higher journal entries (`_TRANSPORT=kernel`,
+  `PRIORITY=0..4`) to catch thermal, OOM, filesystem, disk, NIC, and reset
+  evidence without forwarding all kernel info/debug logs.
+- systemd manager entries (`SYSLOG_IDENTIFIER=systemd`) to preserve unit
+  lifecycle evidence that does not belong to the affected service's
+  `_SYSTEMD_UNIT`.
+- NixOS activation entries (`SYSLOG_IDENTIFIER=nixos`) to preserve
+  `switch-to-configuration` and deployment activation context.
+- SSH/sudo auth entries (`SYSLOG_IDENTIFIER=sshd|sudo`) for operator-access
+  incident context. These remain message-only logs with the same bounded label
+  set; auth message contents are not parsed into labels.
 
 ### Ingest
 
@@ -146,13 +161,14 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 4. Add LAT journald collection.
    - Add Nix options or a small Nix data structure for the host/unit allowlist.
    - Configure Alloy `loki.source.journal`, relabeling only safe journald
-     fields into `host`, `unit`, `priority`, and `role`.
+     fields into `host`, `unit`, `priority`, `role`, and `source`.
    - Point Alloy at the protected Loki push route.
    - Keep the Loki credential in a root-owned environment file or SOPS-managed
      equivalent; do not reuse the Prometheus credential.
 
    Repo status: implemented in `infra/nixos/modules/metrics.nix` for
-   `finite-lat-1` and `finite-lat-3`. The next LAT NixOS activation will require
+   `finite-lat-1` and `finite-lat-3`, including the service allowlist and the
+   host-incident sources above. The next LAT NixOS activation will require
    `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
    and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
    covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
