@@ -52,9 +52,11 @@ jobs:
           esac
           python3 scripts/delivery.py verify-component-version --component finitechat --version "$version"
       - name: Install Rust
+        # The toolchain version comes from rust-toolchain.toml at the repo
+        # root (rustup auto-installs it on first use inside the checkout);
+        # release binaries build with the same pin as Nix images and CI.
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          cargo --version
           rustup target add "${{ matrix.target }}"
       - name: Build finitechat CLI
         run: cargo build --locked --release --target "${{ matrix.target }}" --package finitechat-cli --bin finitechat

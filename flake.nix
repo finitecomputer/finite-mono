@@ -148,9 +148,12 @@
             hermes-agent-minimal = hermesAgentMinimal;
             hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
             hermes-agent-python = hermesAgentMinimal.hermesVenv;
-            agent-runtime-toolchains = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix {
-              hermesAgent = hermesAgentPackage;
-            };
+            agent-runtime-toolchains =
+              hermesPkgs.callPackage
+                ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
+                {
+                  hermesAgent = hermesAgentPackage;
+                };
           }
         else
           { };
@@ -163,6 +166,13 @@
             overlays = [ (import rust-overlay) ];
           };
           finitePackagePkgs = import nixpkgs { inherit system; };
+          # The repo-wide Python formatter/linter pin. Deliberately from the
+          # hermes-nixpkgs pin (ruff 0.15.x, the version the tree is
+          # formatted with and hermes-bridge-ci checks with) so local, CI,
+          # and editor invocations can never disagree. Invoke only via
+          # `just fmt-py` / `just lint-py`; format output differs between
+          # ruff versions and ad-hoc copies are how formatting gates go red.
+          pyToolPkgs = import hermes-nixpkgs { inherit system; };
           finitePackages = import ./infra/nixos/packages.nix {
             pkgs = finitePackagePkgs;
             craneLib = crane.mkLib finitePackagePkgs;
@@ -173,22 +183,19 @@
           # 0.3.x and marked insecure, and the restore drill must use the same
           # 0.5 config format the host runs (modules/finite-litestream.nix).
           litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
-          rustVersion = "1.93.1";
-          # Keep this in sync with the CI Rust workspace pin so cached Cargo
-          # artifacts are reusable between clippy and Nix-shell test commands.
-          rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
-            extensions = [
-              "clippy"
-              "rust-analyzer"
-              "rust-src"
-              "rustfmt"
-            ];
+          # The Rust pin lives in ./rust-toolchain.toml (single source for
+          # rustup on dev hosts, the CI workflows, and these Nix shells).
+          # Cached Cargo artifacts stay reusable between clippy, Nix-shell
+          # test commands, and image builds because they all read the same
+          # file. The iOS std targets below are local-Darwin extras layered
+          # on top; the file itself stays platform-neutral.
+          rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
             targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
               "aarch64-apple-ios"
               "aarch64-apple-ios-sim"
             ];
           };
-          rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
+          rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
             curl
             git
@@ -216,58 +223,59 @@
         {
           packages = (hermesPackagesFor system) // finitePackages;
 
-          devShells = {
-            default = pkgs.mkShell {
-              packages =
-                rustBasePackages
-                ++ [
-                  pkgs.age
-                  gcxCli
-                  litestreamCli
-                  pkgs.sops
-                ]
-                ++ (with pkgs; [
-                  nodejs_24
-                  pnpm
-                  rsync
-                  sqlite
-                  xxd
-                  rustToolchain
-                ])
-                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
-                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
-
-              RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-            };
-
-            rust-ci = pkgs.mkShell {
-              packages = rustCiPackages;
-            };
-
-            devfinity-ci = pkgs.mkShell {
-              packages = devfinityCiPackages;
-            };
-          }
-          // pkgs.lib.optionalAttrs hermesSupported (
-            let
-              hermesAgentRuntime = hermes-agent.packages.${system}.default;
-              hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
-              hermesBridgePkgs = import hermes-nixpkgs { inherit system; };
-            in
+          devShells =
             {
-              hermes-bridge-ci = pkgs.mkShell {
-                packages = [
-                  hermesAgentRuntime
-                  hermesAgentRuntimePython
-                  hermesBridgePkgs.basedpyright
-                  hermesBridgePkgs.ruff
-                ];
+              default = pkgs.mkShell {
+                packages =
+                  rustBasePackages
+                  ++ [
+                    pkgs.age
+                    gcxCli
+                    litestreamCli
+                    pyToolPkgs.ruff
+                    pkgs.sops
+                  ]
+                  ++ (with pkgs; [
+                    nodejs_24
+                    pnpm
+                    rsync
+                    sqlite
+                    xxd
+                    rustToolchain
+                  ])
+                  ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
+                  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
-                HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
-                HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+              };
+
+              rust-ci = pkgs.mkShell {
+                packages = rustCiPackages;
+              };
+
+              devfinity-ci = pkgs.mkShell {
+                packages = devfinityCiPackages;
               };
             }
-          );
+            // pkgs.lib.optionalAttrs hermesSupported (
+              let
+                hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
+              in
+              {
+                hermes-bridge-ci = pkgs.mkShell {
+                  packages = [
+                    hermesAgentRuntime
+                    hermesAgentRuntimePython
+                    pyToolPkgs.basedpyright
+                    pyToolPkgs.ruff
+                  ];
+
+                  HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                  HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                };
+              }
+            );
 
           formatter = pkgs.nixfmt-rfc-style;
         }
