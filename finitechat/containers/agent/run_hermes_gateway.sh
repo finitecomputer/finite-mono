@@ -70,7 +70,8 @@ export FINITECHAT_HERMES_INBOUND_STREAM="${FINITECHAT_HERMES_INBOUND_STREAM:-1}"
 export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
 # Finite Chat inbound arrives over the authenticated relay binding. Legacy
 # agents (created before owner-npub granting) keep the platform-scoped
-# allow-all as the intended delegation to that upstream.
+# allow-all as the intended delegation to that upstream unless the sidecar
+# has locked admission and published its allowlist mirror (see below).
 # GATEWAY_ALLOW_ALL_USERS must never be set here: it is the gateway-global
 # switch and silently authorized every stranger on every other platform
 # (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
@@ -93,6 +94,17 @@ if [[ -n "${FINITECHAT_OWNER_NPUBS:-}" ]]; then
     # sidecar_welcome_allowlist_from_values). This export still covers any
     # sidecar launched under this script's own process tree.
     export FINITECHAT_WELCOME_ALLOWLIST="$FINITECHAT_OWNER_NPUBS"
+    unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+elif [[ -s "${agent_home}/allowed-users" ]]; then
+    # Store-mirrored admission. The chat sidecar's SQLite Welcome allowlist is
+    # the single source of truth and it rewrites ${FINITECHAT_HOME}/
+    # allowed-users (one 64-hex account id per line) after every
+    # seed/grant/revoke. This branch covers hosted agents locked via
+    # FINITECHAT_ADMISSION_DEFAULT=locked whose birth predates
+    # FINITECHAT_OWNER_NPUBS. The file is read once at gateway process start;
+    # later allowlist changes apply at the gateway's next restart (a live
+    # restart trigger is a deliberate follow-up, not built here).
+    export FINITECHAT_ALLOWED_USERS="$(paste -sd, "${agent_home}/allowed-users")"
     unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
 else
     export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"

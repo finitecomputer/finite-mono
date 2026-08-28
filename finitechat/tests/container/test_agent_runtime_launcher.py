@@ -499,7 +499,9 @@ exec {sys.executable!s} "$@"
                 existing_config_data = yaml.safe_load(existing_config)
             self.assertEqual(existing_config_data["model"], expected_model)
 
-    def _gateway_chat_authz_env(self, owner_npubs: str | None) -> dict[str, str]:
+    def _gateway_chat_authz_env(
+        self, owner_npubs: str | None, allowed_users: list[str] | None = None
+    ) -> dict[str, str]:
         """Run the launcher with stub binaries and capture the chat-authz env
         the gateway process would inherit. The runner always injects
         FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility."""
@@ -534,6 +536,13 @@ exec {sys.executable!s} "$@"
             hermes_home = agent_home / "hermes-home"
             hermes_home.mkdir(parents=True)
             (agent_home / "config.json").write_text("{}\n", encoding="utf-8")
+            if allowed_users is not None:
+                # The sidecar-maintained mirror of the store's Welcome
+                # allowlist: one 64-hex account id per line.
+                (agent_home / "allowed-users").write_text(
+                    "".join(f"{entry}\n" for entry in allowed_users),
+                    encoding="utf-8",
+                )
             env = {
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -592,6 +601,37 @@ exec {sys.executable!s} "$@"
         self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
         self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
         self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_allowed_users_mirror_scopes_chat_admission(self) -> None:
+        """No birth env, but the sidecar has locked admission and mirrored the
+        store's allowlist: the gateway locks to the same entries."""
+        owner = "a" * 64
+        guest = "b" * 64
+        captured = self._gateway_chat_authz_env(None, allowed_users=[owner, guest])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), f"{owner},{guest}")
+        # The mirror is a gateway concern only; the sidecar's store is the
+        # source of truth and needs no env re-seed.
+        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
+        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_owner_npubs_take_precedence_over_mirror(self) -> None:
+        owner = "a" * 64
+        stale = "b" * 64
+        captured = self._gateway_chat_authz_env(owner, allowed_users=[stale])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
+        self.assertEqual(captured.get("FINITECHAT_WELCOME_ALLOWLIST"), owner)
+
+    def test_gateway_launcher_empty_mirror_keeps_legacy_allow_all(self) -> None:
+        """An empty mirror must fail open to the same legacy behavior as a
+        missing one: the sidecar writes no file until admission is locked."""
+        captured = self._gateway_chat_authz_env(None, allowed_users=[])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
 
     def test_gateway_launcher_fails_closed_without_replacing_invalid_config(self) -> None:
         reconciler = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
