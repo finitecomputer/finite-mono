@@ -38,7 +38,7 @@ grep -E 'MemTotal' /proc/meminfo
 echo "### block devices (bytes)"
 lsblk -bndo NAME,SIZE,MODEL,SERIAL,TYPE 2>/dev/null | awk '$NF=="disk"'
 echo "### /dev/disk/by-id (whole disks only)"
-ls -l /dev/disk/by-id 2>/dev/null | grep -vE '[0-9]+$' | sed 's/.*by-id\///'
+ls -l /dev/disk/by-id 2>/dev/null | awk '$NF ~ /\/nvme[0-9]+$/ {print $9, "->", $NF}'
 echo "### nvme list (sudo, optional)"
 sudo -n nvme list 2>/dev/null || true
 echo "### current mdstat"
@@ -79,16 +79,16 @@ if not block:
     raise SystemExit("capture is missing the block-device section")
 disks = []
 for line in block.group(1).strip().splitlines():
-    # TYPE is the last column; MODEL may contain spaces (e.g. "SAMSUNG
-    # MZQL21T9HCJR-00A07"), so peel fields from the ends, never a fixed
-    # left-to-right split (lat4 hit exactly this: healthy Samsung data
-    # disks silently dropped, Gate B refused).
-    head, _, kind = line.rpartition(" ")
-    if kind != "disk" or not head:
+    # Columns are whitespace-padded and MODEL may contain spaces ("SAMSUNG
+    # MZQL21T9HCJR-00A07"), so take NAME/SIZE from the left and TYPE from
+    # the right of a whitespace split; the middle is free text (lat4 hit
+    # the fixed-split version of this bug: healthy disks silently dropped).
+    fields = line.split()
+    if len(fields) < 3 or fields[-1] != "disk":
         continue
-    name, _, rest = head.partition(" ")
-    size_text, _, model_serial = rest.partition(" ")
-    size = int(size_text)
+    name = fields[0]
+    size = int(fields[1])
+    model_serial = " ".join(fields[2:-1])
     disks.append((name, size, model_serial))
 
 print(f"==> found {len(disks)} disks")

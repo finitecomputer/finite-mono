@@ -1,46 +1,45 @@
 {
-  # NOT YET CAPTURED. Every value below is a placeholder until
-  # `infra/nixos/scripts/capture-lat2-host-evidence` has been run against the
-  # physical host (Gate A of infra/runbooks/lat2-replacement-cutover.md) and
-  # its output has been reviewed into this file. The disk paths are invalid by
-  # construction, `captured` stays false, and
-  # scripts/build-lat2-nixos-closure-artifact refuses to package a closure
-  # until `captured = true`. The geometry constants are carried over from
-  # finite-lat-3 (same chassis class, captured 439G root / 1.8T data arrays)
-  # and must be re-proven against the real disk sizes before they are trusted.
-  captured = false;
+  # Captured 2026-08-28 from the physical host in Latitude rescue mode
+  # (infra/nixos/scripts/capture-lat2-host-evidence, Gate A of
+  # infra/runbooks/lat2-replacement-cutover.md), reviewed by Paul.
+  # Geometry carried over from the lat3 qualification and re-proven against
+  # these disks: root member end 935331839s <= 937703088 sectors on the
+  # 480G Micron pair; data member end 3747612671s <= 3750748848 sectors on
+  # the 1.92T Samsung pair. Root pair = nvme0n1/nvme1n1 (Micron), data pair
+  # = nvme2n1/nvme3n1 (Samsung), matching the Ubuntu arrays' pairing.
+  captured = true;
 
   disks = {
-    rootA = "/dev/disk/by-id/REPLACE-ME-finite-lat-2-root-a";
-    rootB = "/dev/disk/by-id/REPLACE-ME-finite-lat-2-root-b";
-    dataA = "/dev/disk/by-id/REPLACE-ME-finite-lat-2-data-a";
-    dataB = "/dev/disk/by-id/REPLACE-ME-finite-lat-2-data-b";
+    rootA = "/dev/disk/by-id/nvme-eui.000000000000000100a075244c213b3a";
+    rootB = "/dev/disk/by-id/nvme-eui.000000000000000100a075244c213bdd";
+    dataA = "/dev/disk/by-id/nvme-eui.3634473057c127620025385300000001";
+    dataB = "/dev/disk/by-id/nvme-eui.3634473057c127510025385300000001";
   };
 
   partuuids = {
-    espA = "00000000-0000-0000-0000-00000000000a";
-    rootA = "00000000-0000-0000-0000-00000000000b";
-    espB = "00000000-0000-0000-0000-00000000000c";
-    rootB = "00000000-0000-0000-0000-00000000000d";
-    dataA = "00000000-0000-0000-0000-00000000000e";
-    dataB = "00000000-0000-0000-0000-00000000000f";
+    espA = "915d85bd-5993-4121-83e4-4dc85659098d";
+    rootA = "94df5349-e7f7-44dd-a717-f885a6d68989";
+    espB = "c5473df8-bfda-4aeb-a390-d6f9bc0e95ac";
+    rootB = "f1e862b1-9085-455d-b363-4f6786b5969e";
+    dataA = "d9854627-8522-43d8-9c6d-da644a882812";
+    dataB = "07698e7b-d6ee-4053-abf4-cec38e926fe3";
   };
 
   mdUuids = {
-    root = "00000000:00000000:00000000:00000000";
-    data = "00000000:00000000:00000000:00000001";
+    root = "b3e145ef:c78b134c:6f6cc268:5f9371e0";
+    data = "8ade1ea3:8e2ddeef:58704012:4b5e3adc";
   };
 
   filesystemUuids = {
-    root = "00000000-0000-0000-0000-000000000001";
-    data = "00000000-0000-0000-0000-000000000002";
-    espA = "0000-000A";
-    espB = "0000-000B";
+    root = "820e2fa8-8285-4735-9259-1a5c53479799";
+    data = "5a16eefe-79fe-4e42-a647-b509e6df0e58";
+    espA = "BBCF-F4C0";
+    espB = "659F-3667";
   };
 
   # mkfs.vfat takes the same volume IDs without the display hyphen.
   vfatVolumeIds = {
-    espA = "0000000A";
-    espB = "0000000B";
+    espA = "BBCFF4C0";
+    espB = "659F3667";
   };
 }
