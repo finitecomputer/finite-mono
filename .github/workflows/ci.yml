@@ -562,9 +562,10 @@ jobs:
 
   # Landing gate: builds the 15 scoped service packages through crane and
   # repopulates Cachix. select-harnesses defers this to landing events
-  # (push / merge_group) and to pull requests that change flake.nix or
-  # flake.lock, because a cold cargoArtifacts build here costs ~30 minutes
-  # and the Rust workspace job has already compiled and tested the PR diff.
+  # (push / merge_group) and to pull requests that change Cargo.lock,
+  # flake.nix, or flake.lock (the cargoArtifacts derivation inputs), because
+  # a cold cargoArtifacts build here costs ~30 minutes and the Rust
+  # workspace job has already compiled and tested the PR diff.
   nix-service-packages:
     name: Nix service packages
     needs: changes

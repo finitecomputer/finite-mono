@@ -391,6 +391,18 @@ class CiPackagingGateTests(unittest.TestCase):
         self.assertTrue(selection.run_nix_service_packages)
         self.assertNotIn("deferred", reason)
 
+    def test_pull_request_cargo_lock_change_keeps_nix_service_packages(self) -> None:
+        # Direct coverage for the Cargo.lock-only PR: cargoVendorDir and every
+        # mkCargoArtifacts derive from the root Cargo.lock, so deferring
+        # packaging here would move the cold crane build into devfinity-smoke
+        # without a Cachix warm-up.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("Cargo.lock")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
+
     def test_pull_request_flake_nix_change_keeps_nix_service_packages(self) -> None:
         selection, _reason, _paths = select_harnesses.select_harnesses(
             pull_request_args("flake.nix")

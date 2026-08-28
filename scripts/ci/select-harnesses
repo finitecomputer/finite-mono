@@ -32,8 +32,12 @@ OUTPUT_NAMES = (
 # cache (~30 minutes of crane release builds for 15 packages). It is a landing
 # concern: the Rust workspace job has already compiled and tested the diff, and
 # the landing run rebuilds and repushes Cachix for the next PR. Pull requests
-# run it only when the package graph itself changed (flake inputs / toolchain).
-PACKAGE_GRAPH_PR_PATHS = {"flake.nix", "flake.lock"}
+# run it only when the cargoArtifacts derivation inputs themselves changed:
+# the root Cargo.lock (cargoVendorDir and every mkCargoArtifacts derive from
+# it) or the flake graph (flake inputs / toolchain). Deferring these PRs too
+# would push the cold crane build into devfinity-smoke with no Cachix
+# warm-up, which is the cliff this gate exists to avoid.
+PACKAGE_GRAPH_PR_PATHS = {"Cargo.lock", "flake.nix", "flake.lock"}
 
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
