@@ -53,18 +53,10 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
     def test_checked_in_preparation_contract_passes(self) -> None:
         self.assertEqual(check_repository(ROOT), [])
 
-    def test_release_contract_rejects_all_stop_markers(self) -> None:
-        violations = check_repository(ROOT, release_ready=True)
-        self.assertTrue(
-            any("modelwrap MPK/root hash" in item for item in violations),
-            violations,
-        )
-        self.assertTrue(
-            any("SGLang image digest" in item for item in violations), violations
-        )
-        self.assertTrue(
-            any("limiter image digest" in item for item in violations), violations
-        )
+    def test_release_contract_accepts_committed_release_ready_candidate(self) -> None:
+        # The measured release-ready candidate (sha256 91fe432e...) is checked
+        # in, so the release contract must find zero stop markers.
+        self.assertEqual(check_repository(ROOT, release_ready=True), [])
 
     def test_checkpoint_and_h200_recipe_are_fixed(self) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
