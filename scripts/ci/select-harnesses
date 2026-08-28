@@ -32,12 +32,8 @@ OUTPUT_NAMES = (
 # cache (~30 minutes of crane release builds for 15 packages). It is a landing
 # concern: the Rust workspace job has already compiled and tested the diff, and
 # the landing run rebuilds and repushes Cachix for the next PR. Pull requests
-# run it only when the cargoArtifacts derivation inputs themselves changed:
-# the root Cargo.lock (cargoVendorDir and every mkCargoArtifacts derive from
-# it) or the flake graph (flake inputs / toolchain). Deferring these PRs too
-# would push the cold crane build into devfinity-smoke with no Cachix
-# warm-up, which is the cliff this gate exists to avoid.
-PACKAGE_GRAPH_PR_PATHS = {"Cargo.lock", "flake.nix", "flake.lock"}
+# keep it only when the package derivations themselves changed (see
+# is_package_graph_path); everything else defers packaging to landing events.
 
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
@@ -229,6 +225,38 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
     return selection, reason, paths
 
 
+def is_package_graph_path(path: str) -> bool:
+    """Whether the path changes the nix service package derivations.
+
+    These are the inputs that make a PR-time package build the difference
+    between substituting warm cargoArtifacts from Cachix and paying the cold
+    ~30-minute crane build inside devfinity-smoke:
+
+    - Workspace manifests: crane's mkDummySrc scopes every mkCargoArtifacts
+      to the member Cargo.toml files and the root Cargo.lock (cargoVendorDir
+      also derives from the lock).
+    - rust-toolchain.toml: the single Rust pin, read by the flake via
+      fromRustupToolchainFile, part of every cargoArtifacts derivation.
+    - .cargo/ config: cargo invocation settings for those artifact builds.
+    - flake.nix / flake.lock: crane args, toolchain overlay, and inputs.
+    - infra/nixos/: the packaged closures themselves (packages.nix and the
+      NixOS modules) - the thing this job exists to validate.
+
+    Everything else (Rust source, protos, SQL, docs) only affects thin final
+    package derivations, which devfinity-smoke builds locally against warm
+    cargoArtifacts.
+    """
+    return (
+        path == "Cargo.lock"
+        or path == "Cargo.toml"
+        or path.endswith("/Cargo.toml")
+        or path == "rust-toolchain.toml"
+        or path.startswith(".cargo/")
+        or path in ("flake.nix", "flake.lock")
+        or path.startswith("infra/nixos/")
+    )
+
+
 def apply_pull_request_packaging_gate(
     event: str, selection: HarnessSelection, paths: list[str]
 ) -> str | None:
@@ -236,7 +264,7 @@ def apply_pull_request_packaging_gate(
         return None
     if not selection.run_nix_service_packages:
         return None
-    if any(path in PACKAGE_GRAPH_PR_PATHS for path in paths):
+    if any(is_package_graph_path(path) for path in paths):
         return None
     selection.run_nix_service_packages = False
     return "nix service packages deferred to landing events"

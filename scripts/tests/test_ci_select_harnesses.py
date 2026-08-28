@@ -403,6 +403,41 @@ class CiPackagingGateTests(unittest.TestCase):
         self.assertTrue(selection.run_nix_service_packages)
         self.assertNotIn("deferred", reason)
 
+    def test_pull_request_package_input_changes_keep_nix_service_packages(self) -> None:
+        # Every package-derivation input family keeps the PR-time package
+        # build: workspace manifests (mkDummySrc scopes cargoArtifacts to
+        # them), the single Rust pin, cargo config, the flake graph, and the
+        # infra/nixos packaging surface itself.
+        for changed in (
+            "Cargo.toml",
+            "finitechat/crates/finitechat-server/Cargo.toml",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "flake.nix",
+            "flake.lock",
+            "infra/nixos/packages.nix",
+            "infra/nixos/modules/monitoring-vps.nix",
+        ):
+            with self.subTest(changed=changed):
+                selection, reason, _paths = select_harnesses.select_harnesses(
+                    pull_request_args(changed)
+                )
+                self.assertTrue(selection.run_nix_service_packages, changed)
+                self.assertNotIn("deferred", reason)
+
+    def test_pull_request_derivation_irrelevant_change_defers_nix_service_packages(
+        self,
+    ) -> None:
+        # Generated-code sources feed only the thin final package
+        # derivations, which devfinity-smoke builds locally against warm
+        # cargoArtifacts - they do not justify the PR-time package build.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("finitechat/protos/chat.proto")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertIn("deferred to landing events", reason)
+
     def test_pull_request_flake_nix_change_keeps_nix_service_packages(self) -> None:
         selection, _reason, _paths = select_harnesses.select_harnesses(
             pull_request_args("flake.nix")
