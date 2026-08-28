@@ -1,5 +1,16 @@
 # Decommission finite-lat-2
 
+> **SUPERSEDED 2026-08-28 (ADR 0007, emergency):** lat1's thermal failure
+> changed lat2's destination from "decommission and release" to "wipe and
+> reinstall as the replacement app-plane host" — see
+> [`lat2-replacement-cutover.md`](lat2-replacement-cutover.md). The
+> archive/offload steps below are **skipped by owner decision** (lat1's data
+> is the authority; lat2's local copies are stale); the wipe happens as Gate
+> A of the cutover runbook. Still load-bearing after the cutover:
+> unregister the four GitHub runners (`runners.md` inventory) and rotate the
+> legacy credentials this file names (Core runner token, Resend key, tunnel
+> key, finite-search env values).
+
 PRECONDITIONS:
 
 - Explicit production authorization names this runbook and the intended end

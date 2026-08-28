@@ -108,11 +108,40 @@ LAT_LOG_UNITS = {
         "systemd-networkd.service",
         "wireguard-wg-finite.service",
     ],
+    "finite-lat-2": [
+        "alloy.service",
+        "borgbackup-job-finite-hosted-web-chat-offsite.service",
+        "caddy.service",
+        "finite-core-private-proxy.service",
+        "finite-healthcheck.service",
+        "finite-hosted-web-chat-offsite-health.service",
+        "finite-hosted-web-chat-snapshot-health.service",
+        "finite-identity-backup-health.service",
+        "finite-identity-backup.service",
+        "finite-identity-private-proxy.service",
+        "finite-identity.service",
+        "finite-litestream-finite-brain.service",
+        "finite-litestream-finite-chat-server.service",
+        "finite-litestream-health.service",
+        "finite-postgres-backup.service",
+        "finite-runtime-metrics.service",
+        "finite-saas-core.service",
+        "finite-saas-sites.service",
+        "finitechat-hosted-device.service",
+        "finitechat-server.service",
+        "finite-brain-app.service",
+        "prometheus-node-exporter.service",
+        "podman-finite-saas-dashboard.service",
+        "podman-searxng.service",
+        "podman-firecrawl-api.service",
+    ],
 }
 
 LAT_ROLES = {
     "finite-lat-1": "app",
     "finite-lat-3": "runner",
+    # Emergency replacement app-plane host (lat1's stack, no runner).
+    "finite-lat-2": "app",
 }
 
 
@@ -191,6 +220,12 @@ def nix_eval() -> dict[str, Any]:
             envFiles = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
             activation = flake.nixosConfigurations.finite-lat-3.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-2 = {
+            config = flake.nixosConfigurations.finite-lat-2.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-2.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }
@@ -321,6 +356,7 @@ def check_dashboard_contract() -> None:
                 f'host=~"{LAT_DASHBOARD_HOST_REGEX}"',
                 title,
             )
+            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
 
     require_contains(
         panels_by_title["LAT Recent Warning Logs"]["targets"][0]["expr"],

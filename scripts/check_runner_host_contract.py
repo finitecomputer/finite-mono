@@ -7,7 +7,8 @@ which renders the shared non-secret environment to
 configs pass only the declared per-host inputs. This guard evaluates both
 nixosConfigurations and fails on any runner-role drift outside that declared
 per-host set, so a future hand-edit to one host breaks CI instead of
-production.
+production. (finite-lat-2 is the app-plane replacement host and deliberately
+runs no runner; the runner lane moves to a future host.)
 """
 
 from __future__ import annotations

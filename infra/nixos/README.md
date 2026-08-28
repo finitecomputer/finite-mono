@@ -56,8 +56,22 @@ It was installed and storage-qualified on 2026-07-20. Kata/containerd and the
 Runner now provide customer capacity. It is still not a Recovery Authority:
 RAID preserves availability through one disk failure but does not provide an
 independent backup. The authoritative sequence and dated evidence are in
-`docs/runs/finite-lat-capacity-and-redundancy.md`. Lat2's services and storage
-are unchanged.
+`docs/runs/finite-lat-capacity-and-redundancy.md`.
+
+## finite-lat-2, the replacement app server (in progress)
+
+`nixosConfigurations.finite-lat-2` carries finite-lat-1's service stack
+(Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard,
+search, Caddy, backups, litestream) on the lat3-qualified storage chassis,
+for the ADR 0007 emergency cutover off the thermally failed lat1. It runs
+no Agent Runner — the runner lane moves to a future host. The host boots in
+declarative import mode (`modules/import-mode.nix`): product units stay
+down while lat1's state is imported and verified. Its `storage-ids.nix`
+and networking carry `captured = false` placeholders until
+`scripts/capture-lat2-host-evidence` has run against the physical machine;
+`scripts/build-lat2-nixos-closure-artifact` refuses to package a closure
+before that capture. Authority: `docs/runs/finite-lat2-emergency-cutover.md`
+and `../runbooks/lat2-replacement-cutover.md`.
 
 ## Deploy story
 
@@ -126,6 +140,13 @@ package a disk installer and cannot deploy by itself. Download the exact
 just deploy-lat3-closure ARTIFACT_DIR --validate-only
 just deploy-lat3-closure ARTIFACT_DIR --prepare
 ```
+
+finite-lat-2 has the `Lat2 NixOS Closure` workflow and the same
+`just deploy-lat2-closure` primitive (same fencing, `root@64.34.80.19`
+target). Its artifact additionally packages the disko script and the
+same-pin kexec installer tarball — those two inputs, plus the closure, are
+the only things the bare-metal install consumes, and the workflow refuses to
+build them until the host's storage identity is captured (ADR 0007, Gate B).
 
 `--prepare` validates the main-branch revision, copies the prebuilt closure,
 checks lat3's monitoring-secret names and modes, and runs NixOS dry activation.
