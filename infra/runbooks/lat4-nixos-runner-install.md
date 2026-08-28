@@ -94,7 +94,7 @@ no data worth preserving.
    on this branch before Gate B executes.
 
 VERIFY: artifact manifest matches the merged rev; `nixosConfigurations`
-evals green; lat1 deployed with the lat4 peer and its existing handshakes
+evals green; lat2 deployed with the lat4 peer and its existing handshakes
 current.
 
 ### Gate C — wipe and install (provider console + artifact install)
@@ -143,7 +143,7 @@ identity file `/data/.finite-filesystem-identity` matches
      token per `infra/runbooks/identity-authority.md`.
    - `/etc/finite/runtime-secrets.env` (0600) — direct copy of lat3's.
    - `/etc/finite/wireguard-private-key` (0600) — the private half of the
-     keypair whose public key is already registered on lat1.
+     keypair whose public key is already registered on the lat2 hub.
    - `/etc/finite/metrics-remote-write.env` and `/etc/finite/logs-write.env`
      (0600) — monitoring write credentials; the activation preflight
      `check-lat-monitoring-secrets` blocks activation without them.

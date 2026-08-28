@@ -131,7 +131,7 @@ lat2-runner-rollout-contract:
 # Static manifest, install-input, build-host, dry-activation, Runner-fencing,
 # and rollback contract for finite-lat-4 closure rollouts.
 lat4-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache
+    cd ../.. && bash -n scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache scripts/install-lat4-from-artifact
     cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint

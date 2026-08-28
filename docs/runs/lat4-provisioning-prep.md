@@ -7,10 +7,11 @@ read-only until the gated install runbook executes with fresh approval.
 
 Scope decision: finite-lat-4 is a **dedicated Agent Runner host** cloned from
 the finite-lat-3 personality. It holds sandboxes only — no app services, no
-edge proxy, no database, no monitoring receiver. Per ADR 0007 (PR #715),
-lat4 is the **third** runner host: lat2 rejoins as the second runner twin,
-and lat4 follows the same model — admitted drained, one-creator rule intact,
-Gate-E-style undrain as a separate owner decision.
+edge proxy, no database, no monitoring receiver. Per the final ADR 0007 (PR
+#715, as merged), lat2 is the emergency **app-plane** replacement host (not a
+runner), lat1 is down, and **lat4 is the second runner host** alongside lat3 —
+same model: admitted drained, one-creator rule intact, Gate-E-style undrain as
+a separate owner decision.
 
 Related: `docs/runs/finite-lat-capacity-and-redundancy.md`,
 `infra/nixos/hosts/finite-lat-3/`, `infra/README.md`.
@@ -69,7 +70,7 @@ state) needs a home.
 | Topic | 715 (as amended) decision | lat4 adoption |
 |---|---|---|
 | WireGuard hub | lat2 = `10.254.3.1/29`, Core + Identity socket proxies; lat3's peer re-pointed to lat2 (`iuzuWHBSrPPbanAdiS86jABhwieo+wyig8I1f+FuPBk=`, endpoint `64.34.80.19`) | lat4's peer mirrors lat3's flip exactly; drafted in default.nix. The lat2-side lat4 peer entry lands after 715 merges AND lat2 is live (Gate D/E wait on that) |
-| Runner lane | lat2 ships with NO runner role; the lane moves to lat4 | lat4 = second runner host (was drafted as "third" before the pivot; docs updated) |
+| Runner lane | lat2 ships with NO runner role; the lane moves to lat4 | lat4 = second runner host (after lat3; drafted as "third" before the pivot, docs updated) |
 | Ceiling | lat3's owner-authorized **42** (swap is not capacity) | `maxSandboxes = 42`, `FC_RUNNER_DRAIN=true`; drained still serves existing-Agent lifecycle work, only creation is withheld |
 | Existing-Agent fleet | lat1's 22 Runtimes / ~31G state are homeless; cold-relocation contract exists (`infra/runbooks/runtime-cold-relocation.md`) | **Ownership open** — see §5 item 11 |
 | Storage identity | `captured` gate; build script refuses uncaptured | lat4 ships `captured = true` with live-captured values; guard kept |

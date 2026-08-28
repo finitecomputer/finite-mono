@@ -14,6 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "scripts/build-lat4-nixos-closure-artifact"
 DEPLOY = ROOT / "scripts/deploy-lat4-closure-cache"
+INSTALL = ROOT / "scripts/install-lat4-from-artifact"
 
 
 class Lat4ClosureArtifactTests(unittest.TestCase):
@@ -27,9 +28,23 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             check=False,
         )
 
+    def run_install(self, artifact_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(INSTALL), str(artifact_dir), *args],
+            cwd=ROOT,
+            env={**os.environ, "PATH": os.environ["PATH"]},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_missing_manifest_fails_before_remote_access(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             result = self.run_deploy(Path(temp))
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("artifact manifest is missing", result.stderr)
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.run_install(Path(temp), "root@152.236.34.15", "--validate-only")
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact manifest is missing", result.stderr)
 
@@ -75,27 +90,34 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertEqual(source.count("nixosConfigurations.finite-lat-4."), 2)
 
     def test_valid_manifest_requires_file_binary_cache(self) -> None:
+        def valid_manifest() -> dict:
+            return {
+                "schema": "finite.lat4.nixos-closure.v2",
+                "host": "finite-lat-4",
+                "repository": "finitecomputer/finite-mono",
+                "rev": "a" * 40,
+                "system": "/nix/store/"
+                + "b" * 32
+                + "-nixos-system-finite-lat-4-26.05.test",
+                "disko": "/nix/store/" + "c" * 32 + "-disko",
+                "kexec": "/nix/store/" + "d" * 32 + "-kexec-tarball",
+                "cache": "nix-cache",
+            }
+
         with tempfile.TemporaryDirectory() as temp:
             artifact = Path(temp)
             (artifact / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "schema": "finite.lat4.nixos-closure.v2",
-                        "host": "finite-lat-4",
-                        "repository": "finitecomputer/finite-mono",
-                        "rev": "a" * 40,
-                        "system": "/nix/store/"
-                        + "b" * 32
-                        + "-nixos-system-finite-lat-4-26.05.test",
-                        "disko": "/nix/store/" + "c" * 32 + "-disko",
-                        "kexec": "/nix/store/" + "d" * 32 + "-kexec-tarball",
-                        "cache": "nix-cache",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
+                json.dumps(valid_manifest()) + "\n", encoding="utf-8"
             )
             result = self.run_deploy(Path(temp))
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("artifact cache is missing or incomplete", result.stderr)
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp)
+            (artifact / "manifest.json").write_text(
+                json.dumps(valid_manifest()) + "\n", encoding="utf-8"
+            )
+            result = self.run_install(artifact, "root@152.236.34.15", "--validate-only")
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact cache is missing or incomplete", result.stderr)
 
@@ -159,6 +181,31 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             "alloy.service|dbus-broker.service|systemd-tmpfiles-resetup.service",
             source,
         )
+
+    def test_install_helper_realizes_from_cache_and_drives_pinned_nixos_anywhere(self) -> None:
+        source = INSTALL.read_text(encoding="utf-8")
+        # The artifact cache is unsigned; the installer must read it with
+        # the explicit --no-check-sigs path like every deploy-cache consumer.
+        self.assertIn("--no-check-sigs", source)
+        self.assertIn('nix copy --no-check-sigs --option builders \'\'', source)
+        self.assertIn('--from "file://$CACHE_DIR"', source)
+        self.assertIn('"$SYSTEM" "$DISKO" "$KEXEC"', source)
+        self.assertIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
+        self.assertIn("--kexec \"$KEXEC\"", source)
+        self.assertIn("--build-on local", source)
+        self.assertIn("packages.x86_64-linux.finite-lat-4-nixos-anywhere", source)
+        # Substitution from the artifact cache only: no build invocation.
+        self.assertNotIn("nix build", source)
+
+    def test_capture_parser_peels_type_from_the_right(self) -> None:
+        # lsblk MODEL fields can contain spaces (SAMSUNG MZQL21T9HCJR-00A07);
+        # a fixed left-to-right split silently drops those disks and Gate B
+        # would refuse healthy hardware (this hit lat4 for real).
+        capture = (ROOT / "infra/nixos/scripts/capture-lat4-host-evidence").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('rpartition(" ")', capture)
+        self.assertNotIn("split(None, 4)", capture)
 
 
 if __name__ == "__main__":

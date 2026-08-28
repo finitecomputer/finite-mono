@@ -1,11 +1,11 @@
 # finite-lat-4 is a dedicated Agent Runner host cloned from the proven
 # finite-lat-3 runner-only personality: it holds sandboxes only — no app
 # services, no edge, no database. It follows ADR 0007's runner-twin model as
-# the THIRD runner host (lat2 rejoins second via PR 715): the wg-finite /29
-# widening to 10.254.3.0/29 must land first (lat1=.1, lat3=.2, lat2=.3),
-# lat4 takes 10.254.3.4, and the 42-guest ceiling mirrors lat3's
-# owner-authorized value. Public addresses were captured from the interim OS;
-# see docs/runs/lat4-provisioning-prep.md for evidence and gates.
+# the SECOND runner host (after lat3; lat2 is the app-plane replacement, not
+# a runner): the wg-finite /29 widening to 10.254.3.0/29 landed with #715
+# (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and the 42-guest ceiling
+# mirrors lat3's owner-authorized value. Public addresses were captured from
+# the interim OS; see docs/runs/lat4-provisioning-prep.md for evidence and gates.
 {
   config,
   finitePackages,
@@ -24,7 +24,8 @@ let
     alexKey
   ];
   # Operator routes are deliberately absent from the public Identity vhost.
-  # Reach the loopback Authority through lat1's peer-scoped WireGuard proxy.
+  # Reach the loopback Authority through the lat2 hub's peer-scoped WireGuard
+  # proxy (the hub role moved from lat1 to lat2, ADR 0007).
   identityAuthority = "http://10.254.3.1:18790";
   identityOperatorEnvironmentFile = "/etc/finite/identity-operator.env";
   revision =
