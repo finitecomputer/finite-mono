@@ -2,6 +2,6 @@ environment = "production"
 scope = "lat1-nixos"
 classification = "ordinary"
 risky_path_policy = "lat1-v1"
-mutation_enabled = false
+mutation_enabled = true
 rollback_policy = "previous-lat1-closure"
 required_gates = ["ci-gate", "finite-status-before", "lat1-closure", "finite-status-after"]
