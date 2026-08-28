@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -74,15 +76,22 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 result = self.run_deploy(artifact, "--validate-only")
             self.assertNotEqual(result.returncode, 0)
 
-    def test_uncaptured_storage_ids_block_the_build_script(self) -> None:
-        # The build script must fail closed while finite-lat-2's storage
-        # identity is still placeholder data (ADR 0007 Gate A/B precondition).
+    def test_captured_storage_ids_gate_the_build_script(self) -> None:
+        # Gate B contract: the committed lat2 storage identity is captured
+        # and placeholder-free, and the build guard that refuses an
+        # uncaptured host is still in place (it fires again if the file
+        # ever regresses or a future re-capture flips it).
         ids = ROOT / "infra/nixos/hosts/finite-lat-2/storage-ids.nix"
         source = BUILD.read_text(encoding="utf-8")
         self.assertIn("grep -q '^  captured = true;$'", source)
-        self.assertIn("captured = false", source)
         self.assertTrue(ids.exists())
-        self.assertIn("captured = false", ids.read_text(encoding="utf-8"))
+        ids_text = ids.read_text(encoding="utf-8")
+        self.assertIn("captured = true;", ids_text)
+        self.assertNotIn("captured = false", ids_text)
+        self.assertNotIn("REPLACE-ME", ids_text)
+        self.assertIn("/dev/disk/by-id/nvme-eui.", ids_text)
+        for path in (ROOT / "infra/nixos/hosts/finite-lat-2").glob("*.nix"):
+            self.assertNotIn("REPLACE-ME", path.read_text(encoding="utf-8"))
 
     def test_artifact_includes_the_bare_metal_install_inputs(self) -> None:
         source = BUILD.read_text(encoding="utf-8")
@@ -217,15 +226,48 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn('boot.kernelModules = [ "kvm-amd" ]', host)
         self.assertIn("kvm-amd kernel module", host)  # the assertion message
 
-    def test_capture_parser_peels_type_from_the_right(self) -> None:
-        # lsblk MODEL fields can contain spaces (SAMSUNG MZQL21T9HCJR-00A07);
-        # a fixed left-to-right split silently drops those disks and Gate B
-        # would refuse healthy hardware (lat4 hit this for real).
+    def test_capture_parser_handles_spaced_model_names(self) -> None:
+        # Behavior contract for the geometry proof: lsblk columns are
+        # whitespace-padded and MODEL can contain spaces (SAMSUNG
+        # MZQL21T9HCJR-00A07) — the parser must classify every disk by
+        # splitting whitespace with TYPE taken from the right (lat4 hit the
+        # fixed-split version of this bug: healthy disks silently dropped).
         capture = (ROOT / "infra/nixos/scripts/capture-lat2-host-evidence").read_text(
             encoding="utf-8"
         )
-        self.assertIn('rpartition(" ")', capture)
-        self.assertNotIn("split(None, 4)", capture)
+        match = re.search(r"<<'PY'\n(.*?)\nPY\n", capture, re.DOTALL)
+        assert match, "geometry-proof python heredoc not found in capture script"
+        parser_code = match.group(1)
+
+        root_min = (935331839 + 1) * 512
+        data_min = (3747612671 + 1) * 512
+        sample = "\n".join(
+            [
+                "### block devices (bytes)",
+                "nvme0n1  480103981056 Micron_7450_MTFDKBA480TFR  24454C213B3A   disk",
+                "nvme1n1  480103981056 Micron_7450_MTFDKBA480TFR  24454C213BDD   disk",
+                "nvme2n1 1920383410176 SAMSUNG MZQL21T9HCJR-00A07 S64GNS0WC12762 disk",
+                "nvme3n1 1920383410176 SAMSUNG MZQL21T9HCJR-00A07 S64GNS0WC12751 disk",
+                "### /dev/disk/by-id (whole disks only)",
+            ]
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write(sample)
+            sample_path = fh.name
+        self.addCleanup(os.unlink, sample_path)
+        result = subprocess.run(
+            [sys.executable, "-", str(sample_path), str(root_min), str(data_min)],
+            input=parser_code,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("found 4 disks", result.stdout)
+        self.assertIn(f"root-class  (>= {root_min} bytes, < data): 2", result.stdout)
+        self.assertIn(f"data-class  (>= {data_min} bytes): 2", result.stdout)
+        self.assertIn("too small for the pinned root geometry: 0", result.stdout)
+        self.assertIn("SAMSUNG MZQL21T9HCJR-00A07 S64GNS0WC12762", result.stdout)
 
 
 if __name__ == "__main__":
