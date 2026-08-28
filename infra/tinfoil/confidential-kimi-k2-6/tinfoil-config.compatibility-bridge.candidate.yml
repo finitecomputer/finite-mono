@@ -37,10 +37,7 @@ shim:
   upstream-container: finite-private-compatibility-bridge
   upstream-port: 8000
   authenticated: false
+  # Preserve the upstream service's complete route surface. Caddy and this
+  # shim do not keep a second endpoint allowlist.
   paths:
-    - /v1/chat/completions
-    - /v1/responses
-    - /metrics
-    - /live
-    - /health
-    - /ready
+    - "/*"

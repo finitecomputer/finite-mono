@@ -52,10 +52,11 @@ These are the preparation defaults pending any operator adjustment:
 1. Limiter HTTP seam: `glm-5-3-flash`, `deepseek-v4-flash-0731`, and
    `glm-5-2` all reserve, route to SGLang as `glm-5-3-flash`, stream terminal
    usage, and settle; an unknown model fails closed before reservation.
-2. Candidate manifest seam: repository validation proves fixed checkpoint and
-   base-image identities, eight H200s, private inference networking, parsers,
-   context cap, model-routing variables, and the distinction between safe prep
-   placeholders and release-ready pins.
+2. Candidate manifest seam: repository validation asserts unique fixed
+   checkpoint and base-image identities, eight H200s, private inference
+   networking, parsers, context cap, model-routing variables, and the
+   distinction between safe prep placeholders and release-ready pins. Tinfoil's
+   decoded deployment validation remains the schema and resource authority.
 3. Capacity CLI seam: the hard 120-client gate requires 120/120 successful
    terminal streams, p50 decode at least 20 output tokens/sec, p10 decode at
    least 10 output tokens/sec, aggregate output at least 2,400 tokens/sec, and
@@ -82,7 +83,7 @@ These are the preparation defaults pending any operator adjustment:
 | --- | --- | --- | --- | --- | --- |
 | Pin SGLang/checkpoint and create Tinfoil candidate | AFK | Complete | Pending | Pending | Preparation contract green; release contract blocked as designed |
 | Preserve mixed-version model labels through the limiter | AFK | Complete | Pending | Pending | 16 limiter tests green |
-| Add 120-user capacity, latency, and quality gates | AFK | Complete | Pending | Pending | 8 Python gate tests green |
+| Add protocol, 120-user capacity, latency, and quality gates | AFK | Complete | Pending | Pending | 12 Python gate tests green |
 | Prepare `finite-private` rename with historical-route bridge | AFK | Complete | Pending | Pending | Candidate contract and ops tests green |
 | Write 03:00 cutover and rollback procedure | AFK | Complete | Pending | Pending | Static contract green |
 | Generate Tinfoil MPK and publish measured image pins | HITL/production access | Parked | N/A | Operator/Tinfoil action | No |
@@ -103,12 +104,14 @@ These are the preparation defaults pending any operator adjustment:
 | --- | --- | --- | --- | --- | --- |
 | Preparation PR | `9f9c81db6a991665bcc57f4bb7c26cc0b71dfe78` | Primary Codex worktree | Pending final commit | Pending | `cargo test -p finite-private-limiter --locked`; 23 Python tests; candidate prep contract; YAML/shell syntax; `git diff --check` |
 
-## Open Questions
+## Remaining release blockers
 
-- Whether the proposed 20 tok/s p50 and 10 tok/s p10 120-user thresholds match
-  the operator's intended meaning of "decent output speeds."
-- Whether Tinfoil organization access can publish the model MPK and both
-  satellite releases before the maintenance window.
+- The 120-user definition of "decent" is fixed for this candidate at 20 tok/s
+  p50, 10 tok/s p10, 2,400 aggregate output tok/s, and 10-second p95 TTFT. It
+  may be raised before publication; lowering it requires a reviewed PR and a
+  new operator decision.
+- Tinfoil organization access must publish the model MPK and both satellite
+  releases before the maintenance window.
 
 ## Escalations
 

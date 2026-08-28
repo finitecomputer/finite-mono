@@ -213,6 +213,13 @@ that the rollback tag resolves to the retained deployment assets. Confirm the
 bridge host has enough CPU/memory and no GPU claim. Confirm there is still one
 active eight-H200 allocation; this plan does not assume a second lab rack.
 
+Select one existing internal canary Agent with known durable chat history and
+record its non-secret Account, Project, Runtime, Agent Principal, and Room
+identifiers. Confirm the same Room is usable before the window. Also reserve a
+single-use internal Launch Code and a fresh canary email for the post-cutover
+new-user proof. Creating or consuming either is production state; do it only in
+the authorized window and never use a customer account as the canary.
+
 Record the accounting boundary, then prove the current service at bounded load:
 
 ```bash
@@ -244,11 +251,36 @@ Every mutating command below requires the operator's explicit authorization for
 the exact values recorded above. Keep a second terminal open with this rollback
 section and the retained pre-window JSON.
 
+### Resume rules
+
+Treat the procedure as a small state machine. Before a first attempt or resume,
+read both names with `tinfoil container get ... --output json` and compare IDs,
+repos, tags, hosts, GPU counts, debug/staging flags, and secret names with the
+retained evidence.
+
+| Observed state | Allowed next action |
+| --- | --- |
+| Exact old GPU ID exists as `kimi-k2-6`; `finite-private` is absent | Run the GPU `--replace` once. |
+| Exact target `finite-private` exists; `kimi-k2-6` is absent | Do not reuse the consumed rollback ID. Create the exact bridge. |
+| Exact target main and bridge both exist | Skip both create commands and resume at readiness. |
+| Anything else, including a different ID/tag under either name | Stop. Do not replace, delete, or adopt it. |
+
+The retained create JSON is the authority for the new IDs. A shell failure after
+a successful control-plane request is not permission to rerun it. Re-read state
+and follow the table. Apply the same rule during rollback: if the exact restored
+old release already exists, skip its create and continue with verification.
+
 ### 1. Replace the GPU workload under the generic name
 
 Re-run both repository contracts and compare all six artifact checksums with the
 approved values. Then create `finite-private`, atomically replacing only the
 exact inventoried old container ID:
+
+There is no zero-downtime path with one eight-H200 allocation and a generated
+hostname that cannot move. The approved maintenance interruption begins when
+`--replace` consumes the old container and ends only when GLM and the historical
+bridge are both ready. Create the bridge immediately after the GPU replacement;
+do not extend this interruption with protocol or quality testing first.
 
 ```bash
 test -n "$FINITE_PRIVATE_ROLLBACK_CONTAINER_ID"
@@ -268,10 +300,21 @@ tinfoil container create finite-private \
 ```
 
 Do not pass `--debug`, `--disable-cc-mode`, `--staging`, variables, SSH keys, or
-a custom domain. Read the new exact ID from the retained create/status JSON:
+a custom domain. Read the new exact ID from the retained create JSON, then
+immediately recreate the old external name from the reviewed CPU-only bridge
+release. It receives no secrets, variables, SSH keys, model, or GPU flags:
 
 ```bash
 export FINITE_PRIVATE_NEW_CONTAINER_ID='REPLACE_FROM_CREATE_JSON'
+
+tinfoil container create kimi-k2-6 \
+  --host "$FINITE_PRIVATE_BRIDGE_HOST" \
+  --repo finitecomputer/confidential-kimi-k2-6 \
+  --tag "$FINITE_PRIVATE_BRIDGE_TAG" \
+  --output json \
+  > "$FINITE_PRIVATE_EVIDENCE_DIR/compatibility-bridge-create.json"
+
+export FINITE_PRIVATE_BRIDGE_CONTAINER_ID='REPLACE_FROM_CREATE_JSON'
 export FINITE_PRIVATE_CONTAINER=finite-private
 export FINITE_PRIVATE_ENDPOINT='https://finite-private.finite.containers.tinfoil.dev'
 export FINITE_PRIVATE_MODEL=glm-5-3-flash
@@ -279,11 +322,17 @@ export FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL=glm-5-3-flash
 infra/runbooks/finite-private-ops.sh wait-ready
 tinfoil container get "$FINITE_PRIVATE_NEW_CONTAINER_ID" --output json \
   > "$FINITE_PRIVATE_EVIDENCE_DIR/finite-private-ready.json"
+
+FINITE_PRIVATE_CONTAINER=kimi-k2-6 \
+  FINITE_PRIVATE_ENDPOINT=https://kimi-k2-6.finite.containers.tinfoil.dev \
+  infra/runbooks/finite-private-ops.sh wait-ready
 ```
 
 Readiness may take about 45 minutes while the 305.8-GiB checkpoint becomes
 available. Require the exact release tag, eight GPUs, false debug/staging, three
-secret names, attested route, and healthy `/live`, `/health`, and `/ready`.
+secret names, attested direct route, and healthy `/live`, `/health`, and
+`/ready`. The bridge healthcheck intentionally follows the main `/live`, so the
+historical route becomes ready with the model rather than before it.
 
 ### 2. Prove canonical and mixed-version APIs directly
 
@@ -319,6 +368,43 @@ Separately require:
 - `/v1/responses` returns a response ID and output; and
 - invalid Finite credentials never reach inference.
 
+The protocol gate must also cover the newly documented GLM behavior before
+capacity load begins:
+
+- explicit `clear_thinking=true` over assistant history, with reasoning kept
+  separate from final content;
+- non-streaming and streaming tool calls with valid JSON arguments;
+- a tool result fed back into a second model turn;
+- two requested tools returned as parallel tool calls;
+- `response_format={"type":"json_object"}` content that parses as the requested
+  JSON object;
+- a client-cancelled stream followed by healthy inference and settled usage;
+- malformed JSON and unsupported fields failing without a stuck reservation;
+- one approximately 128,000-token prompt and one approximately 360,000-token
+  near-limit prompt at the fixed 393,216-token service ceiling; and
+- a short request immediately after each long prefill, proving the service did
+  not wedge or restart.
+
+Store the exact request generators and sanitized outputs in the evidence
+directory. The report may contain prompts, response identity, parser shapes,
+timings, usage, and errors, but never the canary key or full generated answers.
+Check settlement after cancellation, malformed input, and each long-context
+call. Any OOM, restart, parser ambiguity, nonterminal stream, invalid JSON, or
+rollout-era reserved row means rollback immediately.
+
+Run the checked-in generator against the direct route. It emits only sanitized
+case metadata and token counts:
+
+```bash
+python3 scripts/check_finite_private_glm53_protocol.py \
+  --endpoint https://finite-private.finite.containers.tinfoil.dev/v1 \
+  --api-key-env FINITE_PRIVATE_CANARY_API_KEY \
+  --timeout-seconds 1200 \
+  > "$FINITE_PRIVATE_EVIDENCE_DIR/glm53-protocol.json"
+infra/runbooks/finite-private-ops.sh settlement-status \
+  "$FINITE_PRIVATE_LEDGER_SINCE"
+```
+
 Any parser, model-identity, or settlement failure means rollback immediately.
 
 Run the fixed GLM reasoning/tool suite at both high and max effort through the
@@ -338,26 +424,20 @@ and tool-selection outcomes with the retained pre-window DeepSeek report. A GLM
 failure where the pre-window DeepSeek lane passed is a rollback condition; do
 not excuse it with throughput.
 
-### 3. Restore the historical route with the CPU bridge
+### 3. Prove the restored historical route
 
-Only after the direct route is healthy, recreate the old external name from the
-reviewed bridge release. It receives no secrets, variables, SSH keys, model, or
-GPU flags:
+The bridge was created immediately after GPU replacement. Switch the operator
+environment to it and verify the exact bridge ID, release, CPU-only shape,
+secret-free manifest, and public health:
 
 ```bash
-tinfoil container create kimi-k2-6 \
-  --host "$FINITE_PRIVATE_BRIDGE_HOST" \
-  --repo finitecomputer/confidential-kimi-k2-6 \
-  --tag "$FINITE_PRIVATE_BRIDGE_TAG" \
-  --output json \
-  > "$FINITE_PRIVATE_EVIDENCE_DIR/compatibility-bridge-create.json"
-
-export FINITE_PRIVATE_BRIDGE_CONTAINER_ID='REPLACE_FROM_CREATE_JSON'
 export FINITE_PRIVATE_CONTAINER=kimi-k2-6
 export FINITE_PRIVATE_ENDPOINT='https://kimi-k2-6.finite.containers.tinfoil.dev'
 export FINITE_PRIVATE_MODEL=glm-5-3-flash
 export FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL=glm-5-3-flash
-infra/runbooks/finite-private-ops.sh wait-ready
+tinfoil container get "$FINITE_PRIVATE_BRIDGE_CONTAINER_ID" --output json \
+  > "$FINITE_PRIVATE_EVIDENCE_DIR/compatibility-bridge-ready.json"
+infra/runbooks/finite-private-ops.sh gate
 ```
 
 Through the historical route, run canonical chat/stream/Responses canaries and
@@ -365,6 +445,26 @@ both `deepseek-v4-flash-0731` and `glm-5-2` alias canaries. Require model
 identity `glm-5-3-flash`, terminal streams, accounting settlement, and the same
 invalid-key behavior. Do not begin the capacity sweep until this compatibility
 proof passes.
+
+Prove the chat through-line through the normal product, not an operator API:
+
+1. Sign in as the recorded existing internal canary, open the same dashboard
+   Room, and confirm its pre-window history and Agent identity are unchanged.
+2. Send two ordinary messages. Both must reach the existing Runtime through the
+   historical URL and historical request label, and both must receive complete
+   Hermes replies without re-enrollment, rebinding, duplicate messages, or a
+   new Room.
+3. In a separate browser session, redeem the reserved single-use Launch Code as
+   the fresh internal canary. Complete Account enrollment, Agent admission,
+   Runner launch, `/contact` identity readiness, Hosted Web Device binding, and
+   two real dashboard chat turns.
+4. Correlate both canaries with canonical `glm-5-3-flash` reserve/settle records
+   created after `$FINITE_PRIVATE_LEDGER_SINCE`. Do not inspect or rewrite their
+   durable Hermes configuration.
+
+If a normal user must use a worksheet, shell, raw JSON, or manual state repair
+to complete either chat, the canary failed. Keep the fresh canary's recovery
+state; model rollback is not purge authority.
 
 ### 4. Prove 120-user capacity on the direct route
 

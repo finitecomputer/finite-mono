@@ -22,6 +22,7 @@ finite-private-glm53-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_glm53_candidate.py'
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_capacity.py'
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_quality.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_protocol.py'
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_ops.py'
     cargo test -p finite-private-limiter --locked
 

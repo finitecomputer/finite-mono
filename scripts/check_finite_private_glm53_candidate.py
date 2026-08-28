@@ -50,6 +50,17 @@ def _require(text: str, anchors: tuple[str, ...], scope: str) -> list[str]:
     ]
 
 
+def _require_once(text: str, anchors: tuple[str, ...], scope: str) -> list[str]:
+    violations: list[str] = []
+    for anchor in anchors:
+        count = text.count(anchor)
+        if count != 1:
+            violations.append(
+                f"{scope} must contain exactly one anchor ({count} found): {anchor}"
+            )
+    return violations
+
+
 def _check_main(text: str, *, release_ready: bool) -> list[str]:
     violations = _require(
         text,
@@ -79,12 +90,53 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
             ),
             "upstream-container: finite-private-limiter",
             "authenticated: false",
+            '- "/*"',
             "- VLLM_API_KEY",
             "- VLLM_INTERNAL_API_KEY",
             "- FINITE_USAGE_API_SERVICE_KEY",
         ),
         "GLM candidate",
     )
+    violations.extend(
+        _require_once(
+            text,
+            (
+                "cvm-version: 0.10.8",
+                "cpus: 32",
+                "memory: 524288",
+                "gpus: 8",
+                CHECKPOINT,
+                '"--served-model-name",\n        "glm-5-3-flash"',
+                '"--tp-size",\n        "8"',
+                '"--ep-size",\n        "8"',
+                '"--context-length",\n        "393216"',
+                'FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"',
+                (
+                    'FINITE_PRIVATE_MODEL_ALIASES: '
+                    '"deepseek-v4-flash-0731,glm-5-2"'
+                ),
+                '- "/*"',
+            ),
+            "GLM candidate",
+        )
+    )
+    top_level_resources = re.findall(
+        r"^(?:cvm-version|cpus|memory|gpus):.*$", text, re.MULTILINE
+    )
+    if top_level_resources != [
+        "cvm-version: 0.10.8",
+        "cpus: 32",
+        "memory: 524288",
+        "gpus: 8",
+    ]:
+        violations.append(
+            "GLM candidate has duplicate, reordered, or conflicting top-level resources"
+        )
+    image_lines = re.findall(r'^\s+image: "([^"]+)"$', text, re.MULTILINE)
+    if len(image_lines) != 2:
+        violations.append(
+            f"GLM candidate must declare exactly two container images ({len(image_lines)} found)"
+        )
 
     for forbidden in (
         'FINITE_PRIVATE_MODEL_ALIASES: "*"',
@@ -149,6 +201,7 @@ def _check_bridge(text: str) -> list[str]:
             '"--change-host-header"',
             "upstream-container: finite-private-compatibility-bridge",
             "authenticated: false",
+            '- "/*"',
         ),
         "compatibility bridge",
     )
@@ -162,6 +215,22 @@ def _check_bridge(text: str) -> list[str]:
         violations.append("compatibility bridge must not carry model weights")
     if "finite-private.finite.containers.tinfoil.dev" not in text:
         violations.append("compatibility bridge does not point at the generic route")
+    top_level_resources = re.findall(
+        r"^(?:cvm-version|cpus|memory|gpus):.*$", text, re.MULTILINE
+    )
+    if top_level_resources != [
+        "cvm-version: 0.10.8",
+        "cpus: 2",
+        "memory: 2048",
+    ]:
+        violations.append(
+            "compatibility bridge has duplicate, reordered, or conflicting resources"
+        )
+    image_lines = re.findall(r'^\s+image: "([^"]+)"$', text, re.MULTILINE)
+    if image_lines != [BRIDGE_IMAGE.removeprefix('image: "').removesuffix('"')]:
+        violations.append("compatibility bridge must declare exactly the fixed Caddy image")
+    if text.count('- "/*"') != 1:
+        violations.append("compatibility bridge must proxy the route surface exactly once")
     return violations
 
 
@@ -172,6 +241,7 @@ def _check_runbook(text: str) -> list[str]:
             "2026-08-28 03:00 America/Chicago",
             "preparation only",
             "scripts/finite-status --json",
+            "### Resume rules",
             "FINITE_PRIVATE_ROLLBACK_TAG",
             "FINITE_PRIVATE_ROLLBACK_CONTAINER_ID",
             "--replace",
@@ -182,11 +252,16 @@ def _check_runbook(text: str) -> list[str]:
             "glm-5-2",
             "120/120",
             "scripts/check_finite_private_glm53_quality.py",
+            "scripts/check_finite_private_glm53_protocol.py",
             "p50 decode",
             "p10 decode",
             "2,400 aggregate output tokens/second",
             "p95 TTFT",
             "35-minute soak",
+            "clear_thinking=true",
+            "360,000-token",
+            "Account enrollment",
+            "existing internal canary",
             "settlement-status",
             "rollback immediately",
             "Do not migrate durable Runtime configurations",

@@ -97,6 +97,23 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
         self.assertTrue(any("GPU-free" in item for item in violations), violations)
         self.assertTrue(any("generic route" in item for item in violations), violations)
 
+    def test_tinfoil_shims_proxy_the_service_owned_route_surface(self) -> None:
+        main = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8").replace(
+            '- "/*"', "- /v1/chat/completions"
+        )
+        bridge = (ROOT / BRIDGE_CANDIDATE).read_text(encoding="utf-8").replace(
+            '- "/*"', "- /v1/chat/completions"
+        )
+        with temporary_repository(
+            main_text=main, bridge_text=bridge
+        ) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertEqual(
+            sum('lacks required anchor: - "/*"' in item for item in violations),
+            2,
+            violations,
+        )
+
     def test_runbook_requires_capacity_rollback_and_mixed_version_proof(self) -> None:
         text = (ROOT / RUNBOOK).read_text(encoding="utf-8")
         for anchor in (

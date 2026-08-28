@@ -101,10 +101,7 @@ shim:
   upstream-container: finite-private-limiter
   upstream-port: 8002
   authenticated: false
+  # Tinfoil requires a path declaration. Proxy every path so the limiter's
+  # Axum router remains the only public route authority.
   paths:
-    - /v1/chat/completions
-    - /v1/responses
-    - /metrics
-    - /live
-    - /health
-    - /ready
+    - "/*"
