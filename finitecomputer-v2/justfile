@@ -15,3 +15,18 @@ finite-private-deepseek-contract:
 # Promotion-time form: the model image and MPK must already be immutable.
 finite-private-deepseek-release-contract:
     cd .. && python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
+
+# GLM-5.3-Flash serving, mixed-version routing, and 120-user gate contracts.
+finite-private-glm53-contract:
+    cd .. && python3 scripts/check_finite_private_glm53_candidate.py
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_glm53_candidate.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_capacity.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_quality.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_check_finite_private_glm53_protocol.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_prepare_glm53_blind_comparison.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_ops.py'
+    cargo test -p finite-private-limiter --locked
+
+# Promotion-time form: all three GLM image/MPK stop markers must be replaced.
+finite-private-glm53-release-contract:
+    cd .. && python3 scripts/check_finite_private_glm53_candidate.py --release-ready

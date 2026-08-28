@@ -70,6 +70,12 @@ finite-private-deepseek-contract:
 finite-private-deepseek-release-contract:
     just computer finite-private-deepseek-release-contract
 
+finite-private-glm53-contract:
+    just computer finite-private-glm53-contract
+
+finite-private-glm53-release-contract:
+    just computer finite-private-glm53-release-contract
+
 finite-status-contract:
     just infra finite-status-contract
 

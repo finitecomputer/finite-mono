@@ -3,6 +3,15 @@
 Status: design and preparation only. No DNS, custom-domain, container, or
 production state mutation is authorized by this file.
 
+The GLM-5.3-Flash cutover additionally prepares a temporary CPU-only bridge at
+the historical generated name. That bridge permits the GPU container to adopt
+`finite-private` in one maintenance window without rewriting issued Runtime
+readers. It does not replace the preferred custom-domain migration below: the
+bridge remains until reader inventory has converged on the stable route and an
+observation window records no historical-route reads. See
+`finite-private-glm-5.3-flash-production-cutover.md` for its bounded deployment
+and rollback contract.
+
 ## Decision
 
 The stable service identity is **Finite Private**, not a model name. Use:
@@ -57,7 +66,7 @@ enablement and the allowed suffix remain explicit prerequisites.
 All three phases below are TODO because no custom domain was registered as of
 the last read-only inventory and this migration has not been exercised.
 
-### TODO: Phase 1 — introduce the stable route
+### TODO: Phase 1, introduce the stable route
 
 1. TODO: Register and verify `inference.finite.computer` using the exact TXT and
    CNAME values returned by Tinfoil. Keep Cloudflare proxying disabled for the
@@ -67,7 +76,7 @@ the last read-only inventory and this migration has not been exercised.
 3. TODO: Prove attestation, health, authentication, inference, accounting, and the
    old generated route. Both routes must work before changing any reader.
 
-### TODO: Phase 2 — migrate readers
+### TODO: Phase 2, migrate readers
 
 1. TODO: Change the repository base-URL constant to the stable custom route and
    publish one canonical Runtime image.
@@ -79,7 +88,7 @@ the last read-only inventory and this migration has not been exercised.
 5. TODO: Hold at least one normal observation window with zero reads of the old
    generated hostname.
 
-### TODO: Phase 3 — replace the container identity
+### TODO: Phase 3, replace the container identity
 
 TODO: Only after phase 2 is complete, create `finite-private` with `--replace` using
 the exact approved release, host, custom domain, variable set, and secret-name

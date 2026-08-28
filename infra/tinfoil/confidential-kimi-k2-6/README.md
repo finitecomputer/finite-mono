@@ -1,5 +1,20 @@
 # Finite Private serving candidates
 
+## Historical-route compatibility bridge
+
+`tinfoil-config.compatibility-bridge.candidate.yml` prepares a CPU-only,
+secret-free measured reverse proxy for the historical generated hostname. It
+exists so the GPU inference container can adopt the generic `finite-private`
+identity without breaking issued Runtime configurations that still read
+`kimi-k2-6.finite.containers.tinfoil.dev`.
+
+The bridge is not an inference candidate and must never be deployed while the
+current eight-H200 `kimi-k2-6` container still owns the name. During the model
+cutover, first replace the GPU workload with the reviewed `finite-private`
+release, prove its new route, and only then recreate `kimi-k2-6` from the bridge
+release. Retire the bridge only after the stable custom-domain migration has
+converged every reader.
+
 ## DeepSeek V4 Flash 0731 production candidate
 
 `tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml` preserves the

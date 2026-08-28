@@ -1,0 +1,107 @@
+# Preparation-only source for the model-independent `finite-private` Tinfoil
+# container. The checkpoint and upstream SGLang amd64 manifest are pinned, but
+# the generated modelwrap MPK and both Finite image digests remain explicit
+# stop markers. Publishing or deploying this file requires separate approval.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "glm-5-3-flash"
+    repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"
+    mpk: "REPLACE_WITH_TINFOIL_MODELWRAP_MPK"
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "glm-5-3-flash"
+    image: "REPLACE_WITH_VERIFIED_GL53_SGLANG_IMAGE"
+    runtime: nvidia
+    gpus: all
+    ipc: host
+    restart: always
+    command:
+      [
+        "--model-path",
+        "/tinfoil/mpk/mpk-REPLACE_WITH_TINFOIL_ROOT_HASH",
+        "--served-model-name",
+        "glm-5-3-flash",
+        "--tp-size",
+        "8",
+        "--ep-size",
+        "8",
+        "--context-length",
+        "393216",
+        "--dsa-prefill-backend",
+        "tilelang",
+        "--dsa-decode-backend",
+        "tilelang",
+        "--kv-cache-dtype",
+        "bfloat16",
+        "--moe-runner-backend",
+        "deep_gemm",
+        "--reasoning-parser",
+        "glm45",
+        "--tool-call-parser",
+        "glm47",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+      ]
+    tmpfs:
+      /tmp: size=512m,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    networks: [model-net]
+    secrets:
+      # Historical secret name retained so the replacement can reuse the
+      # current sealed value. The wrapper passes it to SGLang's --api-key.
+      - VLLM_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+  - name: "finite-private-limiter"
+    image: "REPLACE_WITH_VERIFIED_GL53_LIMITER_IMAGE"
+    restart: always
+    env:
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
+      - FINITE_PRIVATE_MODEL: "glm-5-3-flash"
+      - FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"
+      # Existing issued Runtimes may send either historical label. The limiter
+      # canonicalizes only these names; any other model fails before reserve.
+      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "600"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  # Tinfoil requires a path declaration. Proxy every path so the limiter's
+  # Axum router remains the only public route authority.
+  paths:
+    - "/*"
