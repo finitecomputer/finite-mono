@@ -708,14 +708,19 @@ fn welcome_allowlist_store_supports_list_and_remove() {
     // No policy row: the configured probe is empty and the effective policy
     // stays the legacy allow-all.
     assert_eq!(
-        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
         None
     );
     assert_eq!(
         alice_store.welcome_admission_policy(&owner).unwrap(),
         WelcomeAdmissionPolicy::AllowAll
     );
-    assert_eq!(alice_store.welcome_allowed_senders(&owner).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        Vec::<String>::new()
+    );
 
     alice_store
         .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
@@ -724,7 +729,9 @@ fn welcome_allowlist_store_supports_list_and_remove() {
         .add_welcome_allowed_senders(&owner, [charlie_account.clone(), bob_account.clone()])
         .unwrap();
     assert_eq!(
-        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
         Some(WelcomeAdmissionPolicy::Allowlist)
     );
     // Sorted for a stable mirror rendering.
@@ -753,7 +760,11 @@ fn welcome_allowlist_store_supports_list_and_remove() {
             .welcome_sender_allowed(&owner, &charlie_account)
             .unwrap()
     );
-    assert!(!alice_store.welcome_sender_allowed(&owner, &bob_account).unwrap());
+    assert!(
+        !alice_store
+            .welcome_sender_allowed(&owner, &bob_account)
+            .unwrap()
+    );
 
     // An explicit allow-all row is distinguishable from an absent row, so
     // boot seeding never overwrites a deliberate operator choice.
@@ -761,7 +772,9 @@ fn welcome_allowlist_store_supports_list_and_remove() {
         .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::AllowAll)
         .unwrap();
     assert_eq!(
-        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
         Some(WelcomeAdmissionPolicy::AllowAll)
     );
 }

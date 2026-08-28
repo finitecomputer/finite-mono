@@ -5775,10 +5775,7 @@ mod tests {
             store.welcome_allowed_senders(&owner_ref).unwrap(),
             vec![owner.clone()]
         );
-        assert_eq!(
-            read_allowed_users_mirror(&home),
-            Some(format!("{owner}\n"))
-        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
     }
 
     #[test]
@@ -5959,10 +5956,7 @@ mod tests {
             store.welcome_allowed_senders(&owner_ref).unwrap(),
             vec![owner.clone()]
         );
-        assert_eq!(
-            read_allowed_users_mirror(&home),
-            Some(format!("{owner}\n"))
-        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
     }
 
     #[test]

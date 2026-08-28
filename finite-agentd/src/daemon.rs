@@ -1447,8 +1447,16 @@ mod tests {
         config.sidecar_welcome_allowlist = None;
         config.sidecar_admission_default = None;
         let spec = sidecar_spec(&config);
-        assert!(!spec.environment.contains_key("FINITECHAT_WELCOME_ALLOWLIST"));
-        assert!(!spec.environment.contains_key("FINITECHAT_ADMISSION_DEFAULT"));
+        assert!(
+            !spec
+                .environment
+                .contains_key("FINITECHAT_WELCOME_ALLOWLIST")
+        );
+        assert!(
+            !spec
+                .environment
+                .contains_key("FINITECHAT_ADMISSION_DEFAULT")
+        );
     }
 
     #[test]
