@@ -181,7 +181,9 @@ class DeliveryTests(unittest.TestCase):
             ],
         }
         retried = {**original, "build_run": "github-run-retry"}
-        original_bytes = (json.dumps(original, indent=2, sort_keys=True) + "\n").encode()
+        original_bytes = (
+            json.dumps(original, indent=2, sort_keys=True) + "\n"
+        ).encode()
 
         self.assertEqual(
             delivery.canonical_release_metadata(original_bytes, retried),
@@ -199,10 +201,12 @@ class DeliveryTests(unittest.TestCase):
             "assets": [],
         }
         changed = {**original, "source_sha": "b" * 40}
-        original_bytes = (json.dumps(original, indent=2, sort_keys=True) + "\n").encode()
+        original_bytes = (
+            json.dumps(original, indent=2, sort_keys=True) + "\n"
+        ).encode()
 
         with self.assertRaisesRegex(delivery.DeliveryError, "different facts"):
-                delivery.canonical_release_metadata(original_bytes, changed)
+            delivery.canonical_release_metadata(original_bytes, changed)
 
     def test_alias_promotion_reuses_verified_versioned_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -240,7 +244,9 @@ class DeliveryTests(unittest.TestCase):
                     "_release_assets",
                     return_value={path.name for path in source.iterdir()},
                 ),
-                mock.patch.object(delivery, "_download_release_assets", side_effect=download),
+                mock.patch.object(
+                    delivery, "_download_release_assets", side_effect=download
+                ),
                 mock.patch.object(
                     delivery,
                     "_ensure_metadata_commit",

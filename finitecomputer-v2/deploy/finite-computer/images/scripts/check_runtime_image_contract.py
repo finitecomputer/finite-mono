@@ -118,7 +118,8 @@ def is_test_or_prose(path: Path) -> bool:
         or "/test/" in f"/{lowered}"
         or "/fixtures/" in f"/{lowered}"
         or lowered.startswith("scripts/tests/")
-        or lowered == "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+        or lowered
+        == "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
     )
 
 

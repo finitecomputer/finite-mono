@@ -67,9 +67,7 @@ def make_payload(args: argparse.Namespace, index: int, run_tag: str) -> dict:
         "stream_options": {"include_usage": True},
     }
     if args.thinking != "default":
-        payload["chat_template_kwargs"] = {
-            "enable_thinking": args.thinking == "on"
-        }
+        payload["chat_template_kwargs"] = {"enable_thinking": args.thinking == "on"}
     if args.reasoning_effort:
         payload["reasoning_effort"] = args.reasoning_effort
     return payload
@@ -138,9 +136,7 @@ async def run(args: argparse.Namespace, concurrency: int) -> dict:
         started = time.perf_counter()
         results = await asyncio.gather(
             *(
-                request_once(
-                    session, args, index, f"{args.tag}-c{concurrency}"
-                )
+                request_once(session, args, index, f"{args.tag}-c{concurrency}")
                 for index in range(concurrency)
             )
         )

@@ -33,7 +33,9 @@ def contract_entry(**overrides: object) -> dict[str, object]:
 
 
 class NixosSecretsContractTest(unittest.TestCase):
-    def run_checker(self, contract: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    def run_checker(
+        self, contract: dict[str, object]
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "contract.json"
             path.write_text(json.dumps(contract), encoding="utf-8")

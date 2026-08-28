@@ -169,9 +169,7 @@ def _score(case: QualityCase, response: dict[str, Any]) -> tuple[bool, str, int]
         if not isinstance(tool_calls, list) or not tool_calls:
             return False, "missing tool call", len(reasoning)
         function = (
-            tool_calls[0].get("function")
-            if isinstance(tool_calls[0], dict)
-            else None
+            tool_calls[0].get("function") if isinstance(tool_calls[0], dict) else None
         )
         if not isinstance(function, dict) or function.get("name") != case.expected_tool:
             return False, f"expected tool {case.expected_tool}", len(reasoning)
@@ -184,8 +182,7 @@ def _score(case: QualityCase, response: dict[str, Any]) -> tuple[bool, str, int]
             return False, "tool arguments were invalid JSON", len(reasoning)
         if not isinstance(decoded_arguments, dict) or (
             str(decoded_arguments.get("city", "")).lower() != "austin"
-            or str(decoded_arguments.get("state", "")).lower()
-            not in {"texas", "tx"}
+            or str(decoded_arguments.get("state", "")).lower() not in {"texas", "tx"}
         ):
             return False, "tool arguments did not select Austin, Texas", len(reasoning)
         return True, "tool call matched", len(reasoning)
@@ -235,9 +232,7 @@ def run(
     return results
 
 
-def _identity_violations(
-    *, model: str, results: list[dict[str, Any]]
-) -> list[str]:
+def _identity_violations(*, model: str, results: list[dict[str, Any]]) -> list[str]:
     violations: list[str] = []
     if model != MODEL:
         violations.append(f"requested model must be {MODEL}")
@@ -281,9 +276,7 @@ def main() -> int:
         efforts=efforts,
         timeout_seconds=arguments.timeout_seconds,
     )
-    identity_violations = _identity_violations(
-        model=arguments.model, results=results
-    )
+    identity_violations = _identity_violations(model=arguments.model, results=results)
     report = {
         "schema": "finite-private-glm53-quality-v1",
         "endpoint_host": urllib.parse.urlsplit(arguments.endpoint).hostname,

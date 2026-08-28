@@ -20,9 +20,7 @@ class Glm53QualityTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "max")
         self.assertEqual(payload["temperature"], 1.0)
         self.assertEqual(payload["top_p"], 0.95)
-        self.assertEqual(
-            payload["chat_template_kwargs"], {"enable_thinking": True}
-        )
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": True})
 
     def test_exact_answer_requires_separate_parsed_reasoning(self) -> None:
         response = {
@@ -69,9 +67,9 @@ class Glm53QualityTests(unittest.TestCase):
         }
         passed, _, _ = _score(case, response)
         self.assertTrue(passed)
-        response["choices"][0]["message"]["tool_calls"][0]["function"][
-            "arguments"
-        ] = "not json"
+        response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = (
+            "not json"
+        )
         passed, detail, _ = _score(case, response)
         self.assertFalse(passed)
         self.assertIn("JSON", detail)

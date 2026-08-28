@@ -39,8 +39,12 @@ ROOT = Path(__file__).resolve().parents[1]
 IGNORED_DIRS = {".git", "target", "node_modules", "finite-mono-worktrees"}
 SOURCE_SUFFIXES = {".rs", ".sql"}
 
-CORE_MIGRATIONS = ROOT / "finitecomputer-v2" / "crates" / "finite-saas-core" / "migrations"
-BRAIN_SCHEMA = ROOT / "finite-brain" / "crates" / "finite-brain-store" / "src" / "schema.rs"
+CORE_MIGRATIONS = (
+    ROOT / "finitecomputer-v2" / "crates" / "finite-saas-core" / "migrations"
+)
+BRAIN_SCHEMA = (
+    ROOT / "finite-brain" / "crates" / "finite-brain-store" / "src" / "schema.rs"
+)
 
 # Units break-glass.md references deliberately that belonged to the pre-NixOS
 # hosts; they are not defined anywhere in this repo.
@@ -91,7 +95,9 @@ def source_files() -> list[Path]:
 
 def known_tables() -> set[str]:
     tables = set()
-    create = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_]\w*)", re.IGNORECASE)
+    create = re.compile(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_]\w*)", re.IGNORECASE
+    )
     rename = re.compile(r"\bRENAME\s+TO\s+([a-zA-Z_]\w*)", re.IGNORECASE)
     for path in source_files():
         text = path.read_text(encoding="utf-8")
@@ -133,7 +139,10 @@ def check_tables() -> list[str]:
 
 def migration_ceilings() -> tuple[int, int]:
     core = max(int(p.name[:4]) for p in CORE_MIGRATIONS.glob("????_*.sql"))
-    brain = max(int(v) for v in BRAIN_SCHEMA_REF.findall(BRAIN_SCHEMA.read_text(encoding="utf-8")))
+    brain = max(
+        int(v)
+        for v in BRAIN_SCHEMA_REF.findall(BRAIN_SCHEMA.read_text(encoding="utf-8"))
+    )
     return core, brain
 
 
@@ -156,7 +165,9 @@ def check_migrations() -> list[str]:
                     f" finite-brain schema ceiling V{brain_ceiling}"
                 )
         for match in CEILING_CLAIM.finditer(text):
-            actual = core_ceiling if match.group(1).lower() == "migration" else brain_ceiling
+            actual = (
+                core_ceiling if match.group(1).lower() == "migration" else brain_ceiling
+            )
             if int(match.group(2)) != actual:
                 failures.append(
                     f"{relative}: stated {match.group(1).lower()} ceiling {match.group(2)}"
@@ -187,7 +198,8 @@ def authority_units() -> set[str]:
         text = path.read_text(encoding="utf-8")
         strings = dict(re.findall(r"^ *(\w+) = \"([^\"]+)\";", text, re.MULTILINE))
         services = re.finditer(
-            r"systemd\.(?:services|timers)\.(?:\"([^\"]+)\"|([a-zA-Z0-9@_-]+)|\$\{(\w+)\}) =", text
+            r"systemd\.(?:services|timers)\.(?:\"([^\"]+)\"|([a-zA-Z0-9@_-]+)|\$\{(\w+)\}) =",
+            text,
         )
         for match in services:
             quoted, bare, variable = match.groups()
@@ -204,7 +216,9 @@ def authority_units() -> set[str]:
         units.update("podman-" + (m.group(1) or m.group(2)) for m in containers)
         units.update(
             "podman-" + key
-            for key in first_level_keys(text, "virtualisation.oci-containers.containers")
+            for key in first_level_keys(
+                text, "virtualisation.oci-containers.containers"
+            )
         )
         for service in NIXOS_SERVICE_UNITS:
             if re.search(rf"services\.{service}(\.enable = true| = \{{)", text):
@@ -217,9 +231,9 @@ def authority_units() -> set[str]:
                     "finite-litestream-" + name
                     for name in re.findall(r"\bname = \"([^\"]+)\";", block.group(1))
                 )
-    for unit_file in list((ROOT / "infra" / "hosts").glob("*/systemd/*.service")) + list(
-        (ROOT / "infra" / "hosts").glob("*/systemd/*.timer")
-    ):
+    for unit_file in list(
+        (ROOT / "infra" / "hosts").glob("*/systemd/*.service")
+    ) + list((ROOT / "infra" / "hosts").glob("*/systemd/*.timer")):
         units.add(unit_file.name.rsplit(".", 1)[0])
     return units
 
@@ -232,7 +246,11 @@ def systemctl_units(line: str) -> list[str]:
         rest = match.group(3).split("`", 1)[0]
         for token in rest.split():
             token = token.strip("'\"`")
-            if not UNIT_TOKEN.match(token) or token in ("systemctl", "journalctl", "sudo"):
+            if not UNIT_TOKEN.match(token) or token in (
+                "systemctl",
+                "journalctl",
+                "sudo",
+            ):
                 break
             if "*" not in token:
                 names.append(token)
@@ -244,7 +262,9 @@ def journalctl_units(line: str) -> list[str]:
     names = []
     for match in re.finditer(r"\bjournalctl\b", line):
         command = re.split(r"[`;]", line[match.start() :])[0]
-        names.extend(m.group(1) for m in JOURNAL_UNIT.finditer(command) if "*" not in m.group(1))
+        names.extend(
+            m.group(1) for m in JOURNAL_UNIT.finditer(command) if "*" not in m.group(1)
+        )
     return names
 
 
@@ -259,7 +279,9 @@ def check_units() -> list[str]:
             line = lines[lineno - 1]
             # A systemctl command inside an unbalanced quote continues on the
             # next line (e.g. a multi-line `ssh host 'systemctl ...'`).
-            while "systemctl" in line and line.count("'") % 2 == 1 and lineno < len(lines):
+            while (
+                "systemctl" in line and line.count("'") % 2 == 1 and lineno < len(lines)
+            ):
                 line += " " + lines[lineno]
                 lineno += 1
             referenced = journalctl_units(line) + systemctl_units(line)
@@ -287,9 +309,13 @@ def check_retired_ledgers() -> list[str]:
 
 
 def main() -> None:
-    failures = check_tables() + check_migrations() + check_units() + check_retired_ledgers()
+    failures = (
+        check_tables() + check_migrations() + check_units() + check_retired_ledgers()
+    )
     if failures:
-        raise SystemExit("runbook facts drifted from repo authorities:\n" + "\n".join(failures))
+        raise SystemExit(
+            "runbook facts drifted from repo authorities:\n" + "\n".join(failures)
+        )
     print("runbook facts contract: ok")
 
 

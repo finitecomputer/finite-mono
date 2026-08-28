@@ -28,9 +28,7 @@ def upgrade_rows(ids: list[str]) -> list[list[str]]:
 def running_rows(
     entries: list[tuple[str, str, str, str, datetime]],
 ) -> list[list[str]]:
-    return [
-        ["id", "kind", "agent_runtime_id", "source_host_id", "updated_at"]
-    ] + [
+    return [["id", "kind", "agent_runtime_id", "source_host_id", "updated_at"]] + [
         [
             request_id,
             kind,
@@ -148,9 +146,7 @@ class RolloutPreflightTests(unittest.TestCase):
         exit_code, out, err = self.run_preflight(
             distribution=census_rows(LEGACY_CLEAN_DISTRIBUTION),
             upgrades=upgrade_rows(["req-aaa"]),
-            running=running_rows(
-                [("rt-1", "restart", "runtime-9", "host-a", old)]
-            ),
+            running=running_rows([("rt-1", "restart", "runtime-9", "host-a", old)]),
             argv=("--json",),
         )
         payload = json.loads(out)

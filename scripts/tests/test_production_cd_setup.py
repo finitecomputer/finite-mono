@@ -71,11 +71,11 @@ class ProductionCdSetupTests(unittest.TestCase):
             ruleset, "required_status_checks"
         )
         assert status_rule is not None
-        status_rule["parameters"]["required_status_checks"] = [
-            {"context": "CI gate"}
-        ]
+        status_rule["parameters"]["required_status_checks"] = [{"context": "CI gate"}]
         checks = production_cd_setup.evaluate_ruleset(ruleset)
-        failing = [check for check in checks if check.name == "production required checks"]
+        failing = [
+            check for check in checks if check.name == "production required checks"
+        ]
         self.assertEqual(len(failing), 1)
         self.assertFalse(failing[0].ok)
         self.assertIn("Plan production deploy", failing[0].detail)

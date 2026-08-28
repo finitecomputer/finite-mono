@@ -41,9 +41,7 @@ PER_HOST_KEYS = {
 # The shared default whose hand-set drift halted a rollout; pinned by the
 # shared module and asserted here.
 SHARED_STOP_TIMEOUT = "180"
-CANONICAL_FINITE_PRIVATE_BASE_URL = (
-    "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
-)
+CANONICAL_FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
 CANONICAL_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731"
 
 # The promoted Runtime artifact is an operator-managed pin in runner.env
@@ -57,7 +55,9 @@ OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
 PER_HOST_UNIT_ENV_KEYS = {"FINITE_IDENTITY_AUTHORITY"}
 
 
-def nix_eval(host: str, attribute: str, *, raw: bool = False, stringify: bool = False) -> str:
+def nix_eval(
+    host: str, attribute: str, *, raw: bool = False, stringify: bool = False
+) -> str:
     config = f".#nixosConfigurations.{host}.config"
     command = ["nix", "eval", "--raw" if raw else "--json"]
     if stringify:
@@ -119,9 +119,7 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             envs[host].get("FC_RUNNER_FINITE_PRIVATE_MODEL")
             != CANONICAL_FINITE_PRIVATE_MODEL
         ):
-            raise SystemExit(
-                f"{host}: Finite Private model is not canonical DeepSeek"
-            )
+            raise SystemExit(f"{host}: Finite Private model is not canonical DeepSeek")
 
     for host in others:
         keys_a, keys_b = set(envs[reference]), set(envs[host])
@@ -144,7 +142,9 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
 
         per_host_present = (keys_a | keys_b) & PER_HOST_KEYS
         identical = sorted(
-            key for key in per_host_present if envs[reference].get(key) == envs[host].get(key)
+            key
+            for key in per_host_present
+            if envs[reference].get(key) == envs[host].get(key)
         )
         if identical:
             raise SystemExit(
@@ -160,7 +160,9 @@ def check_unit_fragments() -> None:
     # finite-saas-core.service, and lat3 gates creation on the operator file.
     # The module-owned ordering entries are asserted separately below.
     comparable_attributes = {
-        "description": lambda host: nix_eval(host, "systemd.services.finite-saas-runner.description", raw=True),
+        "description": lambda host: nix_eval(
+            host, "systemd.services.finite-saas-runner.description", raw=True
+        ),
         "path": lambda host: json.loads(
             nix_eval(host, "systemd.services.finite-saas-runner.path", stringify=True)
         ),

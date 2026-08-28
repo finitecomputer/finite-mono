@@ -169,9 +169,7 @@ def is_sops_json_file(path: Path) -> bool:
 
 
 def discover_sops_files(secrets_root: Path) -> list[Path]:
-    return sorted(
-        path for path in secrets_root.rglob("*") if is_sops_json_file(path)
-    )
+    return sorted(path for path in secrets_root.rglob("*") if is_sops_json_file(path))
 
 
 def can_decrypt_file(sops_bin: str, secrets_root: Path, path: Path) -> bool:

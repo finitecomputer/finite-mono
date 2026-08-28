@@ -57,9 +57,13 @@ def main() -> None:
         [
             recovery["snapshot_root"],
             recovery["manifest_name"],
-            recovery["borg_job_unit"].removeprefix("borgbackup-job-").removesuffix(".service"),
+            recovery["borg_job_unit"]
+            .removeprefix("borgbackup-job-")
+            .removesuffix(".service"),
             recovery["borg_health_unit"].removesuffix(".service"),
-            recovery["borg_success_stamp"].removeprefix("/var/lib/finitecomputer/backups/"),
+            recovery["borg_success_stamp"].removeprefix(
+                "/var/lib/finitecomputer/backups/"
+            ),
             str(recovery["snapshot_maximum_age_seconds"]),
             str(recovery["borg_maximum_age_seconds"]),
         ],
@@ -69,7 +73,9 @@ def main() -> None:
         [
             "finite-litestream-",
             recovery["litestream_health_unit"].removesuffix(".service"),
-            recovery["litestream_success_stamp"].removeprefix("/var/lib/finite-litestream/"),
+            recovery["litestream_success_stamp"].removeprefix(
+                "/var/lib/finite-litestream/"
+            ),
         ],
     )
     # Per-db replicator unit names are finite-litestream-<db.name>; the db
@@ -87,7 +93,9 @@ def main() -> None:
   join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
   group by 1,2 order by 1,2;"""
     if finite_status.DISTRIBUTION_QUERY != expected_distribution:
-        raise SystemExit("finite-status drifted from the verified fleet distribution query")
+        raise SystemExit(
+            "finite-status drifted from the verified fleet distribution query"
+        )
     for query in (
         finite_status.ARTIFACTS_QUERY,
         finite_status.DISTRIBUTION_QUERY,

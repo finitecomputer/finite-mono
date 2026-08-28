@@ -80,9 +80,7 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
             body = json.dumps(
                 {
                     "model": self.response_model or payload.get("model"),
-                    "choices": [
-                        {"message": {"content": "finite private ok"}}
-                    ],
+                    "choices": [{"message": {"content": "finite private ok"}}],
                 }
             ).encode()
             self.send_response(200)
@@ -219,7 +217,9 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         MockFinitePrivateHandler.required_model = "glm-5-2"
         result = self.run_ops("mixed-version-canary")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Mixed-version Finite Private compatibility passed", result.stdout)
+        self.assertIn(
+            "Mixed-version Finite Private compatibility passed", result.stdout
+        )
 
     def test_canaries_can_require_a_canonical_response_model(self) -> None:
         self.environment["FINITE_PRIVATE_MODEL"] = "deepseek-v4-flash-0731"
@@ -252,9 +252,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
             self.environment["PATH"] = (
                 temporary_directory + os.pathsep + self.environment["PATH"]
             )
-            result = self.run_ops(
-                "settlement-status", "2026-08-14T04:00:00Z"
-            )
+            result = self.run_ops("settlement-status", "2026-08-14T04:00:00Z")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("preexisting_reserved|50|rollout_reserved|0", result.stdout)
         self.assertIn("rollout-era canary settlements passed", result.stdout)
@@ -271,9 +269,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
             self.environment["PATH"] = (
                 temporary_directory + os.pathsep + self.environment["PATH"]
             )
-            result = self.run_ops(
-                "settlement-status", "2026-08-14T04:00:00Z"
-            )
+            result = self.run_ops("settlement-status", "2026-08-14T04:00:00Z")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("created during this rollout remain reserved", result.stderr)
 

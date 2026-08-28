@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -97,7 +96,7 @@ def rule_by_type(ruleset: dict[str, Any], rule_type: str) -> dict[str, Any] | No
 
 
 def ruleset_targets_production(ruleset: dict[str, Any]) -> bool:
-    ref_names = ((ruleset.get("conditions") or {}).get("ref_name") or {})
+    ref_names = (ruleset.get("conditions") or {}).get("ref_name") or {}
     return "refs/heads/production" in (ref_names.get("include") or [])
 
 
@@ -155,7 +154,9 @@ def evaluate_ruleset(ruleset: dict[str, Any]) -> list[Check]:
         Check(
             "production required checks",
             not missing_contexts,
-            "missing: " + ", ".join(missing_contexts) if missing_contexts else "all present",
+            "missing: " + ", ".join(missing_contexts)
+            if missing_contexts
+            else "all present",
         ),
     ]
 

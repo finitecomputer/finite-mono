@@ -13,9 +13,7 @@ class Glm53BlindComparisonTests(unittest.TestCase):
                 "results": [
                     {
                         "case": case["id"],
-                        "message": {
-                            "content": f"answer-{index}-{lane == 'glm53'}"
-                        },
+                        "message": {"content": f"answer-{index}-{lane == 'glm53'}"},
                     }
                     for index, case in enumerate(CASES)
                 ],

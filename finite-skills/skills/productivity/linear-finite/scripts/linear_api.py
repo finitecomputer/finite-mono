@@ -40,7 +40,9 @@ def env_key(name: str) -> str:
     return value
 
 
-def post_graphql(query: str, *, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+def post_graphql(
+    query: str, *, variables: dict[str, Any] | None = None
+) -> dict[str, Any]:
     body: dict[str, Any] = {"query": query}
     if variables:
         body["variables"] = variables
@@ -90,7 +92,9 @@ def print_json(value: Any) -> int:
     return 0
 
 
-def filter_clause(*, team_key: str | None, assignee_email: str | None, state_type: str | None) -> str:
+def filter_clause(
+    *, team_key: str | None, assignee_email: str | None, state_type: str | None
+) -> str:
     fields: list[str] = []
     if team_key:
         fields.append(f"team: {{ key: {{ eq: {json.dumps(team_key)} }} }}")
@@ -119,7 +123,9 @@ def cmd_teams(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(teams)
     for team in teams:
-        print(f"{team.get('key', '?'):>8}  {team.get('name', '?')}  ({team.get('id', '?')})")
+        print(
+            f"{team.get('key', '?'):>8}  {team.get('name', '?')}  ({team.get('id', '?')})"
+        )
     return 0
 
 
@@ -138,7 +144,9 @@ def cmd_workflow_states(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(states)
     for state in states:
-        print(f"{state.get('type', '?'):>10}  {state.get('name', '?')}  ({state.get('id', '?')})")
+        print(
+            f"{state.get('type', '?'):>10}  {state.get('name', '?')}  ({state.get('id', '?')})"
+        )
     return 0
 
 
@@ -169,7 +177,9 @@ def cmd_issues(args: argparse.Namespace) -> int:
     for issue in issues:
         assignee = (issue.get("assignee") or {}).get("name") or "unassigned"
         state = issue.get("state") or {}
-        print(f"{issue.get('identifier', '?'):>10}  [{state.get('name', '?')}]  {issue.get('title', '?')}")
+        print(
+            f"{issue.get('identifier', '?'):>10}  [{state.get('name', '?')}]  {issue.get('title', '?')}"
+        )
         print(
             f"            team={((issue.get('team') or {}).get('key') or '?')} "
             f"assignee={assignee} priority={priority_label(issue.get('priority'))}"
@@ -200,8 +210,12 @@ def cmd_issue(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(issue)
     print(f"{issue.get('identifier', '?')}  {issue.get('title', '?')}")
-    print(f"state: {(issue.get('state') or {}).get('name', '?')} | priority: {priority_label(issue.get('priority'))}")
-    print(f"team: {(issue.get('team') or {}).get('key', '?')} | assignee: {((issue.get('assignee') or {}).get('name') or 'unassigned')}")
+    print(
+        f"state: {(issue.get('state') or {}).get('name', '?')} | priority: {priority_label(issue.get('priority'))}"
+    )
+    print(
+        f"team: {(issue.get('team') or {}).get('key', '?')} | assignee: {((issue.get('assignee') or {}).get('name') or 'unassigned')}"
+    )
     if issue.get("project"):
         print(f"project: {(issue['project'] or {}).get('name', '?')}")
     if issue.get("dueDate"):
@@ -241,8 +255,12 @@ def cmd_issue_search(args: argparse.Namespace) -> int:
         return print_json(issues)
     for issue in issues:
         assignee = (issue.get("assignee") or {}).get("name") or "unassigned"
-        print(f"{issue.get('identifier', '?'):>10}  [{(issue.get('state') or {}).get('name', '?')}]  {issue.get('title', '?')}")
-        print(f"            assignee={assignee} priority={priority_label(issue.get('priority'))}")
+        print(
+            f"{issue.get('identifier', '?'):>10}  [{(issue.get('state') or {}).get('name', '?')}]  {issue.get('title', '?')}"
+        )
+        print(
+            f"            assignee={assignee} priority={priority_label(issue.get('priority'))}"
+        )
         if issue.get("url"):
             print(f"            {issue['url']}")
     return 0
@@ -263,9 +281,14 @@ def cmd_projects(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(projects)
     for project in projects:
-        teams = ", ".join(node.get("key", "?") for node in ((project.get("teams") or {}).get("nodes") or []))
+        teams = ", ".join(
+            node.get("key", "?")
+            for node in ((project.get("teams") or {}).get("nodes") or [])
+        )
         print(f"{project.get('name', '?')} ({project.get('id', '?')})")
-        print(f"  lead={((project.get('lead') or {}).get('name') or 'n/a')} progress={project.get('progress', '?')} teams={teams or 'n/a'}")
+        print(
+            f"  lead={((project.get('lead') or {}).get('name') or 'n/a')} progress={project.get('progress', '?')} teams={teams or 'n/a'}"
+        )
         if project.get("url"):
             print(f"  {project['url']}")
     return 0
@@ -277,7 +300,9 @@ def cmd_users(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(users)
     for user in users:
-        print(f"{user.get('name', '?')} <{user.get('email', '?')}> ({user.get('id', '?')}) active={user.get('active', '?')}")
+        print(
+            f"{user.get('name', '?')} <{user.get('email', '?')}> ({user.get('id', '?')}) active={user.get('active', '?')}"
+        )
     return 0
 
 
@@ -287,7 +312,9 @@ def cmd_labels(args: argparse.Namespace) -> int:
     if args.json:
         return print_json(labels)
     for label in labels:
-        print(f"{label.get('name', '?'):>20}  {label.get('color', '?')}  ({label.get('id', '?')})")
+        print(
+            f"{label.get('name', '?'):>20}  {label.get('color', '?')}  ({label.get('id', '?')})"
+        )
     return 0
 
 
@@ -321,7 +348,9 @@ def cmd_create_issue(args: argparse.Namespace) -> int:
     return 0
 
 
-def update_issue(args: argparse.Namespace, input_payload: dict[str, Any], fields: str) -> int:
+def update_issue(
+    args: argparse.Namespace, input_payload: dict[str, Any], fields: str
+) -> int:
     data = post_graphql(
         f"""
         mutation($issueId: String!, $input: IssueUpdateInput!) {{
@@ -345,7 +374,9 @@ def cmd_update_state(args: argparse.Namespace) -> int:
 
 
 def cmd_assign(args: argparse.Namespace) -> int:
-    return update_issue(args, {"assigneeId": args.assignee_id}, "assignee { id name email }")
+    return update_issue(
+        args, {"assigneeId": args.assignee_id}, "assignee { id name email }"
+    )
 
 
 def cmd_set_priority(args: argparse.Namespace) -> int:
@@ -389,7 +420,9 @@ def build_parser() -> argparse.ArgumentParser:
     teams.add_argument("--json", action="store_true")
     teams.set_defaults(func=cmd_teams)
 
-    states = subparsers.add_parser("workflow-states", help="List workflow states for a team")
+    states = subparsers.add_parser(
+        "workflow-states", help="List workflow states for a team"
+    )
     states.add_argument("--team-key", required=True)
     states.add_argument("--json", action="store_true")
     states.set_defaults(func=cmd_workflow_states)
@@ -398,7 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
     issues.add_argument("--limit", type=int, default=20)
     issues.add_argument("--team-key")
     issues.add_argument("--assignee-email")
-    issues.add_argument("--state-type", choices=["triage", "backlog", "unstarted", "started", "completed", "canceled"])
+    issues.add_argument(
+        "--state-type",
+        choices=["triage", "backlog", "unstarted", "started", "completed", "canceled"],
+    )
     issues.add_argument("--json", action="store_true")
     issues.set_defaults(func=cmd_issues)
 
@@ -430,11 +466,15 @@ def build_parser() -> argparse.ArgumentParser:
     create_issue.add_argument("--team-id", required=True)
     create_issue.add_argument("--title", required=True)
     create_issue.add_argument("--description", default="")
-    create_issue.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4], default=0)
+    create_issue.add_argument(
+        "--priority", type=int, choices=[0, 1, 2, 3, 4], default=0
+    )
     create_issue.add_argument("--json", action="store_true")
     create_issue.set_defaults(func=cmd_create_issue)
 
-    update_state = subparsers.add_parser("update-state", help="Set an issue workflow state")
+    update_state = subparsers.add_parser(
+        "update-state", help="Set an issue workflow state"
+    )
     update_state.add_argument("--issue-id", required=True)
     update_state.add_argument("--state-id", required=True)
     update_state.add_argument("--json", action="store_true")
@@ -448,7 +488,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     set_priority = subparsers.add_parser("set-priority", help="Set issue priority")
     set_priority.add_argument("--issue-id", required=True)
-    set_priority.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4], required=True)
+    set_priority.add_argument(
+        "--priority", type=int, choices=[0, 1, 2, 3, 4], required=True
+    )
     set_priority.add_argument("--json", action="store_true")
     set_priority.set_defaults(func=cmd_set_priority)
 

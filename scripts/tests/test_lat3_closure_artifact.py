@@ -75,7 +75,9 @@ class Lat3ClosureArtifactTests(unittest.TestCase):
 
     def test_build_is_exact_linux_lat3_system_only(self) -> None:
         source = BUILD.read_text(encoding="utf-8")
-        self.assertIn("nixosConfigurations.finite-lat-3.config.system.build.toplevel", source)
+        self.assertIn(
+            "nixosConfigurations.finite-lat-3.config.system.build.toplevel", source
+        )
         self.assertIn('current_system" != "x86_64-linux', source)
         self.assertNotIn("diskoScript", source)
 
@@ -88,7 +90,7 @@ class Lat3ClosureArtifactTests(unittest.TestCase):
             mutation,
         )
         self.assertIn("previous_system", source)
-        self.assertIn("switch-to-configuration\" switch", source)
+        self.assertIn('switch-to-configuration" switch', source)
         self.assertIn("rollback", source)
         self.assertIn("systemctl start finite-saas-runner.timer", source)
 
@@ -96,7 +98,7 @@ class Lat3ClosureArtifactTests(unittest.TestCase):
         source = DEPLOY.read_text(encoding="utf-8")
         success = source.index('echo "==> DEPLOYED system=')
         self.assertIn(
-            'else\n  systemctl stop finite-saas-runner.timer',
+            "else\n  systemctl stop finite-saas-runner.timer",
             source[:success],
         )
 

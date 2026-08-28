@@ -69,7 +69,9 @@ def token_from_env() -> str:
     return token.strip()
 
 
-def make_handler(upstream_url: str, token: str) -> type[http.server.BaseHTTPRequestHandler]:
+def make_handler(
+    upstream_url: str, token: str
+) -> type[http.server.BaseHTTPRequestHandler]:
     upstream = upstream_url.rstrip("/")
 
     class SearXNGTokenProxy(http.server.BaseHTTPRequestHandler):

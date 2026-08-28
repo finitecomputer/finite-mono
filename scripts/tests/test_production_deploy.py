@@ -114,9 +114,7 @@ class ProductionDeployTests(unittest.TestCase):
             resolved = production_deploy.resolve_ci_source(source, production_base)
         self.assertEqual(resolved["source_sha"], source)
         self.assertEqual(resolved["ci_source_sha"], promoted_source)
-        self.assertEqual(
-            resolved["ci_source_reason"], "production-merge-second-parent"
-        )
+        self.assertEqual(resolved["ci_source_reason"], "production-merge-second-parent")
 
     def test_ci_source_rejects_merge_commit_with_unmatched_tree(self) -> None:
         source = "a" * 40
@@ -168,7 +166,9 @@ class ProductionDeployTests(unittest.TestCase):
             root = Path(directory)
             input_path = root / "not-plan.json"
             output_path = root / "record.json"
-            input_path.write_text(json.dumps({"schema": "other"}) + "\n", encoding="utf-8")
+            input_path.write_text(
+                json.dumps({"schema": "other"}) + "\n", encoding="utf-8"
+            )
             with redirect_stderr(StringIO()):
                 exit_code = production_deploy.main(
                     [
@@ -196,9 +196,9 @@ class ProductionDeployTests(unittest.TestCase):
         )
         self.assertIn("environment: production", deploy)
         self.assertIn("if: needs.prepare.outputs.mutation_enabled == 'true'", deploy)
-        self.assertIn("ci_push_before=\"\"", deploy)
-        self.assertIn("git merge-base --is-ancestor \"$source_sha\" origin/main", deploy)
-        self.assertIn("--push-before \"$ci_push_before\"", deploy)
+        self.assertIn('ci_push_before=""', deploy)
+        self.assertIn('git merge-base --is-ancestor "$source_sha" origin/main', deploy)
+        self.assertIn('--push-before "$ci_push_before"', deploy)
         self.assertIn("CACHIX_CACHE_NAME: finite", deploy)
         self.assertGreaterEqual(deploy.count("Configure Cachix read-only cache"), 2)
         self.assertGreaterEqual(deploy.count("skipPush: true"), 2)
