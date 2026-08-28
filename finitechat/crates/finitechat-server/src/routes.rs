@@ -173,17 +173,13 @@ fn client_ip_from(peer: Option<IpAddr>, x_forwarded_for: Option<&str>) -> Option
     if !peer.is_loopback() {
         return Some(peer);
     }
-    let last_hop = x_forwarded_for
+    // No proxy attribution and the peer is the host itself: exempt rather
+    // than bucket every local caller under 127.0.0.1.
+    x_forwarded_for
         .and_then(|value| value.split(',').next_back())
         .map(str::trim)
         .filter(|hop| !hop.is_empty())
-        .and_then(|hop| hop.parse().ok());
-    match last_hop {
-        Some(hop) => Some(hop),
-        // No proxy attribution and the peer is the host itself: exempt
-        // rather than bucket every local caller under 127.0.0.1.
-        None => None,
-    }
+        .and_then(|hop| hop.parse().ok())
 }
 
 #[cfg(test)]
@@ -200,15 +196,15 @@ mod client_ip_tests {
                 Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
                 Some("198.51.100.1, 203.0.113.9"),
             ),
-            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)))
         );
     }
 
     #[test]
     fn non_loopback_peer_ignores_forwarded_header() {
         let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
-        assert_eq!(client_ip_from(Some(peer), Some("203.0.113.9")), peer);
-        assert_eq!(client_ip_from(Some(peer), None), peer);
+        assert_eq!(client_ip_from(Some(peer), Some("203.0.113.9")), Some(peer));
+        assert_eq!(client_ip_from(Some(peer), None), Some(peer));
     }
 
     #[test]
@@ -223,12 +219,11 @@ mod client_ip_tests {
             client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), None),
             None
         );
-        // An unparsable header falls back to the peer rather than a fresh
-        // bucket per garbage value — and for a loopback peer that means
-        // exemption, not a shared bucket.
+        // An unparsable header cannot attribute a client either; for a
+        // loopback peer that means exemption, not a shared bucket.
         assert_eq!(
             client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some("not-an-ip")),
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            None
         );
     }
 }
