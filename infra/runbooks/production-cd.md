@@ -125,8 +125,9 @@ The workflow records:
 - `finite-status-after`
 
 The deploy job stages the checked-out revision's `scripts/finite-status` and
-`scripts/finite_status.py` on lat1 and requires non-empty valid JSON for the
-pre/post status artifacts.
+`scripts/finite_status.py` on lat1, runs them through the mono checkout's
+pinned `nixpkgs` Python, and requires non-empty valid JSON for the pre/post
+status artifacts.
 
 ## Failure And Unblock
 
