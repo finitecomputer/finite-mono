@@ -128,7 +128,10 @@ fi
 # Realize the three install inputs from the artifact's file cache. This is
 # substitution from the CI-published cache, not a build.
 echo "==> realizing SYSTEM/DISKO/KEXEC from the artifact cache"
-nix copy --option builders '' \
+# The artifact cache is unsigned (plain `nix copy --to file://` at build
+# time); read it with the same explicit --no-check-sigs path as every
+# deploy-cache consumer.
+nix copy --no-check-sigs --option builders '' \
   --from "file://$CACHE_DIR" \
   "$SYSTEM" "$DISKO" "$KEXEC"
 for path in "$SYSTEM" "$DISKO" "$KEXEC"; do

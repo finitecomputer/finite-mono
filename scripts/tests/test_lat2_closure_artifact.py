@@ -189,7 +189,10 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
 
     def test_install_helper_realizes_from_cache_and_drives_pinned_nixos_anywhere(self) -> None:
         source = INSTALL.read_text(encoding="utf-8")
-        self.assertIn('nix copy --option builders \'\'', source)
+        # The artifact cache is unsigned; the installer must read it with
+        # the explicit --no-check-sigs path like every deploy-cache consumer.
+        self.assertIn("--no-check-sigs", source)
+        self.assertIn('nix copy --no-check-sigs --option builders \'\'', source)
         self.assertIn('--from "file://$CACHE_DIR"', source)
         self.assertIn('"$SYSTEM" "$DISKO" "$KEXEC"', source)
         self.assertIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
@@ -198,6 +201,21 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn("packages.x86_64-linux.finite-lat-2-nixos-anywhere", source)
         # Substitution from the artifact cache only: no build invocation.
         self.assertNotIn("nix build", source)
+
+    def test_steady_state_requires_core_health_before_mutation(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        mutation = source.index('echo "==> mutation boundary:')
+        gate = source.index("refusing steady-state switch")
+        # The pre-mutation gate must exist and must run before the boundary.
+        self.assertLess(gate, mutation)
+        self.assertIn('"$expect_startup" != "1"', source)
+
+    def test_app_plane_host_loads_kvm_for_the_kata_runtime(self) -> None:
+        host = (ROOT / "infra/nixos/hosts/finite-lat-2/default.nix").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('boot.kernelModules = [ "kvm-amd" ]', host)
+        self.assertIn("kvm-amd kernel module", host)  # the assertion message
 
     def test_capture_parser_peels_type_from_the_right(self) -> None:
         # lsblk MODEL fields can contain spaces (SAMSUNG MZQL21T9HCJR-00A07);

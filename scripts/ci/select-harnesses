@@ -115,6 +115,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_ci_select_harnesses.py",
     "scripts/build-lat2-nixos-closure-artifact",
     "scripts/deploy-lat2-closure-cache",
+    "scripts/install-lat2-from-artifact",
     "scripts/tests/test_check_deepseek_v4_0731_quality.py",
     "scripts/tests/test_finite_private_deepseek_candidate.py",
     "scripts/tests/test_finite_private_ops.py",

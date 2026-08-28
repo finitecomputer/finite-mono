@@ -271,15 +271,18 @@ if systemctl cat finite-saas-runner.service >/dev/null 2>&1; then
   exit 74
 fi
 
-# Product health markers: after go-live these must be active; in steady
-# state they must already be active and survive the switch.
-for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
-  if systemctl is-active --quiet "$unit"; then
-    echo "active-before $unit"
-  else
-    echo "down-before $unit"
-  fi
-done
+# Pre-mutation health gate. Steady state: the core product units must be
+# active BEFORE crossing the boundary — a steady-state deploy never runs
+# with the product down. Only --expect-startup permits down-before (the one
+# import-mode -> product startup at go-live).
+if [[ "$expect_startup" != "1" ]]; then
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" || {
+      echo "refusing steady-state switch: $unit is down before the mutation boundary" >&2
+      exit 1
+    }
+  done
+fi
 
 containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
 networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
@@ -314,7 +317,8 @@ if [[ "$expect_startup" == "1" ]]; then
     }
   done
 else
-  # Steady state: the core product units must not have been taken down.
+  # Steady state: the units the pre-mutation gate required active must
+  # still be active after the switch.
   for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
     systemctl is-active --quiet "$unit" || {
       echo "$unit was active before and is down after a steady-state switch" >&2
