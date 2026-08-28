@@ -238,7 +238,8 @@ def _check_runbook(text: str) -> list[str]:
     return _require(
         text,
         (
-            "2026-08-28 03:00 America/Chicago",
+            "2026-08-28 02:30 America/Chicago",
+            "05:30 America/Chicago",
             "preparation only",
             "scripts/finite-status --json",
             "### Resume rules",

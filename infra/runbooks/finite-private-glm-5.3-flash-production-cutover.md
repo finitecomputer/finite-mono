@@ -1,7 +1,8 @@
 # Finite Private: GLM-5.3-Flash production cutover
 
 Status: **preparation only**. The intended maintenance window begins at
-`2026-08-28 03:00 America/Chicago` (`2026-08-28 08:00 UTC`). This file and its
+`2026-08-28 02:30 America/Chicago` (`2026-08-28 07:30 UTC`) and has a hard
+`05:30 America/Chicago` (`10:30 UTC`) terminal boundary. This file and its
 draft PR do not authorize an image publication, satellite release, Tinfoil
 container create/delete/replace/relaunch, DNS change, Runtime rollout, or load
 against the serving endpoint.
@@ -54,6 +55,13 @@ live through a failed tier. Speculative EAGLE decoding, a lower static memory
 fraction, larger context, a different KV format, or different request limits
 require a separately reviewed candidate.
 
+If full qualification, including the 35-minute soak, is not complete by
+`04:45 America/Chicago`, begin rollback. The retained DeepSeek deployment took
+about 35 minutes to become ready in prior windows; the 45-minute rollback
+reserve is part of the acceptance contract, not optional test time. At 05:30
+the historical route must be healthy on either fully qualified GLM or the exact
+restored DeepSeek release.
+
 ## Stop markers and immutable inputs
 
 Do not enter the window until all values below are real immutable identities,
@@ -105,22 +113,30 @@ for both images and retain the two workflow URLs and resulting digests:
 export FINITE_MONO_SHA="$(git rev-parse origin/main)"
 export GLM_IMAGE_VERSION='2026-08-28.1'
 
+gh variable set FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED \
+  --body true \
+  --repo finitecomputer/finite-mono
+
 gh workflow run glm-5.3-flash-sglang-image.yml \
   --repo finitecomputer/finite-mono \
-  --ref "$FINITE_MONO_SHA" \
+  --ref main \
   -f version="$GLM_IMAGE_VERSION" \
   -f publish_production=true
 
 gh workflow run service-images.yml \
   --repo finitecomputer/finite-mono \
-  --ref "$FINITE_MONO_SHA" \
+  --ref main \
   -f image=private-limiter \
   -f version="$GLM_IMAGE_VERSION" \
   -f publish_production=true
 ```
 
-Require both jobs to pass. Inspect the anonymous linux/amd64 digests and OCI
-revision labels; do not copy a mutable tag without its digest.
+GitHub workflow dispatch accepts a branch or tag here, not a raw commit SHA.
+Immediately require both runs' `headSha` to equal `$FINITE_MONO_SHA`; a mismatch
+invalidates the runs. Require both jobs to pass, inspect the anonymous
+linux/amd64 digests and OCI revision labels, and delete or restore the
+`FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED` variable to its pre-window value as
+soon as both promotions finish. Do not copy a mutable tag without its digest.
 
 ### 2. Generate and bind the modelwrap artifact
 
@@ -198,7 +214,6 @@ export FINITE_PRIVATE_ROLLBACK_CONTAINER_ID='REPLACE_FROM_TINFOIL_BEFORE'
 export FINITE_PRIVATE_ROLLBACK_REPO='finitecomputer/confidential-kimi-k2-6'
 export FINITE_PRIVATE_ROLLBACK_TAG='REPLACE_FROM_TINFOIL_BEFORE'
 export FINITE_PRIVATE_ROLLBACK_HOST='REPLACE_FROM_TINFOIL_BEFORE'
-export FINITE_PRIVATE_BRIDGE_HOST='REPLACE_WITH_REVIEWED_AVAILABLE_CPU_HOST'
 ```
 
 Verify that the live record has eight H200s, debug mode is false, its repository
@@ -208,10 +223,13 @@ and tag exist, and its mounted secret names are exactly:
 - `VLLM_INTERNAL_API_KEY`; and
 - `FINITE_USAGE_API_SERVICE_KEY`.
 
-Never display secret values. Confirm all five rollback values are non-empty and
-that the rollback tag resolves to the retained deployment assets. Confirm the
-bridge host has enough CPU/memory and no GPU claim. Confirm there is still one
-active eight-H200 allocation; this plan does not assume a second lab rack.
+Never display secret values. Confirm all four rollback values are non-empty and
+that the rollback tag resolves to the retained deployment assets. Validate the
+bridge release through Tinfoil before the window and require a two-CPU,
+2,048-MiB, zero-GPU, secret-free result plus organization capacity for one
+additional instance. The bridge uses Tinfoil's shared CPU scheduling and must
+not be pinned to the dedicated H200 host. Confirm there is still one active
+eight-H200 allocation; this plan does not assume a second lab rack.
 
 Select one existing internal canary Agent with known durable chat history and
 record its non-secret Account, Project, Runtime, Agent Principal, and Room
@@ -314,7 +332,6 @@ release. It receives no secrets, variables, SSH keys, model, or GPU flags:
 export FINITE_PRIVATE_NEW_CONTAINER_ID='REPLACE_FROM_CREATE_JSON'
 
 tinfoil container create kimi-k2-6 \
-  --host "$FINITE_PRIVATE_BRIDGE_HOST" \
   --repo finitecomputer/confidential-kimi-k2-6 \
   --tag "$FINITE_PRIVATE_BRIDGE_TAG" \
   --output json \
