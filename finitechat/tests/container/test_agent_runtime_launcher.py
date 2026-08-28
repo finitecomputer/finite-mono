@@ -518,7 +518,7 @@ exec {sys.executable!s} "$@"
                 "for key in FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS"
                 " GATEWAY_ALLOW_ALL_USERS FINITECHAT_ALLOWED_USERS"
                 " FINITECHAT_WELCOME_ALLOWLIST FINITECHAT_OWNER_NPUBS; do\n"
-                "  if [[ -v $key ]]; then printf '%s=%s\\n' \"$key\" \"${!key}\""
+                '  if [[ -v $key ]]; then printf \'%s=%s\\n\' "$key" "${!key}"'
                 f" >>{env_capture}; fi\n"
                 "done\n",
                 encoding="utf-8",
@@ -526,7 +526,7 @@ exec {sys.executable!s} "$@"
             hermes.chmod(0o755)
             python = fake_bin / "python"
             python.write_text(
-                f"#!/usr/bin/env bash\nexec {sys.executable!s} \"$@\"\n",
+                f'#!/usr/bin/env bash\nexec {sys.executable!s} "$@"\n',
                 encoding="utf-8",
             )
             python.chmod(0o755)
