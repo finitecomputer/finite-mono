@@ -127,7 +127,11 @@ The workflow records:
 The deploy job stages the checked-out revision's `scripts/finite-status` and
 `scripts/finite_status.py` on lat1, runs them through the mono checkout's
 pinned `nixpkgs` Python, and requires non-empty valid JSON for the pre/post
-status artifacts.
+status artifacts. The full platform status is retained as evidence, but this
+lat1 NixOS deploy blocks only on deploy-critical status sections:
+`host_health`, `recovery_boundary`, and `rollout_state`. Agent Runtime fleet
+convergence remains visible in the artifacts, but it is not a blocker for this
+host deploy path.
 
 ## Failure And Unblock
 

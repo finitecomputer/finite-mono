@@ -236,7 +236,11 @@ jobs:
           set -e
           test -s target/production-deploy/finite-status-before.json
           python3 -m json.tool target/production-deploy/finite-status-before.json >/dev/null
-          exit "$status_rc"
+          python3 scripts/production_deploy.py status-gate \
+            --status target/production-deploy/finite-status-before.json
+          if [[ "$status_rc" != 0 ]]; then
+            echo "::notice::finite-status exited $status_rc; production deploy only blocks on deploy-critical status sections."
+          fi
       - name: Cross Mutation Boundary and deploy lat1
         run: |
           set -euo pipefail
@@ -262,7 +266,11 @@ jobs:
           set -e
           test -s target/production-deploy/finite-status-after.json
           python3 -m json.tool target/production-deploy/finite-status-after.json >/dev/null
-          exit "$status_rc"
+          python3 scripts/production_deploy.py status-gate \
+            --status target/production-deploy/finite-status-after.json
+          if [[ "$status_rc" != 0 ]]; then
+            echo "::notice::finite-status exited $status_rc; production deploy only blocks on deploy-critical status sections."
+          fi
       - name: Write deployment record
         if: always()
         run: |

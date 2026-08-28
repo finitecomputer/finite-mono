@@ -50,7 +50,10 @@ When `mutation_enabled = true`, the deploy job waits on the protected GitHub
 `production` environment, reuses the prepared closure artifact when available,
 rebuilds the same SHA only if the artifact expired, stages the checked-out
 `finite-status` collector on lat1, captures valid JSON evidence before and
-after, and then runs the existing lat1 closure deploy script.
+after, gates the lat1 host deploy on deploy-critical status sections, and then
+runs the existing lat1 closure deploy script. The deploy records whole-platform
+status, including Agent Runtime fleet convergence, but that Agent rollout
+evidence does not block this NixOS host deploy path.
 
 The initial workflows are named `Open Production Deploy PR`, `Production Deploy
 Plan`, and `Production Deploy`. The plan workflow is a pull-request review

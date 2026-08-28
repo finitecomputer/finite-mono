@@ -184,6 +184,35 @@ class ProductionDeployTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertFalse(output_path.exists())
 
+    def test_status_gate_ignores_non_deploy_fleet_convergence(self) -> None:
+        report = {
+            "schema_version": "finite.status.v1",
+            "overall_status": "red",
+            "sections": {
+                "fleet_convergence": {"status": "red"},
+                "host_health": {"status": "green"},
+                "recovery_boundary": {"status": "green"},
+                "rollout_state": {"status": "green"},
+            },
+        }
+        production_deploy.validate_status_gate(report)
+
+    def test_status_gate_rejects_deploy_blocking_failure(self) -> None:
+        report = {
+            "schema_version": "finite.status.v1",
+            "overall_status": "red",
+            "sections": {
+                "fleet_convergence": {"status": "green"},
+                "host_health": {"status": "green"},
+                "recovery_boundary": {"status": "red"},
+                "rollout_state": {"status": "green"},
+            },
+        }
+        with self.assertRaisesRegex(
+            production_deploy.DeployConfigError, "recovery_boundary=red"
+        ):
+            production_deploy.validate_status_gate(report)
+
     def test_workflows_keep_mvp_deploy_conductor_shape(self) -> None:
         deploy = (ROOT / ".github/workflows/production-deploy.yml").read_text(
             encoding="utf-8"
@@ -212,6 +241,8 @@ class ProductionDeployTests(unittest.TestCase):
         self.assertIn("github:NixOS/nixpkgs/$REMOTE_NIXPKGS_REV#python3", deploy)
         self.assertIn("--command python3 ./finite-status --json", deploy)
         self.assertIn("python3 -m json.tool", deploy)
+        self.assertIn("production_deploy.py status-gate", deploy)
+        self.assertNotIn('exit "$status_rc"', deploy)
         self.assertNotIn("require-production-disabled", plan)
 
 

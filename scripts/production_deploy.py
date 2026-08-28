@@ -23,6 +23,11 @@ RECORD_SCHEMA = "finite.production-deploy-record.v1"
 RISKY_PATH_POLICY = "lat1-v1"
 ZERO_SHA = "0" * 40
 ALLOWED_CLASSIFICATIONS = {"ordinary", "schema-change", "forward-only"}
+DEPLOY_BLOCKING_STATUS_SECTIONS = (
+    "host_health",
+    "recovery_boundary",
+    "rollout_state",
+)
 ALLOWED_MANIFEST_KEYS = {
     "environment",
     "scope",
@@ -329,6 +334,32 @@ def build_record(
     }
 
 
+def validate_status_gate(
+    report: dict[str, Any],
+    required_sections: tuple[str, ...] = DEPLOY_BLOCKING_STATUS_SECTIONS,
+) -> None:
+    if report.get("schema_version") != "finite.status.v1":
+        raise DeployConfigError("status report is not finite.status.v1")
+    sections = report.get("sections")
+    if not isinstance(sections, dict):
+        raise DeployConfigError("status report is missing sections")
+
+    failures: list[str] = []
+    for name in required_sections:
+        section = sections.get(name)
+        if not isinstance(section, dict):
+            failures.append(f"{name}=missing")
+            continue
+        status = section.get("status")
+        if status != "green":
+            failures.append(f"{name}={status or 'missing'}")
+    if failures:
+        raise DeployConfigError(
+            "deploy-blocking status sections are not green: "
+            + ", ".join(failures)
+        )
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -376,6 +407,33 @@ def command_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_status_gate(args: argparse.Namespace) -> int:
+    try:
+        report = json.loads(args.status.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise DeployConfigError(f"cannot read status report {args.status}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise DeployConfigError(
+            f"cannot parse status report {args.status}: {error}"
+        ) from error
+
+    required_sections = tuple(args.required_section or DEPLOY_BLOCKING_STATUS_SECTIONS)
+    validate_status_gate(report, required_sections)
+    sections = report["sections"]
+    passed = ", ".join(
+        f"{name}={sections[name]['status']}" for name in required_sections
+    )
+    print(f"Deploy-blocking status sections are green: {passed}")
+    non_blocking = [
+        f"{name}={section.get('status', 'missing')}"
+        for name, section in sorted(sections.items())
+        if name not in required_sections and isinstance(section, dict)
+    ]
+    if non_blocking:
+        print("Captured non-blocking status sections: " + ", ".join(non_blocking))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -407,6 +465,15 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--system-path")
     record.add_argument("--override-reason")
     record.set_defaults(func=command_record)
+
+    status_gate = subcommands.add_parser("status-gate")
+    status_gate.add_argument("--status", type=Path, required=True)
+    status_gate.add_argument(
+        "--required-section",
+        action="append",
+        default=None,
+    )
+    status_gate.set_defaults(func=command_status_gate)
     return parser
 
 
