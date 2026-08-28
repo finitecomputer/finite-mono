@@ -5988,11 +5988,15 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
     Ok(report)
 }
 
-/// Decide whether a claimed Welcome may be stored and activated. The
-/// `WelcomeRecord.sender` is server-asserted plaintext: the server binds it
-/// to the account/device which submitted the Add commit (and validates that
-/// submitter), so it is a trustworthy admission signal even though the
-/// Welcome payload itself is opaque to us until activation.
+/// Decide whether a claimed Welcome may be stored and activated.
+///
+/// Trust anchor: `WelcomeRecord.sender` is server-asserted from the commit
+/// request's `sender` field, which `SignedJson` binds to the NIP-98 signer
+/// only when the server runs with `FINITECHAT_REQUIRE_SIGNED_REQUESTS=true`.
+/// Until that flag is enforced, a caller able to reach the server can submit
+/// a commit naming any `sender`, so this gate is a policy control that
+/// becomes a security control only after the server-side flag flip. The
+/// Welcome payload itself stays opaque to us until activation.
 fn welcome_admission_allows(
     store: &SqliteClientStore,
     owner: &DeviceRef,
