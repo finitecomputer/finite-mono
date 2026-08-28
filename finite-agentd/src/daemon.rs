@@ -97,6 +97,15 @@ pub struct DaemonConfig {
     /// already set (the sidecar inherits it) or when no owner list exists
     /// (legacy allow-all).
     pub sidecar_welcome_allowlist: Option<String>,
+    /// Admission-default marker exported for the supervised chat sidecar.
+    /// agentd only runs inside the container, so the marker is what
+    /// distinguishes a hosted sidecar from a standalone `finitechat hermes
+    /// serve`: `locked` makes a sidecar with no persisted admission policy
+    /// row default to allowlist mode (seeded from the owner list and the
+    /// existing rooms' counterparties) instead of the legacy allow-all.
+    /// `None` when an explicit `FINITECHAT_ADMISSION_DEFAULT` is already set
+    /// (the sidecar inherits it unchanged).
+    pub sidecar_admission_default: Option<String>,
     /// How long startup waits for the Finite Chat bridge to serve readiness
     /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
     /// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides it.
@@ -199,6 +208,11 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
                 std::env::var("FINITECHAT_OWNER_NPUBS").ok().as_deref(),
+            ),
+            sidecar_admission_default: sidecar_admission_default_from_value(
+                std::env::var("FINITECHAT_ADMISSION_DEFAULT")
+                    .ok()
+                    .as_deref(),
             ),
             bridge_ready_timeout: bridge_ready_timeout_from_value(
                 std::env::var(BRIDGE_READY_TIMEOUT_ENV).ok().as_deref(),
@@ -1090,10 +1104,23 @@ fn sidecar_welcome_allowlist_from_values(
         .map(str::to_owned)
 }
 
+fn sidecar_admission_default_from_value(admission_default: Option<&str>) -> Option<String> {
+    // An explicit marker is inherited by the sidecar unchanged; otherwise
+    // agentd's presence is itself the hosted marker, so the sidecar it spawns
+    // defaults a row-less admission policy to locked (allowlist) mode.
+    if admission_default.is_some_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    Some("locked".to_owned())
+}
+
 fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
     let mut environment = BTreeMap::new();
     if let Some(allowlist) = &config.sidecar_welcome_allowlist {
         environment.insert("FINITECHAT_WELCOME_ALLOWLIST".to_owned(), allowlist.clone());
+    }
+    if let Some(default) = &config.sidecar_admission_default {
+        environment.insert("FINITECHAT_ADMISSION_DEFAULT".to_owned(), default.clone());
     }
     ProcessSpec {
         name: "finitechat",
@@ -1349,6 +1376,7 @@ mod tests {
             authorized_accounts: BTreeSet::new(),
             specialization_bundle: None,
             sidecar_welcome_allowlist: None,
+            sidecar_admission_default: None,
             bridge_ready_timeout: Duration::from_secs(1),
         };
         clear_boot_scoped_health_evidence(&config);
@@ -1403,6 +1431,7 @@ mod tests {
             authorized_accounts: BTreeSet::new(),
             specialization_bundle: None,
             sidecar_welcome_allowlist: Some(owner.clone()),
+            sidecar_admission_default: Some("locked".to_owned()),
             bridge_ready_timeout: Duration::from_secs(1),
         };
         let spec = sidecar_spec(&config);
@@ -1410,12 +1439,31 @@ mod tests {
             spec.environment.get("FINITECHAT_WELCOME_ALLOWLIST"),
             Some(&owner)
         );
-        config.sidecar_welcome_allowlist = None;
-        assert!(
-            !sidecar_spec(&config)
-                .environment
-                .contains_key("FINITECHAT_WELCOME_ALLOWLIST")
+        // The hosted admission-default marker rides the same relay.
+        assert_eq!(
+            spec.environment.get("FINITECHAT_ADMISSION_DEFAULT"),
+            Some(&"locked".to_owned())
         );
+        config.sidecar_welcome_allowlist = None;
+        config.sidecar_admission_default = None;
+        let spec = sidecar_spec(&config);
+        assert!(!spec.environment.contains_key("FINITECHAT_WELCOME_ALLOWLIST"));
+        assert!(!spec.environment.contains_key("FINITECHAT_ADMISSION_DEFAULT"));
+    }
+
+    #[test]
+    fn sidecar_admission_default_is_locked_unless_explicitly_set() {
+        assert_eq!(
+            sidecar_admission_default_from_value(None),
+            Some("locked".to_owned())
+        );
+        assert_eq!(
+            sidecar_admission_default_from_value(Some("  ")),
+            Some("locked".to_owned())
+        );
+        // An explicit marker (e.g. an operator previewing a future value) is
+        // inherited by the sidecar unchanged.
+        assert_eq!(sidecar_admission_default_from_value(Some("open")), None);
     }
 
     #[test]
