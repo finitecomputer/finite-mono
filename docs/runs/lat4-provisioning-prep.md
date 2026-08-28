@@ -186,16 +186,18 @@ Still open:
     copy-paste across runner twins. Decide whether the shared
     disko/invariants/esp-guard/storage-health module extraction lands with
     #715 feedback, with the lat4 activation PR, or after both.
-11. **Existing-Agent fleet migration (unowned).** lat1's 22 Runtimes (~31G
-    durable state) need a home on lat4: state import + Core
-    `source_host_id` re-point. The one-Runtime vehicle exists
-    (`infra/runbooks/runtime-cold-relocation.md`, `runtime_relocation.v1`);
-    a bulk fleet path needs its own gated run doc. Ownership was raised by
-    Paul on 2026-08-28 and is pending the owner's call (see PR #736
-    discussion). This must not be speculative: per-agent provenance (Runtime
-    ID, durable state ID, Principal, artifact, schema) verified from the
-    lat1 recovery set, chat-preserving verification, and the source kept
-    stopped-and-intact per the cold-relocation contract.
+11. ~~**Existing-Agent fleet migration (unowned).~~ RESOLVED 2026-08-28:
+    Paul ships the archives (scp directly to lat4 post-install), the lat4
+    operator verifies, imports, and re-points in Core. Written into the
+    runbook as **Gate F — fleet adoption**: verify archive sha256 → extract
+    into the declared work root `/data/finite-saas-runner` → 154,299-line
+    per-file sha256 check → restore gate (writer stopped, containerd task
+    absent, PRAGMA integrity_check + identity-hash equality via
+    scratch-copy rule) → owner-approved Core `source_host_id` re-point →
+    chat-preserving observation window. lat1's source stays
+    stopped-and-intact; no retirement or purge. The 18.3 GB truncated
+    dumbpipe partial on the operator Mac is obsolete (kept until the
+    verified import lands on lat4, then deleted).
 
 Items 4-8 are execution-time steps inside the Gates A-E runbook, not prep
 blockers. Item 9 carries the documented default above. The only true prep

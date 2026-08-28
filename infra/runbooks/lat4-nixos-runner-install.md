@@ -187,6 +187,78 @@ credential from Gate D. If taken: flip `FC_RUNNER_DRAIN=false` in lat4's
 lat3, and record the admission decision as a status note on ADR 0007. Until
 this gate, exactly one Runner accepts new creation (ADR 0005, retained).
 
+### Gate F — fleet adoption: import lat1's agent runner state
+
+Ownership: Paul produces and ships the archives; the lat4 operator verifies,
+imports, and re-points in Core. Transport: scp directly to lat4 after Gate C
+(no dumbpipe staging hop). Every mutation below needs fresh owner approval;
+the archives are the only copy of this state, so verification precedes every
+step. lat1's source state stays stopped-and-intact until each observation
+window passes.
+
+Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
+
+| Archive | Size | sha256 (archive-level) |
+|---|---|---|
+| `finite-saas-runner.tar.zst` | 19 GB | `a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba` |
+| `finite-saas-runner-kata.tar.zst` (lat1 `/data/finite-saas-runner/kata`) | 13 GB | recorded on receipt |
+| `runtime_95aa8aa8937bf5c32922.tar.zst` (Recovery Set, Aug 26 op) | 7.7 GB | recorded on receipt |
+
+1. Paul scps the archives + `runner-files.sha256` (154,299 lines, paths
+   relative to `finite-saas-runner/`) + `runner-files.sizes` to
+   `/data/staging/` on lat4 (created by `finite-prepare-data-root`). His
+   operator key is in the declarative `operatorKeys`, so scp works the
+   moment Gate C finishes.
+2. Verify before extracting:
+
+   ```sh
+   sudo shasum -a 256 -c <<< 'a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba  /data/staging/finite-saas-runner.tar.zst'
+   ```
+
+3. Extract into the declared work root. lat4's `workRoot` is
+   `/data/finite-saas-runner` (lat3-style, on the 1.8T data array — NOT
+   lat1's `/var/lib` path); the archive root `finite-saas-runner/` lands
+   there directly, confirmed acceptable for the Core re-point:
+
+   ```sh
+   sudo tar -I zstd -xf /data/staging/finite-saas-runner.tar.zst -C /data
+   ```
+
+4. Per-file integrity over the whole imported tree (all 154,299 lines must
+   pass):
+
+   ```sh
+   cd /data/finite-saas-runner && sudo sha256sum -c /data/staging/runner-files.sha256
+   ```
+
+5. Repeat verify → extract → per-file check for the kata area and the
+   `runtime_95aa8aa8937bf5c32922` Recovery Set archive (locations confirmed
+   with Paul on receipt).
+6. Restore gate (per
+   `docs/runs/finite-lat-capacity-and-redundancy.md`): writer stopped (the
+   Runner is drained and `ConditionPathExists`-gated), no containerd task
+   for these Runtimes, manifests stable, and the target was empty (fresh
+   Gate C install). For any SQLite-backed state use the scratch-copy rule —
+   never open a snapshot SQLite file directly: verify through
+   `scripts/snapshot-sqlite` or a copy, requiring `PRAGMA integrity_check`
+   clean and identity-hash equality against the archive's recorded values.
+7. Core re-point (separate, owner-approved): set each migrated Runtime's
+   `source_host_id` from `finite-lat-1` to `finite-lat-4`, restart Core in
+   the platform-rollout window, then verify a first migrated agent boots its
+   exact pinned artifact on lat4 and answers chat. Record the observation
+   window per `infra/runbooks/runtime-cold-relocation.md` semantics; do not
+   retire or purge the source archive.
+8. `scripts/finite-status` before/after; migrated Runtimes appear under
+   `finite-lat-4` with drain still true.
+
+VERIFY: all three archives hash-clean, 154,299 per-file checks pass,
+integrity checks clean, migrated agents answer chat from lat4, and the
+deployment changelog records Gate F.
+
+ROLLBACK: the import is additive onto an empty target; remove the imported
+tree and the Core re-point reverts per agent. The source archive remains
+stopped-and-intact throughout.
+
 ## VERIFY (whole runbook)
 
 - Every gate above states its own verify; none may be skipped forward.
