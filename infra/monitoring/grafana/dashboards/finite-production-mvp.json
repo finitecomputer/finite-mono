@@ -2105,7 +2105,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"kernel|systemd|nixos-activation|auth\"}",
+          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"kernel|systemd|nixos-activation|auth\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2171,7 +2171,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"systemd|nixos-activation\"}",
+          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"systemd|nixos-activation\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2204,7 +2204,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=\"auth\"}",
+          "expr": "{host=~\"finite-lat-[1-4]\", source=\"auth\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }

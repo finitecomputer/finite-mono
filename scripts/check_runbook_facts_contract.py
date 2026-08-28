@@ -206,6 +206,10 @@ def authority_units() -> set[str]:
             name = quoted or bare or strings.get(variable)
             if name:
                 units.add(name)
+        # Units may also be declared as nested attrsets:
+        #   systemd.services = { finite-storage-health = { ... }; };
+        for attr in ("services", "timers"):
+            units.update(first_level_keys(text, f"systemd.{attr}"))
         jobs = re.finditer(
             r"services\.borgbackup\.jobs\.(?:\"([^\"]+)\"|([a-zA-Z0-9_-]+)) =", text
         )

@@ -12,19 +12,20 @@ policy).
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
 
-> **Topology as of the 2026-07-09 lat1 consolidation cutover**
-> ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): Core, dashboard,
-> native Postgres, chat, sites, and Brain all run on finite-lat-1 (now NixOS,
-> one Caddy edge, no k3s); production Nix closures are built by the
-> Depot-backed `Lat1 NixOS Closure` artifact workflow. Lat2 is pending
-> archive/offload and decommission, not ongoing fleet capacity. Docker/image CI
-> also uses Depot; smoke is the Brain rollback source during migration; clawland is legacy.
+> **Topology as of the 2026-08-28 emergency cutover**
+> ([lat2-replacement-cutover.md](lat2-replacement-cutover.md)): finite-lat-1
+> is DOWN (thermal); finite-lat-2 is being reinstalled as the replacement
+> single app server (ADR 0007) via the `Lat2 NixOS Closure` artifact
+> workflow. Until that cutover's Gate E completes, the product is in full
+> outage; lat3 is up but its runner path is dead with lat1. Production Nix
+> closures are built by CI artifact workflows (`Lat1`, `Lat3`, `Lat2 NixOS
+> Closure`); Docker/image CI uses Depot; smoke is the Brain rollback source
+> during migration; clawland is legacy.
 > **The topology runbooks below
 > (deploy-core / deploy-sites / deploy-finitechat-server /
-> postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
-> The NixOS config (`infra/nixos/`) declares lat1; live inventory proves its
-> physical state. The reinstall file is historical cutover evidence, not
-> current destructive authority.
+> postgres-backup-restore / break-glass) still describe the lat1
+> deployment and are superseded for the lat2 cutover window by
+> [lat2-replacement-cutover.md](lat2-replacement-cutover.md).**
 
 ## Index
 
@@ -42,7 +43,8 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
-| [decommission-lat2.md](decommission-lat2.md) | Hard-cut offload, runner removal, credential revocation, and wipe/release procedure for finite-lat-2 |
+| [decommission-lat2.md](decommission-lat2.md) | **Superseded for the emergency** — legacy credential rotation and runner-removal inventory only; the wipe is Gate A of the cutover |
+| [lat2-replacement-cutover.md](lat2-replacement-cutover.md) | **THE emergency runbook** — wipe, storage capture, artifact-driven install, lat1 state import, go-live, and DNS cutover for finite-lat-2 as the replacement app server (ADR 0007) |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
 | [finite-private-deepseek-production-update.md](finite-private-deepseek-production-update.md) | Guarded promotion of the measured DeepSeek 128/2048 scheduler and canonical model label, with exact current DeepSeek rollback |

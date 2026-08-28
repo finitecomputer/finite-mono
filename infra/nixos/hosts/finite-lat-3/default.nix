@@ -180,14 +180,20 @@ in
   ];
 
   networking.wireguard.interfaces."wg-finite" = {
-    ips = [ "10.254.3.2/30" ];
+    # /29 (widened from the historical /30) for the overlay hub re-addressing.
+    ips = [ "10.254.3.2/29" ];
     listenPort = 51820;
     privateKeyFile = "/etc/finite/wireguard-private-key";
     peers = [
       {
-        publicKey = "UM5bBdhEj15t+bt+UWz7q4iXH0EgYx9p+CQY/E+31Us=";
+        # The overlay hub at 10.254.3.1 is finite-lat-2 — the emergency
+        # replacement app-plane host after lat1's thermal failure
+        # (ADR 0007). Same overlay role,
+        # new machine: new public key and endpoint. Deploy this peer flip as
+        # part of the cutover, not before the replacement is verified.
+        publicKey = "iuzuWHBSrPPbanAdiS86jABhwieo+wyig8I1f+FuPBk=";
         allowedIPs = [ "10.254.3.1/32" ];
-        endpoint = "64.34.82.77:51820";
+        endpoint = "64.34.80.19:51820";
         persistentKeepalive = 25;
       }
     ];

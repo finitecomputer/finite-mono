@@ -115,6 +115,14 @@ CONTRACT: dict[str, Any] = {
             "storage_health_unit": "finite-storage-health.service",
             "recovery": False,
         },
+        # Emergency replacement app-plane host (ADR 0007, 2026-08-28): the
+        # Recovery Authority role moves here with lat1's stack.
+        "finite-lat-2": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "recovery": True,
+        },
     },
     "thresholds": {
         "filesystem_red_percent": 90.0,
