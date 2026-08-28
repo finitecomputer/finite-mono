@@ -33,8 +33,9 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   `kubectl apply` + on-host `podman build` (lat1), systemd + Kata (lat2), Nix
   fleet `just host-deploy` (smoke/clawland), and the hand-run finitechat script
   — are **resolved for the coupled cluster**: one NixOS closure for
-  `finite-lat-1`, built by CI as a downloadable file binary cache and switched
-  by `scripts/deploy-lat1-closure-cache`. On-host `podman build` is gone;
+  `finite-lat-1`, built by CI, published to the `finite` Cachix cache, and
+  switched by `scripts/deploy-lat1-closure-cache` from an exact manifest-pinned
+  system path. On-host `podman build` is gone;
   first-party images are CI-built and digest-pinned (`infra/images/`).
 
 Still elsewhere: lat2 is a decommission target. Historical captures that need
@@ -100,7 +101,7 @@ capacity. The one accepted next candidate and its hard gates live in
 
 | Host | Role | Services |
 |---|---|---|
-| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: CI-built `lat1-nixos-closure-REV` artifact copied and switched by `scripts/deploy-lat1-closure-cache`. |
+| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: CI-built closure published to Cachix, metadata artifact `lat1-nixos-closure-REV`, and exact-path activation by `scripts/deploy-lat1-closure-cache`. |
 | **finite-lat-2** (64.34.80.19) | **Decommission target** (Ubuntu 26.04+nix at last inventory). Historical service captures are in `hosts/lat2/`; private legacy/archive data must be moved off-box through `runbooks/decommission-lat2.md` before repurpose or release. | No production service, CI, build, deploy, Agent capacity, recovery authority, or archive authority may run here. The installed GitHub runners are removal inventory only (`hosts/lat2/runners.md`). finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** and migrated to lat1. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 42.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=42`. This owner-authorized ceiling deliberately overcommits the declared 8-GiB guest maximum against physical RAM; swap is not counted as usable Agent capacity. No Recovery Authority exists here. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
@@ -133,8 +134,9 @@ secret value committed here, rotate it first, then delete it.
 
 CI-only operational secrets live as GitHub Actions repository or organization
 secrets. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
-cache used by the CI Nix service package job. The cache must remain readable
-without that token for forked pull requests to substitute from it.
+cache used by CI Nix service package jobs and lat1 production closure
+publication. The cache must remain readable without that token for forked pull
+requests and production hosts to substitute from it.
 
 ## Images
 
@@ -154,11 +156,14 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
 
 ## Deploy principles
 
-1. **lat1 = `nixos-rebuild` from a release rev.** The rev that tagged the
-   binaries is the rev the host runs. Rollback: `nixos-rebuild --rollback` on
-   the host, or pin the previous rev. Source of truth: `infra/nixos/`. The old
-   bare-metal transcript in `infra/runbooks/lat1-nixos-reinstall.md` is
-   historical and not current wipe authority.
+1. **lat1 = exact NixOS closure activation from a release rev.** The rev that
+   tagged the binaries is the rev the host runs. CI builds the closure, pushes
+   it to the `finite` Cachix cache, and the host substitutes only trusted store
+   paths before activating the recorded `SYSTEM` path. Rollback:
+   `nixos-rebuild --rollback` on the host, or pin the previous rev. Source of
+   truth: `infra/nixos/`. The old bare-metal transcript in
+   `infra/runbooks/lat1-nixos-reinstall.md` is historical and not current wipe
+   authority.
 2. **Images are built by CI**, tagged with the git SHA, pushed to GHCR, and
    deployed by digest. No on-host builds.
 3. **Binaries ship from release tags** (component-scoped: `finitechat/v*`,

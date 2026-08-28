@@ -100,6 +100,16 @@ jobs:
           scripts/build-lat1-nixos-closure-artifact \
             "${{ steps.inputs.outputs.source_sha }}" \
             target/lat1-nixos-closure
+      - name: Publish lat1 closure to Cachix
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN for this GitHub Actions workflow"
+            exit 1
+          fi
+          scripts/publish-lat1-nixos-cachix-closure target/lat1-nixos-closure
       - name: Upload deployment plan
         uses: actions/upload-artifact@v4
         with:
@@ -115,7 +125,6 @@ jobs:
           name: lat1-nixos-closure-${{ steps.inputs.outputs.source_sha }}
           path: |
             target/lat1-nixos-closure/manifest.json
-            target/lat1-nixos-closure/nix-cache
             target/lat1-nixos-closure/store-paths.txt
             target/lat1-nixos-closure/closure-size.txt
           if-no-files-found: error
@@ -169,19 +178,38 @@ jobs:
       - name: Validate or rebuild lat1 closure artifact
         env:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
+          rebuilt=false
           if [[ ! -f target/lat1-nixos-closure/manifest.json ]]; then
             echo "Reviewed closure artifact was unavailable; rebuilding exact source SHA."
             rm -rf target/lat1-nixos-closure
             scripts/build-lat1-nixos-closure-artifact \
               "$SOURCE_SHA" \
               target/lat1-nixos-closure
+            rebuilt=true
           fi
           python3 -m json.tool target/lat1-nixos-closure/manifest.json >/dev/null
           test "$(
             python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json"))["rev"])'
           )" = "$SOURCE_SHA"
+          if [[ "$rebuilt" == true ]]; then
+            if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+              echo "::error::set CACHIX_AUTH_TOKEN for this GitHub Actions workflow"
+              exit 1
+            fi
+            scripts/publish-lat1-nixos-cachix-closure target/lat1-nixos-closure
+          fi
+          python3 - <<'PY'
+          import json
+          with open("target/lat1-nixos-closure/manifest.json", encoding="utf-8") as fh:
+              manifest = json.load(fh)
+          if manifest.get("transport") != "cachix":
+              raise SystemExit("lat1 closure manifest was not published to Cachix")
+          if manifest.get("cachix", {}).get("published") is not True:
+              raise SystemExit("lat1 closure manifest lacks Cachix publication evidence")
+          PY
       - name: Configure production SSH
         env:
           FINITE_PRODUCTION_SSH_KEY: ${{ secrets.FINITE_PRODUCTION_SSH_KEY }}
@@ -237,6 +265,12 @@ jobs:
           test -s target/production-deploy/finite-status-before.json
           python3 -m json.tool target/production-deploy/finite-status-before.json >/dev/null
           exit "$status_rc"
+      - name: Prove lat1 closure substitutes before mutation
+        run: |
+          set -euo pipefail
+          FINITE_LAT1_TARGET=finite-production-lat1 \
+          FINITE_LAT1_DEPLOY_MODE=realise-only \
+            scripts/deploy-lat1-closure-cache target/lat1-nixos-closure
       - name: Cross Mutation Boundary and deploy lat1
         run: |
           set -euo pipefail
@@ -281,6 +315,26 @@ jobs:
           if [[ -f target/lat1-nixos-closure/manifest.json ]]; then
             system_path="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json"))["system"])')"
             record_args+=(--system-path "$system_path")
+            closure_store_path_count="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json")).get("store_path_count", ""))')"
+            closure_size_bytes="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json")).get("closure_size_bytes", ""))')"
+            closure_size_report="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/manifest.json")).get("closure_size_report", ""))')"
+            if [[ -n "$closure_store_path_count" ]]; then
+              record_args+=(--closure-store-path-count "$closure_store_path_count")
+            fi
+            if [[ -n "$closure_size_bytes" ]]; then
+              record_args+=(--closure-size-bytes "$closure_size_bytes")
+            fi
+            if [[ -n "$closure_size_report" ]]; then
+              record_args+=(--closure-size-report "$closure_size_report")
+            fi
+          fi
+          if [[ -f target/lat1-nixos-closure/deployment-transport.json ]]; then
+            closure_transport="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/deployment-transport.json"))["selected_transport"])')"
+            cachix_cache_name="$(python3 -c 'import json; print(json.load(open("target/lat1-nixos-closure/deployment-transport.json")).get("cachix_cache", ""))')"
+            record_args+=(--closure-transport "$closure_transport")
+            if [[ -n "$cachix_cache_name" ]]; then
+              record_args+=(--cachix-cache-name "$cachix_cache_name")
+            fi
           fi
           python3 scripts/production_deploy.py record \
             --plan target/production-deploy/deployment-plan.json \
@@ -308,6 +362,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deployment-record
-          path: target/production-deploy/deployment-record.json
+          path: |
+            target/production-deploy/deployment-record.json
+            target/lat1-nixos-closure/deployment-transport.json
           if-no-files-found: error
           retention-days: 14

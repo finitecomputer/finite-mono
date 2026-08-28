@@ -30,6 +30,11 @@ ALLOWED_MANIFEST_KEYS = {
     "risky_path_policy",
     "mutation_enabled",
     "rollback_policy",
+    "closure_transport",
+    "cachix_cache_name",
+    "cachix_substituter",
+    "cachix_trusted_public_key",
+    "legacy_file_cache_fallback",
     "required_gates",
 }
 
@@ -189,6 +194,11 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "risky_path_policy",
         "mutation_enabled",
         "rollback_policy",
+        "closure_transport",
+        "cachix_cache_name",
+        "cachix_substituter",
+        "cachix_trusted_public_key",
+        "legacy_file_cache_fallback",
     ]
     missing = [key for key in required if key not in manifest]
     if missing:
@@ -208,6 +218,19 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         raise DeployConfigError("mutation_enabled must be a boolean")
     if manifest["rollback_policy"] != "previous-lat1-closure":
         raise DeployConfigError("rollback_policy must be previous-lat1-closure")
+    if manifest["closure_transport"] != "cachix":
+        raise DeployConfigError("closure_transport must be cachix")
+    if manifest["cachix_cache_name"] != "finite":
+        raise DeployConfigError("cachix_cache_name must be finite")
+    if manifest["cachix_substituter"] != "https://finite.cachix.org":
+        raise DeployConfigError("cachix_substituter must be https://finite.cachix.org")
+    if (
+        manifest["cachix_trusted_public_key"]
+        != "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk="
+    ):
+        raise DeployConfigError("cachix_trusted_public_key must match the finite cache")
+    if manifest["legacy_file_cache_fallback"] != "explicit-only":
+        raise DeployConfigError("legacy_file_cache_fallback must be explicit-only")
 
     gates = manifest.get("required_gates", [])
     if not isinstance(gates, list) or not all(
@@ -259,6 +282,10 @@ def build_plan(manifest_path: Path, base: str, head: str) -> dict[str, Any]:
         "risky_path_policy": manifest["risky_path_policy"],
         "mutation_enabled": manifest["mutation_enabled"],
         "rollback_policy": manifest["rollback_policy"],
+        "closure_transport": manifest["closure_transport"],
+        "cachix_cache_name": manifest["cachix_cache_name"],
+        "cachix_substituter": manifest["cachix_substituter"],
+        "legacy_file_cache_fallback": manifest["legacy_file_cache_fallback"],
         "required_gates": manifest.get("required_gates", []),
         "changed_paths": paths,
         "risky_paths": risky,
@@ -286,6 +313,9 @@ def render_plan_summary(plan: dict[str, Any]) -> str:
             f"- Scope: `{plan['scope']}`",
             f"- Classification: `{plan['classification']}`",
             f"- Risky path policy: `{plan['risky_path_policy']}`",
+            f"- Closure transport: `{plan['closure_transport']}`",
+            f"- Cachix cache: `{plan['cachix_cache_name']}` ({plan['cachix_substituter']})",
+            f"- Legacy file-cache fallback: `{plan['legacy_file_cache_fallback']}`",
             f"- Mutation enabled: `{str(plan['mutation_enabled']).lower()}`",
             f"- Post-merge behavior: {merge_behavior}.",
             "",
@@ -305,9 +335,16 @@ def build_record(
     outcome: str,
     mutation_boundary_crossed: bool,
     system_path: str | None,
+    closure_transport: str | None,
+    cachix_cache_name: str | None,
+    closure_store_path_count: int | None,
+    closure_size_bytes: int | None,
+    closure_size_report: str | None,
     override_reason: str | None,
 ) -> dict[str, Any]:
     now = utc_now()
+    recorded_transport = closure_transport or plan.get("closure_transport")
+    recorded_cache = cachix_cache_name or plan.get("cachix_cache_name")
     return {
         "schema": RECORD_SCHEMA,
         "environment": plan["environment"],
@@ -319,6 +356,12 @@ def build_record(
         "mutation_enabled": plan["mutation_enabled"],
         "mutation_boundary_crossed": mutation_boundary_crossed,
         "system_path": system_path,
+        "closure_transport": recorded_transport,
+        "cachix_cache_name": recorded_cache,
+        "cachix_substituter": plan.get("cachix_substituter"),
+        "closure_store_path_count": closure_store_path_count,
+        "closure_size_bytes": closure_size_bytes,
+        "closure_size_report": closure_size_report,
         "finite_status_before_artifact": "finite-status-before",
         "finite_status_after_artifact": "finite-status-after",
         "outcome": outcome,
@@ -371,6 +414,11 @@ def command_record(args: argparse.Namespace) -> int:
         outcome=args.outcome,
         mutation_boundary_crossed=args.mutation_boundary_crossed,
         system_path=args.system_path,
+        closure_transport=args.closure_transport,
+        cachix_cache_name=args.cachix_cache_name,
+        closure_store_path_count=args.closure_store_path_count,
+        closure_size_bytes=args.closure_size_bytes,
+        closure_size_report=args.closure_size_report,
         override_reason=args.override_reason,
     )
     write_json(args.output, record)
@@ -406,6 +454,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--outcome", required=True)
     record.add_argument("--mutation-boundary-crossed", action="store_true")
     record.add_argument("--system-path")
+    record.add_argument("--closure-transport")
+    record.add_argument("--cachix-cache-name")
+    record.add_argument("--closure-store-path-count", type=int)
+    record.add_argument("--closure-size-bytes", type=int)
+    record.add_argument("--closure-size-report")
     record.add_argument("--override-reason")
     record.set_defaults(func=command_record)
     return parser

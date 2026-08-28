@@ -72,9 +72,11 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 > **Automated path:** build the closure with
 > `.github/workflows/lat1-nixos-closure.yml`, download the
 > `lat1-nixos-closure-REV` artifact, then run
-> `just deploy-lat1-closure <artifact-dir>`. That copies the prebuilt closure
-> from the artifact's file binary cache, switches lat1, and verifies the
-> running closure by state. There is no supported lat2 fallback path.
+> `just deploy-lat1-closure <artifact-dir>`. CI has already pushed the closure
+> to the `finite` Cachix cache; the deploy helper makes lat1 realize the exact
+> manifest-pinned `SYSTEM` path with the manifest-pinned Cachix trust settings
+> and local builds disabled, switches lat1, and verifies the running closure by
+> state. There is no supported lat2 fallback path.
 
 To roll a reviewed, healthy existing Runtime cohort after the deployment has
 passed its normal verification, use the separate prepare/execute workflow with
@@ -128,17 +130,22 @@ Fleet scope requires both `--roll-all` and an explicit
    ```
 
 2. Deploy only that artifact. The deploy script validates the manifest, proves
-   `REV` is on `origin/main`, takes the pre-deploy recovery snapshot, copies the
-   unsigned file binary cache to lat1 with `--no-check-sigs`, installs `SYSTEM`
-   as the boot profile, activates it in a transient systemd unit, and asserts
-   `/run/current-system` is exactly the artifact's `SYSTEM` path:
+   `REV` is on `origin/main`, realizes the exact `SYSTEM` path on lat1 with the
+   manifest-pinned Cachix substituter/key and local builds disabled, takes the
+   pre-deploy recovery snapshot, installs `SYSTEM` as the boot profile,
+   activates it in a transient systemd unit, asserts `/run/current-system` is
+   exactly the artifact's `SYSTEM` path, and verifies the activated host now
+   declares the same Cachix trust:
 
    ```sh
    just deploy-lat1-closure "$ARTIFACT_DIR"
    ```
 
-   The script does not evaluate or build Nix derivations. Its local Nix use is
-   limited to copying the workflow-produced file binary cache to lat1.
+   The script does not evaluate or build Nix derivations. A Cachix miss or
+   trusted-key mismatch fails before activation. The legacy file binary cache
+   path is available only by explicitly setting
+   `FINITE_LAT1_DEPLOY_TRANSPORT=file-cache` with an artifact that contains
+   `nix-cache/`; use that only for bootstrap or recovery.
 
 3. **Dashboard image bump:** edit `image = "...@sha256:..."` in
    `infra/nixos/modules/dashboard.nix`, commit to `main` — the committed
