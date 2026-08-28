@@ -68,8 +68,23 @@ jobs:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
 
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Parse the channel out of rust-toolchain.toml — the single Rust
+          # pin — so the install below can never float. The dtolnay action
+          # does NOT read the toml itself: with no toolchain input it
+          # installs its branch name (floating stable), which is exactly
+          # what this repo must not do.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
-        # The Rust version comes from rust-toolchain.toml at the repo root —
+        # Toolchain is the channel parsed from rust-toolchain.toml above —
         # the single build pin shared with Nix shells, release builds, and
         # dev hosts. Bump deliberately (run clippy locally first), don't
         # float: 1.88's clippy trips uninlined_format_args on v2 crates and
@@ -77,6 +92,9 @@ jobs:
         # rust-version floor stays at the oldest rustc that must still build
         # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -215,10 +233,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Same contract as the Rust workspace job: parse the channel from
+          # rust-toolchain.toml rather than letting the action default to
+          # its floating stable branch name.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
-        # Toolchain version comes from rust-toolchain.toml at the repo root —
-        # the same pin the Rust workspace job and release builds use.
+        # Toolchain is the channel parsed from rust-toolchain.toml — the
+        # same pin the Rust workspace job and release builds use.
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
 
       - uses: Swatinem/rust-cache@v2
 
