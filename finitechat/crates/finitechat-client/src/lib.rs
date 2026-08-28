@@ -6006,7 +6006,11 @@ fn welcome_admission_allows(
         return Ok(true);
     }
     // Device-link exemption: a Welcome from the same account is the account
-    // adding one of its own linked devices to a room, never a stranger.
+    // adding one of its own linked devices to a room. Caveat: the sender is
+    // only authenticated once the server enforces signed requests; until
+    // then this exemption is the cheapest allowlist bypass available (claim
+    // sender = the victim's own npub), which is acceptable only because the
+    // flag flip is sequenced inside this same rollout.
     if welcome.sender.account_id == owner.account_id {
         return Ok(true);
     }
