@@ -123,6 +123,12 @@ CONTRACT: dict[str, Any] = {
             "storage_health_unit": "finite-storage-health.service",
             "recovery": True,
         },
+        "finite-lat-4": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "recovery": False,
+        },
     },
     "thresholds": {
         "filesystem_red_percent": 90.0,

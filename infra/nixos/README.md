@@ -73,6 +73,23 @@ and networking carry `captured = false` placeholders until
 before that capture. Authority: `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md`
 and `../runbooks/lat2-replacement-cutover.md`.
 
+## finite-lat-4, the third storage-qualified Runner (in progress)
+
+`nixosConfigurations.finite-lat-4` mirrors the lat3 host shape (same module
+stack, storage contract, ESP guard, and Runner role; `hosts/finite-lat-4/`)
+for the fresh box at `152.236.34.15` (ADR 0007 model; lat4 is the third
+runner host and follows the lat2 rejoin of PR #715). Its `storage-ids.nix`
+carries `captured = true` with identities read from the physical machine on
+2026-08-28 (see `docs/runs/lat4-provisioning-prep.md`), and
+`scripts/capture-lat4-host-evidence` re-verifies them before the wipe;
+`scripts/build-lat4-nixos-closure-artifact` refuses to package a closure
+while that flag is false. The lat3 disk geometry was re-proven against the
+real disks (root last-usable `937703054 >= 935331839`, data
+`3750748814 >= 3747612671`), so the storage contract is identical. It is
+installed, verified, and admitted **drained** only through
+`../runbooks/lat4-nixos-runner-install.md`; it takes the `10.254.3.4`
+WireGuard address after the PR #715 /29 widening merges.
+
 ## Deploy story
 
 ### Bare-metal rebuild (paused; historical transcript follows)

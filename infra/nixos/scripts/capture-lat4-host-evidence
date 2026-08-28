@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Read-only evidence capture from finite-lat-4 BEFORE it is wiped, feeding
+# Gate B of infra/runbooks/lat4-nixos-runner-install.md.
+#
+# Collects exactly what infra/nixos/hosts/finite-lat-4/ needs to stop being
+# placeholder data: disk by-id paths and sizes, NIC MACs, static addressing,
+# RAM/CPU, and the current Ubuntu mdadm state. Nothing on the host is
+# modified; no secret files are read.
+#
+# usage: capture-lat4-host-evidence <ssh-target>   # e.g. finite-lat-4
+# output: target/lat4-host-evidence-<ts>/{evidence.txt,storage-ids.nix.skeleton}
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <ssh-target>" >&2
+  exit 64
+fi
+target="$1"
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+out_dir="target/lat4-host-evidence-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$out_dir"
+
+remote_capture() {
+  ssh -o BatchMode=yes "$target" 'bash -s' <<'REMOTE'
+set -u
+echo "### host"
+hostname -f 2>/dev/null || hostname
+date -u
+echo "### chassis (sudo, optional)"
+sudo -n dmidecode -s system-product-name 2>/dev/null || echo "dmidecode unavailable"
+sudo -n dmidecode -s processor-version 2>/dev/null | sort -u || true
+echo "### cpu / memory"
+nproc
+free -b | sed -n '1,2p'
+grep -E 'MemTotal' /proc/meminfo
+echo "### block devices (bytes)"
+lsblk -bndo NAME,SIZE,MODEL,SERIAL,TYPE 2>/dev/null | awk '$NF=="disk"'
+echo "### /dev/disk/by-id (whole disks only)"
+ls -l /dev/disk/by-id 2>/dev/null | grep -vE '[0-9]+$' | sed 's/.*by-id\///'
+echo "### nvme list (sudo, optional)"
+sudo -n nvme list 2>/dev/null || true
+echo "### current mdstat"
+cat /proc/mdstat
+echo "### network links (MACs)"
+ip -o link show | sort
+echo "### ipv4 addresses"
+ip -4 -o addr show
+echo "### ipv6 global addresses"
+ip -6 -o addr show scope global
+echo "### ipv4 default route"
+ip -4 route show default
+echo "### ipv6 default route"
+ip -6 route show default 2>/dev/null || true
+REMOTE
+}
+
+echo "==> capturing read-only evidence from ${target}"
+remote_capture | tee "$out_dir/evidence.txt"
+
+# --- geometry proof -------------------------------------------------------
+# lat3-qualified geometry the lat4 config pins (sectors, 512B logical).
+root_end_sector=935331839
+data_end_sector=3747612671
+root_min_bytes=$(( (root_end_sector + 1) * 512 ))
+data_min_bytes=$(( (data_end_sector + 1) * 512 ))
+
+python3 - "$out_dir/evidence.txt" "$root_min_bytes" "$data_min_bytes" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+root_min = int(sys.argv[2])
+data_min = int(sys.argv[3])
+
+block = re.search(r"### block devices \(bytes\)\n(.*?)\n###", text, re.DOTALL)
+if not block:
+    raise SystemExit("capture is missing the block-device section")
+disks = []
+for line in block.group(1).strip().splitlines():
+    parts = line.split(None, 4)
+    if len(parts) < 5:
+        continue
+    name, size, model, serial, kind = parts[0], int(parts[1]), parts[2], parts[3], parts[4]
+    if kind != "disk":
+        continue
+    disks.append((name, size, model, serial))
+
+print(f"==> found {len(disks)} disks")
+oversized = [d for d in disks if d[1] > data_min]
+small = [d for d in disks if root_min <= d[1] <= data_min]
+tiny = [d for d in disks if d[1] < root_min]
+print(f"    root-class  (>= {root_min} bytes, < data): {len(small)}")
+print(f"    data-class  (>= {data_min} bytes): {len(oversized)}")
+print(f"    too small for the pinned root geometry: {len(tiny)}")
+for name, size, model, serial, *_ in disks:
+    print(f"    {name}: {size} bytes  {model} {serial}")
+if len(small) < 2 or len(oversized) < 2:
+    print(
+        "REFUSING: the captured disks do not match the expected 2 small + 2 "
+        "large shape, so no storage-ids skeleton is emitted. The finite-lat-3 "
+        "geometry must be re-derived and this script re-run before anything "
+        "can be filled into storage-ids.nix." ,
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+
+# --- storage-ids skeleton --------------------------------------------------
+# Fresh random identifiers for everything the installer creates; the disk
+# by-id paths are carried over from the capture. The human reviewing Gate B
+# assigns root-a/root-b/data-a/data-b from the printed devices.
+if command -v uuidgen >/dev/null 2>&1; then
+  uuid() { uuidgen | tr 'A-Z' 'a-z'; }
+else
+  uuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+fi
+esp_a="$(uuid)"; root_a="$(uuid)"; esp_b="$(uuid)"; root_b="$(uuid)"
+data_a="$(uuid)"; data_b="$(uuid)"
+fs_root="$(uuid)"; fs_data="$(uuid)"
+esp_a_vol="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-8)"
+esp_b_vol="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-8)"
+md_root="$(head -c 16 /dev/urandom | od -An -tx4 | tr -d ' \n' | sed 's/\(.\{8\}\)/\1:/g; s/:$//')"
+md_data="$(head -c 16 /dev/urandom | od -An -tx4 | tr -d ' \n' | sed 's/\(.\{8\}\)/\1:/g; s/:$//')"
+
+cat > "$out_dir/storage-ids.nix.skeleton" <<SKELETON
+# Gate B review artifact — generated from target/lat4-host-evidence-*/.
+# A human must: verify the four disk by-id paths against the captured
+# evidence, confirm the lat3 geometry fits the real disks, rename esp-a/root-a
+# and esp-b/root-b (and data-a/data-b) pairs onto the intended physical
+# disks, then copy this into infra/nixos/hosts/finite-lat-4/storage-ids.nix
+# with captured = true.
+{
+  captured = true;
+
+  disks = {
+    rootA = "/dev/disk/by-id/ASSIGN-ROOT-A";
+    rootB = "/dev/disk/by-id/ASSIGN-ROOT-B";
+    dataA = "/dev/disk/by-id/ASSIGN-DATA-A";
+    dataB = "/dev/disk/by-id/ASSIGN-DATA-B";
+  };
+
+  partuuids = {
+    espA = "${esp_a}";
+    rootA = "${root_a}";
+    espB = "${esp_b}";
+    rootB = "${root_b}";
+    dataA = "${data_a}";
+    dataB = "${data_b}";
+  };
+
+  mdUuids = {
+    root = "${md_root}";
+    data = "${md_data}";
+  };
+
+  filesystemUuids = {
+    root = "${fs_root}";
+    data = "${fs_data}";
+    espA = "$(echo "$esp_a_vol" | sed 's/\(.\{4\}\)/\1-/')";
+    espB = "$(echo "$esp_b_vol" | sed 's/\(.\{4\}\)/\1-/')";
+  };
+
+  # mkfs.vfat takes the same volume IDs without the display hyphen.
+  vfatVolumeIds = {
+    espA = "${esp_a_vol}";
+    espB = "${esp_b_vol}";
+  };
+}
+SKELETON
+
+echo "==> wrote $out_dir/evidence.txt"
+echo "==> wrote $out_dir/storage-ids.nix.skeleton (needs human review at Gate B)"
+echo "==> also record from the provider console / captured evidence:"
+echo "    WAN NIC MAC, LAN NIC MAC, IPv6 address, IPv4/IPv6 gateways"

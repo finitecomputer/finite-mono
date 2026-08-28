@@ -161,6 +161,44 @@
         ];
       };
 
+      # finite-lat-4 is the third storage-qualified Runner host (ADR 0007
+      # model, following the lat2 rejoin in PR #715). It mirrors the lat3
+      # module stack, including the ESP-guard double eval.
+      lat4Modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        revisionModule
+        ./infra/nixos/modules/secrets.nix
+        ./infra/nixos/hosts/finite-lat-4
+      ];
+
+      lat4Unguarded = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs;
+        modules = lat4Modules;
+      };
+
+      lat4 = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs // {
+          unguardedInstallBootLoader = lat4Unguarded.config.system.build.installBootLoader;
+        };
+        modules = lat4Modules ++ [ ./infra/nixos/hosts/finite-lat-4/esp-guard.nix ];
+      };
+
+      lat4Kexec = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nixos-images.nixosModules.kexec-installer
+          nixos-images.nixosModules.noninteractive
+          {
+            networking.hostName = "finite-lat-4-installer";
+            system.kexec-installer.name = "finite-lat-4-nixos-26.05-kexec";
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
+
       monitoring = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
@@ -335,6 +373,10 @@
             finite-lat-2-disko = lat2.config.system.build.diskoScript;
             finite-lat-2-kexec = lat2Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-2-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-lat-4-system = lat4.config.system.build.toplevel;
+            finite-lat-4-disko = lat4.config.system.build.diskoScript;
+            finite-lat-4-kexec = lat4Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-4-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
       };
@@ -363,6 +405,11 @@
       # infra/runbooks/lat2-replacement-cutover.md (ADR 0007); it boots in
       # import mode and goes live at Gate E.
       nixosConfigurations.finite-lat-2 = lat2;
+
+      # The third storage-qualified Runner host (ADR 0007 model). Installed
+      # and admitted only through
+      # infra/runbooks/lat4-nixos-runner-install.md; it starts drained.
+      nixosConfigurations.finite-lat-4 = lat4;
 
       # Dedicated NixOS Grafana/Prometheus/Loki receiver. This is the hard-cut
       # replacement for the historical monitoring Docker Compose stack.

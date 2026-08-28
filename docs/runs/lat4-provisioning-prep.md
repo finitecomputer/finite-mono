@@ -1,8 +1,9 @@
 # lat4 Provisioning Prep (finite-lat-4)
 
-Status: **prep/research — no production mutation, no flake registration yet.**
-This record captures the read-only evidence gathered for the finite-lat-4
-runner-only host and the decisions taken before the implementation PR.
+Status: **prep complete; activation scaffold on branch
+`infra/lat4-nixos-runner-twin` (PR #736).** No production mutation has
+happened or is authorized by this record; the box is only ever touched
+read-only until the gated install runbook executes with fresh approval.
 
 Scope decision: finite-lat-4 is a **dedicated Agent Runner host** cloned from
 the finite-lat-3 personality. It holds sandboxes only — no app services, no
@@ -82,7 +83,7 @@ Sequence: the /29 widening and lat2=.3 land first via #715; lat4=.4 is only
 valid after that merge. If #715 stalls, lat4 falls back to a separate /30 —
 but the default plan is ADR 0007's single overlay.
 
-## 4. Drafted artifacts (uncommitted; flake untouched)
+## 4. Host config and activation scaffold (PR #736)
 
 - `infra/nixos/hosts/finite-lat-4/storage-ids.nix`
 - `infra/nixos/hosts/finite-lat-4/disko.nix` — verbatim lat3 layout
@@ -122,6 +123,18 @@ build/deploy script fork, CI workflow clone, `check_runner_host_contract.py`
 HOSTS update. Those land together in the activation PR once §5 is resolved,
 based on the post-#715 tree.
 
+Update 2026-08-28 (same day): the activation scaffold landed on the
+`infra/lat4-nixos-runner-twin` branch / PR #736 — flake registration,
+`build-lat4-nixos-closure-artifact` (captured guard + disko + same-pin kexec,
+schema `finite.lat4.nixos-closure.v2`), `deploy-lat4-closure-cache`,
+`Lat4 NixOS Closure` workflow, `capture-lat4-host-evidence`,
+`lat4-nixos-runner-install.md` (Gates A–E), just recipes,
+`check_runner_host_contract.py` (3 hosts, lat4 at 42),
+`check_monitoring_nixos_contract.py` lat4 Alloy/log-unit/role entries,
+select-harnesses paths, and README/deployment-queue/capacity-doc updates.
+CI (evals + contracts on x86_64-linux) is the remaining local-verification
+gap: this Mac has no Nix toolchain.
+
 ## 5. Open questions (must be answered before activation PR)
 
 Answered by PR #715 / ADR 0007 since the first draft (see §3):
@@ -147,8 +160,11 @@ Still open:
    runner.env, runtime-secrets.env, identity-operator.env,
    metrics-remote-write.env, logs-write.env, wireguard-private-key — plus a
    values-free lat4 secret contract (lat3 never got one; do not repeat that
-   gap) and `FC_CORE_RUNNER_CREDENTIALS_JSON` registration for
-   `finite-kata-runner-4` in Core.
+   gap). The contract JSON is **deliberately deferred to Gate D
+   preparation**: its content depends on the final secret-custody decisions,
+   and `scripts/check_nixos_secrets_contract.py` grows a finite-lat-4 entry
+   together with that contract file. Also `FC_CORE_RUNNER_CREDENTIALS_JSON`
+   registration for `finite-kata-runner-4` in Core (runbook Gate D).
 7. **Monitoring receiver credentials** for lat4 on the monitoring host must
    match the new `metrics-remote-write.env`/`logs-write.env` pairs.
 8. **Install runbook.** Clone the `lat2-nixos-runner-install.md` Gates A–E
@@ -192,3 +208,4 @@ decisions (address plan, ceiling, admission posture, public IP) are closed.
 | 2026-08-28 | Draft host directory + prep record written (uncommitted); codex review pass, all files PASS | §4 |
 | 2026-08-28 | Re-aligned draft to PR #715 / ADR 0007 (WG /29 lat4=.4, ceiling 42, drained admission, captured pattern, artifact-driven install) | §3 |
 | 2026-08-28 | Operator confirmed public IP 152.236.34.15 (matches live capture); prep decisions closed | §5 |
+| 2026-08-28 | Activation scaffold on branch `infra/lat4-nixos-runner-twin` (PR #736): flake, build/deploy/CI/capture/runbook, contracts, docs; `test_lat4_closure_artifact` 9/9 green locally | PR #736 |
