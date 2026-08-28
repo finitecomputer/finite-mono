@@ -87,16 +87,6 @@ pub struct DaemonConfig {
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
     pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
-    /// Welcome-allowlist seed derived for the supervised Finite Chat sidecar
-    /// (`finitechat hermes serve`) from the Core-injected
-    /// `FINITECHAT_OWNER_NPUBS`. The sidecar is spawned by agentd, not by
-    /// `run_hermes_gateway.sh`, so the gateway script's
-    /// `FINITECHAT_WELCOME_ALLOWLIST` export never reaches it; without this
-    /// derivation an owner-locked runtime would still auto-accept stranger
-    /// Welcomes. `None` when an explicit `FINITECHAT_WELCOME_ALLOWLIST` is
-    /// already set (the sidecar inherits it) or when no owner list exists
-    /// (legacy allow-all).
-    pub sidecar_welcome_allowlist: Option<String>,
     /// Admission-default marker exported for the supervised chat sidecar.
     /// agentd only runs inside the container, so the marker is what
     /// distinguishes a hosted sidecar from a standalone `finitechat hermes
@@ -104,7 +94,10 @@ pub struct DaemonConfig {
     /// row default to allowlist mode (seeded from the owner list and the
     /// existing rooms' counterparties) instead of the legacy allow-all.
     /// `None` when an explicit `FINITECHAT_ADMISSION_DEFAULT` is already set
-    /// (the sidecar inherits it unchanged).
+    /// (the sidecar inherits it unchanged). The sidecar inherits
+    /// `FINITECHAT_OWNER_NPUBS` and `FINITECHAT_WELCOME_ALLOWLIST` directly
+    /// from the container environment — agentd never derives admission
+    /// values; it only marks hostedness.
     pub sidecar_admission_default: Option<String>,
     /// How long startup waits for the Finite Chat bridge to serve readiness
     /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
@@ -203,12 +196,6 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             )?,
-            sidecar_welcome_allowlist: sidecar_welcome_allowlist_from_values(
-                std::env::var("FINITECHAT_WELCOME_ALLOWLIST")
-                    .ok()
-                    .as_deref(),
-                std::env::var("FINITECHAT_OWNER_NPUBS").ok().as_deref(),
-            ),
             sidecar_admission_default: sidecar_admission_default_from_value(
                 std::env::var("FINITECHAT_ADMISSION_DEFAULT")
                     .ok()
@@ -310,6 +297,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     fs::set_permissions(config.state_dir(), fs::Permissions::from_mode(0o700))?;
     clear_boot_scoped_health_evidence(&config);
     prepare_agent_runtime(&config)?;
+    // After prepare (the agent home and store exist) and before the
+    // supervisor starts the gateway or the sidecar, so admission state is
+    // settled before anything reads it and the store writer lease is still
+    // uncontended.
+    seed_chat_admission(&config)?;
     let identity = load_agent_identity(&config.agent_home)?;
     let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
     for account_id in &config.authorized_accounts {
@@ -1089,21 +1081,6 @@ fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
     Ok(DeviceRef::new(config.account_id, config.device_id))
 }
 
-fn sidecar_welcome_allowlist_from_values(
-    welcome_allowlist: Option<&str>,
-    owner_npubs: Option<&str>,
-) -> Option<String> {
-    // An explicit sidecar allowlist is inherited by the sidecar unchanged;
-    // nothing to derive.
-    if welcome_allowlist.is_some_and(|value| !value.trim().is_empty()) {
-        return None;
-    }
-    owner_npubs
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 fn sidecar_admission_default_from_value(admission_default: Option<&str>) -> Option<String> {
     // An explicit marker is inherited by the sidecar unchanged; otherwise
     // agentd's presence is itself the hosted marker, so the sidecar it spawns
@@ -1114,11 +1091,35 @@ fn sidecar_admission_default_from_value(admission_default: Option<&str>) -> Opti
     Some("locked".to_owned())
 }
 
+/// Seed chat admission once, before the supervisor starts any child process.
+///
+/// The sidecar's SQLite admission store is the single source of truth; this
+/// step is its only writer at container boot. Running it here — after
+/// `prepare_agent_runtime` has created the agent home and before the gateway
+/// script or the sidecar can race for the store writer lease — means the
+/// gateway launcher reads a current `allowed-users` mirror on its very first
+/// start, including the legacy-lockdown derivation on an upgraded agent.
+/// Later allowlist changes go through `chat.admission` commands, which
+/// rewrite the mirror in place; they reach the gateway at its next restart.
+fn seed_chat_admission(config: &DaemonConfig) -> Result<(), AgentdError> {
+    let status = StdCommand::new(&config.finitechat_bin)
+        .args(["hermes", "--agent-home"])
+        .arg(config.agent_home.as_os_str())
+        .arg("admission")
+        .arg("seed")
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AgentdError::Supervisor(format!(
+            "chat admission seed failed with {status}"
+        )))
+    }
+}
+
 fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
     let mut environment = BTreeMap::new();
-    if let Some(allowlist) = &config.sidecar_welcome_allowlist {
-        environment.insert("FINITECHAT_WELCOME_ALLOWLIST".to_owned(), allowlist.clone());
-    }
     if let Some(default) = &config.sidecar_admission_default {
         environment.insert("FINITECHAT_ADMISSION_DEFAULT".to_owned(), default.clone());
     }
@@ -1375,7 +1376,6 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             specialization_bundle: None,
-            sidecar_welcome_allowlist: None,
             sidecar_admission_default: None,
             bridge_ready_timeout: Duration::from_secs(1),
         };
@@ -1394,28 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_welcome_allowlist_derives_from_owner_npubs_only_when_unset() {
-        let owner = "a".repeat(64);
-        assert_eq!(
-            sidecar_welcome_allowlist_from_values(None, Some(&owner)),
-            Some(owner.clone())
-        );
-        // An explicit sidecar allowlist wins and is inherited unchanged.
-        assert_eq!(
-            sidecar_welcome_allowlist_from_values(Some("b".repeat(64).as_str()), Some(&owner)),
-            None
-        );
-        // No owner list: legacy allow-all, nothing injected.
-        assert_eq!(sidecar_welcome_allowlist_from_values(None, None), None);
-        assert_eq!(
-            sidecar_welcome_allowlist_from_values(None, Some("  ")),
-            None
-        );
-    }
-
-    #[test]
-    fn sidecar_spec_injects_derived_welcome_allowlist() {
-        let owner = "c".repeat(64);
+    fn sidecar_spec_relays_only_the_admission_default_marker() {
         let mut config = DaemonConfig {
             agent_home: PathBuf::from("/data/agent"),
             hermes_home: PathBuf::from("/data/agent/hermes-home"),
@@ -1430,33 +1409,21 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             specialization_bundle: None,
-            sidecar_welcome_allowlist: Some(owner.clone()),
             sidecar_admission_default: Some("locked".to_owned()),
             bridge_ready_timeout: Duration::from_secs(1),
         };
         let spec = sidecar_spec(&config);
         assert_eq!(
-            spec.environment.get("FINITECHAT_WELCOME_ALLOWLIST"),
-            Some(&owner)
-        );
-        // The hosted admission-default marker rides the same relay.
-        assert_eq!(
             spec.environment.get("FINITECHAT_ADMISSION_DEFAULT"),
             Some(&"locked".to_owned())
         );
-        config.sidecar_welcome_allowlist = None;
+        // Admission values are never derived here: the sidecar inherits
+        // FINITECHAT_OWNER_NPUBS and FINITECHAT_WELCOME_ALLOWLIST from the
+        // container environment (spawns are additive), so no allowlist key
+        // may appear in the spec.
         config.sidecar_admission_default = None;
         let spec = sidecar_spec(&config);
-        assert!(
-            !spec
-                .environment
-                .contains_key("FINITECHAT_WELCOME_ALLOWLIST")
-        );
-        assert!(
-            !spec
-                .environment
-                .contains_key("FINITECHAT_ADMISSION_DEFAULT")
-        );
+        assert!(spec.environment.is_empty());
     }
 
     #[test]
