@@ -533,7 +533,7 @@ exec {sys.executable!s} "$@"
             finitechat.write_text(
                 "#!/usr/bin/env bash\n"
                 f". {seed_stub}\n"
-                '# Emulate `hermes admission seed`: consume the env seed and\n'
+                "# Emulate `hermes admission seed`: consume the env seed and\n"
                 "# publish the store's allowed-users mirror.\n"
                 'if [[ "${1:-}" == "hermes" && "${4:-}" == "admission" ]]; then\n'
                 '  if [[ "$SEED_FAILS" == "1" ]]; then exit 1; fi\n'
