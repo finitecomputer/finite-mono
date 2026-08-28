@@ -1,16 +1,14 @@
 name: Production Deploy Plan
-
 on:
   pull_request:
-    branches:
-      - production
-
+    branches: [production]
 permissions:
   actions: read
   contents: read
   issues: write
   pull-requests: write
-
+env:
+  CACHIX_CACHE_NAME: finite
 jobs:
   plan:
     name: Plan production deploy
@@ -20,22 +18,25 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-
       - uses: DeterminateSystems/nix-installer-action@v16
-
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Build deployment plan
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
           mkdir -p target/production-deploy
           python3 scripts/production_deploy.py plan \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
             --output target/production-deploy/deployment-plan.json \
             --summary target/production-deploy/deployment-plan.md
-
       - name: Build lat1 closure artifact
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -45,28 +46,18 @@ jobs:
           scripts/build-lat1-nixos-closure-artifact \
             "$HEAD_SHA" \
             target/lat1-nixos-closure
-
-      - name: Upload deployment plan
+      - name: Upload plan evidence
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-plan
+          name: production-plan-${{ github.event.pull_request.head.sha }}
           path: |
             target/production-deploy/deployment-plan.json
             target/production-deploy/deployment-plan.md
-          if-no-files-found: error
-
-      - name: Upload lat1 closure artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lat1-nixos-closure-${{ github.event.pull_request.head.sha }}
-          path: |
             target/lat1-nixos-closure/manifest.json
-            target/lat1-nixos-closure/nix-cache
             target/lat1-nixos-closure/store-paths.txt
             target/lat1-nixos-closure/closure-size.txt
           if-no-files-found: error
           retention-days: 14
-
       - name: Comment deployment plan
         uses: actions/github-script@v7
         with:
@@ -98,7 +89,6 @@ jobs:
                 body,
               });
             }
-
       - name: Verify CI gate for source SHA
         env:
           GH_TOKEN: ${{ github.token }}

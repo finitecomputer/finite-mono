@@ -80,21 +80,41 @@ current routine deploy path is the CI-built closure artifact documented in
 
 ### Every deploy after that
 
-The routine deploy path is:
+The protected CD path is the `main` to `production` pull request described in
+[`../runbooks/production-cd.md`](../runbooks/production-cd.md). That workflow
+builds the same `lat1-nixos-closure-REV` metadata artifact, publishes the exact
+closure to the `finite` Cachix cache, and, once `mutation_enabled` is
+explicitly enabled, deploys it after GitHub production environment approval.
+
+The underlying deploy primitive remains:
 
 1. Dispatch `.github/workflows/lat1-nixos-closure.yml` for the exact reviewed
    `origin/main` revision. The workflow runs on `depot-ubuntu-24.04` by default,
    builds `nixosConfigurations.finite-lat-1.config.system.build.toplevel` and
-   the matching disko script with remote builders disabled, and uploads a file
-   binary cache artifact named `lat1-nixos-closure-REV`.
+   the matching disko script with remote builders disabled. By default it
+   pushes every path in that closure to the `finite` Cachix cache and uploads a
+   metadata artifact named `lat1-nixos-closure-REV`. Set the manual workflow's
+   `include_file_cache` input only for an explicit bootstrap/recovery artifact
+   that carries the legacy `nix-cache/` directory instead of depending on a
+   Cachix publication step.
 2. Download that artifact and run `just deploy-lat1-closure ARTIFACT_DIR`.
-   `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
-   prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
-   the exact `SYSTEM` path in a transient systemd unit, and verifies
-   `/run/current-system` equals that path. For revisions that include LAT
-   journald shipping, both the deploy script and the NixOS activation run the
-   values-redacting `infra/nixos/scripts/check-lat-monitoring-secrets` preflight
-   so a missing `/etc/finite/logs-write.env` blocks before Alloy restarts.
+   `scripts/deploy-lat1-closure-cache` validates the manifest, realizes the
+   exact `SYSTEM` path on lat1 with the manifest-pinned Cachix substituter and
+   trusted public key plus local builds disabled, advances
+   `/nix/var/nix/profiles/system`, activates that path in a transient systemd
+   unit, verifies `/run/current-system` equals it, and then verifies the
+   activated host declares the same Cachix trust for steady-state operation. For
+   revisions that include LAT journald shipping, both the deploy script and the
+   NixOS activation run the values-redacting
+   `infra/nixos/scripts/check-lat-monitoring-secrets` preflight so a missing
+   `/etc/finite/logs-write.env` blocks before Alloy restarts.
+
+`FINITE_LAT1_DEPLOY_MODE=realise-only` is the protected CD pre-boundary proof:
+it makes lat1 fetch and validate the exact Cachix-backed store paths without
+snapshotting or activating. `FINITE_LAT1_DEPLOY_TRANSPORT=file-cache` is
+reserved for explicit bootstrap/recovery use with an artifact that still
+contains `nix-cache/`. It is not the routine production carrier; the Deployment
+Record captures the selected transport in `deployment-transport.json`.
 
 For a finite-lat-3 Runner change, use the separate `Lat3 NixOS Closure`
 workflow. It builds only
@@ -129,7 +149,8 @@ if any activation or verification step fails. Run `scripts/finite-status
 the post-rollout status and Runner artifact evidence are green.
 
 Do not build production closures on the Mac, clawland, lat1, or lat2. There is
-no lat2 fallback deploy path. Rollback remains
+no lat2 fallback deploy path. A Cachix cache miss is a failed release pipeline,
+not permission to build on the host. Rollback remains
 `ssh root@64.34.82.77 nixos-rebuild switch --rollback`, or the same artifact
 workflow for a previous known-good revision followed by `just deploy-lat1-closure`.
 

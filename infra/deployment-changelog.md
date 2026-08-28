@@ -19,7 +19,7 @@ Newest first. Never record a secret value.
 | Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat1 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
 | Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat1, lat3) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
-| CLI and Electron releases (`finitechat`, `fsite`, `fbrain`) | component-scoped release tags and the rolling alias releases (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-mono`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
+| CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
 | Server binaries on lat1 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
 | Finite Private (Tinfoil) | [`runbooks/finite-private-deepseek-production-update.md`](runbooks/finite-private-deepseek-production-update.md) and [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `infra/nixos/modules/finite-saas-phala-runner.nix` | the unit environment is the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
@@ -30,24 +30,73 @@ the sources above cannot carry lands here.
 
 ## Standing promises
 
-- The finitechat server keeps accepting every fielded CLI and Electron client
-  until a deprecation is announced. The Electron app is a distinct, revocable
-  Device on the user's existing Finite Chat account.
+- The finitechat server keeps accepting every fielded CLI until a deprecation
+  is announced. The Electron experiment is on hold and is not part of the
+  current release path.
 - Hosted Agents pin their Runtime image at launch and do **not** auto-update.
   Kata launches the immutable digest through a promoted Core artifact;
   existing Agents are rolled serially through Core's guarded same-volume
   upgrade path, which preserves the Agent Principal and the durable `/data`
   mount.
-- Installers point only at the finite-mono rolling alias releases (hard cut
-  2026-07-08). Releases installed before the cut (`finitechat` v0.1.0–v0.1.3,
-  `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from the legacy repo URL; no
-  live users depend on it.
+- Installers point only at the public `finite-releases` rolling alias releases.
+  Releases installed before the 2026-07-08 monorepo cut (`finitechat`
+  v0.1.0–v0.1.3, `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from legacy repo
+  URLs; no live users depend on those URLs.
 - The historical `glm-5-2` request alias remains for mixed-version clients;
   `deepseek-v4-flash-0731` is the canonical model label everywhere else.
 - Runtime artifact ids promoted before 2026-08-05 (`2026-07-10.2` through
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
+
+- Brain sync went incremental (#699): `fbrain sync`/`open` now reconcile
+  against the cached export and pull only sync records instead of downloading
+  the full encrypted export — unbricking every brain whose export exceeds the
+  10 MB response limit (currently `finitecomputer`). Bumped to 0.5.0
+  everywhere; `fbrain/v0.5.0` published and the rolling alias verified
+  (installed binary reports 0.5.0).
+- Agent Runtime `2026-08-27.2`
+  (`…@sha256:7f6d9ab354c40bcddb19ba6ef37769d4a864f87acadf19fad3d22a1d4d6f8368`,
+  source `bfe082a1`, carries the 0.5.0 CLI in the agent baseline) registered
+  and promoted in Core BEFORE host pins moved; canary then `--roll-all` per
+  host — **22/22 lat1, 30/30 lat3 verified** against `.2`.
+- Process note: the v0.5.0 tag briefly landed twice on an unmerged bump ref;
+  both premature builds were cancelled within a minute and nothing published.
+  Guard now required for any release tagging: GitHub `mergeStateStatus`
+  CLEAN, PR state MERGED, and the bump read back from main — in that order.
+
+### 2026-08-27 — Platform wave: lifecycle Core `0020–0022`, Agent Runtime `2026-08-27.1`, hermes delivery hardening
+
+- Deployed rev `b9254c81` to both NixOS closures (lat1 rebooted into kernel
+  6.18.39 mid-activation — see notes). Agent Runtime `2026-08-27.1`
+  (`ghcr.io/finitecomputer/agent-runtime:2026-08-27.1@sha256:c7130042…edf11`,
+  source `847fd818`, Hermes 0.20.0, Finite Skills tree `5d7f5618d4…`) was
+  registered and promoted in Core, then pinned per host.
+- Fleet upgraded via the reviewed prepare/execute wrapper: canary then
+  `--roll-all` per host — **22/22 lat1, 30/30 lat3 verified**; the only
+  non-target record is the known artifact-less `smoke` row (zero drift
+  exceptions).
+- Shipped: canonical runtime-control lifecycle vocabulary + forward-only
+  offboarding phase machine (Core migrations `0020–0022`, applied cleanly —
+  post-migration status census matches pre-wave sums exactly), standing
+  readiness health reports, hermes delivery moved onto the Rust sidecar's
+  leased inbox (45-min lease TTL default; unresolvable reply threads warn and
+  fall back Home instead of being consumed silently), finitechat `/readyz`
+  semantic readiness probes (#678) now answering on production.
+- CLI releases cut and rolling aliases sha256-verified: `finitechat/v0.2.0`,
+  `fsite/v0.5.1`, `fbrain/v0.4.0`.
+- Operational notes folded into runbooks: promote into Core BEFORE flipping
+  host pins (unregistered pin ⇒ runner cycles fail closed, HTTP 404); a closure
+  with a kernel bump reboots during activation (expect the dark window);
+  recovery-snapshot gate can transiently cancel a queued job — immediate
+  systemd retry succeeds.
+- Rollback anchors captured pre-wave: pins
+  `finite-agent-runtime-2026-08-20.1`; `lat3-nixos-closure-6fcea1bb…` artifact +
+  prior lat1 system generation path; named `pg_dump`
+  `finite_core_pre_platform_rollout_2026-08-27T0140Z.dump`; reverse-vocabulary
+  rescue gated by `scripts/rollout_preflight.py`.
 
 ### 2026-08-20 — Agent Runtime `2026-08-20.1` rolled to the full fleet
 

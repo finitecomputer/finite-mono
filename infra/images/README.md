@@ -17,6 +17,7 @@ runs.
 | `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; lat1 runs the nix binary, not this image) |
 | `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat1 (podman oci-container, digest-pinned in `modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-kimi-k2-6) |
+| `glm-5-3-flash-sglang` | `glm-5.3-flash-sglang.Dockerfile` (context: repo root; wraps the exact upstream amd64 manifest with source labels and fail-closed internal auth) | `glm-5.3-flash-sglang-image.yml` | Prepared Finite Private GLM-5.3-Flash Tinfoil candidate |
 | `finite-specialization-worker` | `specialization-worker.Dockerfile` (context: repo root) | `service-images.yml` | shared AEON capability worker on clawland (digest-pinned Kubernetes deployment) |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |
 
@@ -50,6 +51,9 @@ Notes:
   `DEPOT_SERVICE_IMAGES_PROJECT_ID`, `DEPOT_RUNTIME_IMAGE_PROJECT_ID`, or
   `DEPOT_DEEPSEEK_VLLM_PROJECT_ID`. The workflows authenticate via
   `depot/setup-action` OIDC.
-- Version tags are date-based for images (`2026-07-08.1`); every push also
-  gets a `sha-<git sha>` tag and the workflow summary prints the pinned
-  `name:tag@digest` to use in manifests.
+- Version tags are date-based for images (`2026-07-08.1`). The guarded
+  workflows first publish and verify a non-production canary tag from the saved
+  OCI build. Production `:<version>` and `:sha-<git sha>` tags are promoted from
+  that same saved build only when the explicit production-publish input and
+  repository variable are both enabled. Workflow summaries print the pinned
+  `name@digest` or `name:tag@digest` to use in manifests.

@@ -72,11 +72,7 @@ def is_sops_json_file(path: Path) -> bool:
 
 
 def discover_files(secrets_root: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in secrets_root.rglob("*")
-        if is_sops_json_file(path)
-    )
+    return sorted(path for path in secrets_root.rglob("*") if is_sops_json_file(path))
 
 
 def selected_files(secrets_root: Path, supplied: list[str]) -> list[Path]:

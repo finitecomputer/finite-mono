@@ -46,15 +46,17 @@ build it is not the promotion proof for the final digest.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
-   baseline, captures and cross-checks the immutable local image ID, and runs
-   the durable Add/Welcome chat plus `/home/node` restart smoke against that
-   image ID before any
-   push. Only after that smoke passes does it push `:$VERSION` +
-   `:sha-<sha>`, uploads `runtime-image-report.json`, and prints the pinned
-   `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
-   summary. The uploaded durable-smoke report is evidence for the exact image
-   that was tagged and pushed; copy the pinned ref — it is the only thing you
-   promote.
+   baseline, saves the OCI result, pulls that saved result back locally, and
+   runs the durable Add/Welcome chat plus `/home/node` restart smoke against
+   that exact image ID before any push. Only after that smoke passes does it
+   publish a non-production `canary-<run>-<attempt>` tag, verify the registry
+   digest against the saved-build digest, prove anonymous GHCR pull, upload
+   `runtime-image-report.json`, and print the pinned canary ref in the
+   summary. Production `:$VERSION` and `:sha-<sha>` tags are promoted from the
+   same saved build only when `publish_production=true` and
+   `FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED=true`. The uploaded durable-smoke
+   report is evidence for the exact image that was tagged; copy the pinned ref
+   — it is the only thing you promote.
 
 **Recovery boundary:** the canonical image now has the narrow, one-shot
 `recover_known_good` boot receiver and the snapshot-root contract covers all of
@@ -75,7 +77,7 @@ template: `infra/hosts/lat1/systemd/runner.env.example`). The pin is:
   the promoted artifact **kind, reference, and state schema from Core**
   using this ID.
 
-So promotion is two steps:
+So promotion is two steps — **in this order**:
 
 1. Register the new pinned image as an artifact in Core.
    Use Core's service-authenticated runtime-artifact registration endpoint;
@@ -92,6 +94,12 @@ So promotion is two steps:
    required`) if it is missing. No restart needed: the timer re-invokes the
    runner with the new env (set `FC_RUNNER_DRAIN=true` first if you want
    in-flight launches to settle).
+
+> **Order matters (learned 2026-08-27):** finish step 1 before touching any
+> host pin. A pin referencing an id Core does not know makes every runner
+> cycle fail closed with `HTTP 404 {"error":"runtime artifact is not
+> configured"}` — reverting the pin to the previous registered id restores
+> capacity immediately.
 
 When introducing the artifact-capability column, drain new Kata creation before
 the Core/Runner generation switch, register the new recovery-capable digest

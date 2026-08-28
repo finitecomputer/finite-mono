@@ -39,14 +39,20 @@ PENDING_AUTH_PATH = HERMES_HOME / "google_oauth_pending.json"
 def load_scopes():
     """Load the platform-owned Google Workspace scope contract."""
     script_path = Path(__file__).resolve()
-    candidates = [script_path.parent.parent / "references" / "google-workspace-scopes.json"]
+    candidates = [
+        script_path.parent.parent / "references" / "google-workspace-scopes.json"
+    ]
     profile_assets_root = os.getenv("FC_PROFILE_ASSETS_ROOT")
     if profile_assets_root:
-        candidates.append(Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json")
+        candidates.append(
+            Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json"
+        )
 
     for parent in script_path.parents:
         if parent.name == "managed-skills":
-            candidates.append(parent.parent / "contracts" / "google-workspace-scopes.json")
+            candidates.append(
+                parent.parent / "contracts" / "google-workspace-scopes.json"
+            )
             break
 
     for candidate in candidates:
@@ -57,7 +63,9 @@ def load_scopes():
             return data
         raise RuntimeError(f"Invalid Google Workspace scope contract at {candidate}")
 
-    raise RuntimeError("Missing Google Workspace scope contract in the installed skill.")
+    raise RuntimeError(
+        "Missing Google Workspace scope contract in the installed skill."
+    )
 
 
 SCOPES = load_scopes()
@@ -92,7 +100,11 @@ def granted_scopes():
         return SCOPES
 
     scopes = data.get("scopes")
-    if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes) and scopes:
+    if (
+        isinstance(scopes, list)
+        and all(isinstance(item, str) for item in scopes)
+        and scopes
+    ):
         return scopes
     return SCOPES
 
@@ -119,7 +131,9 @@ def install_deps():
         return True
     except subprocess.CalledProcessError as e:
         print(f"ERROR: Failed to install dependencies: {e}")
-        print(f"Try manually: {sys.executable} -m pip install {' '.join(REQUIRED_PACKAGES)}")
+        print(
+            f"Try manually: {sys.executable} -m pip install {' '.join(REQUIRED_PACKAGES)}"
+        )
         return False
 
 
@@ -193,7 +207,9 @@ def store_client_secret(path: str):
 
     if "installed" not in data and "web" not in data:
         print("ERROR: Not a Google OAuth client secret file (missing 'installed' key).")
-        print("Download the correct file from: https://console.cloud.google.com/apis/credentials")
+        print(
+            "Download the correct file from: https://console.cloud.google.com/apis/credentials"
+        )
         sys.exit(1)
 
     atomic_private_write_text(CLIENT_SECRET_PATH, json.dumps(data, indent=2))
@@ -286,7 +302,9 @@ def exchange_auth_code(code: str):
     pending_auth = _load_pending_auth()
     code, returned_state = _extract_code_and_state(code)
     if returned_state and returned_state != pending_auth["state"]:
-        print("ERROR: OAuth state mismatch. Run --auth-url again to start a fresh session.")
+        print(
+            "ERROR: OAuth state mismatch. Run --auth-url again to start a fresh session."
+        )
         sys.exit(1)
 
     _ensure_deps()
@@ -347,16 +365,28 @@ def revoke():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
+    parser = argparse.ArgumentParser(
+        description="Google Workspace OAuth setup for Hermes"
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--check", action="store_true", help="Check if auth is valid (exit 0=yes, 1=no)"
     )
-    group.add_argument("--client-secret", metavar="PATH", help="Store OAuth client_secret.json")
-    group.add_argument("--auth-url", action="store_true", help="Print OAuth URL for user to visit")
-    group.add_argument("--auth-code", metavar="CODE", help="Exchange auth code for token")
-    group.add_argument("--revoke", action="store_true", help="Revoke and delete stored token")
-    group.add_argument("--install-deps", action="store_true", help="Install Python dependencies")
+    group.add_argument(
+        "--client-secret", metavar="PATH", help="Store OAuth client_secret.json"
+    )
+    group.add_argument(
+        "--auth-url", action="store_true", help="Print OAuth URL for user to visit"
+    )
+    group.add_argument(
+        "--auth-code", metavar="CODE", help="Exchange auth code for token"
+    )
+    group.add_argument(
+        "--revoke", action="store_true", help="Revoke and delete stored token"
+    )
+    group.add_argument(
+        "--install-deps", action="store_true", help="Install Python dependencies"
+    )
     args = parser.parse_args()
 
     if args.check:

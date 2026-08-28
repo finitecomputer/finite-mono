@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
   merge_group:
     types: [checks_requested]
   push:
@@ -67,17 +69,39 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Parse the channel out of rust-toolchain.toml — the single Rust
+          # pin — so the install below can never float. The dtolnay action
+          # does NOT read the toml itself: with no toolchain input it
+          # installs its branch name (floating stable), which is exactly
+          # what this repo must not do.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
-        # crates, and floating stable (1.96 today) trips new let-chain lints
-        # in devfinity. 1.93.1 is verified clean across the whole workspace.
-        # Bump deliberately (run clippy locally first), don't float.
-        # MSRV (rust-version 1.88) is still exercised by the release builds.
+        # Toolchain is the channel parsed from rust-toolchain.toml above —
+        # the single build pin shared with Nix shells, release builds, and
+        # dev hosts. Bump deliberately (run clippy locally first), don't
+        # float: 1.88's clippy trips uninlined_format_args on v2 crates and
+        # floating stable trips new let-chain lints. The workspace
+        # rust-version floor stays at the oldest rustc that must still build
+        # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93.1"
-          components: rustfmt, clippy
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -158,6 +182,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - uses: Swatinem/rust-cache@v2
 
       - name: Device parity and Electron boundary gates
@@ -216,10 +245,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Same contract as the Rust workspace job: parse the channel from
+          # rust-toolchain.toml rather than letting the action default to
+          # its floating stable branch name. This job's run working-directory
+          # is finitechat/, so anchor the path at the checkout root.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
+        # Toolchain is the channel parsed from rust-toolchain.toml — the
+        # same pin the Rust workspace job and release builds use.
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -412,6 +457,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Skills check
         run: nix develop --command just skills check
 
@@ -423,6 +473,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Search check
         run: nix develop --command just search check
 
@@ -434,6 +489,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Monitoring NixOS contract
         run: nix develop --command just monitoring-nixos-contract
 
@@ -445,6 +505,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
 
@@ -459,6 +524,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Brain product language check
         run: nix develop --command just brain-language-check
       - name: Canonical Runtime image contract
@@ -490,6 +560,13 @@ jobs:
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
+  # Landing gate: builds the 15 scoped service packages through crane and
+  # repopulates Cachix. select-harnesses defers this to landing events
+  # (push / merge_group) except when a PR changes the package derivations
+  # themselves: the workspace manifests / Cargo.lock / .cargo config that
+  # scope cargoArtifacts, rust-toolchain.toml, the flake graph, or
+  # infra/nixos/. A cold cargoArtifacts build here costs ~30 minutes and
+  # the Rust workspace job has already compiled and tested the PR diff.
   nix-service-packages:
     name: Nix service packages
     needs: changes
@@ -705,10 +782,16 @@ jobs:
 
   devfinity-smoke:
     name: devfinity services-only smoke
+    # Packaging runs on landing events only (and flake-graph PRs); on other
+    # pull requests this job proceeds while the packaging job is skipped:
+    # warm cargoArtifacts substitute from Cachix and only the thin final
+    # packages build locally from the PR tree. `!cancelled()` overrides the
+    # default "skip when a dependency is skipped" without losing the wait for
+    # the Cachix push on landing runs.
     needs:
       - changes
       - nix-service-packages
-    if: needs.changes.outputs.run_devfinity_smoke == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.run_devfinity_smoke == 'true' && needs['nix-service-packages'].result != 'failure' }}
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

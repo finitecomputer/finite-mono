@@ -8,6 +8,7 @@ re-run the canonical fleet status and Tinfoil read-only status before acting.
 | Finite Private | Stable product/service identity | Production |
 | DeepSeek V4 Flash 0731 | Current Finite Private model, canonical API name `deepseek-v4-flash-0731` | Running on eight H200s at `control.inf9.tinfoil.sh` |
 | `kimi-k2-6` | Historical Tinfoil container, satellite repo, and generated hostname | Still the production infrastructure route; it does not identify the current model |
+| GLM-5.3-Flash | Prepared candidate, canonical API name `glm-5-3-flash` | Not deployed; blocked on immutable image/modelwrap pins and the production acceptance window |
 | GLM 5.2 | Mixed-version API alias `glm-5-2` and older recovery evidence | Not the canonical product model |
 | Kimi K2 | Previously served model that gave the container its name | Not current production |
 | Laguna S2.1 | Isolated eight-H200 lab candidate | Never production; recipe/evidence preserved on historical [GPU-lab PR #461](https://github.com/finitecomputer/finite-mono/pull/461) |
@@ -42,8 +43,11 @@ amount.
 
 ## Naming rule
 
-Model names may change; product and route names should not. The next container
-identity is `finite-private`, behind the preferred custom route
-`inference.finite.computer`. Migrate the route and every issued Runtime reader
-before replacing the historical container. See
-[`finite-private-routing-migration.md`](../runbooks/finite-private-routing-migration.md).
+Model names may change; product and route names should not. The next GPU
+container identity is `finite-private`, behind the preferred custom route
+`inference.finite.computer`. Until that custom route and every issued Runtime
+reader have converged, the GLM-5.3-Flash cutover preserves the historical
+generated route with a secret-free CPU compatibility bridge. See
+[`finite-private-routing-migration.md`](../runbooks/finite-private-routing-migration.md)
+and
+[`finite-private-glm-5.3-flash-production-cutover.md`](../runbooks/finite-private-glm-5.3-flash-production-cutover.md).

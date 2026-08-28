@@ -22,12 +22,23 @@ DOCUMENTED_EXCEPTIONS = {
     # Deployed SQLite migrations and their forward rename must retain private
     # legacy identifiers. Product/runtime language remains checked elsewhere.
     ROOT / "finite-brain/crates/finite-brain-store/src/schema.rs",
-    ROOT / "finite-brain/docs/adr/0027-use-brain-as-the-product-language-for-knowledge-spaces.md",
+    ROOT
+    / "finite-brain/docs/adr/0027-use-brain-as-the-product-language-for-knowledge-spaces.md",
     ROOT / "finite-brain/docs/specs/brain-language-and-setup-reconciliation-spec.md",
     ROOT / "finite-brain/docs/specs/intent-based-access-invitations-and-mounts-spec.md",
 }
 TEXT_SUFFIXES = {
-    ".css", ".html", ".js", ".json", ".md", ".mjs", ".rs", ".sh", ".toml", ".ts", ".tsx"
+    ".css",
+    ".html",
+    ".js",
+    ".json",
+    ".md",
+    ".mjs",
+    ".rs",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".tsx",
 }
 FORBIDDEN = re.compile(
     r"\bVaults?\b|\bVaultId\b|\bvaultId\b|\bvault_id\b|/_admin/vaults\b|\bfbrain\s+vault\b"
@@ -57,7 +68,8 @@ for surface in SURFACES:
             if LEGACY_AGENT_STATE_ALIAS.fullmatch(line):
                 continue
             if FORBIDDEN.search(line) or (
-                path.suffix in PRODUCT_TEXT_SUFFIXES and RETIRED_PRODUCT_WORD.search(line)
+                path.suffix in PRODUCT_TEXT_SUFFIXES
+                and RETIRED_PRODUCT_WORD.search(line)
             ):
                 violations.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
 

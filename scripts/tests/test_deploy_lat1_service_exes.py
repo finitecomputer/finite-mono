@@ -16,7 +16,6 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-import textwrap
 import unittest
 
 
@@ -151,7 +150,9 @@ class ServiceExeVerificationTests(unittest.TestCase):
             f"[Service]\nType=oneshot\nExecStart={new_exe(RUN_ONCE)} run-once\n",
             encoding="utf-8",
         )
-        closure_paths = [f"/nix/store/{'n' * 32}-{RUN_ONCE}-1.0"] if runner_in_closure else []
+        closure_paths = (
+            [f"/nix/store/{'n' * 32}-{RUN_ONCE}-1.0"] if runner_in_closure else []
+        )
         (self.units / "closure.txt").write_text(
             "".join(f"{path}\n" for path in closure_paths), encoding="utf-8"
         )
@@ -217,7 +218,9 @@ class ServiceExeVerificationTests(unittest.TestCase):
         order = [
             source.index('test "$ACTUAL" = "$SYSTEM"'),
             source.index("<<'VERIFY'"),
-            source.index("systemctl is-active finite-saas-core podman-finite-saas-dashboard"),
+            source.index(
+                "systemctl is-active finite-saas-core podman-finite-saas-dashboard"
+            ),
         ]
         self.assertEqual(order, sorted(order))
 

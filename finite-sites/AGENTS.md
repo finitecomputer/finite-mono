@@ -86,6 +86,7 @@ git clone https://git.finite.chat/PROJECT.git
 
 # GitHub Release Shape
 
-The public repository is expected to publish `fsite` binaries from tags named
-`v*`. Keep README install commands and generated `/llms.txt` instructions in
-sync with `.github/workflows/release.yml`.
+The monorepo publishes `fsite` binaries from component tags named
+`fsite/vX.Y.Z`. Keep README install commands and generated `/llms.txt`
+instructions in sync with `.github/workflows/release-fsite.yml` and the public
+`finitecomputer/finite-releases` download host.

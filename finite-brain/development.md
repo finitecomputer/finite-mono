@@ -40,7 +40,7 @@ Current production service:
 Repository and releases:
 
 - Source: `https://github.com/finitecomputer/finite-mono/tree/main/finite-brain`
-- Release downloads: `https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
+- Release downloads: `https://github.com/finitecomputer/finite-releases/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
 
 ## Crate Layout
 
@@ -190,17 +190,16 @@ Component tags named `fbrain/vX.Y.Z` trigger
 `.github/workflows/release-fbrain.yml` from the monorepo root. The workflow
 publishes the versioned release and refreshes the `fbrain-latest` rolling alias.
 
-The GitHub release packages `fbrain` binaries for:
+The release workflow currently packages:
 
 - `fbrain-linux-x86_64`
 - `fbrain-macos-aarch64`
 - `fbrain-macos-x86_64`
+- `finite-brain-linux-x86_64`
 
 Each asset is uploaded as `.tar.gz` with a matching `.sha256` file.
-
-The Linux `finite-brain` server binary is also published as
-`finite-brain-linux-x86_64.tar.gz` for the smoke bridge. Normal production
-deployment builds the server through Nix from the exact monorepo revision.
+Normal production deployment builds the server through Nix from the exact
+monorepo revision.
 
 Before tagging:
 

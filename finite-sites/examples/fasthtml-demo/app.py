@@ -8,7 +8,18 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-from fasthtml.common import *
+from fasthtml.common import (
+    Button,
+    Form,
+    Input,
+    Li,
+    P,
+    Redirect,
+    Titled,
+    Ul,
+    fast_app,
+    serve,
+)
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 db = sqlite3.connect(f"{DATA_DIR}/guestbook.db", check_same_thread=False)
@@ -21,7 +32,9 @@ app, rt = fast_app(key_fname=f"{DATA_DIR}/.sesskey")
 
 @rt("/")
 def get():
-    rows = db.execute("SELECT name, at FROM entries ORDER BY rowid DESC LIMIT 10").fetchall()
+    rows = db.execute(
+        "SELECT name, at FROM entries ORDER BY rowid DESC LIMIT 10"
+    ).fetchall()
     return Titled(
         "FastHTML on Finite",
         P("A Python server app fixture for a future Project Output type."),
@@ -40,7 +53,10 @@ def get():
 def post(name: str):
     safe = name.strip()[:80]
     if safe:
-        db.execute("INSERT INTO entries VALUES (?, ?)", (safe, f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M}"))
+        db.execute(
+            "INSERT INTO entries VALUES (?, ?)",
+            (safe, f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M}"),
+        )
         db.commit()
     return Redirect("/")
 

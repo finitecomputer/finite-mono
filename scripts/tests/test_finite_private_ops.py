@@ -20,6 +20,7 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     fail_request_two = False
     required_model: str | None = None
+    response_model: str | None = None
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -53,7 +54,12 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/v1/responses":
-            body = b'{"id":"response-mixed-version"}'
+            body = json.dumps(
+                {
+                    "id": "response-mixed-version",
+                    "model": self.response_model or payload.get("model"),
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
@@ -71,7 +77,12 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload.get("stream") is not True:
-            body = b'{"choices":[{"message":{"content":"finite private ok"}}]}'
+            body = json.dumps(
+                {
+                    "model": self.response_model or payload.get("model"),
+                    "choices": [{"message": {"content": "finite private ok"}}],
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
@@ -79,7 +90,15 @@ class MockFinitePrivateHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         chunks = [
-            'data: {"id":"mock","choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n',
+            "data: "
+            + json.dumps(
+                {
+                    "id": "mock",
+                    "model": self.response_model or payload.get("model"),
+                    "choices": [{"index": 0, "delta": {"content": "ok"}}],
+                }
+            )
+            + "\n\n",
             'data: {"id":"mock","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":16,"total_tokens":28}}\n\n',
             "data: [DONE]\n\n",
         ]
@@ -110,6 +129,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
     def tearDown(self) -> None:
         MockFinitePrivateHandler.fail_request_two = False
         MockFinitePrivateHandler.required_model = None
+        MockFinitePrivateHandler.response_model = None
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
@@ -197,7 +217,24 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
         MockFinitePrivateHandler.required_model = "glm-5-2"
         result = self.run_ops("mixed-version-canary")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Mixed-version Finite Private compatibility passed", result.stdout)
+        self.assertIn(
+            "Mixed-version Finite Private compatibility passed", result.stdout
+        )
+
+    def test_canaries_can_require_a_canonical_response_model(self) -> None:
+        self.environment["FINITE_PRIVATE_MODEL"] = "deepseek-v4-flash-0731"
+        self.environment["FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL"] = "glm-5-3-flash"
+        MockFinitePrivateHandler.required_model = "deepseek-v4-flash-0731"
+        MockFinitePrivateHandler.response_model = "glm-5-3-flash"
+        for command in ("canary", "stream-canary", "responses-canary"):
+            with self.subTest(command=command):
+                result = self.run_ops(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        MockFinitePrivateHandler.response_model = "wrong-model"
+        result = self.run_ops("canary")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected glm-5-3-flash", result.stderr)
 
     def test_settlement_status_accepts_preexisting_but_not_rollout_reserved_rows(
         self,
@@ -215,9 +252,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
             self.environment["PATH"] = (
                 temporary_directory + os.pathsep + self.environment["PATH"]
             )
-            result = self.run_ops(
-                "settlement-status", "2026-08-14T04:00:00Z"
-            )
+            result = self.run_ops("settlement-status", "2026-08-14T04:00:00Z")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("preexisting_reserved|50|rollout_reserved|0", result.stdout)
         self.assertIn("rollout-era canary settlements passed", result.stdout)
@@ -234,9 +269,7 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
             self.environment["PATH"] = (
                 temporary_directory + os.pathsep + self.environment["PATH"]
             )
-            result = self.run_ops(
-                "settlement-status", "2026-08-14T04:00:00Z"
-            )
+            result = self.run_ops("settlement-status", "2026-08-14T04:00:00Z")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("created during this rollout remain reserved", result.stderr)
 

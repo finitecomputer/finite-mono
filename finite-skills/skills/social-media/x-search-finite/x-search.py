@@ -32,7 +32,9 @@ def get_client():
     return Client(api_key=api_key)
 
 
-def grok_chat(prompt: str, model: str = "grok-4-1-fast", handles: list[str] | None = None) -> str:
+def grok_chat(
+    prompt: str, model: str = "grok-4-1-fast", handles: list[str] | None = None
+) -> str:
     """Send a prompt to Grok with x_search enabled and return response text."""
     from xai_sdk.chat import user
     from xai_sdk.tools import x_search
@@ -89,7 +91,9 @@ IMPORTANT: Every tweet MUST include its real x.com URL. Use x_search to find the
         for i, tweet in enumerate(data["tweets"], 1):
             print(f"**{i}. {tweet.get('author', '???')}**")
             print(f"> {tweet.get('text', '')}")
-            print(f"Engagement: {tweet.get('engagement', '')} | [Link]({tweet.get('url', '')})\n")
+            print(
+                f"Engagement: {tweet.get('engagement', '')} | [Link]({tweet.get('url', '')})\n"
+            )
         return
 
     print(f"# X Search: {args.query}\n")
@@ -261,21 +265,29 @@ Be concise and factual."""
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="X/Twitter search and analysis via Grok")
+    parser = argparse.ArgumentParser(
+        description="X/Twitter search and analysis via Grok"
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     search_parser = subparsers.add_parser("search", help="Search tweets on a topic")
     search_parser.add_argument("query", nargs="+")
     search_parser.add_argument("--limit", type=int, default=10)
 
-    topic_parser = subparsers.add_parser("topic", help="Topic analysis with side classification")
+    topic_parser = subparsers.add_parser(
+        "topic", help="Topic analysis with side classification"
+    )
     topic_parser.add_argument("query", nargs="+")
     topic_parser.add_argument("--sides", required=True, help="'SideA|SideB'")
     topic_parser.add_argument("--limit", type=int, default=10)
 
-    account_parser = subparsers.add_parser("account", help="Analyze account across topics")
+    account_parser = subparsers.add_parser(
+        "account", help="Analyze account across topics"
+    )
     account_parser.add_argument("handle")
-    account_parser.add_argument("--topics", required=True, help="Comma-separated topics")
+    account_parser.add_argument(
+        "--topics", required=True, help="Comma-separated topics"
+    )
 
     ask_parser = subparsers.add_parser("ask", help="Freeform question about an account")
     ask_parser.add_argument("handle")

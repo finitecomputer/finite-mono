@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Publish an already-built finite-lat-1 closure to the Finite Cachix cache and
+# mark the deploy manifest as Cachix-backed.
+set -euo pipefail
+
+CACHIX_CACHE_NAME="${CACHIX_CACHE_NAME:-finite}"
+CACHIX_SUBSTITUTER="${CACHIX_SUBSTITUTER:-https://finite.cachix.org}"
+CACHIX_TRUSTED_PUBLIC_KEY="${CACHIX_TRUSTED_PUBLIC_KEY:-finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk=}"
+
+usage() {
+  echo "usage: $0 <lat1-closure-artifact-dir>" >&2
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 64
+fi
+
+artifact_dir="$1"
+if [[ ! -d "$artifact_dir" ]]; then
+  echo "artifact directory does not exist: $artifact_dir" >&2
+  exit 66
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+manifest="$artifact_dir/manifest.json"
+store_paths="$artifact_dir/store-paths.txt"
+
+if [[ ! -f "$manifest" ]]; then
+  echo "artifact manifest is missing: $manifest" >&2
+  exit 66
+fi
+if [[ ! -s "$store_paths" ]]; then
+  echo "store path inventory is missing or empty: $store_paths" >&2
+  exit 66
+fi
+if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+  echo "CACHIX_AUTH_TOKEN is required to publish the lat1 closure" >&2
+  exit 67
+fi
+
+python3 - "$manifest" "$CACHIX_CACHE_NAME" "$CACHIX_SUBSTITUTER" "$CACHIX_TRUSTED_PUBLIC_KEY" <<'PY'
+import json
+import re
+import sys
+
+manifest_path, cache_name, substituter, trusted_key = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if data.get("schema") != "finite.lat1.nixos-closure.v1":
+    raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
+if data.get("host") != "finite-lat-1":
+    raise SystemExit(f"unexpected manifest host: {data.get('host')!r}")
+if data.get("repository") != "finitecomputer/finite-mono":
+    raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
+if not re.fullmatch(r"[0-9a-f]{40}", data.get("rev", "")):
+    raise SystemExit(f"invalid rev: {data.get('rev')!r}")
+if not re.fullmatch(
+    r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/\s]+",
+    data.get("system", ""),
+):
+    raise SystemExit(f"invalid system path: {data.get('system')!r}")
+if not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", data.get("disko", "")):
+    raise SystemExit(f"invalid disko path: {data.get('disko')!r}")
+
+cachix = data.get("cachix")
+if not isinstance(cachix, dict):
+    raise SystemExit("manifest is missing cachix metadata")
+if cachix.get("cache") != cache_name:
+    raise SystemExit(f"manifest cache {cachix.get('cache')!r} does not match {cache_name!r}")
+if cachix.get("substituter") != substituter:
+    raise SystemExit(
+        f"manifest substituter {cachix.get('substituter')!r} does not match {substituter!r}"
+    )
+if cachix.get("trusted_public_key") != trusted_key:
+    raise SystemExit("manifest trusted public key does not match publish configuration")
+PY
+
+closure_count="$(wc -l < "$store_paths" | tr -d '[:space:]')"
+echo "==> pushing $closure_count lat1 closure paths to Cachix cache $CACHIX_CACHE_NAME"
+python3 - "$CACHIX_CACHE_NAME" "$store_paths" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+cache_name, store_paths_file = sys.argv[1:]
+paths = [
+    line.strip()
+    for line in Path(store_paths_file).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+for offset in range(0, len(paths), 100):
+    subprocess.run(["cachix", "push", cache_name, *paths[offset : offset + 100]], check=True)
+PY
+
+published_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+python3 - "$manifest" "$CACHIX_CACHE_NAME" "$CACHIX_SUBSTITUTER" "$CACHIX_TRUSTED_PUBLIC_KEY" "$closure_count" "$published_utc" <<'PY'
+import json
+import sys
+
+manifest_path, cache_name, substituter, trusted_key, closure_count, published_utc = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as fh:
+    data = json.load(fh)
+
+data["transport"] = "cachix"
+data["cachix"] = {
+    "cache": cache_name,
+    "substituter": substituter,
+    "trusted_public_key": trusted_key,
+    "published": True,
+    "published_utc": published_utc,
+    "store_path_count": int(closure_count),
+}
+
+with open(manifest_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+
+printf 'CACHIX_CACHE=%s\n' "$CACHIX_CACHE_NAME"
+printf 'CACHIX_SUBSTITUTER=%s\n' "$CACHIX_SUBSTITUTER"
+printf 'MANIFEST=%s\n' "$manifest"

@@ -27,6 +27,22 @@ check:
 fmt:
     cargo fmt --all
 
+# Formats all Python code with the repo-pinned ruff (flake.nix `pyToolPkgs.ruff`
+# — the exact attr CI's hermes-bridge-ci shell checks with). Never invoke
+# `nix run nixpkgs#ruff` or a host ruff: format output differs between
+# versions and that is how CI formatting gates go red.
+fmt-py:
+    nix develop .#default -c ruff format .
+
+# Lints all Python code with the repo-pinned ruff.
+lint-py:
+    nix develop .#default -c ruff check .
+
+# Prints the pinned toolchain versions (rust-toolchain.toml + flake ruff).
+toolchain-versions:
+    @echo "rust: $$(cargo --version)"
+    @echo "ruff: $$(nix develop .#default -c ruff --version)"
+
 # Runs all Rust tests with isolated devfinity-managed test infrastructure
 test:
     cargo run --quiet --locked -p devfinity -- run -- cargo test --workspace --locked
@@ -69,6 +85,12 @@ finite-private-deepseek-contract:
 
 finite-private-deepseek-release-contract:
     just computer finite-private-deepseek-release-contract
+
+finite-private-glm53-contract:
+    just computer finite-private-glm53-contract
+
+finite-private-glm53-release-contract:
+    just computer finite-private-glm53-release-contract
 
 finite-status-contract:
     just infra finite-status-contract

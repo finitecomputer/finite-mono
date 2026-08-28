@@ -1,24 +1,34 @@
 name: Release fbrain
-
-# Component-scoped release: tag `fbrain/vX.Y.Z` on finite-mono.
-# Installers use the rolling alias release `fbrain-latest` (repo-wide
-# `releases/latest` is meaningless in a multi-component repo):
-#   https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/<asset>
-# Hard-cut 2026-07-08: no mirror releases to the archived legacy repos.
-
 on:
   push:
-    tags:
-      - "fbrain/v*"
-
+    tags: ["fbrain/v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after all build rows pass
+        required: true
+        default: false
+        type: boolean
+      alias_only:
+        description: Repoint the rolling alias from existing versioned assets without rebuilding
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Historical component tag for alias-only promotion; leave blank for a normal release
+        required: false
+        default: ""
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: release-fbrain
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.alias_only != true
+    runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,40 +42,43 @@ jobs:
           - runs_on: macos-14
             asset_name: fbrain-macos-x86_64
             target: x86_64-apple-darwin
-    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
-
+      - name: Validate component version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            fbrain/v*) version="${GITHUB_REF_NAME#fbrain/v}" ;;
+            *) echo "::error::release workflow must run at an fbrain/v* tag"; exit 1 ;;
+          esac
+          python3 scripts/delivery.py verify-component-version --component fbrain --version "$version"
       - name: Install Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           rustup target add "${{ matrix.target }}"
-
       - name: Build fbrain
         run: cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-cli --bin fbrain
-
       - name: Package fbrain
-        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/fbrain" dist/fbrain
-          tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" fbrain
-          shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
-
-      # The smoke-host bridge (infra/hosts/smoke/deploy.md) consumes the
-      # finite-brain server binary from this release so the legacy nix
-      # packaging can stop vendoring source tarballs.
-      - name: Build and package finite-brain server (linux only)
+          cp "target/$TARGET/release/fbrain" dist/fbrain
+          tar -C dist -czf "$ASSET_NAME.tar.gz" fbrain
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
+          else
+            shasum -a 256 "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
+          fi
+      - name: Build finite-brain server
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        shell: bash
         run: |
-          cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-app --bin finite-brain
+          cargo build --locked --release --target x86_64-unknown-linux-gnu --package finite-brain-app --bin finite-brain
           mkdir -p dist-server
-          cp "target/${{ matrix.target }}/release/finite-brain" dist-server/finite-brain
-          tar -C dist-server -czf "finite-brain-linux-x86_64.tar.gz" finite-brain
-          shasum -a 256 "finite-brain-linux-x86_64.tar.gz" > "finite-brain-linux-x86_64.tar.gz.sha256"
-
+          cp target/x86_64-unknown-linux-gnu/release/finite-brain dist-server/finite-brain
+          tar -C dist-server -czf finite-brain-linux-x86_64.tar.gz finite-brain
+          sha256sum finite-brain-linux-x86_64.tar.gz > finite-brain-linux-x86_64.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
@@ -75,39 +88,47 @@ jobs:
             finite-brain-linux-x86_64.tar.gz
             finite-brain-linux-x86_64.tar.gz.sha256
           if-no-files-found: ignore
-
   publish:
     needs: build
+    if: vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-
-      - name: Create or update GitHub release
+      - name: Publish immutable version and rolling alias
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" \
-              --title "$tag" --generate-notes --latest=false
-          fi
-
-      - name: Refresh fbrain-latest rolling alias
+          version="${GITHUB_REF_NAME#fbrain/v}"
+          source_sha="$(git rev-parse HEAD)"
+          python3 scripts/delivery.py publish-release \
+            --component fbrain \
+            --version "$version" \
+            --source-sha "$source_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --assets-dir release-assets \
+            --repository finitecomputer/finite-releases
+  promote-alias:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repoint rolling alias from verified immutable assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          alias=fbrain-latest
-          notes="Rolling alias for the newest fbrain release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
-          if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
-          else
-            gh release create "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" \
-              --title "fbrain (latest)" --notes "$notes" --latest=false
-          fi
+          case "$RELEASE_TAG" in
+            fbrain/v*) version="${RELEASE_TAG#fbrain/v}" ;;
+            *) echo "::error::release_tag must be an fbrain/v* tag"; exit 1 ;;
+          esac
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          source_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          python3 scripts/delivery.py promote-release-alias \
+            --component fbrain \
+            --version "$version" \
+            --expected-source-sha "$source_sha" \
+            --repository finitecomputer/finite-releases

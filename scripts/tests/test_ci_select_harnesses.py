@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import pathlib
+import re
 import sys
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -27,14 +28,49 @@ def selection_for(*paths: str) -> dict[str, str]:
 
 
 def selected(*paths: str) -> set[str]:
-    return {
-        key
-        for key, value in selection_for(*paths).items()
-        if value == "true"
-    }
+    return {key for key, value in selection_for(*paths).items() if value == "true"}
+
+
+def ci_workflow_text() -> str:
+    return (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+
+def ci_job_block(job_id: str) -> str:
+    text = ci_workflow_text()
+    start = text.index(f"\n  {job_id}:\n")
+    match = re.search(r"\n  [a-zA-Z0-9_-]+:\n", text[start + 1 :])
+    if match is None:
+        return text[start:]
+    return text[start : start + 1 + match.start()]
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
+    def test_ci_pull_request_trigger_is_scoped_to_main(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertIn("pull_request:\n    branches:\n      - main", workflow)
+        self.assertNotIn("branches: [production]", workflow)
+
+    def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
+        for job_id in (
+            "rust",
+            "electron-alpha",
+            "skills-check",
+            "search-check",
+            "monitoring-nixos-contract",
+            "finite-status-contract",
+            "nix-checks",
+        ):
+            with self.subTest(job_id=job_id):
+                block = ci_job_block(job_id)
+                self.assertIn(
+                    "uses: DeterminateSystems/nix-installer-action@v16",
+                    block,
+                )
+                self.assertIn("Configure Cachix read-only cache", block)
+                self.assertIn("name: ${{ env.CACHIX_CACHE_NAME }}", block)
+                self.assertIn("skipPush: true", block)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),
@@ -109,6 +145,18 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_production_cd_setup_files_run_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/production_cd_setup.py",
+                "scripts/verify-production-cd-setup",
+                "scripts/tests/test_production_cd_setup.py",
+                "scripts/production_deploy.py",
+                "scripts/tests/test_production_deploy.py",
+            ),
+            {"run_nix_checks"},
+        )
+
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
 
@@ -117,6 +165,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(value, "false")
             else:
                 self.assertEqual(value, "true", key)
+
+    def test_non_ci_workflow_selects_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(".github/workflows/production-deploy.yml"),
+            {"run_nix_checks"},
+        )
 
     def test_unknown_root_file_selects_every_active_harness(self) -> None:
         values = selection_for("pnpm-workspace.yaml")
@@ -144,7 +198,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_dashboard_component_change_runs_browser_e2e(self) -> None:
         self.assertEqual(
-            selected("finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx"),
+            selected(
+                "finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx"
+            ),
             {"run_dashboard", "run_dashboard_browser"},
         )
 
@@ -226,7 +282,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_stripe_price_contract_path_runs_nix_checks(self) -> None:
         self.assertEqual(
-            selected("finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py"),
+            selected(
+                "finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py"
+            ),
             {"run_nix_checks"},
         )
         self.assertEqual(
@@ -282,27 +340,136 @@ class CiHarnessSelectionTests(unittest.TestCase):
             else:
                 self.assertEqual(value, "true", key)
 
-    def test_changed_file_dotfile_path_selects_every_active_harness(self) -> None:
-        args = argparse.Namespace(changed_files=[".github/workflows/README.md"])
+    def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
+        args = argparse.Namespace(
+            changed_files=[".github/workflows/production-deploy.yml"], event=""
+        )
         selection, _reason, paths = select_harnesses.select_harnesses(args)
-        values = selection.values()
 
-        self.assertEqual(paths, [".github/workflows/README.md"])
-        for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+        self.assertEqual(paths, [".github/workflows/production-deploy.yml"])
+        self.assertEqual(
+            {key for key, value in selection.values().items() if value == "true"},
+            {"run_nix_checks"},
+        )
 
     def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
-        prefixed = argparse.Namespace(changed_files=["./justfile"])
-        bare = argparse.Namespace(changed_files=["justfile"])
+        prefixed = argparse.Namespace(changed_files=["./justfile"], event="")
+        bare = argparse.Namespace(changed_files=["justfile"], event="")
 
-        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(prefixed)
+        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(
+            prefixed
+        )
         bare_selection, _reason, bare_paths = select_harnesses.select_harnesses(bare)
 
         self.assertEqual(prefixed_paths, bare_paths)
         self.assertEqual(prefixed_selection.values(), bare_selection.values())
+
+
+def pull_request_args(*paths: str) -> argparse.Namespace:
+    return argparse.Namespace(changed_files=list(paths), event="pull_request")
+
+
+class CiPackagingGateTests(unittest.TestCase):
+    def test_pull_request_defers_nix_service_packages(self) -> None:
+        # A plain source change selects every harness as an unknown path, and
+        # the devfinity/brain dependency rule forces packaging on; the
+        # pull_request gate must still defer packaging.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("finitechat/crates/finitechat-server/src/lib.rs")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertTrue(selection.run_devfinity_smoke)
+        self.assertTrue(selection.run_brain_product_matrix)
+        self.assertIn("deferred to landing events", reason)
+
+    def test_pull_request_flake_lock_change_keeps_nix_service_packages(self) -> None:
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("flake.lock", "Cargo.lock")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
+
+    def test_pull_request_cargo_lock_change_keeps_nix_service_packages(self) -> None:
+        # Direct coverage for the Cargo.lock-only PR: cargoVendorDir and every
+        # mkCargoArtifacts derive from the root Cargo.lock, so deferring
+        # packaging here would move the cold crane build into devfinity-smoke
+        # without a Cachix warm-up.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("Cargo.lock")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
+
+    def test_pull_request_package_input_changes_keep_nix_service_packages(self) -> None:
+        # Every package-derivation input family keeps the PR-time package
+        # build: workspace manifests (mkDummySrc scopes cargoArtifacts to
+        # them), the single Rust pin, cargo config, the flake graph, and the
+        # infra/nixos packaging surface itself.
+        for changed in (
+            "Cargo.toml",
+            "finitechat/crates/finitechat-server/Cargo.toml",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "flake.nix",
+            "flake.lock",
+            "infra/nixos/packages.nix",
+            "infra/nixos/modules/monitoring-vps.nix",
+        ):
+            with self.subTest(changed=changed):
+                selection, reason, _paths = select_harnesses.select_harnesses(
+                    pull_request_args(changed)
+                )
+                self.assertTrue(selection.run_nix_service_packages, changed)
+                self.assertNotIn("deferred", reason)
+
+    def test_pull_request_derivation_irrelevant_change_defers_nix_service_packages(
+        self,
+    ) -> None:
+        # Generated-code sources feed only the thin final package
+        # derivations, which devfinity-smoke builds locally against warm
+        # cargoArtifacts - they do not justify the PR-time package build.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("finitechat/protos/chat.proto")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertIn("deferred to landing events", reason)
+
+    def test_pull_request_flake_nix_change_keeps_nix_service_packages(self) -> None:
+        selection, _reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("flake.nix")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_push_event_keeps_nix_service_packages(self) -> None:
+        args = argparse.Namespace(
+            changed_files=["finitechat/crates/finitechat-server/src/lib.rs"],
+            event="push",
+        )
+
+        selection, _reason, _paths = select_harnesses.select_harnesses(args)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_merge_group_runs_every_harness_including_packaging(self) -> None:
+        args = argparse.Namespace(changed_files=None, event="merge_group")
+
+        selection, _reason, _paths = select_harnesses.select_harnesses(args)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_unselected_packaging_gate_is_a_no_op(self) -> None:
+        # Docs-only changes select nothing; the gate must not invent a note.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("docs/some-note.md")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
 
 
 if __name__ == "__main__":

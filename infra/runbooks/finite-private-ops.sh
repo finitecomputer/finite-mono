@@ -10,6 +10,7 @@ fi
 CONTAINER="${FINITE_PRIVATE_CONTAINER:-kimi-k2-6}"
 ENDPOINT="${FINITE_PRIVATE_ENDPOINT:-https://kimi-k2-6.finite.containers.tinfoil.dev}"
 MODEL="${FINITE_PRIVATE_MODEL:-deepseek-v4-flash-0731}"
+EXPECTED_RESPONSE_MODEL="${FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL:-}"
 TIMEOUT_SECS="${FINITE_PRIVATE_CANARY_TIMEOUT_SECS:-180}"
 READY_TIMEOUT_SECS="${FINITE_PRIVATE_READY_TIMEOUT_SECS:-4200}"
 LOAD_MAX_FIRST_BYTE_SECS="${FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS:-90}"
@@ -46,6 +47,8 @@ Environment:
   FINITE_PRIVATE_CONTAINER             default: kimi-k2-6
   FINITE_PRIVATE_ENDPOINT              default: https://kimi-k2-6.finite.containers.tinfoil.dev
   FINITE_PRIVATE_MODEL                 default: deepseek-v4-flash-0731
+  FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL
+                                       optional exact model identity required in responses
   FINITE_PRIVATE_CANARY_ENV_FILE       default: secrets/finite-private-canary.env
   FINITE_PRIVATE_CANARY_API_KEY        required for canary/gate
   FINITE_PRIVATE_CANARY_TIMEOUT_SECS   default: 180
@@ -138,11 +141,16 @@ canary() {
     --data "$payload" \
     --output "$response_file" \
     "$ENDPOINT/v1/chat/completions"
-  python3 - "$response_file" <<'PY'
+  python3 - "$response_file" "$EXPECTED_RESPONSE_MODEL" <<'PY'
 import json
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_model = sys.argv[2]
+if expected_model and payload.get("model") != expected_model:
+    raise SystemExit(
+        f"chat canary returned model {payload.get('model')!r}; expected {expected_model}"
+    )
 content = payload.get("choices", [{}])[0].get("message", {}).get("content")
 if not isinstance(content, str) or "finite private ok" not in content.lower():
     raise SystemExit("chat canary response did not contain the expected text")
@@ -173,6 +181,29 @@ stream_canary() {
   curl -fsS --no-buffer --max-time "$TIMEOUT_SECS" --config "$curl_config" \
     --data "$payload" --output "$response_file" "$ENDPOINT/v1/chat/completions"
   grep -Fq 'data: [DONE]' "$response_file"
+  python3 - "$response_file" "$EXPECTED_RESPONSE_MODEL" <<'PY'
+import json
+import sys
+
+expected_model = sys.argv[2]
+if expected_model:
+    observed_models = set()
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        for line in stream:
+            if not line.startswith("data: "):
+                continue
+            data = line.removeprefix("data: ").strip()
+            if data == "[DONE]":
+                continue
+            event = json.loads(data)
+            if isinstance(event.get("model"), str):
+                observed_models.add(event["model"])
+    if observed_models != {expected_model}:
+        raise SystemExit(
+            f"stream canary returned models {sorted(observed_models)!r}; "
+            f"expected {expected_model}"
+        )
+PY
   cat "$response_file"
   rm -f "$curl_config" "$response_file"
   trap - RETURN
@@ -198,11 +229,17 @@ responses_canary() {
   payload="$(printf '{"model":"%s","input":"Reply briefly: finite private responses ok","max_output_tokens":128}' "$MODEL")"
   curl -fsS --max-time "$TIMEOUT_SECS" --config "$curl_config" \
     --data "$payload" --output "$response_file" "$ENDPOINT/v1/responses"
-  python3 - "$response_file" <<'PY'
+  python3 - "$response_file" "$EXPECTED_RESPONSE_MODEL" <<'PY'
 import json
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_model = sys.argv[2]
+if expected_model and payload.get("model") != expected_model:
+    raise SystemExit(
+        f"responses canary returned model {payload.get('model')!r}; "
+        f"expected {expected_model}"
+    )
 if not isinstance(payload.get("id"), str) or not payload["id"]:
     raise SystemExit("responses canary did not return a response id")
 print(json.dumps(payload, sort_keys=True))
