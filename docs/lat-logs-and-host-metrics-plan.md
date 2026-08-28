@@ -8,16 +8,19 @@ old Docker Compose monitoring stack is removed from the active path. LAT host
 collection and production rollout remain separate steps.
 
 Current implementation progress: steps 1 through 4 below are implemented;
-step 5 remains pending.
+step 5 remains pending. During the lat1/lat3 hardware incident, the Grafana
+dashboard has been widened to show lat1 through lat4 so the retiring hosts
+remain visible while lat2 and lat4 come online.
 
 ## Goal
 
 Show centralized logs and basic host performance metrics for the LAT fleet in
 Grafana without changing product behavior.
 
-The production rollout target is `finite-lat-1` and `finite-lat-3`. `finite-lat-2`
-is included only after an explicit role decision, because the current infra
-inventory names it as a decommission target rather than production capacity.
+The production dashboard target is the whole `finite-lat-1` through
+`finite-lat-4` fleet. `finite-lat-1` and `finite-lat-3` remain visible while
+they are retired so operators can see them as down instead of silently losing
+the hosts from the dashboard.
 
 ## Non-Goals
 
@@ -99,9 +102,11 @@ Initial unit allowlist:
   storage-health units.
 - `finite-lat-3`: finite-saas-runner, storage-health units, WireGuard/network
   units, Alloy, node exporter.
-- `finite-lat-2`: excluded from the production dashboard unless its role is
-  updated. If explicitly monitored while decommissioning, label it
-  `role="decommission"` and keep it out of production availability summaries.
+- `finite-lat-2`: app-plane successor for `finite-lat-1`; collect the same
+  app-facing service logs once its production role is activated.
+- `finite-lat-4`: runner successor for `finite-lat-3`; collect the same
+  runner, storage-health, WireGuard/network, Alloy, and node-exporter logs once
+  its production role is activated.
 
 Separate host-incident sources:
 
@@ -168,7 +173,9 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 
    Repo status: implemented in `infra/nixos/modules/metrics.nix` for
    `finite-lat-1` and `finite-lat-3`, including the service allowlist and the
-   host-incident sources above. The next LAT NixOS activation will require
+   host-incident sources above. `finite-lat-2` and `finite-lat-4` must use the
+   same app and runner collection profiles respectively when their NixOS host
+   definitions land. The next LAT NixOS activation will require
    `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
    and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
    covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
@@ -180,11 +187,11 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    - Optionally run `infra/nixos/scripts/check-lat-monitoring-secrets` on the
      target host before activation for an early failure; NixOS activation also
      enforces the same check.
-   - Roll out `finite-lat-3` first.
+   - Roll out the replacement host for the currently failing role first.
    - Verify Prometheus host metrics and Loki logs in Grafana.
-   - Roll out `finite-lat-1` after `finite-lat-3` is clean.
-   - Add `finite-lat-2` only after its role is explicitly updated or a
-     decommission-only monitoring view is approved.
+   - Keep `finite-lat-1` and `finite-lat-3` visible in Grafana while retired;
+     the scrape-health panel provides explicit zero-valued fallback series so
+     absent retired hosts render as down.
    - Run `scripts/finite-status --json` after each host rollout.
 
 ## Acceptance Criteria
@@ -198,8 +205,8 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 - Prometheus remote write and Loki push use separate credentials.
 - No log or metric label contains user, account, email, project, runtime,
   request, route, file path, or other customer-derived values.
-- `finite-lat-2` is either absent from production availability panels or
-  clearly labeled as decommission-only.
+- The scrape-health panel keeps `finite-lat-1` through `finite-lat-4` visible,
+  including retired hosts that are no longer remote-writing metrics.
 - `scripts/finite-status --json` is captured before and after each host rollout.
 
 ## Deferred Follow-Ups

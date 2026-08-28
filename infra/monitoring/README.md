@@ -57,12 +57,20 @@ The logs file must contain `FINITE_LOGS_WRITE_USERNAME` and
 credential. It is intentionally separate from the Prometheus remote-write
 credential.
 
+The repository-provisioned Grafana dashboard includes `finite-lat-1` through
+`finite-lat-4`. Retired hosts remain visible in the scrape-health panel as
+`DOWN` after their remote-written series goes stale, while replacement hosts
+appear as soon as their Alloy collectors begin writing with the corresponding
+host label.
+
 Before activating a LAT host closure that includes journald log shipping, an
 operator can validate the host-local files early without printing values:
 
 ```sh
-ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
-ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-1 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-2 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-3 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-4 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ```
 
 `scripts/deploy-lat1-closure-cache` runs this preflight automatically for lat1
