@@ -4522,6 +4522,19 @@ impl SqliteClientStore {
         &self,
         owner: &DeviceRef,
     ) -> Result<WelcomeAdmissionPolicy, ClientStoreError> {
+        Ok(self
+            .configured_welcome_admission_policy(owner)?
+            .unwrap_or(WelcomeAdmissionPolicy::AllowAll))
+    }
+
+    /// The explicitly persisted policy row, if any. Distinguishing "no row"
+    /// from an explicit [`WelcomeAdmissionPolicy::AllowAll`] matters for boot
+    /// seeding: only a device with no row at all is eligible for a birth-time
+    /// seed, so an operator- or seed-written row is never overwritten.
+    pub fn configured_welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Option<WelcomeAdmissionPolicy>, ClientStoreError> {
         owner.validate_limits().map_err(ClientError::from)?;
         let mode = self.conn.query_row(
             r#"
@@ -4533,8 +4546,8 @@ impl SqliteClientStore {
             |row| row.get::<_, String>(0),
         );
         match mode {
-            Ok(mode) => Ok(WelcomeAdmissionPolicy::from_mode(&mode)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(WelcomeAdmissionPolicy::AllowAll),
+            Ok(mode) => Ok(Some(WelcomeAdmissionPolicy::from_mode(&mode))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
@@ -4610,6 +4623,59 @@ impl SqliteClientStore {
                 |row| row.get::<_, bool>(0),
             )
             .map_err(ClientStoreError::from)
+    }
+
+    /// Every allowlisted sender, sorted for a stable mirror rendering.
+    pub fn welcome_allowed_senders(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Vec<String>, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT sender_account_id
+            FROM client_welcome_allowlist
+            WHERE account_id = ?1 AND device_id = ?2
+            ORDER BY sender_account_id
+            "#,
+        )?;
+        let rows = stmt.query_map(params![&owner.account_id, &owner.device_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut senders = Vec::new();
+        for row in rows {
+            senders.push(row?);
+        }
+        Ok(senders)
+    }
+
+    /// Remove one allowlisted sender. Returns whether a row was actually
+    /// removed; removing a sender which was never listed is a no-op so
+    /// duplicate revocations settle idempotently. Callers must refuse to
+    /// remove the final entry themselves — an allowlist policy with zero
+    /// entries admits no one's Welcomes, which bricks room admission.
+    pub fn remove_welcome_allowed_sender(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        validate_string_bytes(
+            "welcome_allowlist.sender_account_id",
+            sender_account_id,
+            MAX_ACCOUNT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        let removed = self.conn.execute(
+            r#"
+            DELETE FROM client_welcome_allowlist
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND sender_account_id = ?3
+            "#,
+            params![&owner.account_id, &owner.device_id, sender_account_id],
+        )?;
+        Ok(removed > 0)
     }
 
     pub fn store_pending_welcome_and_save(

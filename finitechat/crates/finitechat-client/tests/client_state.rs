@@ -694,6 +694,79 @@ fn runtime_sync_tick_admits_same_account_welcome_with_empty_allowlist() {
 }
 
 #[test]
+fn welcome_allowlist_store_supports_list_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_allowlist_store");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_allowlist_store");
+    let owner = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_allowlist_store")
+        .device_ref()
+        .clone();
+    let bob_account = bob.device_ref().account_id.clone();
+    let charlie_account = "c".repeat(64);
+
+    // No policy row: the configured probe is empty and the effective policy
+    // stays the legacy allow-all.
+    assert_eq!(
+        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        None
+    );
+    assert_eq!(
+        alice_store.welcome_admission_policy(&owner).unwrap(),
+        WelcomeAdmissionPolicy::AllowAll
+    );
+    assert_eq!(alice_store.welcome_allowed_senders(&owner).unwrap(), Vec::<String>::new());
+
+    alice_store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(&owner, [charlie_account.clone(), bob_account.clone()])
+        .unwrap();
+    assert_eq!(
+        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        Some(WelcomeAdmissionPolicy::Allowlist)
+    );
+    // Sorted for a stable mirror rendering.
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        vec![bob_account.clone(), charlie_account.clone()]
+    );
+
+    assert!(
+        alice_store
+            .remove_welcome_allowed_sender(&owner, &bob_account)
+            .unwrap()
+    );
+    // A duplicate revoke is an idempotent no-op.
+    assert!(
+        !alice_store
+            .remove_welcome_allowed_sender(&owner, &bob_account)
+            .unwrap()
+    );
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        vec![charlie_account.clone()]
+    );
+    assert!(
+        alice_store
+            .welcome_sender_allowed(&owner, &charlie_account)
+            .unwrap()
+    );
+    assert!(!alice_store.welcome_sender_allowed(&owner, &bob_account).unwrap());
+
+    // An explicit allow-all row is distinguishable from an absent row, so
+    // boot seeding never overwrites a deliberate operator choice.
+    alice_store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::AllowAll)
+        .unwrap();
+    assert_eq!(
+        alice_store.configured_welcome_admission_policy(&owner).unwrap(),
+        Some(WelcomeAdmissionPolicy::AllowAll)
+    );
+}
+
+#[test]
 fn runtime_sync_tick_syncs_room_pages_over_finitechat_http_routes() {
     let dir = tempfile::tempdir().unwrap();
     let server_db = dir.path().join("finitechat-http.sqlite3");
