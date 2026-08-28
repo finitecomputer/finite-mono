@@ -155,3 +155,4 @@ jobs:
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
+          fi
