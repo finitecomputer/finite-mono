@@ -9,8 +9,10 @@
 - Feature branch: `codex/glm-5-3-flash-cutover-prep`
 - Human owner: Finite operator
 - Started: 2026-08-27
-- Current status: repository preparation complete; external publication and
-  production execution remain blocked on operator action
+- Current status: first execution window (2026-08-28 02:31 America/Chicago)
+  stopped no-go before any production mutation; all published artifacts
+  verified reusable; retry pending runbook-exception review and operator
+  scheduling
 - Skill setup status: complete (`docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md` are present)
 
@@ -89,17 +91,59 @@ These are the preparation defaults pending any operator adjustment:
 | Add protocol, 120-user capacity, latency, quality, and blind comparison gates | AFK | Complete | Pass | None | 20 Python gate tests green |
 | Prepare `finite-private` rename with historical-route bridge | AFK | Complete | Pass | None | Candidate contract and ops tests green |
 | Write 03:00 cutover and rollback procedure | AFK | Complete | Pass | None | Static contract and post-fix review green |
-| Generate Tinfoil MPK and publish measured image pins | HITL/production access | Parked | N/A | Operator/Tinfoil action | No |
+| Generate Tinfoil MPK and publish measured image pins | HITL/production access | Complete | Pass | None | MPK root `54b2859a…5ed79`; images `.3` pinned by digest (see attempt record below) |
 | Execute production replacement and live load gate | HITL/production mutation | Parked | N/A | Explicit operator action | No |
+
+## 2026-08-28 02:31 window attempt (no-go before mutation)
+
+The authorized window opened at 02:31 America/Chicago (the runbook's 02:30
+start; earlier ledger references to 03:00 are superseded). Timeline:
+
+- Preflight clean; readiness-fix PR #722 merged. Both production images built
+  from commit `b91eea86`; the service-image workflow's summary step failed on
+  a missing `fi`, fixed by PR #723, and both images republished as
+  `2026-08-28.3` from commit `35834e7e` with verified digests.
+- `confidential-finite-private` satellite tagged and measured from commit
+  `72ef45ed`. Release `v2026-08-28-glm-5-3-flash-1` (deployment hash
+  `4c90778f…a7a06`); compatibility bridge release
+  `v2026-08-28-glm53-compatibility-bridge-1` (deployment hash
+  `da6fad29…eab9`). Candidate config SHA-256 `91fe432e…cc9d35`, committed to
+  this repository on this run's retry-preparation PR.
+- Canonical `scripts/finite-status` from `finite-lat-1` returned
+  `fleet_convergence` red/unknown twice: all 51 active Runtimes readiness
+  `unknown` (never reported), and the distribution aggregate disagreed with
+  the detail snapshot. The runbook then carried no named exceptions, so the
+  window stopped before the first Tinfoil mutation. DeepSeek was never
+  replaced; no rollback was necessary.
+
+Post-attempt root cause (both findings pre-existing, not regressions):
+
+- Readiness `unknown` everywhere: the standing-readiness ferry registers a
+  report target only on fresh launch/relocation completion; the fleet was
+  upgraded in place on 2026-08-27, so no current Runtime can ever report.
+  Tracked for repair separately from this cutover.
+- Aggregate/snapshot mismatch: inner join vs left join on
+  `runtime_artifacts`; explained by the documented artifact-less `smoke` row.
+
+DeepSeek remained production-healthy throughout and passed the full direct
+pre-cutover suite (protocol canaries, 32-way baseline 32/32, p50 TTFT 0.144s,
+quality 10/10, six-case blind reference capture). All published artifacts
+were re-verified on 2026-08-28: both release deployment JSONs match the
+retained evidence, and both pinned GHCR digests resolve anonymously. The
+retry needs the runbook's named-exceptions amendment reviewed, the retained
+before-report baselines re-captured fresh, and an authorized window.
+
+Retained evidence: `.local-state/glm53-cutover-2026-08-28/` (operator
+worktree `finite-mono-glm-5-3-flash-cutover`; not in git).
 
 ## Parked HITL Slices
 
 | Slice | Why parked | Blocks | Required human action | Draft PR decision |
 | --- | --- | --- | --- | --- |
-| Generate modelwrap MPK | Requires Tinfoil Models access and creates an external artifact | Release-ready candidate | Generate from the pinned checkpoint and record MPK/root hash | Remains an explicit placeholder |
-| Publish limiter and SGLang wrapper images | Mutates GHCR and production tags | Release-ready candidate | Dispatch reviewed workflows and record immutable amd64 digests | Preparation workflow is included |
-| Publish satellite releases | Creates external release state | Tinfoil relaunch | Review exact satellite commits and publish artifacts | Commands only |
-| Replace the live eight-H200 container | Causes planned inference downtime | Production cutover | Explicitly execute the 03:00 runbook | Out of draft PR execution scope |
+| Generate modelwrap MPK | Requires Tinfoil Models access and creates an external artifact | Release-ready candidate | Generate from the pinned checkpoint and record MPK/root hash | Complete 2026-08-28; root pinned in candidate |
+| Publish limiter and SGLang wrapper images | Mutates GHCR and production tags | Release-ready candidate | Dispatch reviewed workflows and record immutable amd64 digests | Complete 2026-08-28 as `2026-08-28.3` |
+| Publish satellite releases | Creates external release state | Tinfoil relaunch | Review exact satellite commits and publish artifacts | Complete 2026-08-28; both releases verified |
+| Replace the live eight-H200 container | Causes planned inference downtime | Production cutover | Explicitly execute the 02:30 runbook | Out of draft PR execution scope |
 
 ## Issue Session Ledger
 
@@ -113,8 +157,10 @@ These are the preparation defaults pending any operator adjustment:
   p50, 10 tok/s p10, 2,400 aggregate output tok/s, and 10-second p95 TTFT. It
   may be raised before publication; lowering it requires a reviewed PR and a
   new operator decision.
-- Tinfoil organization access must publish the model MPK and both satellite
-  releases before the maintenance window.
+- The runbook's named pre-existing fleet exceptions (readiness reporting gap
+  and aggregate/snapshot mismatch) must be reviewed and accepted by the
+  operator before the retry window; without them the entry gate fails exactly
+  as it did on 2026-08-28.
 
 ## Escalations
 
