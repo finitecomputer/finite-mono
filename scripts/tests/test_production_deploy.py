@@ -208,6 +208,9 @@ class ProductionDeployTests(unittest.TestCase):
         self.assertIn("skipPush: true", lat1_closure)
         self.assertIn("Stage status collector on lat1", deploy)
         self.assertIn("finite-status-before.json", deploy)
+        self.assertIn('"nodes"]["nixpkgs"]["locked"]["rev"]', deploy)
+        self.assertIn("github:NixOS/nixpkgs/$REMOTE_NIXPKGS_REV#python3", deploy)
+        self.assertIn("--command python3 ./finite-status --json", deploy)
         self.assertIn("python3 -m json.tool", deploy)
         self.assertNotIn("require-production-disabled", plan)
 
