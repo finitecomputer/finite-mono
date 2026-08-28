@@ -23,6 +23,10 @@ LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-4]"
 
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",
+    "node_cpu_scaling_frequency_hertz",
+    "node_cpu_scaling_frequency_max_hertz",
+    "node_hwmon_sensor_label",
+    "node_hwmon_temp_celsius",
     "node_load1",
     "node_load5",
     "node_load15",
@@ -46,6 +50,9 @@ HOST_PANEL_TITLES = [
     "LAT Host Scrape Health",
     "LAT CPU Busy",
     "LAT Load Average",
+    "LAT CPU Temperature",
+    "LAT CPU Clock",
+    "LAT Thermal Throttling Heuristic",
     "LAT Memory Used",
     "LAT Swap Used",
     "LAT Filesystem Used",
@@ -236,6 +243,7 @@ def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def check_dashboard_contract() -> None:
     dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    require(dashboard["refresh"] == "30s", "Grafana dashboard must refresh every 30s")
     panels = dashboard["panels"]
     panel_ids = [panel["id"] for panel in panels]
     require(len(panel_ids) == len(set(panel_ids)), "Grafana panel IDs must be unique")
@@ -288,6 +296,20 @@ def check_dashboard_contract() -> None:
         'device=~"en.*|eth.*|wg-finite"',
         "LAT Network Throughput",
     )
+    require_contains(
+        panels_by_title["LAT CPU Temperature"]["targets"][0]["expr"],
+        'label=~"Tctl|Tccd[0-9]+"',
+        "LAT CPU Temperature",
+    )
+    throttle_expression = panels_by_title["LAT Thermal Throttling Heuristic"][
+        "targets"
+    ][0]["expr"]
+    for threshold in (">= bool 95", ">= bool 70", "<= bool 0.70"):
+        require_contains(
+            throttle_expression,
+            threshold,
+            "LAT Thermal Throttling Heuristic",
+        )
 
     for title in LOG_PANEL_TITLES:
         panel = panels_by_title[title]
@@ -462,6 +484,12 @@ def main() -> int:
 
         for metric_name in HOST_METRIC_NAMES:
             require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
+
+        require_contains(
+            alloy_config,
+            'scrape_interval = "15s"',
+            f"{host_name} Alloy metrics cadence",
+        )
 
         for expected in (
             'loki.relabel "finite_journal"',
