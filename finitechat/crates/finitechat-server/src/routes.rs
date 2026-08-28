@@ -134,18 +134,28 @@ async fn rate_limit_public_routes(
     request: Request,
     next: Next,
 ) -> Response {
-    if state.check_public_route_rate_limit(client_ip(&request)) {
-        return next.run(request).await;
+    // Direct loopback callers (host-local services, no proxy in front) share
+    // one address and one bucket; device-link export alone runs hundreds of
+    // KeyPackage publishes a minute from exactly that path. They are trusted
+    // host-local traffic and are exempt. Everything else — XFF-attributed
+    // clients behind the host-local proxy, or direct remote peers — is
+    // limited per address.
+    match client_ip(&request) {
+        Some(ip) if !state.check_public_route_rate_limit(ip) => {
+            (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response()
+        }
+        _ => next.run(request).await,
     }
-    (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response()
 }
 
-/// Client IP for rate limiting. The edge proxy (Caddy) is host-local, so
-/// X-Forwarded-For is only trusted when the direct peer is loopback; the
-/// trusted value is the LAST hop, the address Caddy observed and appended —
-/// the first hop is attacker-controlled whenever the client supplies the
-/// header. A non-loopback peer is the client itself; XFF is ignored.
-fn client_ip(request: &Request) -> IpAddr {
+/// Client IP for rate limiting; `None` marks a direct loopback caller, which
+/// is exempt (host-local traffic, no per-client address to attribute). The
+/// edge proxy (Caddy) is host-local, so X-Forwarded-For is only trusted when
+/// the direct peer is loopback; the trusted value is the LAST hop, the
+/// address Caddy observed and appended — the first hop is attacker-
+/// controlled whenever the client supplies the header. A non-loopback peer
+/// is the client itself; XFF is ignored.
+fn client_ip(request: &Request) -> Option<IpAddr> {
     client_ip_from(
         request
             .extensions()
@@ -158,17 +168,22 @@ fn client_ip(request: &Request) -> IpAddr {
     )
 }
 
-fn client_ip_from(peer: Option<IpAddr>, x_forwarded_for: Option<&str>) -> IpAddr {
+fn client_ip_from(peer: Option<IpAddr>, x_forwarded_for: Option<&str>) -> Option<IpAddr> {
     let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     if !peer.is_loopback() {
-        return peer;
+        return Some(peer);
     }
-    x_forwarded_for
+    let last_hop = x_forwarded_for
         .and_then(|value| value.split(',').next_back())
         .map(str::trim)
         .filter(|hop| !hop.is_empty())
-        .and_then(|hop| hop.parse().ok())
-        .unwrap_or(peer)
+        .and_then(|hop| hop.parse().ok());
+    match last_hop {
+        Some(hop) => Some(hop),
+        // No proxy attribution and the peer is the host itself: exempt
+        // rather than bucket every local caller under 127.0.0.1.
+        None => None,
+    }
 }
 
 #[cfg(test)]
@@ -197,16 +212,23 @@ mod client_ip_tests {
     }
 
     #[test]
-    fn loopback_peer_without_header_uses_peer() {
+    fn loopback_peer_without_header_is_exempt() {
+        // Direct host-local callers share 127.0.0.1 and cannot be attributed
+        // per client; they are exempt from the limiter entirely.
         assert_eq!(
             client_ip_from(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), None),
-            IpAddr::V6(Ipv6Addr::LOCALHOST)
+            None
+        );
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), None),
+            None
         );
         // An unparsable header falls back to the peer rather than a fresh
-        // bucket per garbage value.
+        // bucket per garbage value — and for a loopback peer that means
+        // exemption, not a shared bucket.
         assert_eq!(
             client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some("not-an-ip")),
-            IpAddr::V4(Ipv4Addr::LOCALHOST)
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
         );
     }
 }

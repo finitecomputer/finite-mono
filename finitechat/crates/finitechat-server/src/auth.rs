@@ -18,17 +18,22 @@ use serde::de::DeserializeOwned;
 use crate::ServerHttpError;
 use crate::state::HttpServerState;
 
-/// Maximum accepted clock skew for HTTP auth events, in seconds.
-pub(crate) const HTTP_AUTH_MAX_SKEW_SECONDS: u64 = 60;
+/// Maximum accepted clock skew for HTTP auth events, in seconds. Generous on
+/// purpose: first-party clients run on consumer devices and hosted boxes
+/// whose clocks drift.
+pub(crate) const HTTP_AUTH_MAX_SKEW_SECONDS: u64 = 300;
 
 /// JSON body extractor for account-scoped routes that authenticates the
 /// request with a NIP-98-style signed event.
 ///
 /// Mixed-version behavior follows `HttpServerState::require_signed_requests`:
-/// when false a missing `Authorization` header is accepted (old deployed
-/// clients keep working) but a present header must verify; when true a
-/// missing header is rejected as well. A verified signer must always match
-/// the account id carried by the body.
+/// when false, a missing header is accepted (old deployed clients keep
+/// working) and a present-but-invalid header is logged and treated as
+/// unsigned — rejecting it would only break upgraded clients whose dial URL
+/// differs from this server's public URL, while buying nothing (an attacker
+/// just omits the header). When true, a missing or invalid header is
+/// rejected. In both modes, a signature that does validate is binding: the
+/// signer must match the account id named by the body.
 pub(crate) struct SignedJson<T>(pub T);
 
 impl<T> FromRequest<HttpServerState> for SignedJson<T>
@@ -52,9 +57,7 @@ where
                 }
                 None
             }
-            Some(value) => {
-                let event = finite_nostr::decode_http_auth_header(value)
-                    .map_err(|_| unauthorized("malformed Nostr authorization header"))?;
+            Some(value) => match finite_nostr::decode_http_auth_header(value).and_then(|event| {
                 let url = absolute_request_url(state.public_url(), &headers, &uri);
                 let validation = finite_nostr::HttpAuthValidation::new(
                     method,
@@ -63,11 +66,29 @@ where
                     HTTP_AUTH_MAX_SKEW_SECONDS,
                 )
                 .with_body(bytes.to_vec());
-                let signer = finite_nostr::validate_http_auth_event(&event, &validation).map_err(
-                    |error| unauthorized(format!("invalid Nostr authorization: {error}")),
-                )?;
-                Some(signer.to_hex())
-            }
+                finite_nostr::validate_http_auth_event(&event, &validation)
+            }) {
+                Ok(signer) => Some(signer.to_hex()),
+                // Flag-off mode treats a bad header as advisory: upgraded
+                // clients sign their configured dial URL, which can differ
+                // from this server's public URL (loopback/alias
+                // deployments), so rejecting here would 401 exactly the
+                // clients this rollout is meant to carry. With the flag off
+                // an attacker simply omits the header anyway — rejecting
+                // buys nothing and breaks real deployments.
+                Err(error) => {
+                    if state.require_signed_requests() {
+                        return Err(unauthorized(format!(
+                            "invalid Nostr authorization: {error}"
+                        )));
+                    }
+                    eprintln!(
+                        "finitechat-server: ignoring invalid Nostr authorization \
+                         (signed-requests flag is off): {error}"
+                    );
+                    None
+                }
+            },
         };
 
         let body = serde_json::from_slice::<T>(&bytes).map_err(|error| {
@@ -81,6 +102,10 @@ where
                 .into_response()
         })?;
 
+        // A signature that validates is binding in every mode: a signer that
+        // does not match the named account is never tolerated, flag or no
+        // flag. First-party clients always sign as the account they name, so
+        // this cannot be a compat false positive.
         if let Some(signer) = signer
             && body.signer_account_id() != signer
         {

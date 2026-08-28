@@ -39,9 +39,12 @@ fn now_unix_seconds() -> u64 {
 /// Sign `body` for `uri` exactly the way the production client transport
 /// does: method, absolute URL, and payload hash.
 fn auth_header(secret: &[u8; 32], uri: &str, body: &[u8], created_at: u64) -> String {
+    auth_header_for_url(secret, &format!("http://{HOST}{uri}"), body, created_at)
+}
+
+fn auth_header_for_url(secret: &[u8; 32], url: &str, body: &[u8], created_at: u64) -> String {
     let request =
-        finite_nostr::HttpAuthEventRequest::new("POST", format!("http://{HOST}{uri}"), created_at)
-            .with_body(body.to_vec());
+        finite_nostr::HttpAuthEventRequest::new("POST", url, created_at).with_body(body.to_vec());
     finite_nostr::sign_http_auth_header_with_secret(secret, &request).expect("sign auth header")
 }
 
@@ -162,8 +165,7 @@ async fn valid_signature_for_the_wrong_account_is_rejected() {
 }
 
 #[tokio::test]
-async fn tampered_body_is_rejected() {
-    let app = http_router(HttpServerState::default());
+async fn tampered_body_is_ignored_when_flag_off_and_rejected_when_on() {
     let signed_bytes = serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body");
     let authorization = auth_header(
         &ALICE_SECRET,
@@ -175,14 +177,26 @@ async fn tampered_body_is_rejected() {
     tampered["now_ms"] = serde_json::json!(1);
     let tampered = serde_json::to_vec(&tampered).expect("tampered json body");
 
-    let response = post_raw(app, LIVENESS_GET_URI, tampered, Some(authorization), None).await;
+    // Flag off: the bad header is advisory, the request rides as unsigned.
+    let off = http_router(HttpServerState::default());
+    let response = post_raw(
+        off,
+        LIVENESS_GET_URI,
+        tampered.clone(),
+        Some(authorization.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
 
+    // Flag on: the tampered payload is rejected by the payload hash.
+    let on = http_router(HttpServerState::default().with_require_signed_requests(true));
+    let response = post_raw(on, LIVENESS_GET_URI, tampered, Some(authorization), None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn stale_created_at_is_rejected() {
-    let app = http_router(HttpServerState::default());
+async fn stale_created_at_is_ignored_when_flag_off_and_rejected_when_on() {
     let body = serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body");
     let authorization = auth_header(
         &ALICE_SECRET,
@@ -191,20 +205,50 @@ async fn stale_created_at_is_rejected() {
         now_unix_seconds() - 3_600,
     );
 
-    let response = post_raw(app, LIVENESS_GET_URI, body, Some(authorization), None).await;
+    let off = http_router(HttpServerState::default());
+    let response = post_raw(
+        off,
+        LIVENESS_GET_URI,
+        body.clone(),
+        Some(authorization.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
 
+    let on = http_router(HttpServerState::default().with_require_signed_requests(true));
+    let response = post_raw(on, LIVENESS_GET_URI, body, Some(authorization), None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn invalid_header_is_rejected_even_when_signed_requests_not_required() {
+async fn invalid_header_is_ignored_when_signed_requests_not_required() {
+    // Flag-off treats a bad header as advisory: rejecting it would 401
+    // upgraded clients whose dial URL differs from the server's public URL
+    // while buying nothing (an attacker just omits the header).
     let app = http_router(HttpServerState::default());
-    let body = serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body");
 
     let response = post_raw(
         app,
         LIVENESS_GET_URI,
-        body,
+        serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body"),
+        Some("Nostr not-base64".to_owned()),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn invalid_header_is_rejected_when_signed_requests_required() {
+    let state = HttpServerState::default().with_require_signed_requests(true);
+    let app = http_router(state);
+
+    let response = post_raw(
+        app,
+        LIVENESS_GET_URI,
+        serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body"),
         Some("Nostr not-base64".to_owned()),
         None,
     )
@@ -213,6 +257,34 @@ async fn invalid_header_is_rejected_even_when_signed_requests_not_required() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn header_signed_for_a_different_url_is_ignored_when_flag_off_and_rejected_when_on() {
+    // The production trap this guards: clients sign their configured dial
+    // URL, which can differ from the server's public URL (loopback/alias
+    // deployments). Flag-off must carry them; flag-on must reject.
+    let body = serde_json::to_vec(&liveness_get(&ALICE_SECRET)).expect("json body");
+    let authorization = auth_header_for_url(
+        &ALICE_SECRET,
+        "https://chat.finite.computer/devices/liveness/get",
+        &body,
+        now_unix_seconds(),
+    );
+
+    let off = http_router(HttpServerState::default());
+    let response = post_raw(
+        off,
+        LIVENESS_GET_URI,
+        body.clone(),
+        Some(authorization.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let on = http_router(HttpServerState::default().with_require_signed_requests(true));
+    let response = post_raw(on, LIVENESS_GET_URI, body, Some(authorization), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
 #[tokio::test]
 async fn signed_mutating_route_accepts_the_matching_account() {
     let state = HttpServerState::default().with_require_signed_requests(true);

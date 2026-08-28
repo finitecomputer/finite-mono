@@ -254,8 +254,11 @@ pub struct HttpServerState {
     public_url: Option<String>,
     /// Mixed-version rollout gate for NIP-98 request auth on account-scoped
     /// routes. When false, requests without an `Authorization` header are
-    /// still accepted (old clients); a present-but-invalid header is always
-    /// rejected. When true, a missing header is rejected too.
+    /// still accepted (old clients) and a present-but-invalid header is
+    /// logged and ignored (upgraded clients may sign a dial URL that differs
+    /// from this server's public URL). When true, a missing or invalid
+    /// header is rejected. A signature that validates binds the signer to
+    /// the body account in both modes.
     require_signed_requests: bool,
     rate_limiter: Arc<PublicRouteRateLimiter>,
     ops_since_snapshot: Arc<Mutex<u64>>,
