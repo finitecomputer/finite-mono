@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -206,6 +207,44 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         )
         self.assertIn('rpartition(" ")', capture)
         self.assertNotIn("split(None, 4)", capture)
+
+    def test_by_id_filter_selects_whole_nvme_disk_targets(self) -> None:
+        # In `ls -l /dev/disk/by-id` output the symlink TARGET ends the line,
+        # so a "does not end in a digit" filter drops every whole NVMe disk
+        # (../../nvme0n1 ends in a digit) and the capture cannot prove the
+        # four committed nvme-eui identities before the destructive Gate A/C
+        # wipe. The filter must select whole-disk targets (nvmeNn1) and
+        # exclude partitions (nvme0n1p1).
+        capture = (ROOT / "infra/nixos/scripts/capture-lat4-host-evidence").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"by-id 2>/dev/null \| grep -E '([^']*)'", capture)
+        self.assertIsNotNone(match, "by-id grep filter not found in capture script")
+        pattern = match.group(1)
+        keep = [
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c2d -> ../../nvme0n1",
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c2e -> ../../nvme1n1",
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c2f -> ../../nvme2n1",
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c30 -> ../../nvme3n1",
+        ]
+        drop = [
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c2d-part1 -> ../../nvme0n1p1",
+            "lrwxrwxrwx 1 root root 10 Aug 28 20:00 nvme-eui.305f88210a0b1c2d-part2 -> ../../nvme0n1p2",
+        ]
+        kept = [line for line in keep + drop if re.search(pattern, line)]
+        self.assertEqual(kept, keep)
+        # The filter must actually surface the nvme-eui.* identities that
+        # Gate A compares against infra/nixos/hosts/finite-lat-4/storage-ids.nix.
+        self.assertIn("nvme-eui.", " ".join(kept))
+
+    def test_runbook_gate_a_cross_checks_committed_storage_ids(self) -> None:
+        # The capture only proves the identities if Gate A says to compare
+        # the emitted by-id names against the committed storage-ids file.
+        runbook = (ROOT / "infra/runbooks/lat4-nixos-runner-install.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("storage-ids.nix", runbook)
+        self.assertIn("capture-lat4-host-evidence", runbook)
 
 
 if __name__ == "__main__":

@@ -37,8 +37,8 @@ free -b | sed -n '1,2p'
 grep -E 'MemTotal' /proc/meminfo
 echo "### block devices (bytes)"
 lsblk -bndo NAME,SIZE,MODEL,SERIAL,TYPE 2>/dev/null | awk '$NF=="disk"'
-echo "### /dev/disk/by-id (whole disks only)"
-ls -l /dev/disk/by-id 2>/dev/null | grep -vE '[0-9]+$' | sed 's/.*by-id\///'
+echo "### /dev/disk/by-id (whole NVMe disks; partitions end n1pN and are excluded)"
+ls -l /dev/disk/by-id 2>/dev/null | grep -E '\-> \.\./\.\./nvme[0-9]+n1$' | awk '{print $9, $(NF-1), $NF}'
 echo "### nvme list (sudo, optional)"
 sudo -n nvme list 2>/dev/null || true
 echo "### current mdstat"
