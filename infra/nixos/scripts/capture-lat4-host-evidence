@@ -79,13 +79,13 @@ if not block:
     raise SystemExit("capture is missing the block-device section")
 disks = []
 for line in block.group(1).strip().splitlines():
-    parts = line.split(None, 4)
-    if len(parts) < 5:
-        continue
-    name, size, model, serial, kind = parts[0], int(parts[1]), parts[2], parts[3], parts[4]
+    # TYPE is the final column; MODEL may contain spaces (e.g. "SAMSUNG
+    # MZQL21T9HCJR-00A07"), so peel TYPE from the right and keep the rest.
+    head, _, kind = line.rpartition(" ")
     if kind != "disk":
         continue
-    disks.append((name, size, model, serial))
+    name, size, model_serial = head.split(None, 2)
+    disks.append((name, int(size), model_serial))
 
 print(f"==> found {len(disks)} disks")
 oversized = [d for d in disks if d[1] > data_min]
@@ -94,8 +94,8 @@ tiny = [d for d in disks if d[1] < root_min]
 print(f"    root-class  (>= {root_min} bytes, < data): {len(small)}")
 print(f"    data-class  (>= {data_min} bytes): {len(oversized)}")
 print(f"    too small for the pinned root geometry: {len(tiny)}")
-for name, size, model, serial, *_ in disks:
-    print(f"    {name}: {size} bytes  {model} {serial}")
+for name, size, model_serial in disks:
+    print(f"    {name}: {size} bytes  {model_serial}")
 if len(small) < 2 or len(oversized) < 2:
     print(
         "REFUSING: the captured disks do not match the expected 2 small + 2 "
