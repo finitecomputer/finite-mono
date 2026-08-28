@@ -70,10 +70,12 @@ jobs:
 
       - name: Install Rust
         # The Rust version comes from rust-toolchain.toml at the repo root —
-        # the single pin shared with Nix shells, release builds, and dev
-        # hosts. Bump deliberately (run clippy locally first), don't float:
-        # 1.88's clippy trips uninlined_format_args on v2 crates and floating
-        # stable trips new let-chain lints.
+        # the single build pin shared with Nix shells, release builds, and
+        # dev hosts. Bump deliberately (run clippy locally first), don't
+        # float: 1.88's clippy trips uninlined_format_args on v2 crates and
+        # floating stable trips new let-chain lints. The workspace
+        # rust-version floor stays at the oldest rustc that must still build
+        # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
