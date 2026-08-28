@@ -2992,6 +2992,7 @@ mod tests {
                 target_source_host_id: None,
                 relocation: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: None,
                 agent_runtime_id: None,
