@@ -1,8 +1,10 @@
 # finite-lat-4 NixOS Runner install (twin of finite-lat-3)
 
-Pattern authority: ADR 0007 (second runner twin, PR #715); lat4 is the third
-runner host and slots in after the #715 /29 widening merges. Lat4-specific
-evidence, decisions, and open items:
+Pattern authority: ADR 0007 as amended by the emergency cutover (PR #715):
+lat1 is down, lat2 is the replacement app-plane host and WireGuard hub at
+10.254.3.1, and the runner lane moves to this host — finite-lat-4 is the
+second storage-qualified Runner host. Lat4-specific evidence, decisions, and
+open items:
 [`docs/runs/lat4-provisioning-prep.md`](../../docs/runs/lat4-provisioning-prep.md).
 This runbook is the execution surface. Every gate that mutates production
 requires the owner's fresh approval per the deployment-queue discipline. The
@@ -16,8 +18,10 @@ first execution, not reconstructed after.
   is not. lat4 must not become a deploy or recovery target mid-incident.
 - The current lat1 backups and the hosted recovery set are independently
   verified. lat4's own history is never a recovery authority.
-- PR #715 has merged: `wg-finite` is /29 on lat1 and lat3 with lat2 = .3, so
-  lat4 = `10.254.3.4` is a valid overlay address.
+- PR #715 has merged AND lat2 is live as the app-plane replacement: lat2
+  carries the `wg-finite` hub at `10.254.3.1` with the Core socket proxy and
+  Identity Authority proxy. Gates D and E wait on that go-live; lat4's
+  overlay path does not exist until the hub is up.
 - lat4 holds no user data: it is a fresh provider box with a throwaway
   interim Ubuntu install (verified read-only 2026-08-28; only an empty md0/md1
   resync and OS defaults). Nothing on it needs archiving.
@@ -81,14 +85,13 @@ no data worth preserving.
    The build script refuses to package a host whose `storage-ids.nix` still
    says `captured = false`; the artifact's manifest carries the system,
    disko, and kexec store paths (`finite.lat4.nixos-closure.v2`).
-3. Set the WG underlay before install: lat1 carries the lat4 peer (public key
-   matching the operator-staged lat4 private key) with
-   `allowedIPs 10.254.3.4/32` and the firewall scope for the new peer; deploy
-   via lat1's existing closure flow and confirm the lat1/lat3 handshakes are
-   still current. This PR deliberately does NOT carry that lat1 edit: it
-   conflicts with PR #715's lat1 /29 change, so it lands as a small follow-up
-   commit on this branch immediately after #715 merges, before Gate B
-   executes.
+3. Set the WG underlay before install: lat2 — the overlay hub — carries the
+   lat4 peer (public key matching the operator-staged lat4 private key) with
+   `allowedIPs 10.254.3.4/32` and the peer-scoped firewall rules mirroring
+   lat3's; deploy via lat2's closure flow and confirm the lat3 handshake is
+   still current. This PR deliberately does NOT carry that lat2 edit: it can
+   only land after #715 merges and lat2 is live, as a small follow-up commit
+   on this branch before Gate B executes.
 
 VERIFY: artifact manifest matches the merged rev; `nixosConfigurations`
 evals green; lat1 deployed with the lat4 peer and its existing handshakes
@@ -154,18 +157,19 @@ identity file `/data/.finite-filesystem-identity` matches
    - `/etc/finite/metrics-remote-write.env` and `/etc/finite/logs-write.env`
      (0600) — monitoring write credentials; the activation preflight
      `check-lat-monitoring-secrets` blocks activation without them.
-2. WireGuard: confirm the handshake with lat1 (`wg show` on both ends; the
-   endpoint is `64.34.82.77:51820`, local `10.254.3.4`). From lat4, the
-   Core URL from `runner.env` must answer over the overlay (an HTTP
-   response, not a timeout). lat4's firewall exposes exactly 22/tcp,
+2. WireGuard: confirm the handshake with the lat2 hub (`wg show` on both
+   ends; the endpoint is `64.34.80.19:51820`, local `10.254.3.4`). From
+   lat4, the Core URL from `runner.env` must answer over the overlay (an
+   HTTP response, not a timeout) — Core and the Identity proxy now live on
+   lat2 at `10.254.3.1`. lat4's firewall exposes exactly 22/tcp,
    51820/udp, and the Kata contact range on `wg-finite` only.
 3. Core credential registration BEFORE the drained first lease: the
    off-host-escrowed `finite-kata-runner-4` keyring entry lands in
-   `/etc/finite/core.env` on lat1 and Core restarts in the
-   platform-rollout window. Registration is not admission — it only lets
-   the Runner authenticate while still drained. Then trigger one Runner
-   cycle and confirm an authenticated, draining response — no creation is
-   offered while `FC_RUNNER_DRAIN=true`:
+   `/etc/finite/core.env` on lat2 (where Core now runs) and Core restarts
+   in the platform-rollout window. Registration is not admission — it only
+   lets the Runner authenticate while still drained. Then trigger one
+   Runner cycle and confirm an authenticated, draining response — no
+   creation is offered while `FC_RUNNER_DRAIN=true`:
 
    ```sh
    systemctl start finite-saas-runner.service
@@ -210,7 +214,7 @@ this gate, exactly one Runner accepts new creation (ADR 0005, retained).
   `nixos-rebuild switch --rollback`; the rescue-mode reinstall can be
   re-run from the same artifact.
 - Gate D: remove secret files (the Runner is `ConditionPathExists`-gated
-  and stays dead), or remove the lat4 WG peer from lat1; lat3 and lat1 are
-  untouched throughout.
+  and stays dead), or remove the lat4 WG peer from the lat2 hub; lat3 and
+  lat2 are untouched throughout.
 - Gate E: re-set `FC_RUNNER_DRAIN=true` and revoke the new Core keyring
   entry; this is the auditable admission boundary.

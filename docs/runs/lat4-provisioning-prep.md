@@ -56,32 +56,32 @@ Drafted in `infra/nixos/hosts/finite-lat-4/storage-ids.nix`:
 The interim arrays' UUIDs (5555f02b…, 97d709fd…) are throwaway and are
 replaced at disko install time.
 
-## 3. Alignment with PR #715 / ADR 0007 (2026-08-28)
+## 3. Alignment with PR #715 / ADR 0007 (2026-08-28, updated for the pivot)
 
-PR #715 (`infra/lat2-nixos-runner-twin`, Paul) scaffolds lat2 as the second
-NixOS runner twin of lat3 and is the planning authority for the runner-twin
-pattern. lat4's prep was re-aligned to it:
+PR #715 was amended before merging: **lat1 went down (thermal, full product
+outage) and lat2 became the emergency replacement app-plane host** — Core,
+Postgres, chat, Identity, edge, backups — plus the `wg-finite` hub at
+`10.254.3.1`. The runner lane moved to a future host: **finite-lat-4 is now
+the SECOND storage-qualified Runner host**, and its role is doubly load-
+bearing because lat1's existing-Agent fleet (22 Runtimes, ~31G durable
+state) needs a home.
 
-| Topic | PR #715 / ADR 0007 decision | lat4 adoption |
+| Topic | 715 (as amended) decision | lat4 adoption |
 |---|---|---|
-| WireGuard | `wg-finite` widens /30 → /29: lat1=.1, lat3=.2, **lat2=.3** | lat4 = **10.254.3.4/29**; draft updated from the earlier 10.254.4.0/30 proposal; allowedIPs minimal `10.254.3.1/32` like lat2 |
-| Ceiling | mirrors lat3's owner-authorized **42** (same chassis class, 4 vCPU/8 GiB, swap is not capacity) | `maxSandboxes = 42` in default.nix and runner.env.example (was 32) |
-| Admission | drained-first; undrain is the separate Gate E owner decision; one-creator rule stands | `FC_RUNNER_DRAIN=true`; undrain deferred to a lat4 admission gate |
-| Storage identity | `storage-ids.nix` carries `captured = true/false`; build script refuses uncaptured closures | lat4 ships `captured = true` with live-captured values + evidence; the lat4 build-script fork must keep the same guard |
-| Install | CI artifact carries toplevel + **disko script + same-pin kexec tarball**; rescue-mode artifact-driven install; runbook with Gates A–E | lat4 clones the lat2 runbook/artifact pattern instead of inventing a path |
-| Evidence | `infra/nixos/scripts/capture-lat2-host-evidence` (read-only, Gate B) | adapt as `capture-lat4-host-evidence`; lat4 §1-2 evidence was gathered the same way manually |
-| Contracts | runner-host contract goes to 3 hosts in #715 | lat4 activation PR goes to 4 hosts, based on the post-#715 tree |
+| WireGuard hub | lat2 = `10.254.3.1/29`, Core + Identity socket proxies; lat3's peer re-pointed to lat2 (`iuzuWHBSrPPbanAdiS86jABhwieo+wyig8I1f+FuPBk=`, endpoint `64.34.80.19`) | lat4's peer mirrors lat3's flip exactly; drafted in default.nix. The lat2-side lat4 peer entry lands after 715 merges AND lat2 is live (Gate D/E wait on that) |
+| Runner lane | lat2 ships with NO runner role; the lane moves to lat4 | lat4 = second runner host (was drafted as "third" before the pivot; docs updated) |
+| Ceiling | lat3's owner-authorized **42** (swap is not capacity) | `maxSandboxes = 42`, `FC_RUNNER_DRAIN=true`; drained still serves existing-Agent lifecycle work, only creation is withheld |
+| Existing-Agent fleet | lat1's 22 Runtimes / ~31G state are homeless; cold-relocation contract exists (`infra/runbooks/runtime-cold-relocation.md`) | **Ownership open** — see §5 item 11 |
+| Storage identity | `captured` gate; build script refuses uncaptured | lat4 ships `captured = true` with live-captured values; guard kept |
+| Install | CI artifact carries toplevel + disko + same-pin kexec; Gates A–E | cloned for lat4 |
+| Contracts | runner-host stays lat1+lat3 on 715 | lat4 activation adds itself (3 hosts) |
 
-Paul's review note on #715 ("very nix-shaped and probably does too much copy
-and pasting where instead we could share stuff") applies to lat4's verbatim
-clones too. Before or during the lat4 activation PR, extract the twin files
+Paul's review note on #715 ("too much copy and pasting where instead we
+could share stuff") applies to lat4's verbatim clones too. Before or during
+the lat4 activation PR, extract the twin files
 (disko/invariants/esp-guard/storage-health) into a shared, storage-ids +
-host-label-parameterized module set rather than a third copy. Sequence this
-with the outcome of that #715 review discussion.
-
-Sequence: the /29 widening and lat2=.3 land first via #715; lat4=.4 is only
-valid after that merge. If #715 stalls, lat4 falls back to a separate /30 —
-but the default plan is ADR 0007's single overlay.
+host-label-parameterized module set. Sequence this with the outcome of that
+#715 review discussion.
 
 ## 4. Host config and activation scaffold (PR #736)
 
@@ -139,11 +139,13 @@ gap: this Mac has no Nix toolchain.
 
 Answered by PR #715 / ADR 0007 since the first draft (see §3):
 
-1. ~~WireGuard topology~~ → single overlay, /29 widening first, lat4 =
-   10.254.3.4. **Sequencing dependency: #715 must merge before lat4=.4 is
-   valid.** lat1's lat4 peer entry + firewall are the only lat1-side changes.
+1. ~~WireGuard topology~~ → single overlay, /29 widening via #715, lat4 =
+   10.254.3.4; **hub is lat2** after the emergency pivot (was lat1). The
+   lat2-side lat4 peer entry lands post-#715 and post-lat2-go-live.
 2. ~~Sandbox cap~~ → mirror lat3's owner-authorized 42; undraining lat4 needs
-   its own owner authorization at the admission gate.
+   its own owner authorization at the admission gate. Drained lat4 still
+   serves existing-Agent lifecycle work (lat1's drained model), so fleet
+   adoption does not require undraining.
 
 Still open:
 
@@ -182,6 +184,16 @@ Still open:
     copy-paste across runner twins. Decide whether the shared
     disko/invariants/esp-guard/storage-health module extraction lands with
     #715 feedback, with the lat4 activation PR, or after both.
+11. **Existing-Agent fleet migration (unowned).** lat1's 22 Runtimes (~31G
+    durable state) need a home on lat4: state import + Core
+    `source_host_id` re-point. The one-Runtime vehicle exists
+    (`infra/runbooks/runtime-cold-relocation.md`, `runtime_relocation.v1`);
+    a bulk fleet path needs its own gated run doc. Ownership was raised by
+    Paul on 2026-08-28 and is pending the owner's call (see PR #736
+    discussion). This must not be speculative: per-agent provenance (Runtime
+    ID, durable state ID, Principal, artifact, schema) verified from the
+    lat1 recovery set, chat-preserving verification, and the source kept
+    stopped-and-intact per the cold-relocation contract.
 
 Items 4-8 are execution-time steps inside the Gates A-E runbook, not prep
 blockers. Item 9 carries the documented default above. The only true prep

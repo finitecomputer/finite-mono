@@ -188,16 +188,18 @@ in
   ];
 
   # The private key is operator-placed at /etc/finite/wireguard-private-key;
-  # its public key is registered as a peer on lat1.
+  # its public key is registered as a peer on the overlay hub. The hub role
+  # moved from lat1 to lat2 (ADR 0007 emergency cutover, PR #715): the peer
+  # below is lat2's key and endpoint, mirroring lat3's re-point.
   networking.wireguard.interfaces."wg-finite" = {
     ips = [ "10.254.3.4/29" ];
     listenPort = 51820;
     privateKeyFile = "/etc/finite/wireguard-private-key";
     peers = [
       {
-        publicKey = "UM5bBdhEj15t+bt+UWz7q4iXH0EgYx9p+CQY/E+31Us=";
+        publicKey = "iuzuWHBSrPPbanAdiS86jABhwieo+wyig8I1f+FuPBk=";
         allowedIPs = [ "10.254.3.1/32" ];
-        endpoint = "64.34.82.77:51820";
+        endpoint = "64.34.80.19:51820";
         persistentKeepalive = 25;
       }
     ];
