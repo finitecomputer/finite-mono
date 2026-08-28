@@ -13,6 +13,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
 
+LAT_DASHBOARD_HOSTS = (
+    "finite-lat-1",
+    "finite-lat-2",
+    "finite-lat-3",
+    "finite-lat-4",
+)
+LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-4]"
+
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",
     "node_load1",
@@ -246,17 +254,29 @@ def check_dashboard_contract() -> None:
         require(title in panels_by_title, f"missing Grafana log panel {title!r}")
 
     rendered_dashboard = json.dumps(dashboard)
+    require(
+        "finite-lat-1|finite-lat-3" not in rendered_dashboard,
+        "Grafana dashboard must not keep the pre-migration lat1/lat3-only selector",
+    )
     for metric_name in HOST_METRIC_NAMES:
         require_contains(rendered_dashboard, metric_name, "Grafana host panels")
 
     for title in HOST_PANEL_TITLES:
         for target in panel_targets(panels_by_title[title]):
             expression = target["expr"]
-            require_contains(expression, 'instance=~"finite-lat-1|finite-lat-3"', title)
-            require(
-                "finite-lat-2" not in expression,
-                f"{title} must not include finite-lat-2 in production host panels",
+            require_contains(
+                expression,
+                f'instance=~"{LAT_DASHBOARD_HOST_REGEX}"',
+                title,
             )
+
+    health_expression = panels_by_title["LAT Host Scrape Health"]["targets"][0]["expr"]
+    for host_name in LAT_DASHBOARD_HOSTS:
+        require_contains(
+            health_expression,
+            f'label_replace(vector(0), "instance", "{host_name}"',
+            "LAT Host Scrape Health retired-host fallback",
+        )
 
     require_contains(
         panels_by_title["LAT Filesystem Used"]["targets"][0]["expr"],
@@ -274,10 +294,10 @@ def check_dashboard_contract() -> None:
         require(panel["datasource"]["uid"] == "finite-loki", f"{title} must use Loki")
         for target in panel_targets(panel):
             expression = target["expr"]
-            require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
-            require(
-                "finite-lat-2" not in expression,
-                f"{title} must not include finite-lat-2 in production log panels",
+            require_contains(
+                expression,
+                f'host=~"{LAT_DASHBOARD_HOST_REGEX}"',
+                title,
             )
 
     require_contains(
