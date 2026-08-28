@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import pathlib
+import re
 import sys
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -30,7 +31,46 @@ def selected(*paths: str) -> set[str]:
     return {key for key, value in selection_for(*paths).items() if value == "true"}
 
 
+def ci_workflow_text() -> str:
+    return (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+
+def ci_job_block(job_id: str) -> str:
+    text = ci_workflow_text()
+    start = text.index(f"\n  {job_id}:\n")
+    match = re.search(r"\n  [a-zA-Z0-9_-]+:\n", text[start + 1 :])
+    if match is None:
+        return text[start:]
+    return text[start : start + 1 + match.start()]
+
+
 class CiHarnessSelectionTests(unittest.TestCase):
+    def test_ci_pull_request_trigger_is_scoped_to_main(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertIn("pull_request:\n    branches:\n      - main", workflow)
+        self.assertNotIn("branches: [production]", workflow)
+
+    def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
+        for job_id in (
+            "rust",
+            "electron-alpha",
+            "skills-check",
+            "search-check",
+            "monitoring-nixos-contract",
+            "finite-status-contract",
+            "nix-checks",
+        ):
+            with self.subTest(job_id=job_id):
+                block = ci_job_block(job_id)
+                self.assertIn(
+                    "uses: DeterminateSystems/nix-installer-action@v16",
+                    block,
+                )
+                self.assertIn("Configure Cachix read-only cache", block)
+                self.assertIn("name: ${{ env.CACHIX_CACHE_NAME }}", block)
+                self.assertIn("skipPush: true", block)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),

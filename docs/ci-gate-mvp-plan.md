@@ -16,10 +16,15 @@ status check named `CI gate`:
 changes -> selected existing jobs -> CI gate
 ```
 
-The workflow will still start for every pull request and relevant push. Jobs
-will be skipped with job-level `if` conditions rather than workflow-level path
-filters, because a required workflow skipped by a path filter can remain
-pending.
+The workflow starts for pull requests to `main` and relevant pushes. Production
+promotion pull requests are intentionally handled by the separate Production
+Deploy Plan workflow, which verifies that the promoted source SHA already has a
+successful `CI gate` result instead of launching a second full CI run against
+the same tree.
+
+Within the `main` pull-request workflow, jobs are skipped with job-level `if`
+conditions rather than workflow-level path filters, because a required workflow
+skipped by a path filter can remain pending.
 
 ## MVP Boundary
 
@@ -42,9 +47,10 @@ Files in these paths select `dashboard`, `nix-checks`, and `devfinity-smoke`:
 - `finitechat/packages/finitechat-chat-ui/**`
 
 Any other touched file selects all eight existing jobs. This includes
-component-local documentation, mixed changes, root manifests, workflow files,
-Nix, infrastructure, skills, and any path that has not been explicitly moved
-to a narrower harness after the MVP.
+component-local documentation, mixed changes, root manifests, `ci.yml` itself,
+Nix, infrastructure, skills, and any path that has not been explicitly moved to
+a narrower harness after the MVP. Non-CI workflow files use the narrower Nix
+static contract lane.
 
 The MVP does not:
 
@@ -89,7 +95,9 @@ an unowned path selected all eight. An invalid Git range failed detection.
 - [x] Add a job-level condition matching that job's `run_*` output.
 - [x] Preserve every existing command, environment, runner label, timeout, and
   artifact behavior in the MVP.
-- [x] Keep the workflow-level pull-request and push triggers unfiltered.
+- [x] Keep main pull-request path decisions inside the job-level selector while
+  routing production promotion pull requests through the Production Deploy Plan
+  workflow.
 
 ### 4. Add the authoritative gate
 

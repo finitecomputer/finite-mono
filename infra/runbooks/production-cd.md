@@ -106,7 +106,7 @@ ongoing review surface. After that, future production PRs are ordinary
 ## Merge And Approve
 
 1. Merge the `main` to `production` PR only after:
-   - `CI gate` is green.
+   - the staged source SHA has a successful `CI gate` result.
    - `Plan production deploy` is green.
    - the deployment plan has been reviewed.
 2. The `Production Deploy` workflow starts from the `production` branch tip.
