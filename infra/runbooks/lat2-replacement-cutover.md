@@ -56,17 +56,21 @@ merged rev; `.#nixosConfigurations.finite-lat-2` evals green with
 
 ### Gate C — install (import-mode closure)
 
-1. From the artifact directory, drive the install with pinned
-   nixos-anywhere, consuming only artifact store paths:
+1. From the artifact directory, drive the install with the installer
+   helper. It validates the manifest, realizes SYSTEM/DISKO/KEXEC from the
+   artifact cache (substitution only — nothing builds), and invokes the
+   pinned nixos-anywhere:
 
    ```sh
-   # TODO(prove): exact flag spellings proven here on first execution.
-   nixos-anywhere \
-     --kexec <artifact>/kexec \
-     --store-paths <artifact>/system <artifact>/disko \
-     --build-on local \
-     root@64.34.80.19
+   scripts/install-lat2-from-artifact <artifact-dir> root@64.34.80.19
    ```
+
+   Run this from a Linux driver machine or CI job that can realize
+   x86_64-linux store paths — `nix copy` from the artifact cache fails
+   honestly anywhere else. The kexec tarball is the same-pin NixOS 26.05
+   installer built by the CI workflow; do not let nixos-anywhere substitute
+   its default. TODO(prove): exact nixos-anywhere behavior is proven at
+   first execution; the invariants above are what must hold.
 
 2. Reboot into NixOS. `ssh root@64.34.80.19` (new host key).
 
@@ -130,10 +134,14 @@ unit has ever started.
 1. Go-live PR: `finite.importMode.enable = false` in
    `infra/nixos/hosts/finite-lat-2/default.nix`; merge; build the go-live
    `lat2-nixos-closure-<REV2>` artifact; `just deploy-lat2-closure
-   ARTIFACT_DIR --prepare` then `--activate` (fenced flow, dry-activation
-   reviewed first). The WG peer flip for lat3 (already merged on main)
-   rides the next `Lat3 NixOS Closure` deploy — after it, lat3's runner
-   reaches Core through lat2.
+   ARTIFACT_DIR --prepare` then `--activate --expect-startup` (fenced flow,
+   dry-activation reviewed first). `--expect-startup` tells the fence this
+   is the one import-mode → product startup: the dry activation may name
+   only the declared app-plane unit set, and the core product units must be
+   active after the switch. Steady-state deploys later omit the flag — any
+   product-unit start then is a refusal. The WG peer flip for lat3 (already
+   merged on main) rides the next `Lat3 NixOS Closure` deploy — after it,
+   lat3's runner reaches Core through lat2.
 2. Full verification on lat2 (from the historical cutover checklist):
    Core health on loopback via the private proxy, `finite.computer` vhost
    via `curl --resolve`, chat `/health` + hosted-device, brain health,

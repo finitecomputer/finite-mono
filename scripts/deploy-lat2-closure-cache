@@ -1,18 +1,64 @@
 #!/usr/bin/env bash
 # Activate an exact CI-built finite-lat-2 closure without building on a
-# production host. Existing Kata sandboxes remain owned by containerd.
-# Only valid AFTER the host is installed per
-# infra/runbooks/lat2-replacement-cutover.md Gate C.
+# production host. finite-lat-2 is the emergency replacement APP-PLANE host
+# (ADR 0007) and deliberately runs no Agent Runner: there is no runner timer
+# or worker unit to fence here.
+#
+# Two rollout shapes exist:
+#   - go-live (Gate E): the first activation of product units out of import
+#     mode. Pass --expect-startup; the dry-activation fence then allows
+#     exactly the declared app-plane unit set to start and requires the
+#     product health checks to pass after the switch.
+#   - steady state (post go-live): ordinary deploys. The fence allows only
+#     the declared app-plane unit set plus explicitly approved extras;
+#     anything else named by dry activation refuses the rollout.
 set -euo pipefail
 
 LAT2="${FINITE_LAT2_TARGET:-root@64.34.80.19}"
 mode="prepare"
 mode_seen=0
+expect_startup=0
 artifact_dir=""
 approved_extra_units=()
 
+# The declared app-plane unit set: exactly the units the import-mode gate
+# holds down (infra/nixos/hosts/finite-lat-2/default.nix). A dry activation
+# may only name these, plus extras approved with --allow-unit.
+expected_app_plane_units=(
+  caddy.service
+  finite-saas-core.service
+  finitechat-server.service
+  finitechat-hosted-device.service
+  finite-saas-sites.service
+  finite-brain-app.service
+  finite-identity.service
+  podman-finite-saas-dashboard.service
+  podman-searxng.service
+  podman-firecrawl-api.service
+  init-firecrawl-network.service
+  finite-healthcheck.service
+  finite-healthcheck.timer
+  finite-postgres-backup.service
+  finite-postgres-backup.timer
+  finite-litestream-finite-chat-server.service
+  finite-litestream-finite-brain.service
+  finite-litestream-health.service
+  finite-litestream-health.timer
+  finite-hosted-web-chat-snapshot.service
+  finite-hosted-web-chat-snapshot-health.service
+  finite-hosted-web-chat-snapshot-health.timer
+  finite-identity-backup.service
+  finite-identity-backup-health.service
+  finite-identity-backup-health.timer
+  borgbackup-job-finite-hosted-web-chat-offsite.service
+  finite-hosted-web-chat-offsite-health.service
+  finite-hosted-web-chat-offsite-health.timer
+  finite-runtime-metrics.service
+  finite-runtime-metrics.timer
+)
+
 usage() {
-  echo "usage: $0 [--validate-only|--prepare|--activate] [--allow-unit UNIT]... <lat2-closure-artifact-dir>" >&2
+  echo "usage: $0 [--validate-only|--prepare|--activate] [--expect-startup] [--allow-unit UNIT]... <lat2-closure-artifact-dir>" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +75,9 @@ while [[ $# -gt 0 ]]; do
         --prepare) mode="prepare" ;;
         --activate) mode="activate" ;;
       esac
+      ;;
+    --expect-startup)
+      expect_startup=1
       ;;
     --allow-unit)
       shift
@@ -133,6 +182,9 @@ echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
 echo "    kexec=$KEXEC"
+if [[ "$expect_startup" == 1 ]]; then
+  echo "    mode=go-live (import-mode -> product startup expected)"
+fi
 if [[ ${#approved_extra_units[@]} -gt 0 ]]; then
   printf '    explicitly-approved-unit=%s\n' "${approved_extra_units[@]}"
 fi
@@ -156,23 +208,27 @@ ssh -o BatchMode=yes "$LAT2" \
   >"$dry_output_file" 2>&1
 cat "$dry_output_file"
 
-# A Runner-only rollout may relink the one-shot worker and refresh its static
-# version metric. Every other named unit requires an explicit CLI approval for
-# this attempt; the default remains fail closed.
+# App-plane fence: a rollout may only touch the declared app-plane unit set
+# (units starting for the first time at go-live, or ordinary restarts in
+# steady state). Anything else needs an explicit --allow-unit for this
+# attempt; the default remains fail closed.
 unexpected_units=""
 while IFS= read -r unit; do
-  case "$unit" in
-    finite-saas-runner.service|finite-saas-runner.timer|finite-component-version-metrics.service)
-      continue
-      ;;
-  esac
   approved=0
-  for approved_unit in "${approved_extra_units[@]}"; do
-    if [[ "$unit" == "$approved_unit" ]]; then
+  for expected_unit in "${expected_app_plane_units[@]}"; do
+    if [[ "$unit" == "$expected_unit" ]]; then
       approved=1
       break
     fi
   done
+  if [[ "$approved" == 0 ]]; then
+    for approved_unit in "${approved_extra_units[@]}"; do
+      if [[ "$unit" == "$approved_unit" ]]; then
+        approved=1
+        break
+      fi
+    done
+  fi
   if [[ "$approved" == 0 ]]; then
     unexpected_units+="${unit}"$'\n'
   fi
@@ -181,7 +237,8 @@ done < <({
 } | sort -u)
 unexpected_units="${unexpected_units%$'\n'}"
 if [[ -n "$unexpected_units" ]]; then
-  echo "refusing Runner-only rollout: dry activation names unexpected units:" >&2
+  echo "refusing app-plane rollout: dry activation names units outside the" >&2
+  echo "declared app-plane set:" >&2
   printf '%s\n' "$unexpected_units" >&2
   exit 75
 fi
@@ -191,10 +248,11 @@ if [[ "$mode" == "prepare" ]]; then
   exit 0
 fi
 
-echo "==> activating the fenced Runner-only closure"
-ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" <<'LAT2'
+echo "==> activating the fenced app-plane closure"
+ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" <<'LAT2'
 set -euo pipefail
 system="$1"
+expect_startup="$2"
 [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$ ]] || exit 64
 test -x "$system/bin/switch-to-configuration"
 nix-store --check-validity "$system" >/dev/null
@@ -205,8 +263,24 @@ if [[ "$previous_system" != "$previous_profile" ]]; then
   echo "refusing: current system and system profile already differ" >&2
   exit 73
 fi
-timer_was_active=0
-systemctl is-active --quiet finite-saas-runner.timer && timer_was_active=1 || true
+
+# This host runs no Agent Runner by design (ADR 0007): if a runner unit ever
+# appears here, stop before mutating anything.
+if systemctl cat finite-saas-runner.service >/dev/null 2>&1; then
+  echo "refusing: finite-saas-runner.service exists on the app-plane host" >&2
+  exit 74
+fi
+
+# Product health markers: after go-live these must be active; in steady
+# state they must already be active and survive the switch.
+for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+  if systemctl is-active --quiet "$unit"; then
+    echo "active-before $unit"
+  else
+    echo "down-before $unit"
+  fi
+done
+
 containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
 networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
 
@@ -216,26 +290,9 @@ rollback() {
   echo "activation failed; rolling back to $previous_system" >&2
   nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$previous_system" || true
   "$previous_system/bin/switch-to-configuration" switch || true
-  if [[ "$timer_was_active" == 1 ]]; then
-    systemctl start finite-saas-runner.timer || true
-  else
-    systemctl stop finite-saas-runner.timer || true
-  fi
   exit "$status"
 }
 trap rollback ERR
-
-# Stop only new Runner invocations. Never kill an in-flight one-shot: wait for
-# it to finish its already-leased operation before crossing the boundary.
-systemctl stop finite-saas-runner.timer
-deadline=$((SECONDS + 600))
-while systemctl is-active --quiet finite-saas-runner.service; do
-  (( SECONDS < deadline )) || {
-    echo "Runner one-shot did not become inactive within 600s" >&2
-    exit 1
-  }
-  sleep 2
-done
 
 echo "==> mutation boundary: switching finite-lat-2 to $system"
 nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
@@ -248,23 +305,29 @@ test "$(systemctl show systemd-networkd.service --property=MainPID --value)" = "
 systemctl is-active --quiet containerd.service
 systemctl is-active --quiet systemd-networkd.service
 
-runner_exec="$(
-  systemctl cat finite-saas-runner.service \
-    | sed -n 's/^ExecStart=//p' \
-    | sed '/^[[:space:]]*$/d' \
-    | tail -n 1 \
-    | awk '{print $1}'
-)"
-runner_store="$(printf '%s\n' "$runner_exec" | cut -d/ -f1-4)"
-nix-store -qR "$system" | grep -qxF "$runner_store"
-
-if [[ "$timer_was_active" == 1 ]]; then
-  systemctl start finite-saas-runner.timer
-  systemctl is-active --quiet finite-saas-runner.timer
+if [[ "$expect_startup" == "1" ]]; then
+  # Go-live: every core product unit must be up after the switch.
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" || {
+      echo "$unit is not active after go-live activation" >&2
+      exit 1
+    }
+  done
 else
-  systemctl stop finite-saas-runner.timer
-  ! systemctl is-active --quiet finite-saas-runner.timer
+  # Steady state: the core product units must not have been taken down.
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" || {
+      echo "$unit was active before and is down after a steady-state switch" >&2
+      exit 1
+    }
+  done
 fi
+
+runner_check="$(systemctl cat finite-saas-runner.service >/dev/null 2>&1 && echo present || echo absent)"
+[[ "$runner_check" == "absent" ]] || {
+  echo "a runner unit appeared during activation; rolling back" >&2
+  exit 1
+}
 trap - ERR
-echo "==> DEPLOYED system=$system runner=$runner_exec"
+echo "==> DEPLOYED system=$system"
 LAT2

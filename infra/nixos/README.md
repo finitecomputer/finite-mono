@@ -141,12 +141,18 @@ just deploy-lat3-closure ARTIFACT_DIR --validate-only
 just deploy-lat3-closure ARTIFACT_DIR --prepare
 ```
 
-finite-lat-2 has the `Lat2 NixOS Closure` workflow and the same
-`just deploy-lat2-closure` primitive (same fencing, `root@64.34.80.19`
-target). Its artifact additionally packages the disko script and the
-same-pin kexec installer tarball — those two inputs, plus the closure, are
-the only things the bare-metal install consumes, and the workflow refuses to
-build them until the host's storage identity is captured (ADR 0007, Gate B).
+finite-lat-2 has the `Lat2 NixOS Closure` workflow and its own
+`just deploy-lat2-closure` primitive — an app-plane lifecycle, not a copy
+of the lat3 Runner rollout: the dry-activation fence allows only the
+declared app-plane unit set (with `--expect-startup` marking the one
+import-mode → product startup at go-live), activation refuses if any
+runner unit exists on the host, and product health is checked after the
+switch. Its artifact additionally packages the disko script and the
+same-pin kexec installer tarball; Gate C installs with
+`scripts/install-lat2-from-artifact`, which validates the manifest,
+realizes those three store paths from the artifact cache, and drives the
+pinned nixos-anywhere. The workflow refuses to build any of it until the
+host's storage identity is captured (ADR 0007, Gate B).
 
 `--prepare` validates the main-branch revision, copies the prebuilt closure,
 checks lat3's monitoring-secret names and modes, and runs NixOS dry activation.
