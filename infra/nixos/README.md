@@ -70,7 +70,7 @@ down while lat1's state is imported and verified. Its `storage-ids.nix`
 and networking carry `captured = false` placeholders until
 `scripts/capture-lat2-host-evidence` has run against the physical machine;
 `scripts/build-lat2-nixos-closure-artifact` refuses to package a closure
-before that capture. Authority: `docs/runs/finite-lat2-emergency-cutover.md`
+before that capture. Authority: `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md`
 and `../runbooks/lat2-replacement-cutover.md`.
 
 ## Deploy story

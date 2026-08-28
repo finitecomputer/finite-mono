@@ -9,7 +9,7 @@ Opened: 2026-07-20
 Status note 2026-08-27 (ADR 0007), superseded 2026-08-28: the first draft
 made finite-lat-2 a second Runner host; the actual ADR 0007 (emergency,
 lat1 thermal failure) makes it the **replacement app-plane host** — see
-`docs/runs/finite-lat2-emergency-cutover.md`. The acceptance line's
+`docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md`. The acceptance line's
 "outside Agent capacity" clause remains true for lat2 (it runs no runner);
 the runner lane moves to a future host.
 
@@ -474,4 +474,4 @@ Append only decisive checkpoints here:
 | 2026-07-21 | AEON in-flight stop, stable empty-target restore, and two fresh decryptable chats | Pass |
 | 2026-08-26 | Owner authorized raising the declarative lat3 admission ceiling from 32 to 42 with explicit memory overcommit | Pending merged closure activation and post-deploy verification |
 | 2026-08-27 | ADR 0007 draft: lat2 as second Runner (superseded next day) | Withdrawn |
-| 2026-08-28 | ADR 0007 final: lat1 thermal failure; lat2 becomes the replacement app-plane host; runner lane moves to a future host | `docs/runs/finite-lat2-emergency-cutover.md` |
+| 2026-08-28 | ADR 0007 final: lat1 thermal failure; lat2 becomes the replacement app-plane host; runner lane moves to a future host | `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md` |

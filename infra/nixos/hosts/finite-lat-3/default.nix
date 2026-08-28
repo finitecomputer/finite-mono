@@ -188,7 +188,7 @@ in
       {
         # The overlay hub at 10.254.3.1 is finite-lat-2 — the emergency
         # replacement app-plane host after lat1's thermal failure
-        # (docs/runs/finite-lat2-emergency-cutover.md). Same overlay role,
+        # (ADR 0007). Same overlay role,
         # new machine: new public key and endpoint. Deploy this peer flip as
         # part of the cutover, not before the replacement is verified.
         publicKey = "iuzuWHBSrPPbanAdiS86jABhwieo+wyig8I1f+FuPBk=";

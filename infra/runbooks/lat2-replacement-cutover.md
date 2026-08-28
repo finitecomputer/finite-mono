@@ -1,7 +1,6 @@
 # finite-lat-2 replacement cutover (emergency, lat1 thermal failure)
 
-Planning authority: [`docs/runs/finite-lat2-emergency-cutover.md`](../../docs/runs/finite-lat2-emergency-cutover.md)
-(ADR 0007). Every gate that mutates production needs Paul's fresh approval.
+Decision authority: [ADR 0007](../../docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md). Every gate that mutates production needs Paul's fresh approval.
 Steps marked `TODO(prove)` have not been exercised yet — prove them at
 execution, never reconstruct afterward.
 
@@ -159,6 +158,13 @@ unit has ever started.
 
 VERIFY: every product name serves 200 from lat2; runners show current
 handshakes to the new hub; finite-status green.
+
+## CHECKPOINTS
+
+| Date | Event | Result |
+|---|---|---|
+| 2026-08-27 | lat1 thermal failure; rescue mode; state pull started | — |
+| 2026-08-28 | ADR 0007 + replacement scaffold PR | this PR |
 
 ## ROLLBACK
 

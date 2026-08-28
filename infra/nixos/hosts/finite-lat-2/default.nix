@@ -6,7 +6,7 @@
 # cloned onto the lat3-qualified storage chassis (mirrored root + data,
 # dual ESPs, fail-closed storage health), MINUS every Agent Runner piece —
 # the runner lane moves to a separate host. Authority:
-# docs/runs/finite-lat2-emergency-cutover.md.
+# ADR 0007.
 #
 # The host boots in import mode (finite.importMode.enable): product units do
 # not start until lat1's state is imported and verified; the go-live closure
