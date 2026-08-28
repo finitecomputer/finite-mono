@@ -246,6 +246,25 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertIn("storage-ids.nix", runbook)
         self.assertIn("capture-lat4-host-evidence", runbook)
 
+    def test_runbook_gate_f_uses_the_exact_relocation_contract(self) -> None:
+        # Gate F's binding move must go through the existing
+        # runtime_relocation.v1 transaction (runtime-cold-relocate-exact with
+        # the absent-compute variant, per-Runtime), never a bulk Core
+        # source_host_id edit: Core replaces a binding only after the target
+        # Runner proves the staged state, and a broad update would commit
+        # chat routing for unverified Runtimes.
+        runbook = (ROOT / "infra/runbooks/lat4-nixos-runner-install.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runtime-cold-relocate-exact", runbook)
+        self.assertIn("--source-compute-absent", runbook)
+        self.assertIn("runtime_relocation.v1", runbook)
+        self.assertIn("migrated-runtimes.manifest", runbook)
+        self.assertNotRegex(runbook, r"UPDATE\s+\w+.*SET.*source_host_id")
+        self.assertNotIn("bulk binding change", runbook.replace(
+            "no bulk binding change", ""
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

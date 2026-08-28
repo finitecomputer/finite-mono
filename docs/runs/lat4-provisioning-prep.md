@@ -188,14 +188,20 @@ Still open:
     #715 feedback, with the lat4 activation PR, or after both.
 11. ~~**Existing-Agent fleet migration (unowned).~~ RESOLVED 2026-08-28:
     Paul ships the archives (scp directly to lat4 post-install), the lat4
-    operator verifies, imports, and re-points in Core. Written into the
-    runbook as **Gate F — fleet adoption**: verify archive sha256 → extract
-    into the declared work root `/data/finite-saas-runner` → 154,299-line
-    per-file sha256 check → restore gate (writer stopped, containerd task
-    absent, PRAGMA integrity_check + identity-hash equality via
-    scratch-copy rule) → owner-approved Core `source_host_id` re-point →
-    chat-preserving observation window. lat1's source stays
-    stopped-and-intact; no retirement or purge. The 18.3 GB truncated
+    operator verifies, imports, and relocates each Runtime through the
+    exact `runtime_relocation.v1` contract. Written into the runbook as
+    **Gate F — fleet adoption**: verify archive sha256 → extract into the
+    declared work root `/data/finite-saas-runner` → 154,299-line per-file
+    sha256 check → restore gate (writer stopped, containerd task absent,
+    PRAGMA integrity_check + identity-hash equality via scratch-copy rule)
+    → exact enumeration of the migrated Runtime set (imported tree ∩
+    Core's finite-lat-1 records; no broad `source_host_id` selection) →
+    per-Runtime `finite-saas-core runtime-cold-relocate-exact
+    --source-compute-absent` with expected npub and manifest hash; Core
+    replaces the binding only after the lat4 Runner proves the staged tree
+    at lease time and `/contact` exposes the expected npub → chat-preserving
+    observation window per batch. lat1's source stays stopped-and-intact;
+    no retirement or purge; no bulk binding edit. The 18.3 GB truncated
     dumbpipe partial on the operator Mac is obsolete (kept until the
     verified import lands on lat4, then deleted).
 

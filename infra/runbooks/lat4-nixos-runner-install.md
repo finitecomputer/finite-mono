@@ -190,11 +190,11 @@ this gate, exactly one Runner accepts new creation (ADR 0005, retained).
 ### Gate F — fleet adoption: import lat1's agent runner state
 
 Ownership: Paul produces and ships the archives; the lat4 operator verifies,
-imports, and re-points in Core. Transport: scp directly to lat4 after Gate C
-(no dumbpipe staging hop). Every mutation below needs fresh owner approval;
-the archives are the only copy of this state, so verification precedes every
-step. lat1's source state stays stopped-and-intact until each observation
-window passes.
+imports, and relocates each Runtime through the exact relocation contract.
+Transport: scp directly to lat4 after Gate C (no dumbpipe staging hop). Every
+mutation below needs fresh owner approval; the archives are the only copy of
+this state, so verification precedes every step. lat1's source state stays
+stopped-and-intact until each observation window passes.
 
 Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
 
@@ -242,22 +242,65 @@ Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
    never open a snapshot SQLite file directly: verify through
    `scripts/snapshot-sqlite` or a copy, requiring `PRAGMA integrity_check`
    clean and identity-hash equality against the archive's recorded values.
-7. Core re-point (separate, owner-approved): set each migrated Runtime's
-   `source_host_id` from `finite-lat-1` to `finite-lat-4`, restart Core in
-   the platform-rollout window, then verify a first migrated agent boots its
-   exact pinned artifact on lat4 and answers chat. Record the observation
-   window per `infra/runbooks/runtime-cold-relocation.md` semantics; do not
-   retire or purge the source archive.
-8. `scripts/finite-status` before/after; migrated Runtimes appear under
+7. Enumerate the exact migrated Runtime set BEFORE any binding change. Two
+   independent lists must agree exactly — any discrepancy fails closed:
+
+   - **From the imported tree:** the durable directories under
+     `/data/finite-saas-runner/kata/` (each named by a `DURABLE_STATE_ID`),
+     plus Paul's per-runtime export records carrying the
+     `runtime_relocation.v1` field set: `PROJECT_ID`, `RUNTIME_ID`,
+     `SOURCE_HOST_ID` (`finite-lat-1`), `SOURCE_MACHINE_ID`,
+     `DURABLE_STATE_ID`, `RUNTIME_ARTIFACT_ID`, `STATE_SCHEMA_VERSION`,
+     `EXPECTED_AGENT_NPUB`, and the export-time `state-manifest` sha256.
+   - **From Core's records:** a read-only export of every Runtime currently
+     bound to `finite-lat-1` (Runtime ID, machine ID, artifact, schema,
+     Principal).
+
+   Generate `migrated-runtimes.manifest` (one record per Runtime) from
+   their intersection. A broad `source_host_id` selection alone is NOT the
+   migration set: every Runtime in the set must carry a full record, and
+   Runtimes absent from it stay untouched on their existing binding.
+8. Per-Runtime exact relocation — no bulk binding change. For each record,
+   one Runtime (or small batch) at a time, follow
+   `infra/runbooks/runtime-cold-relocation.md` STEPS with the
+   absent-compute variant:
+
+   - Run the bounded absence probe on lat1 (rescue mode: container and
+     task absent) and record the attestation — required before
+     `--source-compute-absent` may be used.
+   - Compute the target manifest on lat4 with the deployed Runner binary
+     over `/data/finite-saas-runner/kata/<durable-state-id>`; require it to
+     equal the export-recorded source manifest exactly.
+   - Enqueue via the system-installed Core CLI:
+     `finite-saas-core runtime-cold-relocate-exact --source-compute-absent`
+     with `--project-id`, `--expected-agent-runtime-id`,
+     `--expected-source-host-id finite-lat-1`,
+     `--expected-source-machine-id`, `--target-source-host-id
+     finite-lat-4`, `--expected-agent-npub`, and
+     `--durable-state-manifest-sha256`.
+   - Core replaces the binding only after the lat4 Runner proves the staged
+     tree at lease time (manifest, identity file, absent target compute)
+     and the launched `/contact` endpoint exposes the expected npub. A
+     failed pre-binding request removes target compute and leaves Core
+     untouched — rollback stays the reviewed relocation transaction, not
+     manual repair.
+   - Give each relocated Runtime its own observation window (chat round
+     trip, workspace present) before the next batch; keep lat4 otherwise
+     drained.
+
+9. `scripts/finite-status` before/after; migrated Runtimes appear under
    `finite-lat-4` with drain still true.
 
 VERIFY: all three archives hash-clean, 154,299 per-file checks pass,
-integrity checks clean, migrated agents answer chat from lat4, and the
-deployment changelog records Gate F.
+integrity checks clean, the two enumerations agree exactly, every migrated
+Runtime relocated through `runtime_relocation.v1` and answering chat from
+lat4, and the deployment changelog records Gate F.
 
 ROLLBACK: the import is additive onto an empty target; remove the imported
-tree and the Core re-point reverts per agent. The source archive remains
-stopped-and-intact throughout.
+tree and Core bindings revert per the relocation contract's rollback section
+(reverse exact transaction; the old source canonical path is preserved
+non-canonically). No bulk edit of Core bindings occurs at any point. The
+source archive remains stopped-and-intact throughout.
 
 ## VERIFY (whole runbook)
 
