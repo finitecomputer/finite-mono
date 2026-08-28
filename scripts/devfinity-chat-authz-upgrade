@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 # devfinity-chat-authz-upgrade — end-to-end acceptance for the chat-authz
-# owner-npubs stack (branch chat-authz/owner-npubs).
+# owner-npubs stack (branch chat-authz/owner-npubs, store-backed admission
+# design).
 #
-# Simulates the production upgrade on the local docker-saas lane:
+# Proves the legacy fleet migration on the local docker-saas lane:
 #   1. Launch an agent the OLD way (Core API directly, no ownerChatAccountId,
-#      so the lease spec carries no FINITECHAT_OWNER_NPUBS).
-#   2. Establish durable chat state (owner <-> agent profile chat + messages).
-#   3. Prove the stranger-self-admission vulnerability: a fresh identity can
-#      create-room + add-member the agent and the old-style agent auto-joins.
-#   4. "Upgrade": recreate the same runtime container with
-#      FINITECHAT_OWNER_NPUBS=<owner hex> added, bind-mounting the same /data.
-#   5. Assert: history intact, owner still served, owner welcomes accepted,
-#      pre-upgrade stranger blocked at the adapter, fresh stranger's Welcome
-#      denied (agent never joins).
+#      so the lease spec carries no FINITECHAT_OWNER_NPUBS) and establish
+#      durable owner chat state with the home-channel pointer set.
+#   2. Prove the stranger-self-admission vulnerability: a fresh identity can
+#      create-room + add-member the agent and the old-style agent auto-joins
+#      and answers.
+#   3. "Upgrade": recreate the same runtime container with IDENTICAL env and
+#      the same /data bind mount — no FINITECHAT_OWNER_NPUBS is added. The
+#      new image's sidecar (agentd exports FINITECHAT_ADMISSION_DEFAULT=
+#      locked) seeds its Welcome allowlist from the existing home-room
+#      counterparty and publishes the allowed-users mirror; the gateway
+#      derives FINITECHAT_ALLOWED_USERS from that mirror.
+#   4. Assert: (a) history intact and the owner still dispatches, with the
+#      mirror naming the owner and NOT the pre-upgrade stranger; (b) the
+#      pre-upgrade stranger is blocked at the adapter; (c) a fresh stranger's
+#      Welcome is denied; (d) the owner's chat.admission grant/revoke
+#      round-trip works (with the documented gateway mirror re-read at
+#      restart); (e, bonus) a birth-seed agent launched WITH
+#      ownerChatAccountId works from first boot.
 #
 # Requires a RUNNING devfinity docker-saas stack; reads the same env the
 # smoke scripts consume. Run against a live stack with:
@@ -366,6 +376,172 @@ wait_agent_room_connected() {
   done
 }
 
+# --- helpers for the store-backed admission design ---
+
+# --- helpers for the store-backed admission design ----------------------------
+
+# The sidecar's plain-text mirror of the store's Welcome allowlist.
+agent_mirror() {
+  docker exec "$container_id" cat /data/agent/allowed-users 2>/dev/null || true
+}
+
+wait_mirror_state() {
+  local hex="$1" want="$2" timeout_secs="$3" started
+  started="$(date +%s)"
+  while true; do
+    if [[ "$want" == present ]] && agent_mirror | grep -qx "$hex"; then
+      return 0
+    fi
+    if [[ "$want" == absent ]] && ! agent_mirror | grep -qx "$hex"; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      return 1
+    fi
+    sleep 3
+  done
+}
+
+gateway_pid() {
+  docker exec "$container_id" sh -c '
+    for p in /proc/[0-9]*; do
+      c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
+      case "$c" in
+        *"sh -c"*) continue ;;
+        *gateway\ run*) echo "${p#/proc/}" ;;
+      esac
+    done' 2>/dev/null | head -1
+}
+
+# The mirror is read once at gateway process start; applying an allowlist
+# change means restarting the runtime. Use a full container restart (the
+# production path: Core runtime restart == container restart), NOT a
+# process-level kill — a SIGTERM to just the gateway inside a live container
+# repeatedly wedged the pinned gateway's finitechat inbound (events leased
+# during the boot auto-resume window were stranded unprocessed; see report).
+gateway_active_agents() {
+  docker exec "$container_id" python3 -c '
+import json
+print(json.load(open("/data/agent/hermes-home/gateway_state.json")).get("active_agents") or 0)
+' 2>/dev/null || echo 1
+}
+
+wait_gateway_idle() {
+  # Idle = no running agent turn AND the log has been quiet for 8s. The
+  # active_agents count alone has a gap: a boot auto-resume turn can be
+  # pending (not yet counted) while the store reports zero, and killing the
+  # gateway inside that window strands leased-but-unprocessed inbox events.
+  local started last_count quiet_since count
+  started="$(date +%s)"
+  last_count=""
+  quiet_since="$(date +%s)"
+  while true; do
+    count="$(gateway_log | wc -l | tr -d ' ')"
+    if [[ "$count" != "$last_count" ]]; then
+      last_count="$count"
+      quiet_since="$(date +%s)"
+    fi
+    if [[ "$(gateway_active_agents)" == "0" ]] \
+      && (( "$(date +%s)" - quiet_since >= 8 )); then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= 240 )); then
+      fail "gateway never settled (active_agents=$(gateway_active_agents), log still moving)"
+    fi
+    sleep 2
+  done
+}
+
+restart_gateway() {
+  local started log_lines
+  wait_gateway_idle
+  log_lines="$(gateway_log | wc -l | tr -d ' ')"
+  docker restart "$container_id" >/dev/null
+  wait_http "Agent Runtime after container restart" "$runtime_url/healthz" 240
+  started="$(date +%s)"
+  while true; do
+    if gateway_log | tail -n +"$((log_lines + 1))" | grep -q "finitechat connected"; then
+      break
+    fi
+    if (( "$(date +%s)" - started >= 180 )); then
+      fail "gateway did not reconnect the finitechat adapter after container restart"
+    fi
+    sleep 2
+  done
+  # The startup-restore gate stays shut until any auto-resumed turn finishes;
+  # only a drained, idle gateway is safe to assert against.
+  wait_gateway_idle
+}
+
+# The gateway process's FINITECHAT_ALLOWED_USERS / allow-all state.
+gateway_allowed_users() {
+  local pid
+  pid="$(gateway_pid)"
+  [[ -n "$pid" ]] || return 1
+  docker exec "$container_id" sh -c "tr '\0' '\n' </proc/$pid/environ" 2>/dev/null \
+    | grep -E '^FINITECHAT_(ALLOWED_USERS|ALLOW_ALL_USERS)=' || true
+}
+
+# The current container's agent account id (64-hex).
+agent_account_id_current() {
+  docker exec "$container_id" finitechat auth status 2>/dev/null | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      try {
+        process.stdout.write(JSON.parse(body).account_id);
+      } catch { process.exit(1); }
+    });
+  '
+}
+
+# A `chat.admission` runtime command from the owner through the hosted
+# device's command API. The sidecar consumes chat.admission itself and posts
+# no result event, so the HTTP wait times out — that is expected; the mirror
+# and behavior are the evidence.
+send_admission_command() {
+  local action="$1" account="$2"
+  node -e '
+    const [roomId, agentHex, action, account] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({
+      room_id: roomId,
+      target_account_id: agentHex,
+      command: "chat.admission",
+      schema: "finite.chat.admission.v1",
+      body: { action, account_id: account },
+      wait_millis: 1000,
+    }));
+  ' -- "$canonical_room" "$agent_hex" "$action" "$account" >"$work/admission.json"
+  local status
+  status="$(curl -sS --max-time 45 -o "$work/admission-response.json" -w '%{http_code}' \
+    -H "authorization: Bearer ${FINITECHAT_HOSTED_API_TOKEN:?}" \
+    -H "x-finite-workos-user-id: $(hosted_workos_user_id)" \
+    -H 'content-type: application/json' \
+    --data-binary "@$work/admission.json" \
+    "${FC_HOSTED_WEB_DEVICE_URL:?}/v1/app/runtime-commands" 2>/dev/null || true)"
+  note "  chat.admission $action $account -> HTTP $status (result-less timeout expected)"
+}
+
+# Supplementary: owner can add the agent to a NEW room (allowlisted Welcome accepted).
+# The dashboard's chat-actions proxy deliberately supports only a narrow
+# action set, so create+invite through the hosted device's own action API
+# (same owner identity, service token from the generated devfinity env).
+hosted_device_action() {
+  curl -fsS --max-time 30 \
+    -H "authorization: Bearer ${FINITECHAT_HOSTED_API_TOKEN:?}" \
+    -H "x-finite-workos-user-id: $(hosted_workos_user_id)" \
+    -H 'content-type: application/json' \
+    --data-binary "@$1" \
+    "${FC_HOSTED_WEB_DEVICE_URL:?}/v1/app/actions"
+}
+hosted_workos_user_id() {
+  curl_customer "$core_url/api/core/v1/me" | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => process.stdout.write(JSON.parse(body).workos_user_id));
+  '
+}
+
 note "== chat-authz upgrade acceptance $run_id =="
 
 # --- Phase 1: launch the agent OLD style (no ownerChatAccountId) ------------
@@ -468,6 +644,47 @@ transcript_has_marker "$marker_pre" \
 note "PASS: owner pre-upgrade message landed in the canonical room transcript"
 owner_hex="$(owner_account_id)"
 note "owner account id: $owner_hex"
+canonical_room="$(node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+if (!roomId) throw new Error("canonical room is unavailable");
+process.stdout.write(roomId);
+JS
+)"
+note "canonical home room: $canonical_room"
+
+# Model a legacy agent whose home room is the owner's chat (the primary seed
+# source). Without this pointer the boot seed deliberately falls back to
+# EVERY Connected room's counterparties — which would grandfather the
+# stranger we are about to admit; that fallback is reported in the summary.
+docker exec -i "$container_id" python3 - "$canonical_room" <<'PY'
+import json, sys, urllib.request
+payload = json.dumps({"room_id": sys.argv[1]}).encode()
+req = urllib.request.Request(
+    "http://127.0.0.1:37633/v1/hermes/home-channel-set",
+    data=payload,
+    headers={"content-type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=15) as response:
+    body = json.load(response)
+assert body.get("home_channel", {}).get("room_id") == sys.argv[1], body
+PY
+note "set the agent's home-channel pointer to the owner's room (legacy home-room model)"
+docker exec "$container_id" test -s /data/agent/hermes-home-channel.json \
+  || fail "home-channel pointer write did not persist"
+docker exec "$container_id" cat /data/agent/hermes-home-channel.json 2>/dev/null \
+  | sed 's/^/  pointer-after-set: /' >>"$evidence" \
+  || echo "  pointer-after-set: MISSING" >>"$evidence"
+
+# Pre-upgrade legacy state: gateway runs allow-all and no mirror exists.
+if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOW_ALL_USERS=true$"; then
+  fail "pre-upgrade gateway is not in the legacy allow-all mode"
+fi
+if docker exec "$container_id" test -s /data/agent/allowed-users; then
+  fail "allowed-users mirror exists before the upgrade"
+fi
+note "PASS: pre-upgrade gateway is legacy allow-all; no allowed-users mirror exists"
 
 # --- Phase 3: reproduce the vulnerability pre-upgrade -----------------------
 
@@ -503,16 +720,21 @@ else
   fail "agent never answered stranger1's room pre-upgrade"
 fi
 
-# --- Phase 4: "upgrade" — same runtime, owner-scoped env, same /data --------
+# --- Phase 4: "upgrade" — new image, IDENTICAL env/mounts, same /data -------
+# The legacy fleet migration: the spec-env carry-forward was reverted, so the
+# cutover adds NO FINITECHAT_OWNER_NPUBS. The new image's sidecar (locked by
+# agentd's FINITECHAT_ADMISSION_DEFAULT marker) derives its allowlist from
+# existing room state at first boot and publishes the allowed-users mirror;
+# the gateway reads that mirror when no birth env exists.
 
 inspect_json="$work/container-inspect.json"
 docker inspect "$container_id" >"$inspect_json"
-node - "$inspect_json" "$owner_hex" >"$work/docker-run.sh" <<'JS'
+node - "$inspect_json" >"$work/docker-run.sh" <<'JS'
 const fs = require("node:fs");
 const inspect = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))[0];
-const owner = process.argv[3];
-const env = inspect.Config.Env.filter((entry) => !entry.startsWith("FINITECHAT_OWNER_NPUBS="));
-env.push(`FINITECHAT_OWNER_NPUBS=${owner}`);
+if (inspect.Config.Env.some((entry) => entry.startsWith("FINITECHAT_OWNER_NPUBS="))) {
+  throw new Error("legacy upgrade must NOT carry FINITECHAT_OWNER_NPUBS");
+}
 const args = ["docker", "run", "-d", "--name", inspect.Name.replace(/^\//, "")];
 const restart = inspect.HostConfig.RestartPolicy?.Name;
 if (restart) args.push("--restart", restart);
@@ -528,7 +750,7 @@ for (const [containerPort, bindings] of Object.entries(ports)) {
 for (const [key, value] of Object.entries(inspect.Config.Labels || {})) {
   args.push("--label", `${key}=${value}`);
 }
-for (const entry of env) args.push("--env", entry);
+for (const entry of inspect.Config.Env) args.push("--env", entry);
 args.push(inspect.Config.Image);
 const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 process.stdout.write(args.map(q).join(" ") + "\n");
@@ -540,6 +762,9 @@ data_mount="$(node -e '
 ' -- "$inspect_json")"
 [[ -n "$data_mount" ]] || fail "runtime container has no /data bind mount"
 note "reusing durable mount: $data_mount"
+docker exec "$container_id" cat /data/agent/hermes-home-channel.json \
+  | sed 's/^/  pointer-before-upgrade: /' >>"$evidence" 2>/dev/null \
+  || echo "  pointer-before-upgrade: MISSING" >>"$evidence"
 
 docker rm -f "$container_id" >/dev/null
 bash "$work/docker-run.sh" >/dev/null
@@ -551,43 +776,73 @@ agent_npub_after="$(runtime_agent_npub)"
   || fail "Agent Principal changed across the upgrade ($agent_npub_before -> $agent_npub_after)"
 note "PASS: same Agent Principal after upgrade ($agent_npub_after)"
 
-# The gateway script must translate FINITECHAT_OWNER_NPUBS into the adapter
-# allowlist (gateway process) and agentd must derive the sidecar's Welcome
-# allowlist. Note the sidecar legitimately inherits the container's
-# FINITECHAT_ALLOW_ALL_USERS=true: only the Hermes gateway reads that flag,
-# and run_hermes_gateway.sh actively unsets it for the gateway process.
+
+# --- post-upgrade environment and seed assertions -----------------------------
+
+# Identical-env upgrade: no FINITECHAT_OWNER_NPUBS anywhere in the container.
+if docker inspect "$container_id" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep -q '^FINITECHAT_OWNER_NPUBS='; then
+  fail "legacy upgrade unexpectedly carried FINITECHAT_OWNER_NPUBS"
+fi
+note "PASS: upgraded container env is identical to the legacy lease (no FINITECHAT_OWNER_NPUBS)"
+
 docker exec "$container_id" sh -c '
   for p in /proc/[0-9]*; do
     c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
     case "$c" in
       *"sh -c"*) continue ;;
       *finitechat\ hermes*serve*) echo "== sidecar"; tr "\0" "\n" <"$p/environ" 2>/dev/null ;;
-      *gateway\ run*) echo "== gateway"; tr "\0" "\n" <"$p/environ" 2>/dev/null ;;
     esac
-  done' >"$work/gateway-env.txt" 2>/dev/null || true
-sidecar_env="$(sed -n '/^== sidecar/,/^== /p' "$work/gateway-env.txt")"
-gateway_env="$(sed -n '/^== gateway/,$p' "$work/gateway-env.txt")"
-if ! grep -q "^FINITECHAT_WELCOME_ALLOWLIST=$owner_hex\$" <<<"$sidecar_env"; then
-  fail "upgraded sidecar env lacks FINITECHAT_WELCOME_ALLOWLIST=$owner_hex"
+  done' >"$work/sidecar-env.txt" 2>/dev/null || true
+if ! grep -q "^FINITECHAT_ADMISSION_DEFAULT=locked\$" "$work/sidecar-env.txt"; then
+  fail "upgraded sidecar env lacks FINITECHAT_ADMISSION_DEFAULT=locked (agentd marker missing)"
 fi
-note "PASS: sidecar (finitechat hermes serve) env has WELCOME_ALLOWLIST=owner"
-if ! grep -q "^FINITECHAT_ALLOWED_USERS=$owner_hex\$" <<<"$gateway_env"; then
-  fail "upgraded gateway env lacks FINITECHAT_ALLOWED_USERS=$owner_hex"
+note "PASS: sidecar env carries FINITECHAT_ADMISSION_DEFAULT=locked"
+
+# The sidecar must seed the store from the home-room counterparty and publish
+# the mirror: owner present, pre-upgrade stranger NOT grandfathered.
+if ! wait_mirror_state "$owner_hex" present 150; then
+  fail "sidecar never wrote the allowed-users mirror containing the owner"
 fi
-if grep -q "^FINITECHAT_ALLOW_ALL_USERS=" <<<"$gateway_env"; then
-  fail "upgraded gateway process env still carries FINITECHAT_ALLOW_ALL_USERS"
+note "PASS: allowed-users mirror exists and contains the owner"
+if agent_mirror | grep -qx "$stranger1_hex"; then
+  fail "mirror seeded the pre-upgrade stranger (home-room pointer was not honored)"
 fi
-note "PASS: gateway env has ALLOWED_USERS=owner and no ALLOW_ALL"
+note "PASS: mirror does NOT contain the pre-upgrade stranger:"
+agent_mirror | sed 's/^/  allowed-users: /' >>"$evidence"
+
+# The gateway must have started with FINITECHAT_ALLOWED_USERS from the
+# mirror. First boot can race the sidecar's mirror write (documented
+# follow-up); restart the runtime once to converge, and say so. Wait for the
+# gateway process to exist first so a slow boot is not mistaken for the race.
+started="$(date +%s)"
+until [[ -n "$(gateway_pid)" ]]; do
+  if (( "$(date +%s)" - started >= 120 )); then
+    fail "no gateway process appeared after the upgrade"
+  fi
+  sleep 2
+done
+if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOWED_USERS="; then
+  note "NOTE: first-boot race — gateway started before the mirror existed; restarting the runtime to converge"
+  restart_gateway
+fi
+if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOWED_USERS=$owner_hex\$"; then
+  fail "gateway has no FINITECHAT_ALLOWED_USERS even after the mirror existed"
+fi
+if gateway_allowed_users | grep -q "^FINITECHAT_ALLOW_ALL_USERS="; then
+  fail "gateway still carries FINITECHAT_ALLOW_ALL_USERS"
+fi
+note "PASS: gateway runs with FINITECHAT_ALLOWED_USERS from the sidecar mirror, no allow-all"
 # --- Phase 5: post-upgrade assertions ----------------------------------------
 
 start_chat_updates
 wait_for_connected_chat
 
-# 5a. history intact + owner still served.
+# 4a. history intact + owner still served.
 chat_state
 transcript_has_marker "$marker_pre" \
   || fail "pre-upgrade owner message missing after upgrade (history lost)"
-note "PASS(6a/history): pre-upgrade owner message still in the transcript"
+note "PASS(4a/history): pre-upgrade owner message still in the transcript"
 marker_post="owner-post-upgrade-$run_id"
 # The gateway may still be in startup restore when the owner sends; drained
 # messages are logged with an empty preview, so assert on a NEW inbound
@@ -597,7 +852,7 @@ send_chat_message "$marker_post"
 chat_state
 transcript_has_marker "$marker_post" \
   || fail "owner post-upgrade message did not land"
-note "PASS(6a/send): owner post-upgrade message landed in the transcript"
+note "PASS(4a/send): owner post-upgrade message landed in the transcript"
 owner_dispatch_line=""
 started="$(date +%s)"
 while true; do
@@ -613,28 +868,9 @@ while true; do
   fi
   sleep 3
 done
-note "PASS(6a/dispatch): gateway dispatched the owner's post-upgrade message to the agent:"
+note "PASS(4a/dispatch): gateway dispatched the owner's post-upgrade message to the agent:"
 sed 's/^/  /' <<<"$owner_dispatch_line" >>"$evidence"
 
-# 5b. owner can add the agent to a NEW room (allowlisted Welcome accepted).
-# The dashboard's chat-actions proxy deliberately supports only a narrow
-# action set, so create+invite through the hosted device's own action API
-# (same owner identity, service token from the generated devfinity env).
-hosted_device_action() {
-  curl -fsS --max-time 30 \
-    -H "authorization: Bearer ${FINITECHAT_HOSTED_API_TOKEN:?}" \
-    -H "x-finite-workos-user-id: $(hosted_workos_user_id)" \
-    -H 'content-type: application/json' \
-    --data-binary "@$1" \
-    "${FC_HOSTED_WEB_DEVICE_URL:?}/v1/app/actions"
-}
-hosted_workos_user_id() {
-  curl_customer "$core_url/api/core/v1/me" | node -e '
-    let body = "";
-    process.stdin.on("data", (chunk) => body += chunk);
-    process.stdin.on("end", () => process.stdout.write(JSON.parse(body).workos_user_id));
-  '
-}
 chat_state
 node - "$chat_state_json" "$agent_hex" "$agent_npub_after" "$run_id" >"$chat_action_json" <<'JS'
 const fs = require("node:fs");
@@ -680,12 +916,12 @@ JS
 rm -f "/tmp/chat-authz-profile-$run_id.json"
 hosted_device_action "$chat_action_json" >/dev/null
 if wait_agent_room_connected "$new_room" 120; then
-  note "PASS(6b): agent accepted the owner's Welcome into new room $new_room (status: $(agent_room_status "$new_room"))"
+  note "PASS(supplementary): agent accepted the owner's Welcome into new room $new_room (status: $(agent_room_status "$new_room"))"
 else
   fail "agent did not join the owner's new room (allowlisted Welcome rejected?)"
 fi
 
-# 5c. pre-upgrade stranger is now blocked at the adapter.
+# 4b. the pre-upgrade stranger is now blocked at the adapter.
 marker_s1_post="stranger1-post-upgrade-$run_id"
 gateway_log >"$work/gateway-log-before-6c.txt"
 stranger_cli "$stranger1" send --room-id "$s1_room" --text "$marker_s1_post" >/dev/null
@@ -707,13 +943,13 @@ if grep "inbound message: platform=finitechat user=$stranger1_hex" "$work/gatewa
     | grep -q "msg='$marker_s1_post'"; then
   fail "gateway dispatched stranger1's post-upgrade message (FINITECHAT_ALLOWED_USERS not enforced)"
 fi
-note "PASS(6c): stranger1's post-upgrade message was never dispatched and never answered"
+note "PASS(4b): stranger1's post-upgrade message was never dispatched and never answered"
 if grep -q "Unauthorized user" "$work/gateway-log-after-6c.txt"; then
-  note "PASS(6c): gateway logged the authz block:"
+  note "PASS(4b): gateway logged the authz block:"
   grep "Unauthorized user" "$work/gateway-log-after-6c.txt" | tail -1 | sed 's/^/  /' >>"$evidence"
 fi
 
-# 5d. a fresh stranger's Welcome is denied: the agent never joins.
+# 4c. a fresh stranger's Welcome is denied: the agent never joins.
 stranger2="$work/stranger2"
 stranger2_hex="$(stranger_account_id "$stranger2")"
 note "stranger2 account id: $stranger2_hex"
@@ -726,14 +962,14 @@ s2_status="$(agent_room_status "$s2_room")"
 if [[ "$(cut -f2 <<<"$s2_status")" == "true" ]]; then
   fail "upgraded agent joined stranger2's room (Welcome allowlist not enforced)"
 fi
-note "PASS(6d): agent never joined stranger2's room (room-status: $s2_status)"
+note "PASS(4c): agent never joined stranger2's room (room-status: $s2_status)"
 if gateway_log | grep -q "verified joiner admitted: $stranger2_hex"; then
   fail "upgraded adapter admitted stranger2 as a verified joiner"
 fi
 if gateway_log | grep -q "inbound message: platform=finitechat user=$stranger2_hex"; then
   fail "gateway dispatched stranger2's message despite the denied Welcome"
 fi
-note "PASS(6d): gateway log shows no joiner admission and no dispatch for stranger2"
+note "PASS(4c): gateway log shows no joiner admission and no dispatch for stranger2"
 s2_transcript="$(stranger_room_transcript "$stranger2" "$s2_room")"
 node - "$s2_transcript" <<'JS'
 const rows = JSON.parse(process.argv[2]);
@@ -741,7 +977,281 @@ if (rows.some((row) => !row.from_self)) {
   throw new Error("stranger2 received an agent message despite the denied Welcome");
 }
 JS
-note "PASS(6d): stranger2 received no agent reply"
+note "PASS(4c): stranger2 received no agent reply"
+
+# 4d. chat.admission grant/revoke round-trip driven by the allowlisted owner.
+stranger3="$work/stranger3"
+stranger3_hex="$(stranger_account_id "$stranger3")"
+note "stranger3 account id: $stranger3_hex"
+
+send_admission_command grant "$stranger3_hex"
+if ! wait_mirror_state "$stranger3_hex" present 90; then
+  fail "owner's chat.admission grant did not add stranger3 to the mirror"
+fi
+note "PASS(4d/grant): owner's grant added stranger3 to the store allowlist + mirror:"
+agent_mirror | sed 's/^/  allowed-users: /' >>"$evidence"
+
+# Welcome acceptance is store-driven: no gateway restart needed for the join.
+stranger_cli "$stranger3" create-room --display-name "s3-$run_id" >/dev/null
+s3_room="$(stranger_room_by_name "$stranger3" "s3-$run_id")"
+stranger_cli "$stranger3" add-member --room-id "$s3_room" --account-id "$agent_hex" >/dev/null
+if wait_agent_room_connected "$s3_room" 120; then
+  note "PASS(4d/grant): agent accepted granted stranger3's Welcome into $s3_room"
+else
+  fail "agent did not join granted stranger3's room"
+fi
+
+# Dispatch needs the gateway's adapter allowlist, re-read at gateway start.
+restart_gateway
+# Prove the restarted gateway is actually serving before trusting the grant
+# dispatch check (the first-boot race taught us a new pid is not readiness).
+wait_for_connected_chat
+chat_state
+marker_probe="owner-gateway-probe-$run_id"
+gateway_log >"$work/gateway-log-before-probe.txt"
+send_chat_message "$marker_probe"
+probe_line=""
+started="$(date +%s)"
+while true; do
+  probe_line="$(
+    comm -13 <(sort "$work/gateway-log-before-probe.txt") <(gateway_log | sort) \
+      | grep "inbound message: platform=finitechat user=$owner_hex" | tail -1 || true
+  )"
+  if [[ -n "$probe_line" ]]; then
+    break
+  fi
+  if (( "$(date +%s)" - started >= 150 )); then
+    fail "gateway did not serve the owner after its restart"
+  fi
+  sleep 3
+done
+note "PASS(4d/grant): restarted gateway serves the owner again"
+stranger_cli "$stranger3" send --room-id "$s3_room" --text "stranger3-granted-$run_id" >/dev/null
+if wait_gateway_log "inbound message: platform=finitechat user=$stranger3_hex" 90; then
+  note "PASS(4d/grant): gateway dispatched granted stranger3's message:"
+  gateway_log | grep "inbound message: platform=finitechat user=$stranger3_hex" | tail -1 \
+    | sed 's/^/  /' >>"$evidence"
+else
+  fail "gateway never dispatched granted stranger3's message"
+fi
+
+# Revoke round-trip: store + mirror first, gateway enforcement after restart.
+send_admission_command revoke "$stranger3_hex"
+if ! wait_mirror_state "$stranger3_hex" absent 90; then
+  fail "owner's chat.admission revoke did not remove stranger3 from the mirror"
+fi
+note "PASS(4d/revoke): owner's revoke removed stranger3 from the store allowlist + mirror"
+restart_gateway
+# Same readiness discipline as the grant side: prove the owner path serves
+# before trusting the stranger silence below.
+wait_for_connected_chat
+chat_state
+gateway_log >"$work/gateway-log-before-probe2.txt"
+send_chat_message "owner-gateway-probe2-$run_id"
+started="$(date +%s)"
+while true; do
+  if comm -13 <(sort "$work/gateway-log-before-probe2.txt") <(gateway_log | sort) \
+      | grep -q "inbound message: platform=finitechat user=$owner_hex"; then
+    break
+  fi
+  if (( "$(date +%s)" - started >= 150 )); then
+    fail "gateway did not serve the owner after the revoke restart"
+  fi
+  sleep 3
+done
+marker_s3_post="stranger3-revoked-$run_id"
+stranger_cli "$stranger3" send --room-id "$s3_room" --text "$marker_s3_post" >/dev/null
+sleep 45
+gateway_log >"$work/gateway-log-after-4d.txt"
+if grep "inbound message: platform=finitechat user=$stranger3_hex" "$work/gateway-log-after-4d.txt" \
+    | grep -q "msg='$marker_s3_post'"; then
+  fail "gateway dispatched stranger3's message AFTER the revoke"
+fi
+if grep -q "Unauthorized user: $stranger3_hex" "$work/gateway-log-after-4d.txt"; then
+  note "PASS(4d/revoke): gateway blocks revoked stranger3:"
+  grep "Unauthorized user: $stranger3_hex" "$work/gateway-log-after-4d.txt" | tail -1 \
+    | sed 's/^/  /' >>"$evidence"
+else
+  fail "gateway logged no 'Unauthorized user' for revoked stranger3"
+fi
+
+# The last-entry revoke guard: after stranger3's revoke only the owner
+# remains, so revoking the owner must be refused.
+send_admission_command revoke "$owner_hex"
+sleep 10
+if docker logs "$container_id" 2>&1 | grep -q "refusing to revoke the last allowlist entry"; then
+  note "PASS(4d/guard): last-entry revoke refused:"
+  docker logs "$container_id" 2>&1 | grep "refusing to revoke the last allowlist entry" | tail -1 \
+    | sed 's/^/  /' >>"$evidence"
+else
+  fail "sidecar did not log the last-entry revoke refusal"
+fi
+if ! agent_mirror | grep -qx "$owner_hex"; then
+  fail "owner entry vanished from the mirror despite the refusal"
+fi
+note "PASS(4d/guard): owner remains on the allowlist"
+
+# 4e (bonus). Birth seed: a NEW agent launched WITH ownerChatAccountId works
+# for the owner from first boot. Runtime 1 is stopped first: the local docker
+# lane binds one fixed host port per runner, and Core's runtime destroy is
+# gated behind a retirement flag devfinity does not set, so a plain
+# `docker stop` (compute only, /data preserved) is the local stand-in.
+note "== 4e bonus: birth-seed agent =="
+docker stop "$container_id" >/dev/null
+started="$(date +%s)"
+while docker ps -q --filter "label=computer.finite.v2.project_id=$project_id" | grep -q .; do
+  if (( "$(date +%s)" - started >= 120 )); then
+    fail "first runtime container did not stop"
+  fi
+  sleep 2
+done
+note "first runtime stopped (port released; /data preserved on the host)"
+
+issue_json="$work/issued-launch-code-2.json"
+curl_auth "$state_dir/workos-fixture/operator.jwt" \
+  -H 'content-type: application/json' \
+  --data '{"name":"chat-authz birth-seed","codeCount":1,"expiresInHours":24}' \
+  "$core_url/api/core/v1/admin/launch-code-batches" >"$issue_json"
+launch_code="$(node - "$issue_json" <<'JS'
+const fs = require("node:fs");
+const code = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))?.codes?.[0]?.code;
+if (typeof code !== "string" || !code) throw new Error("Core did not return a Launch Code");
+process.stdout.write(code);
+JS
+)"
+rm -f "$issue_json"
+node - "$launch_code" "$run_id" "$owner_hex" >"$work/creation-request-2.json" <<'JS'
+const [code, runId, owner] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  displayName: `chat-authz birth-seed ${runId}`,
+  launchCode: code,
+  idempotencyKey: `chat-authz-birth-${runId}`,
+  hostingTier: "standard",
+  ownerChatAccountId: owner,
+}));
+JS
+curl_customer \
+  -H 'content-type: application/json' \
+  --data-binary "@$work/creation-request-2.json" \
+  "$core_url/api/core/v1/me/agent-creation-requests" >"$work/creation-result-2.json"
+rm -f "$work/creation-request-2.json"
+note "submitted birth-seed agent creation (ownerChatAccountId=$owner_hex)"
+
+project_id=""
+machine_id=""
+started="$(date +%s)"
+while true; do
+  read_core_me
+  # Candidate = project whose runtime container actually exists (the destroyed
+  # first project can linger in /me with a stale runtime entry).
+  fields="$(node - "$me_json" <<'JS'
+const fs = require("node:fs");
+const me = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const entry of (me.projects || [])) {
+  if (!entry.runtime) continue;
+  const contact = new URL(entry.runtime.contact_endpoint);
+  contact.pathname = contact.pathname.replace(/\/contact\/?$/, "");
+  console.log([
+    entry.project.id,
+    entry.runtime.id,
+    contact.toString().replace(/\/$/, ""),
+  ].join("\t"));
+}
+JS
+)"
+  while IFS=$'\t' read -r candidate_project candidate_machine candidate_url; do
+    [[ -n "$candidate_project" ]] || continue
+    if [[ -n "$(docker ps -q --filter "label=computer.finite.v2.project_id=$candidate_project")" ]]; then
+      project_id="$candidate_project"
+      machine_id="$candidate_machine"
+      runtime_url="$candidate_url"
+      break
+    fi
+  done <<<"$fields"
+  if [[ -n "$project_id" ]]; then
+    break
+  fi
+  if (( "$(date +%s)" - started >= 600 )); then
+    fail "birth-seed agent did not launch within 600s"
+  fi
+  sleep 2
+done
+wait_http "Birth-seed Agent Runtime" "$runtime_url/healthz" 240
+container_id="$(runtime_container_id)"
+[[ -n "$container_id" ]] || fail "no birth-seed runtime container"
+if ! docker inspect "$container_id" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep -q "^FINITECHAT_OWNER_NPUBS=$owner_hex\$"; then
+  fail "birth-seed container lacks FINITECHAT_OWNER_NPUBS=$owner_hex"
+fi
+note "PASS(4e): birth-seed lease carries FINITECHAT_OWNER_NPUBS"
+
+# The gateway takes the env branch at first boot (no mirror race), and the
+# sidecar seeds its store from the relayed owner list.
+if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOWED_USERS=$owner_hex\$"; then
+  fail "birth-seed gateway lacks FINITECHAT_ALLOWED_USERS=owner at first boot"
+fi
+if gateway_allowed_users | grep -q "^FINITECHAT_ALLOW_ALL_USERS="; then
+  fail "birth-seed gateway carries allow-all"
+fi
+if ! wait_mirror_state "$owner_hex" present 120; then
+  fail "birth-seed sidecar never seeded the owner into the mirror"
+fi
+note "PASS(4e): first boot has the owner in the gateway allowlist and the mirror"
+
+if ! chat_state 2>/dev/null; then
+  curl -fsS --max-time 30 -X POST \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/recover-binding" \
+    >"$chat_state_json" \
+    || fail "hosted-device binding for the birth-seed agent failed"
+  note "authorized hosted-device binding for the birth-seed agent"
+fi
+start_chat_updates
+wait_for_connected_chat
+chat_state
+marker_birth="owner-birth-seed-$run_id"
+canonical_room="$(node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+if (!roomId) throw new Error("canonical room is unavailable");
+process.stdout.write(roomId);
+JS
+)"
+gateway_log >"$work/gateway-log-before-4e.txt"
+send_chat_message "$marker_birth"
+chat_state
+transcript_has_marker "$marker_birth" \
+  || fail "birth-seed owner message did not land"
+birth_dispatch_line=""
+started="$(date +%s)"
+while true; do
+  birth_dispatch_line="$(
+    comm -13 <(sort "$work/gateway-log-before-4e.txt") <(gateway_log | sort) \
+      | grep "inbound message: platform=finitechat user=$owner_hex" | tail -1 || true
+  )"
+  if [[ -n "$birth_dispatch_line" ]]; then
+    break
+  fi
+  if (( "$(date +%s)" - started >= 150 )); then
+    fail "birth-seed agent never dispatched the owner's first message"
+  fi
+  sleep 3
+done
+note "PASS(4e): owner chat works from first boot:"
+sed 's/^/  /' <<<"$birth_dispatch_line" >>"$evidence"
+
+stranger4="$work/stranger4"
+stranger4_hex="$(stranger_account_id "$stranger4")"
+stranger_cli "$stranger4" create-room --display-name "s4-$run_id" >/dev/null
+s4_room="$(stranger_room_by_name "$stranger4" "s4-$run_id")"
+stranger_cli "$stranger4" add-member --room-id "$s4_room" --account-id "$(agent_account_id_current)" >/dev/null
+stranger_cli "$stranger4" send --room-id "$s4_room" --text "stranger4-ctf-$run_id" >/dev/null
+sleep 45
+s4_status="$(agent_room_status "$s4_room")"
+if [[ "$(cut -f2 <<<"$s4_status")" == "true" ]]; then
+  fail "birth-seed agent joined a stranger's room"
+fi
+note "PASS(4e): birth-seed agent denies a stranger Welcome from first boot (room-status: $s4_status)"
 
 note "== all chat-authz upgrade assertions passed =="
 note "project_id=$project_id runtime_id=$machine_id container=$container_id room_pre=$s1_room room_new=$new_room"
