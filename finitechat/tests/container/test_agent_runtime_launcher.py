@@ -500,18 +500,53 @@ exec {sys.executable!s} "$@"
             self.assertEqual(existing_config_data["model"], expected_model)
 
     def _gateway_chat_authz_env(
-        self, owner_npubs: str | None, allowed_users: list[str] | None = None
+        self,
+        *,
+        supervised: bool = True,
+        owner_npubs: str | None = None,
+        allowed_users: list[str] | None = None,
+        seed_writes_mirror: bool = False,
+        seed_fails: bool = False,
     ) -> dict[str, str]:
         """Run the launcher with stub binaries and capture the chat-authz env
         the gateway process would inherit. The runner always injects
-        FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility."""
+        FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility.
+
+        Under agentd supervision (the production topology) agentd has already
+        run `finitechat hermes admission seed` before starting this script, so
+        the launcher only reads the allowed-users mirror. Standalone mode
+        (FINITE_AGENTD_SUPERVISED unset) makes the launcher run the seed step
+        itself; the stub finitechat emulates it by consuming the env seed and
+        publishing the mirror."""
         launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             fake_bin = tmp / "bin"
             fake_bin.mkdir()
+            seed_stub = tmp / "seed-stub.env"
+            seed_stub.write_text(
+                f"SEED_WRITES={1 if seed_writes_mirror else 0}\n"
+                f"SEED_FAILS={1 if seed_fails else 0}\n",
+                encoding="utf-8",
+            )
             finitechat = fake_bin / "finitechat"
-            finitechat.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            finitechat.write_text(
+                "#!/usr/bin/env bash\n"
+                f". {seed_stub}\n"
+                '# Emulate `hermes admission seed`: consume the env seed and\n'
+                "# publish the store's allowed-users mirror.\n"
+                'if [[ "${1:-}" == "hermes" && "${4:-}" == "admission" ]]; then\n'
+                '  if [[ "$SEED_FAILS" == "1" ]]; then exit 1; fi\n'
+                '  if [[ "$SEED_WRITES" == "1" ]]; then\n'
+                '    seed="${FINITECHAT_WELCOME_ALLOWLIST:-${FINITECHAT_OWNER_NPUBS:-}}"\n'
+                '    if [[ -n "$seed" ]]; then\n'
+                '      printf "%s\\n" ${seed//,/ } > "${FINITECHAT_HOME}/allowed-users"\n'
+                "    fi\n"
+                "  fi\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
             finitechat.chmod(0o755)
             env_capture = tmp / "gateway.env"
             hermes = fake_bin / "hermes"
@@ -551,7 +586,7 @@ exec {sys.executable!s} "$@"
                 "HERMES_HOME": str(hermes_home),
                 "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
                 "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
-                "FINITE_AGENTD_SUPERVISED": "1",
+                "FINITE_AGENTD_SUPERVISED": "1" if supervised else "0",
                 "FINITECHAT_ALLOW_ALL_USERS": "true",
                 "FINITE_ALLOW_ALL_USERS": "true",
                 "GATEWAY_ALLOW_ALL_USERS": "true",
@@ -580,34 +615,12 @@ exec {sys.executable!s} "$@"
                     captured[key] = value
             return captured
 
-    def test_gateway_launcher_owner_npubs_scope_chat_admission(self) -> None:
-        owner = "a" * 64
-        captured = self._gateway_chat_authz_env(owner)
-
-        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
-        self.assertEqual(captured.get("FINITECHAT_WELCOME_ALLOWLIST"), owner)
-        self.assertEqual(captured.get("FINITECHAT_OWNER_NPUBS"), owner)
-        # The runner-injected allow-all flags must be actively unset so the
-        # allowlist is the only admission path.
-        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
-        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
-        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
-
-    def test_gateway_launcher_without_owner_npubs_keeps_legacy_allow_all(self) -> None:
-        captured = self._gateway_chat_authz_env(None)
-
-        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
-        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
-        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
-        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
-        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
-
-    def test_gateway_launcher_allowed_users_mirror_scopes_chat_admission(self) -> None:
-        """No birth env, but the sidecar has locked admission and mirrored the
-        store's allowlist: the gateway locks to the same entries."""
+    def test_gateway_launcher_mirror_scopes_gateway_admission(self) -> None:
+        """Under agentd the seed already ran and the store mirrored its
+        allowlist: the gateway locks to exactly those entries."""
         owner = "a" * 64
         guest = "b" * 64
-        captured = self._gateway_chat_authz_env(None, allowed_users=[owner, guest])
+        captured = self._gateway_chat_authz_env(allowed_users=[owner, guest])
 
         self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), f"{owner},{guest}")
         # The mirror is a gateway concern only; the sidecar's store is the
@@ -617,18 +630,52 @@ exec {sys.executable!s} "$@"
         self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
         self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
 
-    def test_gateway_launcher_owner_npubs_take_precedence_over_mirror(self) -> None:
+    def test_gateway_launcher_without_mirror_keeps_legacy_allow_all(self) -> None:
+        """No mirrored admission state means the legacy allow-all delegation
+        stands. The launcher itself must not key on the birth-time
+        FINITECHAT_OWNER_NPUBS: seeding belongs to the seed step, not the
+        gateway launcher."""
         owner = "a" * 64
-        stale = "b" * 64
-        captured = self._gateway_chat_authz_env(owner, allowed_users=[stale])
+        captured = self._gateway_chat_authz_env(owner_npubs=owner)
 
-        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
-        self.assertEqual(captured.get("FINITECHAT_WELCOME_ALLOWLIST"), owner)
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
+        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
 
     def test_gateway_launcher_empty_mirror_keeps_legacy_allow_all(self) -> None:
         """An empty mirror must fail open to the same legacy behavior as a
         missing one: the sidecar writes no file until admission is locked."""
-        captured = self._gateway_chat_authz_env(None, allowed_users=[])
+        captured = self._gateway_chat_authz_env(allowed_users=[])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
+
+    def test_gateway_launcher_standalone_mode_seeds_admission(self) -> None:
+        """Without agentd the launcher runs the seed step itself; the seed
+        consumed the birth env and published the mirror, and the gateway
+        locks to it."""
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(
+            supervised=False,
+            owner_npubs=owner,
+            seed_writes_mirror=True,
+        )
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
+        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_standalone_seed_failure_falls_back_to_allow_all(self) -> None:
+        """A failing seed step must not wedge the gateway: the legacy
+        allow-all delegation stands and the launcher still boots."""
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(
+            supervised=False,
+            owner_npubs=owner,
+            seed_fails=True,
+        )
 
         self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
         self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)

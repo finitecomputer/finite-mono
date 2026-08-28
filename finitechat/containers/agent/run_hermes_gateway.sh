@@ -68,45 +68,35 @@ export HERMES_HOME="$hermes_home"
 export FINITECHAT_BIN="$finitechat_bin"
 export FINITECHAT_HERMES_INBOUND_STREAM="${FINITECHAT_HERMES_INBOUND_STREAM:-1}"
 export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
-# Finite Chat inbound arrives over the authenticated relay binding. Legacy
-# agents (created before owner-npub granting) keep the platform-scoped
-# allow-all as the intended delegation to that upstream unless the sidecar
-# has locked admission and published its allowlist mirror (see below).
+# Chat admission: the sidecar's SQLite admission store is the single source
+# of truth for who may add this agent to rooms. Under agentd, `finitechat
+# hermes admission seed` has already run (agentd seeds once after prepare,
+# before starting any child process); this script only reads the store's
+# allowed-users mirror. Without agentd (standalone script mode) the seed runs
+# here best-effort so a manually launched gateway still sees current state.
+# FINITECHAT_ALLOWED_USERS entries are comma-separated 64-hex account ids,
+# compared verbatim against the finitechat adapter's source.user_id —
+# verified against the pinned hermes-agent (flake.lock v2026.8.3)
+# gateway/authz_mixin.py. The runner injects FINITECHAT_ALLOW_ALL_USERS=true
+# for old-image compatibility, so allowlist mode must actively unset it. The
+# mirror is read once at gateway process start; admission changes made after
+# that (chat.admission grants/revokes) apply at the next gateway restart.
 # GATEWAY_ALLOW_ALL_USERS must never be set here: it is the gateway-global
 # switch and silently authorized every stranger on every other platform
 # (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
-if [[ -n "${FINITECHAT_OWNER_NPUBS:-}" ]]; then
-    # Owner-scoped admission. FINITECHAT_OWNER_NPUBS is a comma-separated list
-    # of 64-hex account ids injected by Core into the lease-time runtime spec.
-    # FINITECHAT_ALLOWED_USERS entries are comma-separated and compared
-    # verbatim against the finitechat adapter's source.user_id (the sender's
-    # 64-hex account id) — verified against the pinned hermes-agent
-    # (flake.lock v2026.8.3) gateway/authz_mixin.py. The runner injects
-    # FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility, so
-    # allowlist mode must actively unset it here rather than rely on a
-    # default change.
-    export FINITECHAT_ALLOWED_USERS="$FINITECHAT_OWNER_NPUBS"
-    # The gateway-side seed for the chat Welcome allowlist. Under the
-    # production topology finite-agentd spawns the chat sidecar
-    # (`finitechat hermes serve`) itself and never sees this export, so
-    # agentd independently derives the sidecar's FINITECHAT_WELCOME_ALLOWLIST
-    # from FINITECHAT_OWNER_NPUBS (finite-agentd/src/daemon.rs
-    # sidecar_welcome_allowlist_from_values). This export still covers any
-    # sidecar launched under this script's own process tree.
-    export FINITECHAT_WELCOME_ALLOWLIST="$FINITECHAT_OWNER_NPUBS"
-    unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
-elif [[ -s "${agent_home}/allowed-users" ]]; then
-    # Store-mirrored admission. The chat sidecar's SQLite Welcome allowlist is
-    # the single source of truth and it rewrites ${FINITECHAT_HOME}/
-    # allowed-users (one 64-hex account id per line) after every
-    # seed/grant/revoke. This branch covers hosted agents locked via
-    # FINITECHAT_ADMISSION_DEFAULT=locked whose birth predates
-    # FINITECHAT_OWNER_NPUBS. The file is read once at gateway process start;
-    # later allowlist changes apply at the gateway's next restart (a live
-    # restart trigger is a deliberate follow-up, not built here).
-    export FINITECHAT_ALLOWED_USERS="$(paste -sd, "${agent_home}/allowed-users")"
+allowed_users_file="${agent_home}/allowed-users"
+if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
+    "$finitechat_bin" hermes --home "$agent_home" admission seed \
+        >/dev/null 2>&1 \
+        || echo "run_hermes_gateway: admission seed unavailable; using existing admission state" >&2
+fi
+if [[ -s "$allowed_users_file" ]]; then
+    export FINITECHAT_ALLOWED_USERS="$(paste -sd, "$allowed_users_file")"
     unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
 else
+    # No admission state (a brand-new agent with no seed and no rooms yet, or
+    # an explicitly allow-all store): the legacy platform-scoped allow-all
+    # delegation stands until the store's admission policy is seeded.
     export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
     unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
 fi
