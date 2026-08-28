@@ -760,6 +760,12 @@ pub(crate) enum HermesCommand {
         command: HermesHomeChannelCommand,
     },
 
+    /// Manage chat room admission (who may add this agent to rooms).
+    Admission {
+        #[command(subcommand)]
+        command: HermesAdmissionCommand,
+    },
+
     /// Report one room's connection/pairing status.
     RoomStatus(HermesRoomStatusArgs),
 
@@ -869,6 +875,17 @@ pub(crate) enum HermesHomeChannelCommand {
 
     /// Clear the home channel.
     Clear,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum HermesAdmissionCommand {
+    /// Run the admission birth-seed step: consume the environment seed into
+    /// the store's Welcome admission policy exactly once (a store with a
+    /// policy row only refreshes the gateway's allowed-users mirror), then
+    /// print the current admission state. Safe to run repeatedly; agentd runs
+    /// it before starting the gateway and sidecar, and `hermes serve` runs it
+    /// again at boot.
+    Seed,
 }
 
 #[derive(Debug, Args)]

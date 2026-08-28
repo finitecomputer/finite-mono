@@ -65,8 +65,9 @@ use serde_json::{Value, json};
 
 use crate::CliError;
 use crate::cli::{
-    HermesArgs, HermesCommand, HermesHomeChannelCommand, HermesHomeChannelSetArgs, HermesInitArgs,
-    HermesInstallArgs, HermesRoomStatusArgs, HermesServeArgs,
+    HermesAdmissionCommand, HermesArgs, HermesCommand, HermesHomeChannelCommand,
+    HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRoomStatusArgs,
+    HermesServeArgs,
 };
 
 const CONFIG_FILE: &str = "config.json";
@@ -128,6 +129,12 @@ const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_
 /// must never silently fail open. The agent's own account is always admitted
 /// (device link needs no allowlist entry).
 const WELCOME_ALLOWLIST_ENV: &str = "FINITECHAT_WELCOME_ALLOWLIST";
+/// Core-injected birth seed (the owner's hosted-chat account id list) read
+/// directly from the container environment. Same consume-once contract as
+/// [`WELCOME_ALLOWLIST_ENV`], which overrides it when both are set: the
+/// store is the single source of truth and both spellings are only seeds
+/// into it. Core normalizes the value to comma-separated 64-hex account ids.
+const OWNER_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
 /// Hosted-image marker exported by finite-agentd for the sidecar it spawns
 /// (agentd only runs inside the container). The value `locked` makes a device
 /// with no policy row default to allowlist admission, seeded from the
@@ -195,6 +202,7 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::Install(args) => cmd_install(&home_dir, args, json_mode, output),
         HermesCommand::Serve(args) => cmd_serve(&home_dir, args, json_mode, output),
         HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
+        HermesCommand::Admission { command } => cmd_admission(&home_dir, command, output),
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
         HermesCommand::Poll => with_backup_activity(&home_dir, "poll", || {
             cmd_poll(&home_dir, read_request(request_json)?, output)
@@ -1278,6 +1286,53 @@ fn cmd_home_channel<W: Write>(
             crate::write_pretty_json(output, &json!({ "cleared": true, "home_channel": null }))
         }
     }
+}
+
+fn cmd_admission<W: Write>(
+    home_dir: &Path,
+    command: HermesAdmissionCommand,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match command {
+        HermesAdmissionCommand::Seed => cmd_admission_seed(home_dir, output),
+    }
+}
+
+/// Run the admission birth-seed step (`hermes admission seed`).
+///
+/// agentd invokes this after prepare and before starting the gateway or the
+/// sidecar, so the store's admission policy is settled and the gateway
+/// launcher reads a current `allowed-users` mirror on its first start.
+/// `hermes serve` runs the same step again at boot; the step is idempotent.
+fn cmd_admission_seed<W: Write>(home_dir: &Path, output: &mut W) -> Result<(), CliError> {
+    let home = load_home(home_dir)?;
+    seed_welcome_allowlist(&home)?;
+    let options = SqliteClientStoreOptions::from_nostr_secret(&home.secret, &home.config.device_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let store = SqliteClientStore::open_read_only(home_dir.join(STORE_FILE), options)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    let policy = store
+        .configured_welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let allowed_senders = store
+        .welcome_allowed_senders(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let mirror = fs::read_to_string(home_dir.join(ALLOWED_USERS_FILE)).ok();
+    crate::write_pretty_json(
+        output,
+        &json!({
+            "admission_policy": policy.map(|policy| match policy {
+                WelcomeAdmissionPolicy::AllowAll => "allow_all",
+                WelcomeAdmissionPolicy::Allowlist => "allowlist",
+            }),
+            "allowed_senders": allowed_senders,
+            "allowed_users_mirror": mirror,
+        }),
+    )
 }
 
 fn set_home_channel<W: Write>(
@@ -3829,11 +3884,16 @@ fn parse_welcome_allowlist(raw: &str) -> Result<BTreeSet<String>, CliError> {
     Ok(senders)
 }
 
-/// Seed the Welcome admission allowlist from the environment before the
-/// runtime starts. Must run before `open_agent_runtime`, which takes the
-/// store writer lease for the life of the process.
+/// Read the admission birth seed from the environment and run the seed step.
+///
+/// Precedence: an explicit `FINITECHAT_WELCOME_ALLOWLIST` wins, then the
+/// Core-injected `FINITECHAT_OWNER_NPUBS`. Both are birth-time seeds: the
+/// store consumes them exactly once, when no policy row exists. Called at
+/// every entry that can be first to touch the store — agentd before it
+/// starts any child process, the launcher script when it runs without
+/// agentd, and `hermes serve` itself — so the step must stay idempotent.
 fn seed_welcome_allowlist(home: &AgentHome) -> Result<(), CliError> {
-    let raw = match std::env::var(WELCOME_ALLOWLIST_ENV) {
+    let welcome_allowlist = match std::env::var(WELCOME_ALLOWLIST_ENV) {
         Ok(raw) => Some(raw),
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => {
@@ -3842,10 +3902,37 @@ fn seed_welcome_allowlist(home: &AgentHome) -> Result<(), CliError> {
             )));
         }
     };
+    let owner_npubs = match std::env::var(OWNER_NPUBS_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{OWNER_NPUBS_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
     let locked = std::env::var(ADMISSION_DEFAULT_ENV)
         .map(|value| value.trim().eq_ignore_ascii_case(ADMISSION_DEFAULT_LOCKED))
         .unwrap_or(false);
+    let raw = resolve_birth_seed(welcome_allowlist.as_deref(), owner_npubs.as_deref());
     seed_welcome_allowlist_from_values(home, raw.as_deref(), locked)
+}
+
+/// Birth-seed precedence. An explicit `FINITECHAT_WELCOME_ALLOWLIST` wins —
+/// including an empty one, which is a deliberate "no env seed" that also
+/// suppresses the owner list. Otherwise the Core-injected
+/// `FINITECHAT_OWNER_NPUBS` seeds when non-empty.
+fn resolve_birth_seed(
+    welcome_allowlist: Option<&str>,
+    owner_npubs: Option<&str>,
+) -> Option<String> {
+    match welcome_allowlist {
+        Some(raw) => Some(raw.to_owned()),
+        None => owner_npubs
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
 }
 
 /// The env values are a birth-time seed, consumed into the store exactly
@@ -4045,9 +4132,11 @@ fn apply_chat_admission_command(
     // Authz: only a currently-allowlisted sender may manage the allowlist
     // (post-seed the owner always is). Under the legacy allow-all — no
     // policy row — the command is inert so a stranger cannot bootstrap
-    // admission state on an unlocked device. The sender account id is
-    // server-asserted and bound to the account which submitted the event, so
-    // it is a trustworthy authz signal.
+    // admission state on an unlocked device. Trust anchor: the sender
+    // account id is server-asserted from the event submission, which the
+    // server binds to a NIP-98 signer only while
+    // FINITECHAT_REQUIRE_SIGNED_REQUESTS is enforced; until that flip this
+    // check is a policy control, not a security control.
     if store
         .welcome_admission_policy(&owner)
         .map_err(|error| CliError::Hermes(error.to_string()))?
@@ -5753,6 +5842,27 @@ mod tests {
 
     fn read_allowed_users_mirror(home: &AgentHome) -> Option<String> {
         fs::read_to_string(home.dir.join(ALLOWED_USERS_FILE)).ok()
+    }
+
+    #[test]
+    fn birth_seed_precedence_explicit_wins_then_owner_npubs() {
+        let owner = "a".repeat(64);
+        let override_list = "b".repeat(64);
+        // The explicit seed wins over the Core-injected owner list.
+        assert_eq!(
+            resolve_birth_seed(Some(&override_list), Some(&owner)),
+            Some(override_list.clone())
+        );
+        // The owner list seeds when no explicit seed is set.
+        assert_eq!(resolve_birth_seed(None, Some(&owner)), Some(owner.clone()));
+        // A deliberately empty explicit seed suppresses the owner list too.
+        assert_eq!(
+            resolve_birth_seed(Some("  "), Some(&owner)),
+            Some("  ".to_owned())
+        );
+        // Neither set: no seed; a locked marker may still derive one.
+        assert_eq!(resolve_birth_seed(None, None), None);
+        assert_eq!(resolve_birth_seed(None, Some("   ")), None);
     }
 
     #[test]
