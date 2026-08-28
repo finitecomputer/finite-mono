@@ -2968,18 +2968,12 @@ pub(crate) fn runtime_operation_spec_v1(
     } else {
         current.secret_references.clone()
     };
+    // No carry-forward of `OWNER_CHAT_NPUBS_ENV` here: the value is only a
+    // birth-time seed. The sidecar's SQLite store consumes it once into the
+    // Welcome admission policy on first boot, so an upgrade-time environment
+    // refresh that drops it cannot reopen admission after that first boot.
     let environment = match refreshed_environment {
-        Some(configured) => {
-            let mut environment = configured.clone();
-            // The owner chat identity is per-request spec state, never part
-            // of the Core-global environment map, so an upgrade-time refresh
-            // must carry it forward verbatim. Dropping it here would silently
-            // revert an owner-locked runtime to allow-all chat admission.
-            if let Some(owner) = current.environment.get(OWNER_CHAT_NPUBS_ENV) {
-                environment.insert(OWNER_CHAT_NPUBS_ENV.to_string(), owner.clone());
-            }
-            environment
-        }
+        Some(configured) => configured.clone(),
         None => current.environment.clone(),
     };
     build_runtime_spec_v1(
@@ -3950,104 +3944,6 @@ mod tests {
             let parsed = parse_time(&stamp).unwrap();
             assert_eq!(parsed.nanosecond() % 1_000, 0, "{stamp}");
         }
-    }
-
-    #[test]
-    fn upgrade_environment_refresh_preserves_owner_chat_account_id() {
-        let artifact = RuntimeArtifact {
-            id: "artifact-v1".to_string(),
-            kind: RuntimeArtifactKind::OciImage,
-            reference: format!(
-                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                "a".repeat(64)
-            ),
-            version_label: "v1".to_string(),
-            source_git_sha: None,
-            finitec_version: None,
-            hermes_source_ref: None,
-            finite_platform_plugin_ref: None,
-            state_schema_version: "state-v1".to_string(),
-            base_image: None,
-            recover_known_good_chat: false,
-            created_at: NOW.to_string(),
-            promoted_at: Some(NOW.to_string()),
-            retired_at: None,
-        };
-        let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
-        let current_environment = BTreeMap::from([
-            (
-                "FINITE_SITES_API".to_string(),
-                "https://api.finite.chat".to_string(),
-            ),
-            (OWNER_CHAT_NPUBS_ENV.to_string(), "a".repeat(64)),
-        ]);
-        let current = build_runtime_spec_v1(
-            RuntimeSpecIdentity {
-                operation_id: "creation-request",
-                project_id: "project-1",
-                agent_runtime_id: "runtime-1",
-                placement,
-            },
-            &artifact,
-            "runtime-1",
-            current_environment,
-            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
-            RuntimeBootIntent::Normal,
-        )
-        .unwrap();
-
-        // Upgrade refreshes the Core-global environment; the per-request owner
-        // chat identity rides along or the runtime would silently revert to
-        // allow-all chat admission on its next image upgrade.
-        let refreshed = BTreeMap::from([(
-            "FINITE_SITES_API".to_string(),
-            "https://api-v2.finite.chat".to_string(),
-        )]);
-        let upgraded = runtime_operation_spec_v1(
-            &current,
-            RuntimeSpecIdentity {
-                operation_id: "upgrade-request",
-                project_id: "project-1",
-                agent_runtime_id: "runtime-1",
-                placement,
-            },
-            &artifact,
-            &artifact,
-            RuntimeBootIntent::Normal,
-            Some(&refreshed),
-            None,
-        )
-        .unwrap();
-        let spec = runtime_spec_v1(&upgraded);
-        assert_eq!(
-            spec.environment.get(OWNER_CHAT_NPUBS_ENV),
-            Some(&"a".repeat(64))
-        );
-        assert_eq!(
-            spec.environment.get("FINITE_SITES_API"),
-            Some(&"https://api-v2.finite.chat".to_string())
-        );
-
-        // Non-upgrade operations carry the whole current environment forward.
-        let restarted = runtime_operation_spec_v1(
-            &current,
-            RuntimeSpecIdentity {
-                operation_id: "restart-request",
-                project_id: "project-1",
-                agent_runtime_id: "runtime-1",
-                placement,
-            },
-            &artifact,
-            &artifact,
-            RuntimeBootIntent::Normal,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            runtime_spec_v1(&restarted).environment,
-            runtime_spec_v1(&current).environment
-        );
     }
 
     fn stored_health(ready: bool, reported_at: &str, interval_seconds: i64) -> StoredRuntimeHealth {
