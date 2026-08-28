@@ -3,9 +3,14 @@ set -euo pipefail
 
 system_target="nixosConfigurations.finite-lat-1.config.system.build.toplevel"
 disko_target="nixosConfigurations.finite-lat-1.config.system.build.diskoScript"
+cachix_cache_name="${CACHIX_CACHE_NAME:-finite}"
+cachix_substituter="${CACHIX_SUBSTITUTER:-https://finite.cachix.org}"
+cachix_trusted_public_key="${CACHIX_TRUSTED_PUBLIC_KEY:-finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk=}"
+include_file_cache="${FINITE_LAT1_BUILD_FILE_CACHE:-0}"
 
 usage() {
   echo "usage: $0 <exact-40-hex-mono-rev> <output-dir>" >&2
+  echo "       set FINITE_LAT1_BUILD_FILE_CACHE=1 to include legacy nix-cache/" >&2
 }
 
 if [[ $# -ne 2 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
@@ -28,6 +33,11 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo "refusing to package a dirty checkout" >&2
   exit 65
 fi
+case "$include_file_cache" in
+  1|true|TRUE|yes|YES) include_file_cache=true ;;
+  0|false|FALSE|no|NO) include_file_cache=false ;;
+  *) echo "invalid FINITE_LAT1_BUILD_FILE_CACHE: $include_file_cache" >&2; exit 64 ;;
+esac
 
 current_system="$(nix eval --option builders '' --impure --raw --expr builtins.currentSystem)"
 if [[ "$current_system" != "x86_64-linux" ]]; then
@@ -43,7 +53,6 @@ out_dir="$(cd "$out_dir" && pwd -P)"
 rm -rf "$out_dir/nix-cache" "$out_dir/system" "$out_dir/disko" \
   "$out_dir/manifest.json" "$out_dir/store-paths.txt" "$out_dir/closure-size.txt"
 cache_dir="$out_dir/nix-cache"
-mkdir -p "$cache_dir"
 
 system_path="$(nix build \
   --option builders '' \
@@ -89,8 +98,21 @@ fi
 
 nix path-info --recursive "$system_path" "$disko_path" > "$out_dir/store-paths.txt"
 nix path-info --closure-size "$system_path" "$disko_path" > "$out_dir/closure-size.txt"
-nix copy --option builders '' --to "file://$cache_dir" "$system_path" "$disko_path"
+closure_size_bytes="$(
+  xargs -r nix path-info --size < "$out_dir/store-paths.txt" \
+    | awk '{ total += $2 } END { print total + 0 }'
+)"
+if [[ "$include_file_cache" == true ]]; then
+  mkdir -p "$cache_dir"
+  nix copy --option builders '' --to "file://$cache_dir" "$system_path" "$disko_path"
+fi
+if [[ "$include_file_cache" == true ]]; then
+  initial_transport="file-cache"
+else
+  initial_transport="cachix"
+fi
 
+store_path_count="$(wc -l < "$out_dir/store-paths.txt" | tr -d '[:space:]')"
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 python3 - "$out_dir/manifest.json" <<PY
 import json
@@ -99,12 +121,24 @@ import sys
 
 manifest = {
     "schema": "finite.lat1.nixos-closure.v1",
+    "host": "finite-lat-1",
     "repository": "finitecomputer/finite-mono",
     "rev": "$rev",
     "builder_system": "$current_system",
     "system": "$system_path",
     "disko": "$disko_path",
     "cache": "nix-cache",
+    "file_cache": "nix-cache",
+    "transport": "$initial_transport",
+    "store_path_count": int("$store_path_count"),
+    "closure_size_bytes": int("$closure_size_bytes"),
+    "closure_size_report": "closure-size.txt",
+    "cachix": {
+        "cache": "$cachix_cache_name",
+        "substituter": "$cachix_substituter",
+        "trusted_public_key": "$cachix_trusted_public_key",
+        "published": False,
+    },
     "created_utc": "$created_utc",
 }
 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL"):
@@ -118,4 +152,5 @@ PY
 
 printf 'SYSTEM=%s\n' "$system_path"
 printf 'DISKO=%s\n' "$disko_path"
+printf 'FILE_CACHE=%s\n' "$include_file_cache"
 printf 'MANIFEST=%s\n' "$out_dir/manifest.json"

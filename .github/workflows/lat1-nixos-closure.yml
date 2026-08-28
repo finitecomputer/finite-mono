@@ -12,6 +12,11 @@ on:
         required: true
         default: '"depot-ubuntu-24.04"'
         type: string
+      include_file_cache:
+        description: "Include legacy nix-cache/ in the artifact for explicit bootstrap/recovery"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: lat1-nixos-closure-${{ inputs.rev }}
@@ -42,6 +47,7 @@ jobs:
       - name: Build and package closure
         env:
           REV: ${{ inputs.rev }}
+          FINITE_LAT1_BUILD_FILE_CACHE: ${{ inputs.include_file_cache && '1' || '0' }}
         run: |
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
@@ -50,14 +56,39 @@ jobs:
             "$REV" \
             target/lat1-nixos-closure
 
+      - name: Publish lat1 closure to Cachix
+        if: ${{ ! inputs.include_file_cache }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN for this GitHub Actions workflow"
+            exit 1
+          fi
+          scripts/publish-lat1-nixos-cachix-closure target/lat1-nixos-closure
+
       - name: Upload closure artifact
+        if: ${{ ! inputs.include_file_cache }}
         uses: actions/upload-artifact@v4
         with:
           name: lat1-nixos-closure-${{ inputs.rev }}
           path: |
             target/lat1-nixos-closure/manifest.json
-            target/lat1-nixos-closure/nix-cache
             target/lat1-nixos-closure/store-paths.txt
             target/lat1-nixos-closure/closure-size.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload closure artifact with file cache
+        if: ${{ inputs.include_file_cache }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lat1-nixos-closure-${{ inputs.rev }}
+          path: |
+            target/lat1-nixos-closure/manifest.json
+            target/lat1-nixos-closure/store-paths.txt
+            target/lat1-nixos-closure/closure-size.txt
+            target/lat1-nixos-closure/nix-cache
           if-no-files-found: error
           retention-days: 14

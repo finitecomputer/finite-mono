@@ -54,7 +54,6 @@ jobs:
             target/production-deploy/deployment-plan.json
             target/production-deploy/deployment-plan.md
             target/lat1-nixos-closure/manifest.json
-            target/lat1-nixos-closure/nix-cache
             target/lat1-nixos-closure/store-paths.txt
             target/lat1-nixos-closure/closure-size.txt
           if-no-files-found: error

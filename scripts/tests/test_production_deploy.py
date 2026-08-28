@@ -20,6 +20,11 @@ VALID_MANIFEST = {
     "risky_path_policy": "lat1-v1",
     "mutation_enabled": False,
     "rollback_policy": "previous-lat1-closure",
+    "closure_transport": "cachix",
+    "cachix_cache_name": "finite",
+    "cachix_substituter": "https://finite.cachix.org",
+    "cachix_trusted_public_key": "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk=",
+    "legacy_file_cache_fallback": "explicit-only",
     "required_gates": ["ci-gate"],
 }
 
@@ -29,6 +34,8 @@ class ProductionDeployTests(unittest.TestCase):
         manifest = production_deploy.validate_manifest(dict(VALID_MANIFEST))
         self.assertEqual(manifest["environment"], "production")
         self.assertEqual(manifest["scope"], "lat1-nixos")
+        self.assertEqual(manifest["closure_transport"], "cachix")
+        self.assertEqual(manifest["cachix_cache_name"], "finite")
         self.assertFalse(manifest["mutation_enabled"])
 
     def test_manifest_rejects_extra_keys(self) -> None:
@@ -149,18 +156,31 @@ class ProductionDeployTests(unittest.TestCase):
             "manifest_sha256": "b" * 64,
             "classification": "ordinary",
             "mutation_enabled": False,
+            "closure_transport": "cachix",
+            "cachix_cache_name": "finite",
+            "cachix_substituter": "https://finite.cachix.org",
         }
         record = production_deploy.build_record(
             plan,
             outcome="dry_run_blocked_before_mutation",
             mutation_boundary_crossed=False,
             system_path=None,
+            closure_transport="cachix",
+            cachix_cache_name="finite",
+            closure_store_path_count=1234,
+            closure_size_bytes=5678,
+            closure_size_report="closure-size.txt",
             override_reason=None,
         )
         self.assertEqual(record["schema"], production_deploy.RECORD_SCHEMA)
         self.assertEqual(record["source_sha"], "a" * 40)
         self.assertFalse(record["mutation_boundary_crossed"])
         self.assertIsNone(record["system_path"])
+        self.assertEqual(record["closure_transport"], "cachix")
+        self.assertEqual(record["cachix_cache_name"], "finite")
+        self.assertEqual(record["closure_store_path_count"], 1234)
+        self.assertEqual(record["closure_size_bytes"], 5678)
+        self.assertEqual(record["closure_size_report"], "closure-size.txt")
         self.assertEqual(record["outcome"], "dry_run_blocked_before_mutation")
 
     def test_record_command_rejects_non_plan_input(self) -> None:
@@ -202,10 +222,25 @@ class ProductionDeployTests(unittest.TestCase):
         self.assertIn("CACHIX_CACHE_NAME: finite", deploy)
         self.assertGreaterEqual(deploy.count("Configure Cachix read-only cache"), 2)
         self.assertGreaterEqual(deploy.count("skipPush: true"), 2)
+        self.assertIn("Publish lat1 closure to Cachix", deploy)
+        self.assertIn("scripts/publish-lat1-nixos-cachix-closure", deploy)
+        self.assertLess(
+            deploy.index("Publish lat1 closure to Cachix"),
+            deploy.index("Upload lat1 closure artifact"),
+        )
+        self.assertIn("deployment-transport.json", deploy)
+        self.assertIn("Prove lat1 closure substitutes before mutation", deploy)
+        self.assertIn("FINITE_LAT1_DEPLOY_MODE=realise-only", deploy)
+        self.assertIn("--closure-store-path-count", deploy)
+        self.assertIn("--closure-size-bytes", deploy)
         self.assertIn("Configure Cachix read-only cache", plan)
         self.assertIn("skipPush: true", plan)
         self.assertIn("Configure Cachix read-only cache", lat1_closure)
         self.assertIn("skipPush: true", lat1_closure)
+        self.assertIn("Publish lat1 closure to Cachix", lat1_closure)
+        self.assertIn("scripts/publish-lat1-nixos-cachix-closure", lat1_closure)
+        self.assertIn("if: ${{ ! inputs.include_file_cache }}", lat1_closure)
+        self.assertIn("FINITE_LAT1_BUILD_FILE_CACHE", lat1_closure)
         self.assertIn("Stage status collector on lat1", deploy)
         self.assertIn("finite-status-before.json", deploy)
         self.assertIn('"nodes"]["nixpkgs"]["locked"]["rev"]', deploy)

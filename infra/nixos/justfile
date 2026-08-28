@@ -45,7 +45,7 @@ deploy-lat3-closure artifact_dir *args:
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
-    cd ../.. && bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
+    cd ../.. && bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/publish-lat1-nixos-cachix-closure scripts/rollout-lat1-runtime-artifact
     cd ../.. && python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
     cd ../.. && python3 -m unittest scripts.tests.test_lat1_closure_artifact
     cd ../.. && python3 -m unittest scripts.tests.test_deploy_lat1_service_exes

@@ -119,15 +119,22 @@ ongoing review surface. After that, future production PRs are ordinary
 The workflow records:
 
 - `deployment-plan`
-- `lat1-nixos-closure-<sha>`
+- `lat1-nixos-closure-<sha>` metadata for the exact CI-built, Cachix-published
+  NixOS closure
 - `deployment-record`
+- `deployment-transport.json` inside the deployment record artifact
 - `finite-status-before`
 - `finite-status-after`
 
 The deploy job stages the checked-out revision's `scripts/finite-status` and
 `scripts/finite_status.py` on lat1, runs them through the mono checkout's
 pinned `nixpkgs` Python, and requires non-empty valid JSON for the pre/post
-status artifacts.
+status artifacts. Before writing the mutation-boundary marker, it makes lat1
+realize and validate the pinned closure from the `finite` Cachix cache with
+local builds disabled. Routine activation repeats that validity check, switches
+the exact `SYSTEM` path, and then verifies the activated host declares the same
+Cachix trust; file-cache transport requires explicit bootstrap/recovery
+selection.
 
 ## Failure And Unblock
 
