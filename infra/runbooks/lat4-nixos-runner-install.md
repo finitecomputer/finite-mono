@@ -105,28 +105,18 @@ current.
 2. `ssh root@152.236.34.15` (accept the new host key; this is rescue Ubuntu).
    TODO(prove): confirm the rescue kernel exposes all four disks and that
    the disko script's by-id paths resolve.
-3. From the artifact directory, realize the manifest's exact store paths from
-   the artifact's file binary cache and drive the install consuming only
-   those realized paths (the uploaded artifact carries `nix-cache/` plus the
-   manifest; the system, disko, and kexec links are named in the manifest,
-   not shipped as directories):
+3. From a Linux driver machine (or CI job) that can realize x86_64-linux
+   store paths, drive the whole install with the artifact driver — it
+   validates the manifest, proves the rev is on origin/main, realizes the
+   SYSTEM/DISKO/KEXEC paths from the artifact's file cache (pure
+   substitution, nothing built), and invokes the flake-pinned
+   nixos-anywhere:
 
    ```sh
-   # Realize the exact manifest paths into the local x86_64-linux store.
-   nix copy --from "file://$PWD/nix-cache" \
-     "$(jq -r .system manifest.json)" \
-     "$(jq -r .disko manifest.json)" \
-     "$(jq -r .kexec manifest.json)"
-
    # TODO(prove): exact nixos-anywhere flag spellings are proven here on
-   # first execution; the invariants below are what must hold — the disko
-   # script comes BEFORE the system closure, the kexec tarball is the
-   # same-pin CI artifact (not nixos-anywhere's default), and nothing is
-   # built on the target.
-   nixos-anywhere \
-     --disko-script "$(jq -r .disko manifest.json)" \
-     --nixos-system "$(jq -r .system manifest.json)" \
-     --kexec "$(jq -r .kexec manifest.json)" \
+   # first execution; the invariants are: kexec from the artifact, store
+   # paths from the artifact, no build fallback.
+   scripts/install-lat4-from-artifact target/lat4-nixos-closure-<REV> \
      root@152.236.34.15
    ```
 

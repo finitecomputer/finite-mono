@@ -84,6 +84,10 @@ deploy-lat3-closure artifact_dir *args:
 deploy-lat4-closure artifact_dir *args:
     just nixos deploy-lat4-closure "$@"
 
+[positional-arguments]
+install-lat4-from-artifact artifact_dir target_host *args:
+    just nixos install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 

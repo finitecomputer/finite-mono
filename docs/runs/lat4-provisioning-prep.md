@@ -169,10 +169,11 @@ Still open:
    registration for `finite-kata-runner-4` in Core (runbook Gate D).
 7. **Monitoring receiver credentials** for lat4 on the monitoring host must
    match the new `metrics-remote-write.env`/`logs-write.env` pairs.
-8. **Install runbook.** Clone the `lat2-nixos-runner-install.md` Gates A–E
+8. **Install runbook.** Clone the `lat2-replacement-cutover.md` Gates A–E
    pattern as `lat4-nixos-runner-install.md`: Gate A pre-wipe evidence +
    provider console steps, Gate B fill storage-ids (already drafted) + CI
-   artifact at merged rev, Gate C rescue-mode artifact-driven install,
+   artifact at merged rev, Gate C rescue-mode artifact-driven install via
+   `scripts/install-lat4-from-artifact`,
    Gate D secrets drained + WG handshake + drained first-lease proof +
    storage drills, Gate E admission decision. Record observed
    `component_size` + rollback boundary.

@@ -96,6 +96,18 @@ install-lat2-from-artifact artifact_dir target_host *args:
     cd "$repo_root"
     exec scripts/install-lat2-from-artifact "$artifact_dir" "$target_host" "$@"
 
+# Drive the artifact-driven bare-metal install for finite-lat-4 (Gate C of
+# infra/runbooks/lat4-nixos-runner-install.md). Validates the manifest,
+# realizes the install inputs from the artifact cache, and runs the pinned
+# nixos-anywhere against the rescue-mode host. Nothing is built.
+[positional-arguments]
+install-lat4-from-artifact artifact_dir target_host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
+
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
