@@ -3998,10 +3998,17 @@ fn seed_welcome_allowlist_from_values(
 /// profile chat the owner's Hosted Web Device opened), or of every connected
 /// room when no home-channel pointer was ever written. MLS membership is
 /// read from the local store and every member credential is verified, so a
-/// name here is proof the account already chats with this agent — never a
-/// stranger granted admission retroactively. A room whose members cannot be
-/// verified (e.g. expired credentials in a long-idle room) is skipped
-/// loudly rather than blocking the other rooms.
+/// name here is proof the account already chats with this agent.
+///
+/// Known grandfathering edge: when the all-rooms fallback runs for an agent
+/// that was exploited before the upgrade (a stranger self-admitted via the
+/// pre-stack open Welcome path), that stranger is an MLS-verified member and
+/// IS seeded — lockdown then only prevents new strangers. Operators should
+/// audit the allowlist after upgrading such agents and revoke via
+/// `chat.admission`; revocation reaches gateway dispatch at the next gateway
+/// restart. A room whose members cannot be verified (e.g. expired
+/// credentials in a long-idle room) is skipped loudly rather than blocking
+/// the other rooms.
 fn legacy_admission_seed_account_ids(
     home: &AgentHome,
     store: &SqliteClientStore,
@@ -4159,13 +4166,14 @@ fn apply_chat_admission_command(
             .add_welcome_allowed_senders(&owner, [account_id])
             .map_err(|error| CliError::Hermes(error.to_string()))?,
         "revoke" => {
-            let entries = store
-                .welcome_allowed_senders(&owner)
-                .map_err(|error| CliError::Hermes(error.to_string()))?;
-            if entries.len() == 1 && entries.first().is_some_and(|entry| *entry == account_id) {
+            // Self-revoke is refused: the sender must be allowlisted to
+            // manage the list at all, so refusing self-revoke also keeps at
+            // least one manager on the list forever (the older last-entry
+            // guard is unreachable under this rule).
+            if account_id == delivery.sender.account_id {
                 return Err(CliError::Hermes(
-                    "refusing to revoke the last allowlist entry; that would brick room \
-                     admission for this agent"
+                    "refusing to revoke the requesting sender; that would cut this \
+                     management channel off from the agent"
                         .to_owned(),
                 ));
             }
@@ -6070,30 +6078,34 @@ mod tests {
     }
 
     #[test]
-    fn chat_admission_revoke_refuses_the_last_entry() {
+    fn chat_admission_revoke_refuses_the_requesting_sender() {
+        // Revoking your own entry cuts the management channel off from the
+        // agent; the last-entry guard alone does not cover multi-entry
+        // lists.
         let dir = tempfile::tempdir().unwrap();
-        let home = admission_test_home(&dir, 0x28);
+        let home = admission_test_home(&dir, 0x2b);
         let owner_ref = admission_owner(&home);
         let owner = "cd".repeat(32);
+        let guest = "ef".repeat(32);
         {
             let mut store = admission_store(&home);
             store
                 .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
                 .unwrap();
             store
-                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone(), guest.clone()])
                 .unwrap();
         }
 
         let error = apply_admission(&home, &owner, "revoke", &owner).unwrap_err();
         assert!(
-            error.to_string().contains("last allowlist entry"),
+            error.to_string().contains("cut this management channel"),
             "unexpected error: {error}"
         );
         let store = admission_store(&home);
         assert_eq!(
             store.welcome_allowed_senders(&owner_ref).unwrap(),
-            vec![owner]
+            vec![owner, guest]
         );
     }
 

@@ -300,8 +300,18 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     // After prepare (the agent home and store exist) and before the
     // supervisor starts the gateway or the sidecar, so admission state is
     // settled before anything reads it and the store writer lease is still
-    // uncontended.
-    seed_chat_admission(&config)?;
+    // uncontended. Best-effort here by design: a failure (operator typo in
+    // the seed env, store hiccup) must not take the whole agent down —
+    // that would turn a typo into a total chat outage in a restart loop.
+    // The sidecar's own boot-time seed re-runs the step and remains the
+    // hard gate: a malformed seed env crash-loops the sidecar loudly
+    // instead of silently downgrading to allow-all.
+    if let Err(error) = seed_chat_admission(&config) {
+        eprintln!(
+            "finite-agentd: chat admission seed failed ({error}); \
+             the sidecar enforces admission policy at its own boot"
+        );
+    }
     let identity = load_agent_identity(&config.agent_home)?;
     let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
     for account_id in &config.authorized_accounts {
@@ -1101,6 +1111,11 @@ fn sidecar_admission_default_from_value(admission_default: Option<&str>) -> Opti
 /// start, including the legacy-lockdown derivation on an upgraded agent.
 /// Later allowlist changes go through `chat.admission` commands, which
 /// rewrite the mirror in place; they reach the gateway at its next restart.
+///
+/// Callers treat failure as non-fatal: log and continue. The sidecar's own
+/// boot-time seed is the enforcing copy of this step and fails its boot on
+/// a malformed seed env, so skipping here can never silently downgrade
+/// admission to allow-all.
 fn seed_chat_admission(config: &DaemonConfig) -> Result<(), AgentdError> {
     let status = StdCommand::new(&config.finitechat_bin)
         .args(["hermes", "--agent-home"])
