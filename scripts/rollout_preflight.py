@@ -192,12 +192,11 @@ def psql_query(dsn: str, statement: str) -> list[list[str]]:
 
 
 def checked_header(rows: list[list[str]], name: str) -> list[list[str]]:
-    if len(rows[0]) != len(EXPECTED_HEADERS[name]) or [
-        cell.lower() for cell in rows[0]
-    ] != EXPECTED_HEADERS[name]:
-        raise CensusError(
-            f"{name} query returned unexpected columns: {rows[0]}"
-        )
+    if (
+        len(rows[0]) != len(EXPECTED_HEADERS[name])
+        or [cell.lower() for cell in rows[0]] != EXPECTED_HEADERS[name]
+    ):
+        raise CensusError(f"{name} query returned unexpected columns: {rows[0]}")
     return rows[1:]
 
 
@@ -337,13 +336,13 @@ def render_report(report: dict) -> str:
         f"- `{entry['kind']}/{entry['status']}`: {entry['count']}"
         for entry in report["status_distribution"]
     ] or ["- (table empty)"]
-    unknown_lines = [
-        f"- `{status}`" for status in report["unknown_statuses"]
-    ] or ["- None"]
+    unknown_lines = [f"- `{status}`" for status in report["unknown_statuses"]] or [
+        "- None"
+    ]
     upgrades = report["active_upgrade_requests"]
-    upgrade_lines = [
-        f"- `{request_id}`" for request_id in upgrades["ids"]
-    ] or ["- None"]
+    upgrade_lines = [f"- `{request_id}`" for request_id in upgrades["ids"]] or [
+        "- None"
+    ]
     running = report["running_inventory"]
     long_lived_lines = [
         f"- `{entry['id']}` kind=`{entry['kind']}` "

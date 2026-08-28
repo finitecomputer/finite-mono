@@ -69,13 +69,15 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
     def test_checkpoint_and_h200_recipe_are_fixed(self) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace('"--tp-size",\n        "8"', '"--tp-size",\n        "4"')
-        text = text.replace('"--kv-cache-dtype",\n        "bfloat16"', '')
+        text = text.replace('"--kv-cache-dtype",\n        "bfloat16"', "")
         with temporary_repository(main_text=text) as temporary_directory:
             violations = check_repository(Path(temporary_directory))
         self.assertTrue(any("tp-size" in item for item in violations), violations)
         self.assertTrue(any("bfloat16" in item for item in violations), violations)
 
-    def test_legacy_aliases_are_required_but_unknown_labels_are_not_wildcarded(self) -> None:
+    def test_legacy_aliases_are_required_but_unknown_labels_are_not_wildcarded(
+        self,
+    ) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace(
             'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"',
@@ -85,7 +87,9 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
             violations = check_repository(Path(temporary_directory))
         self.assertTrue(any("model aliases" in item for item in violations), violations)
 
-    def test_bridge_must_be_cpu_only_secretless_and_point_at_generic_route(self) -> None:
+    def test_bridge_must_be_cpu_only_secretless_and_point_at_generic_route(
+        self,
+    ) -> None:
         text = (ROOT / BRIDGE_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace("memory: 2048", "memory: 2048\ngpus: 1")
         text = text.replace(
@@ -98,11 +102,15 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
         self.assertTrue(any("generic route" in item for item in violations), violations)
 
     def test_tinfoil_shims_proxy_the_service_owned_route_surface(self) -> None:
-        main = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8").replace(
-            '- "/*"', "- /v1/chat/completions"
+        main = (
+            (ROOT / MAIN_CANDIDATE)
+            .read_text(encoding="utf-8")
+            .replace('- "/*"', "- /v1/chat/completions")
         )
-        bridge = (ROOT / BRIDGE_CANDIDATE).read_text(encoding="utf-8").replace(
-            '- "/*"', "- /v1/chat/completions"
+        bridge = (
+            (ROOT / BRIDGE_CANDIDATE)
+            .read_text(encoding="utf-8")
+            .replace('- "/*"', "- /v1/chat/completions")
         )
         with temporary_repository(
             main_text=main, bridge_text=bridge

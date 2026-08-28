@@ -50,23 +50,23 @@ def _replace_once(text: str, old: str, new: str, *, label: str) -> str:
 def patch_tokenizer(text: str) -> str:
     text = _replace_once(
         text,
-        '''            thinking = kwargs.get("thinking", False)
+        """            thinking = kwargs.get("thinking", False)
             enable_thinking = kwargs.get("enable_thinking", False)
             thinking = thinking or enable_thinking
             thinking_mode = "thinking" if thinking else "chat"
-''',
-        '''            thinking = kwargs.get("thinking")
+""",
+        """            thinking = kwargs.get("thinking")
             enable_thinking = kwargs.get("enable_thinking")
             thinking_enabled = bool(thinking) or bool(enable_thinking)
             if "thinking" not in kwargs and "enable_thinking" not in kwargs:
                 thinking_enabled = True
             thinking_mode = "thinking" if thinking_enabled else "chat"
-''',
+""",
         label="thinking default",
     )
     return _replace_once(
         text,
-        '''            reasoning_effort = kwargs.get("reasoning_effort")
+        """            reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
                 reasoning_effort = None
             elif reasoning_effort == "none":
@@ -76,8 +76,8 @@ def patch_tokenizer(text: str) -> str:
                 reasoning_effort = "max"
             else:
                 reasoning_effort = "high"
-''',
-        '''            reasoning_effort = kwargs.get("reasoning_effort")
+""",
+        """            reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
                 reasoning_effort = "high" if thinking_enabled else None
             elif reasoning_effort == "none":
@@ -89,7 +89,7 @@ def patch_tokenizer(text: str) -> str:
                 reasoning_effort = "low"
             else:
                 reasoning_effort = "high"
-''',
+""",
         label="reasoning effort mapping",
     )
 
@@ -97,13 +97,13 @@ def patch_tokenizer(text: str) -> str:
 def patch_encoding(text: str) -> str:
     text = _replace_once(
         text,
-        '''REASONING_EFFORT_MAX = (
+        """REASONING_EFFORT_MAX = (
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\\n"
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\\n"
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\\n\\n"
 )
-''',
-        '''REASONING_EFFORT_PROMPTS: Dict[str, str] = {
+""",
+        """REASONING_EFFORT_PROMPTS: Dict[str, str] = {
     "low": "",
     "high": (
         "Reasoning Effort: Absolute maximum with no shortcuts permitted.\\n"
@@ -117,24 +117,24 @@ def patch_encoding(text: str) -> str:
     ),
 }
 DEFAULT_REASONING_EFFORT = "low"
-''',
+""",
         label="reasoning effort prompts",
     )
     return _replace_once(
         text,
-        '''    # Reasoning effort prefix (only at index 0 in thinking mode with max effort)
+        """    # Reasoning effort prefix (only at index 0 in thinking mode with max effort)
     assert reasoning_effort in ['max', None, 'high'], f"Invalid reasoning effort: {reasoning_effort}"
     if index == 0 and thinking_mode == "thinking" and reasoning_effort == 'max':
         prompt += REASONING_EFFORT_MAX
-''',
-        '''    reasoning_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
+""",
+        """    reasoning_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
     assert reasoning_effort in REASONING_EFFORT_PROMPTS, (
         f"Invalid reasoning effort: {reasoning_effort}, expected one of "
         f"{list(REASONING_EFFORT_PROMPTS)}"
     )
     if index == 0 and thinking_mode == "thinking":
         prompt += REASONING_EFFORT_PROMPTS[reasoning_effort]
-''',
+""",
         label="reasoning effort rendering",
     )
 

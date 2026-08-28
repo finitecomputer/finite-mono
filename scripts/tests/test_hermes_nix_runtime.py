@@ -21,7 +21,17 @@ def _closure() -> HermesRuntimeClosure:
         python_store_path="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-hermes-venv",
         toolchain_store_path="/nix/store/cccccccccccccccccccccccccccccccc-agent-runtime-toolchains",
         playwright_browsers_path="/nix/store/dddddddddddddddddddddddddddddddd-playwright-browsers",
-        toolchain_bins=["node", "npm", "npx", "bun", "bunx", "deno", "uv", "uvx", "playwright"],
+        toolchain_bins=[
+            "node",
+            "npm",
+            "npx",
+            "bun",
+            "bunx",
+            "deno",
+            "uv",
+            "uvx",
+            "playwright",
+        ],
         version="0.20.0",
         closure_count=3,
     )

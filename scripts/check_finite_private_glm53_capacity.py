@@ -133,9 +133,7 @@ def make_payload(args: argparse.Namespace, index: int, run_tag: str) -> dict[str
         "stream_options": {"include_usage": True},
     }
     if args.thinking != "default":
-        payload["chat_template_kwargs"] = {
-            "enable_thinking": args.thinking == "on"
-        }
+        payload["chat_template_kwargs"] = {"enable_thinking": args.thinking == "on"}
     if args.reasoning_effort:
         payload["reasoning_effort"] = args.reasoning_effort
     return payload
@@ -252,9 +250,7 @@ def run_once(
     good = [result for result in results if result.error is None]
     errors = [result.error for result in results if result.error is not None]
     ttfts = [result.ttft_s for result in good if result.ttft_s is not None]
-    latencies = [
-        result.latency_s for result in good if result.latency_s is not None
-    ]
+    latencies = [result.latency_s for result in good if result.latency_s is not None]
     per_request_rates = [
         result.completion_tokens
         / max((result.latency_s or 0) - (result.ttft_s or 0), 0.001)
@@ -347,19 +343,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="OpenAI-compatible /v1 base URL")
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY")
     parser.add_argument(
-        "--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY"
+        "--concurrency", type=parse_concurrency, default=(1, 32, 64, 120)
     )
-    parser.add_argument("--concurrency", type=parse_concurrency, default=(1, 32, 64, 120))
     parser.add_argument("--required-concurrency", type=int, default=120)
     parser.add_argument("--output-tokens", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--tag", required=True)
-    parser.add_argument(
-        "--thinking", choices=("default", "on", "off"), default="on"
-    )
+    parser.add_argument("--thinking", choices=("default", "on", "off"), default="on")
     parser.add_argument(
         "--reasoning-effort", choices=("low", "high", "max"), default="high"
     )

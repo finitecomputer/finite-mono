@@ -137,7 +137,9 @@ def chat_completion(
     try:
         return str(body["choices"][0]["message"]["content"]).strip()
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected OpenRouter response: {json.dumps(body)[:1000]}") from exc
+        raise RuntimeError(
+            f"Unexpected OpenRouter response: {json.dumps(body)[:1000]}"
+        ) from exc
 
 
 def panel_messages(mode: str, question: str) -> list[dict[str, str]]:
@@ -170,7 +172,9 @@ def panel_messages(mode: str, question: str) -> list[dict[str, str]]:
     ]
 
 
-def synth_messages(mode: str, question: str, results: Iterable[CouncilResult]) -> list[dict[str, str]]:
+def synth_messages(
+    mode: str, question: str, results: Iterable[CouncilResult]
+) -> list[dict[str, str]]:
     panel_text = "\n\n".join(
         f"## {result.model}\n{result.content}" for result in results if result.ok
     )
@@ -249,31 +253,45 @@ def render_report(
         "",
     ]
     if synthesis:
-        lines.extend([
-            "## Synthesis",
-            "",
-            synthesis.content if synthesis.ok else f"Synthesis failed: {synthesis.content}",
-            "",
-        ])
+        lines.extend(
+            [
+                "## Synthesis",
+                "",
+                synthesis.content
+                if synthesis.ok
+                else f"Synthesis failed: {synthesis.content}",
+                "",
+            ]
+        )
     lines.extend(["## Individual Opinions", ""])
     for result in results:
         status = "ok" if result.ok else "failed"
-        lines.extend([
-            f"### {result.model} ({status}, {result.elapsed_seconds:.1f}s)",
-            "",
-            result.content,
-            "",
-        ])
+        lines.extend(
+            [
+                f"### {result.model} ({status}, {result.elapsed_seconds:.1f}s)",
+                "",
+                result.content,
+                "",
+            ]
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a small OpenRouter-backed model council.")
+    parser = argparse.ArgumentParser(
+        description="Run a small OpenRouter-backed model council."
+    )
     parser.add_argument("--mode", choices=sorted(MODE_GUIDANCE), default="decision")
     parser.add_argument("--question", default="")
     parser.add_argument("--input-file")
-    parser.add_argument("--models", default="", help="Comma-separated OpenRouter model IDs.")
-    parser.add_argument("--synthesis-model", default="", help="Defaults to the first successful panel model.")
+    parser.add_argument(
+        "--models", default="", help="Comma-separated OpenRouter model IDs."
+    )
+    parser.add_argument(
+        "--synthesis-model",
+        default="",
+        help="Defaults to the first successful panel model.",
+    )
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-tokens", type=int, default=1400)
     parser.add_argument("--synthesis-max-tokens", type=int, default=1800)
@@ -290,12 +308,18 @@ def main() -> int:
         return 2
 
     question = read_question(args)
-    models = [item.strip() for item in args.models.split(",") if item.strip()] if args.models else env_models()
+    models = (
+        [item.strip() for item in args.models.split(",") if item.strip()]
+        if args.models
+        else env_models()
+    )
     if not models:
         print("No models configured.", file=sys.stderr)
         return 2
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(models), 6)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(models), 6)
+    ) as executor:
         futures = [
             executor.submit(
                 ask_panel,
@@ -309,7 +333,9 @@ def main() -> int:
             )
             for model in models
         ]
-        results = [future.result() for future in concurrent.futures.as_completed(futures)]
+        results = [
+            future.result() for future in concurrent.futures.as_completed(futures)
+        ]
     results.sort(key=lambda result: models.index(result.model))
 
     successful = [result for result in results if result.ok]
@@ -326,11 +352,23 @@ def main() -> int:
                 max_tokens=args.synthesis_max_tokens,
                 timeout=args.timeout,
             )
-            synthesis = CouncilResult(synthesis_model, True, synthesis_content, time.monotonic() - started)
+            synthesis = CouncilResult(
+                synthesis_model, True, synthesis_content, time.monotonic() - started
+            )
         except Exception as exc:
-            synthesis = CouncilResult(synthesis_model, False, str(exc), time.monotonic() - started)
+            synthesis = CouncilResult(
+                synthesis_model, False, str(exc), time.monotonic() - started
+            )
 
-    print(render_report(mode=args.mode, question=question, models=models, results=results, synthesis=synthesis))
+    print(
+        render_report(
+            mode=args.mode,
+            question=question,
+            models=models,
+            results=results,
+            synthesis=synthesis,
+        )
+    )
     return 0 if successful else 1
 
 

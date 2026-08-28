@@ -115,7 +115,10 @@ def score_tool_calls(
     return (
         (True, "matched")
         if expected_cities.issubset(observed_cities)
-        else (False, f"missing requested cities: {sorted(expected_cities - observed_cities)}")
+        else (
+            False,
+            f"missing requested cities: {sorted(expected_cities - observed_cities)}",
+        )
     )
 
 
@@ -176,7 +179,9 @@ class ProtocolClient:
                     continue
                 event = json.loads(data)
                 if event.get("model") not in (None, MODEL):
-                    raise RuntimeError(f"stream returned wrong model {event.get('model')!r}")
+                    raise RuntimeError(
+                        f"stream returned wrong model {event.get('model')!r}"
+                    )
                 event_usage = response_usage(event)
                 if event_usage != (0, 0):
                     usage = event_usage
@@ -207,7 +212,9 @@ class ProtocolClient:
         raise RuntimeError("cancel stream produced no event")
 
 
-def base_payload(messages: list[dict[str, Any]], *, thinking: bool = True) -> dict[str, Any]:
+def base_payload(
+    messages: list[dict[str, Any]], *, thinking: bool = True
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": MODEL,
         "messages": messages,
@@ -221,7 +228,9 @@ def base_payload(messages: list[dict[str, Any]], *, thinking: bool = True) -> di
     return payload
 
 
-def result(case: str, passed: bool, detail: str, elapsed: float, **facts: Any) -> dict[str, Any]:
+def result(
+    case: str, passed: bool, detail: str, elapsed: float, **facts: Any
+) -> dict[str, Any]:
     return {
         "case": case,
         "passed": passed,
@@ -246,7 +255,9 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
         result(
             "thinking_off",
             isinstance(message.get("content"), str) and not reasoning,
-            "content separated without reasoning" if not reasoning else "reasoning leaked",
+            "content separated without reasoning"
+            if not reasoning
+            else "reasoning leaked",
             elapsed,
         )
     )
@@ -256,10 +267,19 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
     )
     message = completion_message(response)
     reasoning = message.get("reasoning_content") or message.get("reasoning")
-    thinking_passed = isinstance(reasoning, str) and bool(reasoning.strip()) and isinstance(
-        message.get("content"), str
+    thinking_passed = (
+        isinstance(reasoning, str)
+        and bool(reasoning.strip())
+        and isinstance(message.get("content"), str)
     )
-    results.append(result("thinking_high", thinking_passed, "parsed" if thinking_passed else "missing separated reasoning/content", elapsed))
+    results.append(
+        result(
+            "thinking_high",
+            thinking_passed,
+            "parsed" if thinking_passed else "missing separated reasoning/content",
+            elapsed,
+        )
+    )
 
     tool_payload = base_payload(
         [{"role": "user", "content": "Use get_weather for Austin, Texas."}]
@@ -273,7 +293,9 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
     calls = tool_message.get("tool_calls")
     calls = calls if isinstance(calls, list) else []
     passed, detail = score_tool_calls(calls, {"austin"})
-    results.append(result("forced_tool", passed, detail, elapsed, tool_calls=len(calls)))
+    results.append(
+        result("forced_tool", passed, detail, elapsed, tool_calls=len(calls))
+    )
 
     if calls:
         follow_messages = list(tool_payload["messages"])
@@ -293,29 +315,63 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
         passed = isinstance(follow_message.get("content"), str) and bool(
             follow_message["content"].strip()
         )
-        results.append(result("tool_result_second_turn", passed, "completed" if passed else "missing final content", elapsed))
+        results.append(
+            result(
+                "tool_result_second_turn",
+                passed,
+                "completed" if passed else "missing final content",
+                elapsed,
+            )
+        )
     else:
-        results.append(result("tool_result_second_turn", False, "first tool call unavailable", 0.0))
+        results.append(
+            result("tool_result_second_turn", False, "first tool call unavailable", 0.0)
+        )
 
     events, saw_done, usage, elapsed = client.stream(tool_payload)
     stream_calls = accumulate_tool_calls(events)
     passed, detail = score_tool_calls(stream_calls, {"austin"})
     passed = passed and saw_done and usage[1] > 0
-    results.append(result("streaming_tool", passed, detail if passed else f"{detail}; done={saw_done}; usage={usage}", elapsed, tool_calls=len(stream_calls), completion_tokens=usage[1]))
+    results.append(
+        result(
+            "streaming_tool",
+            passed,
+            detail if passed else f"{detail}; done={saw_done}; usage={usage}",
+            elapsed,
+            tool_calls=len(stream_calls),
+            completion_tokens=usage[1],
+        )
+    )
 
     parallel_payload = base_payload(
-        [{"role": "user", "content": "Call get_weather separately for Austin, Texas and Boston, Massachusetts."}]
+        [
+            {
+                "role": "user",
+                "content": "Call get_weather separately for Austin, Texas and Boston, Massachusetts.",
+            }
+        ]
     )
-    parallel_payload.update(tools=[WEATHER_TOOL], tool_choice="required", parallel_tool_calls=True)
+    parallel_payload.update(
+        tools=[WEATHER_TOOL], tool_choice="required", parallel_tool_calls=True
+    )
     response, elapsed = client.post(parallel_payload)
     parallel_message = completion_message(response)
     parallel_calls = parallel_message.get("tool_calls")
     parallel_calls = parallel_calls if isinstance(parallel_calls, list) else []
     passed, detail = score_tool_calls(parallel_calls, {"austin", "boston"})
-    results.append(result("parallel_tools", passed, detail, elapsed, tool_calls=len(parallel_calls)))
+    results.append(
+        result(
+            "parallel_tools", passed, detail, elapsed, tool_calls=len(parallel_calls)
+        )
+    )
 
     json_payload = base_payload(
-        [{"role": "user", "content": 'Return one JSON object with integer field "answer" equal to 323.'}],
+        [
+            {
+                "role": "user",
+                "content": 'Return one JSON object with integer field "answer" equal to 323.',
+            }
+        ],
         thinking=False,
     )
     json_payload["response_format"] = {"type": "json_object"}
@@ -326,33 +382,72 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
         passed = decoded == {"answer": 323}
     except json.JSONDecodeError:
         passed = False
-    results.append(result("json_object", passed, "matched" if passed else "invalid or wrong JSON object", elapsed))
+    results.append(
+        result(
+            "json_object",
+            passed,
+            "matched" if passed else "invalid or wrong JSON object",
+            elapsed,
+        )
+    )
 
     history_payload = base_payload(
         [
             {"role": "user", "content": "What is 2 + 2?"},
-            {"role": "assistant", "reasoning_content": "Add two and two.", "content": "4"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Add two and two.",
+                "content": "4",
+            },
             {"role": "user", "content": "Now multiply that result by 3."},
         ]
     )
     history_payload["chat_template_kwargs"]["clear_thinking"] = True
     response, elapsed = client.post(history_payload)
     history_message = completion_message(response)
-    passed = isinstance(history_message.get("content"), str) and "12" in history_message["content"]
-    results.append(result("clear_thinking_history", passed, "matched" if passed else "history result was not 12", elapsed))
+    passed = (
+        isinstance(history_message.get("content"), str)
+        and "12" in history_message["content"]
+    )
+    results.append(
+        result(
+            "clear_thinking_history",
+            passed,
+            "matched" if passed else "history result was not 12",
+            elapsed,
+        )
+    )
 
     status, elapsed = client.malformed_status()
-    results.append(result("malformed_json", 400 <= status < 500, f"HTTP {status}", elapsed))
+    results.append(
+        result("malformed_json", 400 <= status < 500, f"HTTP {status}", elapsed)
+    )
 
     elapsed = client.cancel_after_first_event(
-        base_payload([{"role": "user", "content": "Write a long explanation of replicated logs."}])
+        base_payload(
+            [
+                {
+                    "role": "user",
+                    "content": "Write a long explanation of replicated logs.",
+                }
+            ]
+        )
     )
     response, recovery_elapsed = client.post(
-        base_payload([{"role": "user", "content": "Reply exactly: recovered"}], thinking=False)
+        base_payload(
+            [{"role": "user", "content": "Reply exactly: recovered"}], thinking=False
+        )
     )
     recovery_message = completion_message(response)
     passed = isinstance(recovery_message.get("content"), str)
-    results.append(result("cancel_and_recover", passed, "recovered" if passed else "recovery failed", elapsed + recovery_elapsed))
+    results.append(
+        result(
+            "cancel_and_recover",
+            passed,
+            "recovered" if passed else "recovery failed",
+            elapsed + recovery_elapsed,
+        )
+    )
 
     ratio = 1.0
     for target_tokens in (128_000, 360_000):
@@ -378,7 +473,9 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
             result(
                 f"context_{target_tokens}",
                 passed,
-                "completed" if passed else "token count outside 10% or response incomplete",
+                "completed"
+                if passed
+                else "token count outside 10% or response incomplete",
                 elapsed,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -386,20 +483,31 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
             )
         )
         recovery, recovery_elapsed = client.post(
-            base_payload([{"role": "user", "content": "Reply exactly: healthy"}], thinking=False)
+            base_payload(
+                [{"role": "user", "content": "Reply exactly: healthy"}], thinking=False
+            )
         )
         recovery_message = completion_message(recovery)
         recovery_passed = (
             isinstance(recovery_message.get("content"), str)
             and "healthy" in recovery_message["content"].lower()
         )
-        results.append(result(f"context_{target_tokens}_recovery", recovery_passed, "healthy" if recovery_passed else "recovery failed", recovery_elapsed))
+        results.append(
+            result(
+                f"context_{target_tokens}_recovery",
+                recovery_passed,
+                "healthy" if recovery_passed else "recovery failed",
+                recovery_elapsed,
+            )
+        )
     return results
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--endpoint", required=True, help="OpenAI-compatible /v1 base URL")
+    parser.add_argument(
+        "--endpoint", required=True, help="OpenAI-compatible /v1 base URL"
+    )
     parser.add_argument("--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY")
     parser.add_argument("--timeout-seconds", type=float, default=1200)
     arguments = parser.parse_args()

@@ -517,8 +517,7 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
         # lat1 disks retain stale MD metadata from a failed RAID attempt;
         # leftover arrays in /proc/mdstat are not a single-disk health signal.
         raw["storage"]["disks"] = [
-            {"path": path, "present": Path(path).exists()}
-            for path in profile["disks"]
+            {"path": path, "present": Path(path).exists()} for path in profile["disks"]
         ]
 
     namespace = CONTRACT["runner"]["namespace"]
@@ -582,7 +581,9 @@ def safe_snapshot_directory(root: Path) -> Path:
         snapshot = latest.resolve(strict=True)
         snapshot.relative_to(resolved_root)
     except (OSError, ValueError) as error:
-        raise CollectionError(f"latest snapshot escapes its recovery root: {error}") from error
+        raise CollectionError(
+            f"latest snapshot escapes its recovery root: {error}"
+        ) from error
     if not snapshot.is_dir():
         raise CollectionError("latest recovery snapshot is not a directory")
     return snapshot
@@ -678,7 +679,9 @@ def collect_recovery(hostname: str) -> dict[str, Any]:
             litestream_stamp.read_text(encoding="utf-8").strip()
         )
     except (OSError, ValueError) as error:
-        raw["litestream_last_success_error"] = f"cannot read {litestream_stamp}: {error}"
+        raw["litestream_last_success_error"] = (
+            f"cannot read {litestream_stamp}: {error}"
+        )
     litestream_units: dict[str, Any] = {}
     for unit in recovery["litestream_service_units"]:
         try:
@@ -735,7 +738,9 @@ def collect_rollout() -> dict[str, Any]:
     }
 
 
-def probe_agent_entry(verdict: str, reason: str | None, detail: str | None = None) -> dict[str, Any]:
+def probe_agent_entry(
+    verdict: str, reason: str | None, detail: str | None = None
+) -> dict[str, Any]:
     entry: dict[str, Any] = {"verdict": verdict, "reason": reason}
     if detail is not None:
         entry["detail"] = detail
@@ -937,14 +942,18 @@ def project_runtime_health(row: dict[str, Any], now: datetime) -> dict[str, Any]
     ):
         try:
             interval = int(
-                row.get("health_report_interval_seconds") or HEALTH_DEFAULT_INTERVAL_SECONDS
+                row.get("health_report_interval_seconds")
+                or HEALTH_DEFAULT_INTERVAL_SECONDS
             )
         except (TypeError, ValueError):
             interval = HEALTH_DEFAULT_INTERVAL_SECONDS
         interval = min(
             max(interval, HEALTH_MIN_INTERVAL_SECONDS), HEALTH_MAX_INTERVAL_SECONDS
         )
-        if age_seconds is not None and age_seconds <= interval * HEALTH_STALE_MULTIPLIER:
+        if (
+            age_seconds is not None
+            and age_seconds <= interval * HEALTH_STALE_MULTIPLIER
+        ):
             status = "ready" if ready else "not_ready"
     return {
         "status": status,
@@ -965,7 +974,10 @@ def build_fleet(
     artifacts = core.get("artifacts", [])
     target = target_runtime_artifact(artifacts)
     if target is None:
-        return {"status": "unknown", "error": "no promoted, non-retired Runtime artifact"}
+        return {
+            "status": "unknown",
+            "error": "no promoted, non-retired Runtime artifact",
+        }
 
     target_version = target["version_label"]
     probe_agents = (probe or {}).get("agents", {})
@@ -999,7 +1011,9 @@ def build_fleet(
             # App health (version above) and lifecycle-control health are
             # separate facts; both are displayed per Agent.
             entry["lifecycle"] = lifecycle
-        host.setdefault(row.get("link_state", "unlinked"), host["unlinked"]).append(entry)
+        host.setdefault(row.get("link_state", "unlinked"), host["unlinked"]).append(
+            entry
+        )
 
     host_reports: list[dict[str, Any]] = []
     section_statuses: list[str] = []
@@ -1013,12 +1027,18 @@ def build_fleet(
         # is displayed with its projected state but never counted against the
         # host. A fresh not_ready report turns the host red; stale or missing
         # reports read unknown.
-        health_tracked = [row for row in active if row.get("runtime_status") == "online"]
-        health_ready = [row for row in health_tracked if row["health"]["status"] == "ready"]
+        health_tracked = [
+            row for row in active if row.get("runtime_status") == "online"
+        ]
+        health_ready = [
+            row for row in health_tracked if row["health"]["status"] == "ready"
+        ]
         health_not_ready = [
             row for row in health_tracked if row["health"]["status"] == "not_ready"
         ]
-        health_unknown = [row for row in health_tracked if row["health"]["status"] == "unknown"]
+        health_unknown = [
+            row for row in health_tracked if row["health"]["status"] == "unknown"
+        ]
         status = (
             "red"
             if stragglers or health_not_ready
@@ -1111,7 +1131,9 @@ def unit_status(properties: dict[str, Any], *, active_required: bool) -> str:
     return "unknown"
 
 
-def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict[str, Any]:
+def build_host_health(
+    raw: dict[str, Any] | None, target_id: str | None
+) -> dict[str, Any]:
     if raw is None or raw.get("error"):
         return {
             "status": "unknown",
@@ -1141,7 +1163,11 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
     probes = []
     for name, endpoint in CONTRACT["healthcheck"]["probes"].items():
         observed = raw.get("probes", {}).get(name)
-        status = "green" if observed == "OK" else ("red" if observed == "FAIL" else "unknown")
+        status = (
+            "green"
+            if observed == "OK"
+            else ("red" if observed == "FAIL" else "unknown")
+        )
         statuses.append(status)
         probes.append(
             {
@@ -1357,7 +1383,8 @@ def build_recovery(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
         litestream_age = int(now.timestamp()) - litestream_epoch
         litestream_stamp_status = (
             "green"
-            if 0 <= litestream_age
+            if 0
+            <= litestream_age
             <= CONTRACT["recovery"]["litestream_maximum_age_seconds"]
             else "red"
         )
@@ -1436,7 +1463,9 @@ def build_rollout(raw: dict[str, Any] | None) -> dict[str, Any]:
         }
     plan = raw.get("plan", {})
     events = raw.get("events", [])
-    start_indexes = [index for index, event in enumerate(events) if event.get("event") == "start"]
+    start_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "start"
+    ]
     if not start_indexes:
         return {
             "status": "unknown",
@@ -1451,7 +1480,8 @@ def build_rollout(raw: dict[str, Any] | None) -> dict[str, Any]:
     completed_ids = {
         event.get("agent_runtime_id")
         for event in phase_events
-        if event.get("event") == "entry_postflight" and event.get("status") == "succeeded"
+        if event.get("event") == "entry_postflight"
+        and event.get("status") == "succeeded"
     }
     completed_ids.discard(None)
     planned = len(plan.get("planned", []))
@@ -1497,7 +1527,9 @@ def report_exit_code(report: dict[str, Any]) -> int:
 
 def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
     errors = raw.get("collection_errors", {})
-    fleet = build_fleet(raw.get("core"), now, errors.get("core"), raw.get("lifecycle_probe"))
+    fleet = build_fleet(
+        raw.get("core"), now, errors.get("core"), raw.get("lifecycle_probe")
+    )
     target_id = fleet.get("target_artifact", {}).get("id")
     sections = {
         "fleet_convergence": fleet,
@@ -1508,7 +1540,9 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
     report = {
         "schema_version": "finite.status.v1",
         "generated_at": isoformat(now),
-        "overall_status": combine_status([section["status"] for section in sections.values()]),
+        "overall_status": combine_status(
+            [section["status"] for section in sections.values()]
+        ),
         "exit_code": 0,
         "sections": sections,
     }
@@ -1544,8 +1578,7 @@ def render_human(report: dict[str, Any]) -> str:
 
     fleet = sections["fleet_convergence"]
     lines.append(
-        f"Fleet convergence {badge(fleet['status'])} — "
-        "Core-recorded, NOT verified live"
+        f"Fleet convergence {badge(fleet['status'])} — Core-recorded, NOT verified live"
     )
     if fleet.get("target_artifact"):
         target = fleet["target_artifact"]
@@ -1751,7 +1784,9 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Canonical read-only Finite platform and fleet status"
     )
-    parser.add_argument("--json", action="store_true", help="emit finite.status.v1 JSON")
+    parser.add_argument(
+        "--json", action="store_true", help="emit finite.status.v1 JSON"
+    )
     parser.add_argument(
         "--fixture",
         type=Path,

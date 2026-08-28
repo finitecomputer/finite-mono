@@ -53,9 +53,7 @@ def main() -> int:
             "reasoning_effort": "high",
         }
     )["choices"][0]["message"]
-    hidden_reasoning = reasoning.get("reasoning") or reasoning.get(
-        "reasoning_content"
-    )
+    hidden_reasoning = reasoning.get("reasoning") or reasoning.get("reasoning_content")
     final_text = reasoning.get("content") or ""
     if not hidden_reasoning:
         failures.append("reasoning field was empty")
@@ -98,9 +96,7 @@ def main() -> int:
         "plain": plain_text.strip(),
         "reasoning_chars": len(hidden_reasoning or ""),
         "final_chars": len(final_text),
-        "tool_name": (
-            calls[0].get("function", {}).get("name") if calls else None
-        ),
+        "tool_name": (calls[0].get("function", {}).get("name") if calls else None),
         "failures": failures,
     }
     print(json.dumps(report))

@@ -82,9 +82,13 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
 
     def test_satellite_release_must_start_from_the_production_commit(self) -> None:
         candidate = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
-        runbook = (ROOT / RUNBOOK).read_text(encoding="utf-8").replace(
-            "e337db3606d67c53387113700362adec7b4dfdf7",
-            "0" * 40,
+        runbook = (
+            (ROOT / RUNBOOK)
+            .read_text(encoding="utf-8")
+            .replace(
+                "e337db3606d67c53387113700362adec7b4dfdf7",
+                "0" * 40,
+            )
         )
         with temporary_candidate(
             candidate, runbook_text=runbook
@@ -109,9 +113,13 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
 
     def test_runbook_requires_status_delta_instead_of_unrelated_repairs(self) -> None:
         candidate = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
-        runbook = (ROOT / RUNBOOK).read_text(encoding="utf-8").replace(
-            "Any new or worsened red or unknown",
-            "Any result",
+        runbook = (
+            (ROOT / RUNBOOK)
+            .read_text(encoding="utf-8")
+            .replace(
+                "Any new or worsened red or unknown",
+                "Any result",
+            )
         )
         with temporary_candidate(
             candidate, runbook_text=runbook
@@ -123,9 +131,13 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
 
     def test_runbook_scopes_settlement_to_the_rollout_boundary(self) -> None:
         candidate = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
-        runbook = (ROOT / RUNBOOK).read_text(encoding="utf-8").replace(
-            "all reservations created during this rollout settle",
-            "all reservations settle",
+        runbook = (
+            (ROOT / RUNBOOK)
+            .read_text(encoding="utf-8")
+            .replace(
+                "all reservations created during this rollout settle",
+                "all reservations settle",
+            )
         )
         with temporary_candidate(
             candidate, runbook_text=runbook

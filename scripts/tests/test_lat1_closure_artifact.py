@@ -170,7 +170,9 @@ class LatMonitoringSecretsTests(unittest.TestCase):
         self.logs_secret.unlink()
         result = self.run_checker()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("missing required file: /etc/finite/logs-write.env", result.stderr)
+        self.assertIn(
+            "missing required file: /etc/finite/logs-write.env", result.stderr
+        )
 
     def test_wrong_mode_and_missing_name_fail_without_emitting_value(self) -> None:
         self.logs_secret.write_text(

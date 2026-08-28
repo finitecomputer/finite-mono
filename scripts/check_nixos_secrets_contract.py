@@ -167,9 +167,7 @@ def check_contract(host: str, contract: dict[str, Any]) -> list[str]:
                 f"{host}:{name}: sopsFormat must be one of {sorted(SOPS_FORMATS)}"
             )
 
-        if item.get("sopsKey") is not None and not isinstance(
-            item.get("sopsKey"), str
-        ):
+        if item.get("sopsKey") is not None and not isinstance(item.get("sopsKey"), str):
             failures.append(f"{host}:{name}: sopsKey must be null or a string")
 
     return failures

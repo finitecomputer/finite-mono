@@ -49,7 +49,9 @@ CASES = (
 )
 
 
-def capture(endpoint: str, model: str, lane: str, api_key: str, timeout: float) -> dict[str, Any]:
+def capture(
+    endpoint: str, model: str, lane: str, api_key: str, timeout: float
+) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for case in CASES:
         payload = {
@@ -66,9 +68,7 @@ def capture(endpoint: str, model: str, lane: str, api_key: str, timeout: float) 
             "top_p": 0.95,
             "max_tokens": 4096,
             "chat_template_kwargs": (
-                {"enable_thinking": True}
-                if lane == "candidate"
-                else {"thinking": True}
+                {"enable_thinking": True} if lane == "candidate" else {"thinking": True}
             ),
         }
         request = urllib.request.Request(
@@ -159,7 +159,9 @@ def make_packet(
 
 def write_private(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     path.chmod(0o600)
 
 
@@ -170,7 +172,9 @@ def main() -> int:
     capture_parser.add_argument("--endpoint", required=True)
     capture_parser.add_argument("--model", required=True)
     capture_parser.add_argument("--lane", required=True)
-    capture_parser.add_argument("--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY")
+    capture_parser.add_argument(
+        "--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY"
+    )
     capture_parser.add_argument("--timeout-seconds", type=float, default=600)
     capture_parser.add_argument("--output", type=Path, required=True)
     packet_parser = subparsers.add_parser("packet")

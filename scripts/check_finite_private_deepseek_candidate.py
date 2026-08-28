@@ -142,11 +142,9 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         return violations
 
     if SATELLITE_ROLLBACK_COMMIT not in runbook_text:
-        violations.append(
-            "DeepSeek runbook lacks the exact satellite rollback commit"
-        )
+        violations.append("DeepSeek runbook lacks the exact satellite rollback commit")
     for anchor in (
-        'never from satellite `main`',
+        "never from satellite `main`",
         '--ref "$SATELLITE_BRANCH"',
         "control.inf12.tinfoil.sh",
         "one active eight-H200 cluster",

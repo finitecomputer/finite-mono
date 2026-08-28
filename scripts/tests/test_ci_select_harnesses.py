@@ -27,11 +27,7 @@ def selection_for(*paths: str) -> dict[str, str]:
 
 
 def selected(*paths: str) -> set[str]:
-    return {
-        key
-        for key, value in selection_for(*paths).items()
-        if value == "true"
-    }
+    return {key for key, value in selection_for(*paths).items() if value == "true"}
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
@@ -162,7 +158,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_dashboard_component_change_runs_browser_e2e(self) -> None:
         self.assertEqual(
-            selected("finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx"),
+            selected(
+                "finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx"
+            ),
             {"run_dashboard", "run_dashboard_browser"},
         )
 
@@ -244,7 +242,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_stripe_price_contract_path_runs_nix_checks(self) -> None:
         self.assertEqual(
-            selected("finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py"),
+            selected(
+                "finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py"
+            ),
             {"run_nix_checks"},
         )
         self.assertEqual(
@@ -301,7 +301,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(value, "true", key)
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
-        args = argparse.Namespace(changed_files=[".github/workflows/production-deploy.yml"])
+        args = argparse.Namespace(
+            changed_files=[".github/workflows/production-deploy.yml"]
+        )
         selection, _reason, paths = select_harnesses.select_harnesses(args)
 
         self.assertEqual(paths, [".github/workflows/production-deploy.yml"])
@@ -314,7 +316,9 @@ class CiHarnessSelectionTests(unittest.TestCase):
         prefixed = argparse.Namespace(changed_files=["./justfile"])
         bare = argparse.Namespace(changed_files=["justfile"])
 
-        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(prefixed)
+        prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(
+            prefixed
+        )
         bare_selection, _reason, bare_paths = select_harnesses.select_harnesses(bare)
 
         self.assertEqual(prefixed_paths, bare_paths)

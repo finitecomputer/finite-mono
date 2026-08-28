@@ -19,7 +19,11 @@ from typing import Any
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import (  # noqa: E402  (needs the sys.path shim above)
+    image_build_args,
+    nix_system_for_platform,
+    stage_runtime_closure,
+)
 
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
@@ -100,7 +104,9 @@ def stage_repo(source: Path, dest: Path) -> None:
 
 
 def docker_image_metadata(image: str) -> dict[str, Any]:
-    inspected = json.loads(run(["docker", "image", "inspect", image], timeout=60).stdout)[0]
+    inspected = json.loads(
+        run(["docker", "image", "inspect", image], timeout=60).stdout
+    )[0]
     repo_digests = inspected.get("RepoDigests") or []
     digest = inspected["Id"]
     if repo_digests and "@" in repo_digests[0]:
@@ -126,7 +132,9 @@ def docker_image_metadata(image: str) -> dict[str, Any]:
 
 
 def apple_image_metadata(image: str) -> dict[str, Any]:
-    payload = json.loads(run(["container", "image", "inspect", image], timeout=60).stdout)
+    payload = json.loads(
+        run(["container", "image", "inspect", image], timeout=60).stdout
+    )
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         raise SystemExit(f"unexpected Apple Container image inspect output for {image}")
 
@@ -187,7 +195,9 @@ def native_linux_platform() -> str:
         "x86_64": "amd64",
     }.get(machine)
     if architecture is None:
-        raise SystemExit(f"unsupported native architecture for container image build: {machine}")
+        raise SystemExit(
+            f"unsupported native architecture for container image build: {machine}"
+        )
     return f"linux/{architecture}"
 
 
@@ -223,7 +233,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hermes-agent-version",
-        default=os.environ.get("FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION),
+        default=os.environ.get(
+            "FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION
+        ),
         help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
     )
     parser.add_argument(
@@ -231,9 +243,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="optional persistent staged image build context",
     )
-    parser.add_argument("--platform", help="optional image build platform, e.g. linux/amd64")
-    parser.add_argument("--no-cache", action="store_true", help="disable the engine build cache")
-    parser.add_argument("--push", action="store_true", help="push image after a successful build")
+    parser.add_argument(
+        "--platform", help="optional image build platform, e.g. linux/amd64"
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="disable the engine build cache"
+    )
+    parser.add_argument(
+        "--push", action="store_true", help="push image after a successful build"
+    )
     parser.add_argument(
         "--save",
         action="store_true",
@@ -273,7 +291,12 @@ def build_image(
         flush=True,
     )
 
+    # The runtime-image contract greps this exact one-liner
+    # (check_runtime_image_contract.py), so keep it out of the formatter's
+    # reach.
+    # fmt: off
     dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+    # fmt: on
     if args.engine == "docker":
         build = ["docker", "build"]
     elif args.engine == "depot":
@@ -406,14 +429,18 @@ def main() -> int:
         if args.context_dir:
             context = args.context_dir.expanduser().resolve()
             context.mkdir(parents=True, exist_ok=True)
-            image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+            image_metadata = build_image(
+                args, context, mono_sha=mono_sha, platform=platform
+            )
         else:
             temp_parent = MONOREPO_ROOT / "target/runtime-image"
             temp_parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=temp_parent) as tmp_value:
                 context = Path(tmp_value) / "ctx"
                 context.mkdir()
-                image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+                image_metadata = build_image(
+                    args, context, mono_sha=mono_sha, platform=platform
+                )
 
     report = {
         "status": "built",

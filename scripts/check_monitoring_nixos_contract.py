@@ -86,7 +86,7 @@ LAT_ROLES = {
 
 
 def nix_eval() -> dict[str, Any]:
-    expression = r'''
+    expression = r"""
       let
         flake = builtins.getFlake (toString ./.);
         cfg = flake.nixosConfigurations.finite-monitoring.config;
@@ -163,7 +163,7 @@ def nix_eval() -> dict[str, Any]:
           };
         };
       }
-    '''
+    """
     completed = subprocess.run(
         [
             "nix",
@@ -202,7 +202,12 @@ def panel_rect(panel: dict[str, Any]) -> tuple[int, int, int, int]:
 def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_x1, left_y1, left_x2, left_y2 = panel_rect(left)
     right_x1, right_y1, right_x2, right_y2 = panel_rect(right)
-    return left_x1 < right_x2 and right_x1 < left_x2 and left_y1 < right_y2 and right_y1 < left_y2
+    return (
+        left_x1 < right_x2
+        and right_x1 < left_x2
+        and left_y1 < right_y2
+        and right_y1 < left_y2
+    )
 
 
 def check_dashboard_contract() -> None:
@@ -254,7 +259,9 @@ def check_dashboard_contract() -> None:
         for target in panel_targets(panel):
             expression = target["expr"]
             require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
-            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
+            require_contains(
+                expression, 'priority=~"warning|error|crit|alert|emerg"', title
+            )
             require(
                 "finite-lat-2" not in expression,
                 f"{title} must not include finite-lat-2 in production log panels",
@@ -272,7 +279,9 @@ def check_ubuntu_contract() -> None:
 def main() -> int:
     contract = nix_eval()
 
-    require(contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname")
+    require(
+        contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname"
+    )
     require(contract["release"] == "26.05", "monitoring host must use NixOS 26.05")
     require(contract["firewallTcp"] == [22, 80, 443], "unexpected public TCP port set")
 
@@ -280,9 +289,15 @@ def main() -> int:
     require(grafana["enable"], "Grafana must be enabled")
     require(grafana["address"] == "127.0.0.1", "Grafana must bind loopback")
     require(grafana["domain"] == "monitoring.finite.computer", "Grafana domain drifted")
-    require("finite-prometheus" in grafana["datasourceUids"], "Prometheus datasource uid missing")
+    require(
+        "finite-prometheus" in grafana["datasourceUids"],
+        "Prometheus datasource uid missing",
+    )
     require("finite-loki" in grafana["datasourceUids"], "Loki datasource uid missing")
-    require(grafana["dashboardProviderCount"] == 1, "expected exactly one dashboard provider")
+    require(
+        grafana["dashboardProviderCount"] == 1,
+        "expected exactly one dashboard provider",
+    )
 
     prometheus = contract["prometheus"]
     require(prometheus["enable"], "Prometheus must be enabled")
@@ -336,16 +351,29 @@ def main() -> int:
         caddy["envFiles"] == ["/etc/finite/monitoring/caddy.env"],
         "Caddy must load the monitoring credential hash env file",
     )
-    require_contains(caddy["globalConfig"], "admin unix//run/caddy/admin.sock", "Caddy global config")
-    require(caddy["runtimeDirectory"] == "caddy", "Caddy must own /run/caddy for the Unix admin socket")
-    require(caddy["runtimeDirectoryMode"] == "0750", "Caddy runtime directory mode drifted")
-    require_contains(caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost")
+    require_contains(
+        caddy["globalConfig"], "admin unix//run/caddy/admin.sock", "Caddy global config"
+    )
+    require(
+        caddy["runtimeDirectory"] == "caddy",
+        "Caddy must own /run/caddy for the Unix admin socket",
+    )
+    require(
+        caddy["runtimeDirectoryMode"] == "0750", "Caddy runtime directory mode drifted"
+    )
+    require_contains(
+        caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost"
+    )
     require_contains(caddy["ingestVhost"], "path /api/v1/write", "ingest vhost")
     require_contains(caddy["ingestVhost"], "path /loki/api/v1/push", "ingest vhost")
     require_contains(caddy["ingestVhost"], "{$METRICS_USERNAME}", "ingest vhost")
     require_contains(caddy["ingestVhost"], "{$LOGS_USERNAME}", "ingest vhost")
-    require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost")
-    require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost")
+    require_contains(
+        caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost"
+    )
+    require_contains(
+        caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost"
+    )
 
     for host_name, alloy in contract["latAlloy"].items():
         alloy_config = alloy["config"]

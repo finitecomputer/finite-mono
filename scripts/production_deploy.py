@@ -139,9 +139,7 @@ def tree_sha(rev: str) -> str:
 def resolve_ci_source(source: str, push_before: str | None) -> dict[str, str]:
     source_sha = resolve_rev(source)
     before_sha = (
-        resolve_rev(push_before)
-        if push_before and push_before != ZERO_SHA
-        else None
+        resolve_rev(push_before) if push_before and push_before != ZERO_SHA else None
     )
     parents = commit_parents(source_sha)
 
@@ -149,8 +147,7 @@ def resolve_ci_source(source: str, push_before: str | None) -> dict[str, str]:
         ci_source_sha = parents[1]
         if tree_sha(source_sha) != tree_sha(ci_source_sha):
             raise DeployConfigError(
-                "production merge commit tree does not match its promoted "
-                "source parent"
+                "production merge commit tree does not match its promoted source parent"
             )
         return {
             "source_sha": source_sha,
@@ -231,7 +228,9 @@ def classify_paths(paths: list[str]) -> list[dict[str, str]]:
     return risky
 
 
-def validate_classification(manifest: dict[str, Any], risky: list[dict[str, str]]) -> None:
+def validate_classification(
+    manifest: dict[str, Any], risky: list[dict[str, str]]
+) -> None:
     if risky and manifest["classification"] == "ordinary":
         risky_list = ", ".join(entry["path"] for entry in risky)
         raise DeployConfigError(
@@ -331,7 +330,9 @@ def build_record(
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def command_validate_manifest(args: argparse.Namespace) -> int:

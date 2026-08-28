@@ -14,14 +14,9 @@ BRIDGE_CANDIDATE = Path(
     "infra/tinfoil/confidential-kimi-k2-6/"
     "tinfoil-config.compatibility-bridge.candidate.yml"
 )
-RUNBOOK = Path(
-    "infra/runbooks/finite-private-glm-5.3-flash-production-cutover.md"
-)
+RUNBOOK = Path("infra/runbooks/finite-private-glm-5.3-flash-production-cutover.md")
 
-CHECKPOINT = (
-    'repo: "zai-org/GLM-5.3-Flash@'
-    '04c4e9e95c5da8862dced7e5056455116f83a7e0"'
-)
+CHECKPOINT = 'repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"'
 SGLANG_IMAGE_PLACEHOLDER = 'image: "REPLACE_WITH_VERIFIED_GL53_SGLANG_IMAGE"'
 LIMITER_IMAGE_PLACEHOLDER = 'image: "REPLACE_WITH_VERIFIED_GL53_LIMITER_IMAGE"'
 SGLANG_IMAGE_PATTERN = re.compile(
@@ -84,10 +79,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
             'UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"',
             'FINITE_PRIVATE_MODEL: "glm-5-3-flash"',
             'FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"',
-            (
-                'FINITE_PRIVATE_MODEL_ALIASES: '
-                '"deepseek-v4-flash-0731,glm-5-2"'
-            ),
+            ('FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'),
             "upstream-container: finite-private-limiter",
             "authenticated: false",
             '- "/*"',
@@ -111,10 +103,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
                 '"--ep-size",\n        "8"',
                 '"--context-length",\n        "393216"',
                 'FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"',
-                (
-                    'FINITE_PRIVATE_MODEL_ALIASES: '
-                    '"deepseek-v4-flash-0731,glm-5-2"'
-                ),
+                ('FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'),
                 '- "/*"',
             ),
             "GLM candidate",
@@ -146,30 +135,35 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         '"--mem-fraction-static"',
         '"--kv-cache-dtype",\n        "fp8"',
         "vllm/vllm-openai",
-        "lmsysorg/sglang:glm-5.3-flash\"",
+        'lmsysorg/sglang:glm-5.3-flash"',
     ):
         if forbidden in text:
             violations.append(f"GLM candidate contains forbidden anchor: {forbidden}")
 
-    aliases = (
-        'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'
-    )
+    aliases = 'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'
     if aliases not in text:
         violations.append(
-            "GLM candidate model aliases must be exactly "
-            "deepseek-v4-flash-0731,glm-5-2"
+            "GLM candidate model aliases must be exactly deepseek-v4-flash-0731,glm-5-2"
         )
 
     has_sglang_image = SGLANG_IMAGE_PATTERN.search(text) is not None
     has_limiter_image = LIMITER_IMAGE_PATTERN.search(text) is not None
     if release_ready and not has_sglang_image:
         violations.append("GLM candidate lacks an immutable SGLang image digest")
-    elif not release_ready and not (has_sglang_image or SGLANG_IMAGE_PLACEHOLDER in text):
-        violations.append("GLM candidate lacks an SGLang image digest or prep placeholder")
+    elif not release_ready and not (
+        has_sglang_image or SGLANG_IMAGE_PLACEHOLDER in text
+    ):
+        violations.append(
+            "GLM candidate lacks an SGLang image digest or prep placeholder"
+        )
     if release_ready and not has_limiter_image:
         violations.append("GLM candidate lacks an immutable limiter image digest")
-    elif not release_ready and not (has_limiter_image or LIMITER_IMAGE_PLACEHOLDER in text):
-        violations.append("GLM candidate lacks a limiter image digest or prep placeholder")
+    elif not release_ready and not (
+        has_limiter_image or LIMITER_IMAGE_PLACEHOLDER in text
+    ):
+        violations.append(
+            "GLM candidate lacks a limiter image digest or prep placeholder"
+        )
 
     mpk_match = MPK_PATTERN.search(text)
     model_path_match = re.search(r'"/tinfoil/mpk/mpk-([0-9a-f]{64})"', text)
@@ -179,7 +173,9 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
     )
     if mpk_match and model_path_match:
         if mpk_match.group("root") != model_path_match.group(1):
-            violations.append("model mount path does not match the modelwrap MPK root hash")
+            violations.append(
+                "model mount path does not match the modelwrap MPK root hash"
+            )
     elif release_ready:
         violations.append("Tinfoil modelwrap MPK/root hash is not release-ready")
     elif not has_placeholders:
@@ -228,9 +224,13 @@ def _check_bridge(text: str) -> list[str]:
         )
     image_lines = re.findall(r'^\s+image: "([^"]+)"$', text, re.MULTILINE)
     if image_lines != [BRIDGE_IMAGE.removeprefix('image: "').removesuffix('"')]:
-        violations.append("compatibility bridge must declare exactly the fixed Caddy image")
+        violations.append(
+            "compatibility bridge must declare exactly the fixed Caddy image"
+        )
     if text.count('- "/*"') != 1:
-        violations.append("compatibility bridge must proxy the route surface exactly once")
+        violations.append(
+            "compatibility bridge must proxy the route surface exactly once"
+        )
     return violations
 
 

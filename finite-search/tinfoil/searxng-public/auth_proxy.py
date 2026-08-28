@@ -68,7 +68,11 @@ class SearchProxy(BaseHTTPRequestHandler):
         ok, reason = authorized(self.headers)
         if not ok:
             status = 401 if reason == "missing" else 403
-            headers = {"WWW-Authenticate": 'Bearer realm="finite-search"'} if status == 401 else None
+            headers = (
+                {"WWW-Authenticate": 'Bearer realm="finite-search"'}
+                if status == 401
+                else None
+            )
             respond_json(self, status, {"error": f"{reason} bearer token"}, headers)
             return
 
@@ -80,7 +84,9 @@ class SearchProxy(BaseHTTPRequestHandler):
                 if 200 <= response.status < 300:
                     respond_json(self, 200, {"ok": True})
                     return
-                respond_json(self, 502, {"ok": False, "upstream_status": response.status})
+                respond_json(
+                    self, 502, {"ok": False, "upstream_status": response.status}
+                )
         except Exception as exc:
             respond_json(self, 502, {"ok": False, "error": str(exc)})
 
@@ -116,7 +122,9 @@ class SearchProxy(BaseHTTPRequestHandler):
             if body:
                 self.wfile.write(body)
         except Exception as exc:
-            respond_json(self, 502, {"error": "upstream request failed", "detail": str(exc)})
+            respond_json(
+                self, 502, {"error": "upstream request failed", "detail": str(exc)}
+            )
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -128,7 +136,9 @@ def main():
         return 1
 
     server = ThreadingHTTPServer(("0.0.0.0", PORT), SearchProxy)
-    sys.stderr.write(f"finite-search auth proxy listening on :{PORT}, upstream={UPSTREAM}\n")
+    sys.stderr.write(
+        f"finite-search auth proxy listening on :{PORT}, upstream={UPSTREAM}\n"
+    )
     server.serve_forever()
     return 0
 
