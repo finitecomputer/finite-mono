@@ -342,7 +342,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(
-            changed_files=[".github/workflows/production-deploy.yml"]
+            changed_files=[".github/workflows/production-deploy.yml"], event=""
         )
         selection, _reason, paths = select_harnesses.select_harnesses(args)
 
@@ -353,8 +353,8 @@ class CiHarnessSelectionTests(unittest.TestCase):
         )
 
     def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
-        prefixed = argparse.Namespace(changed_files=["./justfile"])
-        bare = argparse.Namespace(changed_files=["justfile"])
+        prefixed = argparse.Namespace(changed_files=["./justfile"], event="")
+        bare = argparse.Namespace(changed_files=["justfile"], event="")
 
         prefixed_selection, _reason, prefixed_paths = select_harnesses.select_harnesses(
             prefixed
@@ -363,6 +363,113 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
         self.assertEqual(prefixed_paths, bare_paths)
         self.assertEqual(prefixed_selection.values(), bare_selection.values())
+
+
+def pull_request_args(*paths: str) -> argparse.Namespace:
+    return argparse.Namespace(changed_files=list(paths), event="pull_request")
+
+
+class CiPackagingGateTests(unittest.TestCase):
+    def test_pull_request_defers_nix_service_packages(self) -> None:
+        # A plain source change selects every harness as an unknown path, and
+        # the devfinity/brain dependency rule forces packaging on; the
+        # pull_request gate must still defer packaging.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("finitechat/crates/finitechat-server/src/lib.rs")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertTrue(selection.run_devfinity_smoke)
+        self.assertTrue(selection.run_brain_product_matrix)
+        self.assertIn("deferred to landing events", reason)
+
+    def test_pull_request_flake_lock_change_keeps_nix_service_packages(self) -> None:
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("flake.lock", "Cargo.lock")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
+
+    def test_pull_request_cargo_lock_change_keeps_nix_service_packages(self) -> None:
+        # Direct coverage for the Cargo.lock-only PR: cargoVendorDir and every
+        # mkCargoArtifacts derive from the root Cargo.lock, so deferring
+        # packaging here would move the cold crane build into devfinity-smoke
+        # without a Cachix warm-up.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("Cargo.lock")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
+
+    def test_pull_request_package_input_changes_keep_nix_service_packages(self) -> None:
+        # Every package-derivation input family keeps the PR-time package
+        # build: workspace manifests (mkDummySrc scopes cargoArtifacts to
+        # them), the single Rust pin, cargo config, the flake graph, and the
+        # infra/nixos packaging surface itself.
+        for changed in (
+            "Cargo.toml",
+            "finitechat/crates/finitechat-server/Cargo.toml",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "flake.nix",
+            "flake.lock",
+            "infra/nixos/packages.nix",
+            "infra/nixos/modules/monitoring-vps.nix",
+        ):
+            with self.subTest(changed=changed):
+                selection, reason, _paths = select_harnesses.select_harnesses(
+                    pull_request_args(changed)
+                )
+                self.assertTrue(selection.run_nix_service_packages, changed)
+                self.assertNotIn("deferred", reason)
+
+    def test_pull_request_derivation_irrelevant_change_defers_nix_service_packages(
+        self,
+    ) -> None:
+        # Generated-code sources feed only the thin final package
+        # derivations, which devfinity-smoke builds locally against warm
+        # cargoArtifacts - they do not justify the PR-time package build.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("finitechat/protos/chat.proto")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertIn("deferred to landing events", reason)
+
+    def test_pull_request_flake_nix_change_keeps_nix_service_packages(self) -> None:
+        selection, _reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("flake.nix")
+        )
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_push_event_keeps_nix_service_packages(self) -> None:
+        args = argparse.Namespace(
+            changed_files=["finitechat/crates/finitechat-server/src/lib.rs"],
+            event="push",
+        )
+
+        selection, _reason, _paths = select_harnesses.select_harnesses(args)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_merge_group_runs_every_harness_including_packaging(self) -> None:
+        args = argparse.Namespace(changed_files=None, event="merge_group")
+
+        selection, _reason, _paths = select_harnesses.select_harnesses(args)
+
+        self.assertTrue(selection.run_nix_service_packages)
+
+    def test_unselected_packaging_gate_is_a_no_op(self) -> None:
+        # Docs-only changes select nothing; the gate must not invent a note.
+        selection, reason, _paths = select_harnesses.select_harnesses(
+            pull_request_args("docs/some-note.md")
+        )
+
+        self.assertFalse(selection.run_nix_service_packages)
+        self.assertNotIn("deferred", reason)
 
 
 if __name__ == "__main__":
