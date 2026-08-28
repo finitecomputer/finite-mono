@@ -812,9 +812,10 @@ note "PASS: mirror does NOT contain the pre-upgrade stranger:"
 agent_mirror | sed 's/^/  allowed-users: /' >>"$evidence"
 
 # The gateway must have started with FINITECHAT_ALLOWED_USERS from the
-# mirror. First boot can race the sidecar's mirror write (documented
-# follow-up); restart the runtime once to converge, and say so. Wait for the
-# gateway process to exist first so a slow boot is not mistaken for the race.
+# mirror. agentd runs `finitechat hermes admission seed` after prepare and
+# BEFORE starting the gateway or the sidecar, so the mirror exists before the
+# gateway's first start — no first-boot race. The poll is boot-time tolerance
+# only (slow gateway start must not be mistaken for a missing mirror).
 started="$(date +%s)"
 until [[ -n "$(gateway_pid)" ]]; do
   if (( "$(date +%s)" - started >= 120 )); then
@@ -822,12 +823,8 @@ until [[ -n "$(gateway_pid)" ]]; do
   fi
   sleep 2
 done
-if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOWED_USERS="; then
-  note "NOTE: first-boot race — gateway started before the mirror existed; restarting the runtime to converge"
-  restart_gateway
-fi
 if ! gateway_allowed_users | grep -q "^FINITECHAT_ALLOWED_USERS=$owner_hex\$"; then
-  fail "gateway has no FINITECHAT_ALLOWED_USERS even after the mirror existed"
+  fail "gateway has no FINITECHAT_ALLOWED_USERS=$owner_hex despite agentd seeding before start"
 fi
 if gateway_allowed_users | grep -q "^FINITECHAT_ALLOW_ALL_USERS="; then
   fail "gateway still carries FINITECHAT_ALLOW_ALL_USERS"
