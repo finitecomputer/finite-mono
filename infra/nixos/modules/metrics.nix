@@ -26,6 +26,8 @@ let
     "finite_runtime_artifact_active_agents"
     "finite_runtime_artifact_info"
     "finite_service_health_status"
+    "node_cpu_scaling_frequency_hertz"
+    "node_cpu_scaling_frequency_max_hertz"
     "node_cpu_seconds_total"
     "node_disk_io_time_seconds_total"
     "node_disk_read_bytes_total"
@@ -33,6 +35,8 @@ let
     "node_filesystem_avail_bytes"
     "node_filesystem_readonly"
     "node_filesystem_size_bytes"
+    "node_hwmon_sensor_label"
+    "node_hwmon_temp_celsius"
     "node_load1"
     "node_load5"
     "node_load15"
@@ -223,7 +227,7 @@ in
               "job"         = "finite-internal-health",
             }]
 
-            scrape_interval = "60s"
+            scrape_interval = "15s"
             scrape_timeout  = "10s"
             forward_to      = [prometheus.relabel.finite_mvp.receiver]
           }

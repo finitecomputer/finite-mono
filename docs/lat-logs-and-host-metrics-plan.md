@@ -56,6 +56,9 @@ Prometheus relabel allowlist to include basic node-exporter host metrics.
 Initial metric families:
 
 - CPU: `node_cpu_seconds_total`, `node_load1`, `node_load5`, `node_load15`.
+- CPU thermals and frequency: `node_hwmon_temp_celsius`,
+  `node_hwmon_sensor_label`, `node_cpu_scaling_frequency_hertz`, and
+  `node_cpu_scaling_frequency_max_hertz`.
 - Memory and swap: `node_memory_MemTotal_bytes`,
   `node_memory_MemAvailable_bytes`, `node_memory_SwapTotal_bytes`,
   `node_memory_SwapFree_bytes`.
@@ -67,6 +70,12 @@ Initial metric families:
   `node_network_transmit_bytes_total`, `node_network_receive_errs_total`,
   `node_network_transmit_errs_total`.
 - Existing health/version series remain unchanged.
+
+Scrape LAT host metrics every 15 seconds so short thermal and frequency
+excursions remain visible. The dashboard's thermal-throttling signal is a
+heuristic, because these AMD hosts do not export a direct hardware throttle
+counter: it requires a temperature of at least 95 C, CPU busy of at least 70%,
+and average current frequency at or below 70% of the exported maximum.
 
 Bound the cardinality at collection time where practical:
 
@@ -191,7 +200,8 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 
 - Grafana has a repository-provisioned `LAT Fleet` dashboard.
 - The dashboard shows CPU, load, memory, swap, filesystem, disk I/O, network,
-  and scrape-health data for each monitored LAT host.
+  scrape-health, CPU temperature, and CPU frequency data for each monitored LAT
+  host, plus a clearly labeled thermal-throttling heuristic.
 - Grafana Explore can query recent logs by `host`, `unit`, `priority`, and
   `role`.
 - Loki is not directly internet-accessible.
