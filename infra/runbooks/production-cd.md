@@ -59,8 +59,11 @@ revision, then a later tiny PR enables production mutation.
    - Require at least one approving review.
    - Allow merge commits; do not require arbitrary local pushes.
    - Require status checks:
-     - `CI gate`
      - `Plan production deploy`
+
+   `Plan production deploy` verifies that the staged source SHA has a
+   successful `CI gate`; do not require `CI gate` directly on the production
+   branch because `ci.yml` only runs pull-request CI for `main`.
 
 5. Verify setup from a clean checkout:
 

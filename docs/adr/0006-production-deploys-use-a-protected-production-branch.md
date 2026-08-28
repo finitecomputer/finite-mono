@@ -67,13 +67,13 @@ what production newly receives.
 Temporary root SSH credentials, when mutation is enabled, must live only as
 GitHub `production` environment secrets, including the deploy key and pinned
 `known_hosts`; repository-level secrets are not sufficient production
-authority. The deploy workflow verifies the exact production tip's `CI gate`
-status through GitHub rather than trusting branch protection alone. The plan
-workflow updates one concise pull-request comment, and the deploy workflow
-supports manual retry only for the current `production` branch tip, never for
-an arbitrary SHA input. The deploy workflow reuses the prepare-stage artifact
-when available and otherwise rebuilds the same source revision; the PR plan is
-review evidence, not a permanent runtime dependency.
+authority. The plan and deploy workflows verify the promoted source SHA's
+`CI gate` status through GitHub rather than trusting branch protection alone.
+The plan workflow updates one concise pull-request comment, and the deploy
+workflow supports manual retry only for the current `production` branch tip,
+never for an arbitrary SHA input. The deploy workflow reuses the prepare-stage
+artifact when available and otherwise rebuilds the same source revision; the PR
+plan is review evidence, not a permanent runtime dependency.
 
 Initial rollout hard-cuts `production` from the current `main` scaffold without
 deploying, then installs branch protection/rulesets and the GitHub

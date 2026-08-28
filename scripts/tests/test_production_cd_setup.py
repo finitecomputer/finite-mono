@@ -22,7 +22,6 @@ def valid_ruleset() -> dict[str, object]:
                 "type": "required_status_checks",
                 "parameters": {
                     "required_status_checks": [
-                        {"context": "CI gate"},
                         {"context": "Plan production deploy"},
                     ]
                 },
@@ -71,7 +70,7 @@ class ProductionCdSetupTests(unittest.TestCase):
             ruleset, "required_status_checks"
         )
         assert status_rule is not None
-        status_rule["parameters"]["required_status_checks"] = [{"context": "CI gate"}]
+        status_rule["parameters"]["required_status_checks"] = []
         checks = production_cd_setup.evaluate_ruleset(ruleset)
         failing = [
             check for check in checks if check.name == "production required checks"
@@ -79,6 +78,24 @@ class ProductionCdSetupTests(unittest.TestCase):
         self.assertEqual(len(failing), 1)
         self.assertFalse(failing[0].ok)
         self.assertIn("Plan production deploy", failing[0].detail)
+
+    def test_ruleset_rejects_stale_ci_gate_requirement(self) -> None:
+        ruleset = valid_ruleset()
+        status_rule = production_cd_setup.rule_by_type(
+            ruleset, "required_status_checks"
+        )
+        assert status_rule is not None
+        status_rule["parameters"]["required_status_checks"] = [
+            {"context": "CI gate"},
+            {"context": "Plan production deploy"},
+        ]
+        checks = production_cd_setup.evaluate_ruleset(ruleset)
+        failing = [
+            check for check in checks if check.name == "production required checks"
+        ]
+        self.assertEqual(len(failing), 1)
+        self.assertFalse(failing[0].ok)
+        self.assertIn("unexpected: CI gate", failing[0].detail)
 
     def test_ruleset_rejects_zero_approvals(self) -> None:
         ruleset = valid_ruleset()
