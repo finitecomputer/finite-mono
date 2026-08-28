@@ -1771,7 +1771,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "node_hwmon_temp_celsius{instance=~\"finite-lat-1|finite-lat-3\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-1|finite-lat-3\",label=~\"Tctl|Tccd[0-9]+\"}",
+          "expr": "node_hwmon_temp_celsius{instance=~\"finite-lat-[1-4]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-4]\",label=~\"Tctl|Tccd[0-9]+\"}",
           "instant": false,
           "legendFormat": "{{instance}} {{label}}",
           "range": true,
@@ -1866,7 +1866,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-1|finite-lat-3\"})",
+          "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-4]\"})",
           "instant": false,
           "legendFormat": "{{instance}} current",
           "range": true,
@@ -1874,7 +1874,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-1|finite-lat-3\"})",
+          "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-4]\"})",
           "instant": false,
           "legendFormat": "{{instance}} maximum",
           "range": true,
@@ -1956,7 +1956,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-1|finite-lat-3\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-1|finite-lat-3\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-1|finite-lat-3\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-1|finite-lat-3\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-1|finite-lat-3\"})) <= bool 0.70)",
+          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-4]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-4]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-4]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-4]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-4]\"})) <= bool 0.70)",
           "instant": true,
           "legendFormat": "{{instance}}",
           "range": false,
