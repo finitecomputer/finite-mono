@@ -1064,6 +1064,46 @@ mod tests {
         assert!(!status.effective);
     }
 
+    #[test]
+    fn leftover_specialization_env_cannot_become_desired_or_fail_boot() {
+        // from_env no longer reads FINITE_SPECIALIZATION_* or FBRAIN_EMBEDDING_*.
+        // Leftover container env cannot fail boot or become desired state.
+        let config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/bin/finitechat"),
+            prepare_command: PathBuf::from("/bin/true"),
+            hermes_command: PathBuf::from("/bin/true"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            sidecar_admission_default: None,
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        assert!(!format!("{config:?}").contains("aeon-multimodal"));
+        let json = serde_json::to_value(AgentdStatus {
+            service: "finite-agentd".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            account_id: "acct".to_owned(),
+            device_id: "dev".to_owned(),
+            authorized_principals: 0,
+            processes: SupervisorStatus::default(),
+            specialization: inactive_specialization_status(),
+            updated_at_ms: 0,
+        })
+        .unwrap();
+        assert_eq!(json["specialization"]["desired"], false);
+        assert_eq!(json["specialization"]["effective"], false);
+        assert!(json["specialization"]["bundle_id"].is_null());
+        assert_eq!(
+            AgentdError::UnsupportedCommand("agent.specialization.aeon.reconcile".to_owned())
+                .public_code(),
+            "unsupported_command"
+        );
+    }
+
     fn delivery(message_id: &str, seq: u64) -> RuntimeCommandDeliveryV1 {
         RuntimeCommandDeliveryV1 {
             room_id: "room-main".to_owned(),

@@ -1797,11 +1797,13 @@ impl std::fmt::Debug for RuntimeRestartOptions {
 
 /// Reconcile only the explicitly desired opaque keys. Existing Runtime-contract
 /// values, provider settings, and credentials are retained byte-for-byte so
-/// compute replacement does not silently erase them.
+/// compute replacement does not silently erase them. Retired AEON bundle keys
+/// are the exception: leftover copies must not survive upgrade or replacement.
 fn merge_desired_runtime_environment(
     mut existing: Vec<(String, String)>,
     options: &RuntimeRestartOptions,
 ) -> Vec<(String, String)> {
+    existing.retain(|(key, _)| !retired_specialization_environment_key(key));
     for (key, value) in &mut existing {
         if let Some(desired) = options.environment().get(key) {
             *value = desired.clone();
@@ -1955,47 +1957,56 @@ fn valid_runtime_environment_key(key: &str) -> bool {
         })
 }
 
-fn reserved_runtime_environment_key(key: &str) -> bool {
+pub(crate) fn retired_specialization_environment_key(key: &str) -> bool {
     matches!(
         key,
-        "FINITE_SERVER_URL"
-            | "FINITECHAT_SERVER_URL"
-            | "FINITE_AGENT_BOOT_INTENT_JSON"
-            | "FINITE_AGENT_STATE_ROOT"
-            | "FINITECHAT_HOME"
-            | "FINITE_HOME"
-            | "HERMES_HOME"
-            | "FINITECHAT_WORKSPACE"
-            | "FINITE_AGENT_HTTP_HOST"
-            | "FINITE_AGENT_HTTP_PORT"
-            | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
-            | "FINITE_AGENT_ID"
-            | "FINITE_AGENT_NAME"
-            | "FINITECHAT_HERMES_AGENT_NAME"
-            | "FINITECHAT_HERMES_ROOM_NAME"
-            | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
-            | "FINITECHAT_HERMES_INBOUND_STREAM"
-            | "FINITECHAT_ALLOW_ALL_USERS"
-            | "FINITE_ALLOW_ALL_USERS"
-            | "GATEWAY_ALLOW_ALL_USERS"
-            | "FINITE_DEFAULT_INFERENCE_PROFILE"
-            | "FINITE_PRIVATE_MODEL"
-            | "FINITE_PRIVATE_CONTEXT_LENGTH"
-            | "FINITE_PRIVATE_BASE_URL"
-            | "FINITE_PRIVATE_API_KEY"
-            | "FINITECHAT_HERMES_MODEL"
-            | "FINITECHAT_HERMES_CONTEXT_LENGTH"
-            | "FINITECHAT_HERMES_PROVIDER"
-            | "FINITECHAT_HERMES_BASE_URL"
-            | "FINITECHAT_HERMES_API_MODE"
-            // Retired AEON worker keys. Keep reserved so leftover host or
-            // operator env cannot re-inject the clawland specialization bundle.
-            | "FINITE_SPECIALIZATION_BUNDLE"
+        "FINITE_SPECIALIZATION_BUNDLE"
             | "FINITE_SPECIALIZATION_WORKER_API_KEY"
             | "FBRAIN_EMBEDDING_ENDPOINT"
             | "FBRAIN_EMBEDDING_BEARER_TOKEN"
-            | "OPENAI_API_KEY"
     )
+}
+
+fn reserved_runtime_environment_key(key: &str) -> bool {
+    // Retired AEON worker keys stay reserved so leftover host or operator env
+    // cannot re-inject the clawland specialization bundle. Reserved-alone is
+    // not enough on Kata upgrade: that path copies reserved keys forward, so
+    // upgrade and replacement also drop them from retained env.
+    retired_specialization_environment_key(key)
+        || matches!(
+            key,
+            "FINITE_SERVER_URL"
+                | "FINITECHAT_SERVER_URL"
+                | "FINITE_AGENT_BOOT_INTENT_JSON"
+                | "FINITE_AGENT_STATE_ROOT"
+                | "FINITECHAT_HOME"
+                | "FINITE_HOME"
+                | "HERMES_HOME"
+                | "FINITECHAT_WORKSPACE"
+                | "FINITE_AGENT_HTTP_HOST"
+                | "FINITE_AGENT_HTTP_PORT"
+                | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
+                | "FINITE_AGENT_ID"
+                | "FINITE_AGENT_NAME"
+                | "FINITECHAT_HERMES_AGENT_NAME"
+                | "FINITECHAT_HERMES_ROOM_NAME"
+                | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
+                | "FINITECHAT_HERMES_INBOUND_STREAM"
+                | "FINITECHAT_ALLOW_ALL_USERS"
+                | "FINITE_ALLOW_ALL_USERS"
+                | "GATEWAY_ALLOW_ALL_USERS"
+                | "FINITE_DEFAULT_INFERENCE_PROFILE"
+                | "FINITE_PRIVATE_MODEL"
+                | "FINITE_PRIVATE_CONTEXT_LENGTH"
+                | "FINITE_PRIVATE_BASE_URL"
+                | "FINITE_PRIVATE_API_KEY"
+                | "FINITECHAT_HERMES_MODEL"
+                | "FINITECHAT_HERMES_CONTEXT_LENGTH"
+                | "FINITECHAT_HERMES_PROVIDER"
+                | "FINITECHAT_HERMES_BASE_URL"
+                | "FINITECHAT_HERMES_API_MODE"
+                | "OPENAI_API_KEY"
+        )
 }
 
 fn secret_runtime_environment_key(key: &str) -> bool {
@@ -5608,6 +5619,10 @@ mod tests {
             "FINITE_AGENT_STATE_ROOT",
             "FINITE_HOME",
             "OPENAI_API_KEY",
+            "FINITE_SPECIALIZATION_BUNDLE",
+            "FINITE_SPECIALIZATION_WORKER_API_KEY",
+            "FBRAIN_EMBEDDING_ENDPOINT",
+            "FBRAIN_EMBEDDING_BEARER_TOKEN",
             "GOOGLE_OAUTH_TOKEN",
             "lowercase",
         ] {
@@ -5661,6 +5676,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_desired_runtime_environment_drops_retired_aeon_keys() {
+        let existing = vec![
+            ("FINITE_HOME".to_string(), "/data/agent".to_string()),
+            (
+                "FINITE_SPECIALIZATION_BUNDLE".to_string(),
+                "aeon-multimodal".to_string(),
+            ),
+            (
+                "FINITE_SPECIALIZATION_WORKER_API_KEY".to_string(),
+                "leftover-worker-secret".to_string(),
+            ),
+            (
+                "FBRAIN_EMBEDDING_ENDPOINT".to_string(),
+                "https://specialization.finite.vip".to_string(),
+            ),
+            (
+                "FBRAIN_EMBEDDING_BEARER_TOKEN".to_string(),
+                "leftover-embed-secret".to_string(),
+            ),
+        ];
+        let merged = merge_desired_runtime_environment(existing, &RuntimeRestartOptions::default());
+        assert!(
+            merged
+                .iter()
+                .any(|(key, value)| key == "FINITE_HOME" && value == "/data/agent")
+        );
+        assert!(
+            merged
+                .iter()
+                .all(|(key, _)| !retired_specialization_environment_key(key))
+        );
+    }
+
+    #[test]
     fn opaque_runtime_secret_environment_is_bounded_disjoint_and_value_redacted() {
         let secrets = BTreeMap::from([
             ("FAL_KEY".to_string(), "fal_test_secret".to_string()),
@@ -5669,7 +5718,13 @@ mod tests {
         validate_runtime_secret_environment(&secrets).unwrap();
         validate_runtime_environment_disjoint(&BTreeMap::new(), &secrets).unwrap();
 
-        for key in ["FINITE_PRIVATE_API_KEY", "OPENAI_API_KEY", "lowercase"] {
+        for key in [
+            "FINITE_PRIVATE_API_KEY",
+            "OPENAI_API_KEY",
+            "FINITE_SPECIALIZATION_WORKER_API_KEY",
+            "FBRAIN_EMBEDDING_BEARER_TOKEN",
+            "lowercase",
+        ] {
             let invalid = BTreeMap::from([(key.to_string(), "secret".to_string())]);
             assert!(
                 validate_runtime_secret_environment(&invalid).is_err(),

@@ -57,13 +57,13 @@ approved private operator record, not this public repository. The worker emits
 only request status/timing, bounded batch/model identity, opaque request
 identifiers, and error categories; never section/query text or bearer tokens.
 
-Runner must additionally set
-`FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED=true` and
-`FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID` only after this
-manifest points at a worker digest containing the verified-policy health gate.
-Without both values Runner intentionally withholds the embedding endpoint and
-credential from new runtimes, so the currently pinned pre-gate image cannot
-receive Brain plaintext through this deployment path.
+Runner no longer reads
+`FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED` or
+`FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID`. Do not set them
+to turn the bundle back on. New runtimes and Kata upgrades drop the leftover
+`FINITE_SPECIALIZATION_*` / `FBRAIN_EMBEDDING_*` keys. The worker stays up
+until the live HTTP image-request counter is flat; rotate host and worker
+tokens on teardown day.
 
 Before allowing any Runtime to enable semantic search, verify without printing
 credentials or plaintext:

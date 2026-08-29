@@ -3250,6 +3250,9 @@ fn kata_upgrade_environment(
     let retained = existing
         .into_iter()
         .filter(|(key, _)| {
+            if retired_specialization_environment_key(key) {
+                return false;
+            }
             let secret = secret_runtime_environment_key(key);
             if secret {
                 secret_keys.insert(key.clone());
@@ -3295,7 +3298,11 @@ fn kata_recovery_environment(
             )));
         }
     }
-    existing.retain(|(key, _)| key != RECOVERY_STATE_ROOT_ENV && key != RECOVERY_BOOT_INTENT_ENV);
+    existing.retain(|(key, _)| {
+        key != RECOVERY_STATE_ROOT_ENV
+            && key != RECOVERY_BOOT_INTENT_ENV
+            && !retired_specialization_environment_key(key)
+    });
     existing.push((
         RECOVERY_STATE_ROOT_ENV.to_string(),
         RECOVERY_STATE_ROOT.to_string(),
@@ -4635,6 +4642,37 @@ esac
                 (key.to_string(), value.to_string())
             })
             .collect()
+    }
+
+    #[test]
+    fn kata_recovery_drops_retired_aeon_environment() {
+        let inspected = KataInspectConfig {
+            labels: BTreeMap::new(),
+            image: "old-image".to_string(),
+            environment: vec![
+                "FINITE_HOME=/data/agent".to_string(),
+                "FINITE_SITES_API=https://sites.example".to_string(),
+                "FINITE_PRIVATE_API_KEY=secret-kept".to_string(),
+                "FINITE_SPECIALIZATION_BUNDLE=aeon-multimodal".to_string(),
+                "FINITE_SPECIALIZATION_WORKER_API_KEY=leftover-worker-secret".to_string(),
+                "FBRAIN_EMBEDDING_ENDPOINT=https://specialization.finite.vip".to_string(),
+                "FBRAIN_EMBEDDING_BEARER_TOKEN=leftover-embed-secret".to_string(),
+            ],
+        };
+
+        let environment =
+            kata_recovery_environment(&inspected, &recovery_options(), "runtime_ctl_1").unwrap();
+
+        assert!(environment.entries.contains(&(
+            "FINITE_PRIVATE_API_KEY".to_string(),
+            "secret-kept".to_string()
+        )));
+        assert!(
+            environment
+                .entries
+                .iter()
+                .all(|(key, _)| !retired_specialization_environment_key(key))
+        );
     }
 
     fn recovery_options() -> RuntimeRestartOptions {
@@ -6341,6 +6379,51 @@ esac
         assert!(
             args.iter()
                 .all(|value| !value.contains("fal-added-by-upgrade"))
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_drops_retired_aeon_environment() {
+        let inspected = KataInspectConfig {
+            labels: BTreeMap::new(),
+            image: "old-image".to_string(),
+            environment: vec![
+                "FINITE_HOME=/data/agent".to_string(),
+                "FINITE_PRIVATE_API_KEY=secret-kept".to_string(),
+                "FINITE_SPECIALIZATION_BUNDLE=aeon-multimodal".to_string(),
+                "FINITE_SPECIALIZATION_WORKER_API_KEY=leftover-worker-secret".to_string(),
+                "FBRAIN_EMBEDDING_ENDPOINT=https://specialization.finite.vip".to_string(),
+                "FBRAIN_EMBEDDING_BEARER_TOKEN=leftover-embed-secret".to_string(),
+            ],
+        };
+
+        let environment =
+            kata_upgrade_environment(&inspected, &RuntimeRestartOptions::default()).unwrap();
+
+        assert!(
+            environment
+                .entries
+                .contains(&("FINITE_HOME".to_string(), "/data/agent".to_string()))
+        );
+        assert!(environment.entries.contains(&(
+            "FINITE_PRIVATE_API_KEY".to_string(),
+            "secret-kept".to_string()
+        )));
+        assert!(
+            environment
+                .entries
+                .iter()
+                .all(|(key, _)| { !retired_specialization_environment_key(key) })
+        );
+        assert!(
+            !environment
+                .secret_keys
+                .contains("FINITE_SPECIALIZATION_WORKER_API_KEY")
+        );
+        assert!(
+            !environment
+                .secret_keys
+                .contains("FBRAIN_EMBEDDING_BEARER_TOKEN")
         );
     }
 
