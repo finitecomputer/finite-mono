@@ -68,8 +68,10 @@ merged rev; `.#nixosConfigurations.finite-lat-2` evals green with
    x86_64-linux store paths — `nix copy` from the artifact cache fails
    honestly anywhere else. The kexec tarball is the same-pin NixOS 26.05
    installer built by the CI workflow; do not let nixos-anywhere substitute
-   its default. TODO(prove): exact nixos-anywhere behavior is proven at
-   first execution; the invariants above are what must hold.
+   its default. Proven at the 2026-08-29 install: the driver scp's the
+   kexec tarball to the target and serves it from the target's loopback via
+   a transient unit (`--kexec` is a URL the target fetches), and
+   `--store-paths` takes the disko script first, the system closure second.
 
 2. Reboot into NixOS. `ssh root@64.34.80.19` (new host key).
 
@@ -79,6 +81,31 @@ storage health unit exits clean; `/boot-a` and `/boot-b` mounted;
 `systemctl list-units --state=running` shows NO product units (import
 mode), while sshd, postgres, node-exporter are up; postgres created a
 fresh empty cluster.
+
+#### Proven first-boot landmines (2026-08-29, both hit and fixed)
+
+- **Monitoring-secrets activation abort.** First boot ran the
+  `finite-lat-monitoring-secrets` activation snippet with no monitoring
+  secrets placed yet; its non-zero exit aborted activation mid-sequence —
+  /etc partially populated, later snippets (networkd config writer
+  included) never ran, and the box looked booted while half-configured.
+  Fixed structurally: the snippet is now skipped while
+  `finite.importMode.enable` is true
+  (`infra/nixos/modules/metrics.nix`).
+- **WireGuard private key must be placed BEFORE first boot.** With
+  `networking.wireguard` + `useNetworkd`, the netdev's
+  `PrivateKey=@wireguard-...-private-key` rides a LoadCredential on
+  systemd-networkd, and systemd 260 kills the whole service
+  (`status=243/CREDENTIALS`, WAN included) when the file is missing — so
+  `/etc/finite/wireguard-private-key` goes on in rescue mode before the
+  install reboot, not at Gate D.
+- **Latitude console behaviors.** Rescue mode persists across reboots
+  until exited in the console — the post-install reboot silently re-loads
+  rescue instead of NixOS. Root console login is locked (no password
+  configured). Working diagnosis pattern for a dead first boot: rescue
+  boot → `mdadm --assemble --scan` → mount `/dev/md126` →
+  `journalctl --directory=<mnt>/var/log/journal -b -1` to read the failed
+  boot's journal.
 
 ### Gate D — import lat1's state
 
@@ -165,6 +192,7 @@ handshakes to the new hub; finite-status green.
 |---|---|---|
 | 2026-08-27 | lat1 thermal failure; rescue mode; state pull started | — |
 | 2026-08-28 | ADR 0007 + replacement scaffold PR | this PR |
+| 2026-08-29 | Gate C/D executed: install, two first-boot landmines fixed via rescue passes, state import verified | see this PR + the go-live PR |
 
 ## ROLLBACK
 

@@ -47,7 +47,11 @@ let
     "podman-finite-saas-dashboard.service"
     "podman-searxng.service"
     "podman-firecrawl-api.service"
-    "init-firecrawl-network.service"
+    # NOT gated: init-firecrawl-network.service — the four other
+    # podman-firecrawl-*.service units (redis, rabbitmq, nuq-postgres,
+    # playwright) intentionally stay running in import mode and need the
+    # network; `podman network create` is idempotent, and gating only the
+    # creator boot-looped them to start-limit-hit on the 2026-08-29 boot.
     "finite-healthcheck.service"
     "finite-healthcheck.timer"
     "finite-postgres-backup.service"
