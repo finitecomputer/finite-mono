@@ -1,5 +1,10 @@
 # GLM-5.3-Flash degraded admission (temporary)
 
+Torn down 2026-08-29: `v2026-08-28-glm-5-3-flash-5` on
+`acc651a6-9de6-4da5-9fdc-bb9888245962` restored usage-api admission. This
+file is the historical record of the mid-outage overlay, not current
+production.
+
 Temporary limiter mode so the 8xH200 GLM container can serve while
 `finite.computer`'s usage-admission route is missing. Not a product feature.
 Default remains usage-api; this overlay exists to be torn down.

@@ -88,12 +88,12 @@ So promotion is two steps — **in this order**:
    additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
    not inherit a control their image cannot execute.
 2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on every
-   Kata host (lat1 and lat3). That operator file is the only place the pin
-   exists: the Nix-rendered shared env deliberately carries no default, and
-   the unit fails closed at start (`FC_RUNNER_RUNTIME_ARTIFACT_ID is
-   required`) if it is missing. No restart needed: the timer re-invokes the
-   runner with the new env (set `FC_RUNNER_DRAIN=true` first if you want
-   in-flight launches to settle).
+   Kata host (lat3 and lat4; lat1 is leftover/inactive only). That operator
+   file is the only place the pin exists: the Nix-rendered shared env
+   deliberately carries no default, and the unit fails closed at start
+   (`FC_RUNNER_RUNTIME_ARTIFACT_ID is required`) if it is missing. No restart
+   needed: the timer re-invokes the runner with the new env (set
+   `FC_RUNNER_DRAIN=true` first if you want in-flight launches to settle).
 
 > **Order matters (learned 2026-08-27):** finish step 1 before touching any
 > host pin. A pin referencing an id Core does not know makes every runner
@@ -164,9 +164,9 @@ Private key.
 
 After a canary passes, prepare the broad production cohort. Preparation reads
 Core's deterministic scope, verifies the already-target canary, checks every
-eligible canonical Kata container directly on lat1, and writes a mode-0600
-reviewed plan under the ignored `.local-state/runtime-rollouts/` tree. It does
-not enqueue an upgrade:
+eligible canonical Kata container directly on the selected host, and writes a
+mode-0600 reviewed plan under the ignored `.local-state/runtime-rollouts/`
+tree. It does not enqueue an upgrade:
 
 ```sh
 scripts/rollout-lat1-runtime-artifact \
@@ -209,9 +209,10 @@ plan may differ only by entries Core already records on the target artifact,
 and each entry is reconciled before acting — already on target is verified and
 skipped, an identical in-flight upgrade request is awaited (Core never
 enqueues a duplicate), and anything else executes normally. The same wrapper
-covers lat3 with `--host lat3` (default `lat1`); the plan is provably
-single-host and mixed-host plans are refused. Core CLI calls always run on
-lat1; only provider facts and Runner addressing follow `--host`.
+covers lat3 and lat4 with `--host lat3` or `--host lat4` (default `lat1`
+is leftover/inactive only). The plan is provably single-host and mixed-host
+plans are refused. Core CLI calls always run on lat2; only provider facts
+and Runner addressing follow `--host`.
 For `--roll-all`, a canonical container that is already stopped is retained in
 the hashed plan as `provider_not_running` and is never contacted, started, or
 enqueued; healthy eligible Runtimes may continue. An explicitly selected

@@ -17,7 +17,7 @@ Newest first. Never record a secret value.
 | Surface | Source of truth | How to read it |
 |---|---|---|
 | Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat1 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
-| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat1, lat3) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
+| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
 | CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
 | Server binaries on lat1 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
@@ -51,6 +51,30 @@ the sources above cannot carry lands here.
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-08-29 — Agent Runtime `2026-08-29.3` promoted; Waffle Prime canary
+
+- Published from `c94134c7` (PRs #765 + #768):
+  `ghcr.io/finitecomputer/agent-runtime:2026-08-29.3@sha256:5a18956266e9eb5556ddc621bb45640e1f4926f72815d79394741c18654da84e`
+  ([run 33265870329](https://github.com/finitecomputer/finite-mono/actions/runs/33265870329)).
+  Core artifact `finite-agent-runtime-2026-08-29.3` promoted 17:40Z.
+- Waffle Prime (`runtime_60a635e4c80b9cc9fd1b` on lat4) is the canary: exact
+  digest, `/contact` ready, sidecar `/readyz` store ok. A live chat consume
+  on this canary is still required as go/no-go before any host pin or fleet
+  roll. Host pins on lat3 and lat4 are still `finite-agent-runtime-2026-08-27.2`.
+  The other 50 active Runtimes remain on `2026-08-29.1`. Fleet roll is not
+  authorized by this record.
+
+### 2026-08-29 — Finite Private flash-5 restores usage-api admission
+
+- Replaced flash-4 with `v2026-08-28-glm-5-3-flash-5` on container
+  `acc651a6-9de6-4da5-9fdc-bb9888245962` (8xH200). Allowlist secret
+  unmounted; limiter reports `admissionMode: usage-api`. Reservation
+  traffic reaches Core through lat2 (malformed POST → 422, not a Vercel
+  307). First flash-5 GitHub release lacked Tinfoil measurement assets;
+  rolled back to flash-4, rebuilt via the measurement workflow, then
+  redeployed. Two ~29-minute reloads. Org-level
+  `FINITE_ADMISSION_ALLOWLIST` secret remains for later deletion.
 
 ### 2026-08-29 — Finite Private GLM flash-4 (chunked prefill + 392k proof)
 
