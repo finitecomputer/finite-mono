@@ -91,6 +91,10 @@ const DEFAULT_CREDENTIAL_VALIDITY_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 const DEFAULT_APP_UPDATE_WAIT_MILLIS: u64 = 30_000;
 const DEFAULT_EPHEMERAL_ACTIVITY_EXPIRY_MILLIS: u64 = 30_000;
 const SERVER_CONTRACT_HEALTH_TIMEOUT_SECS: u64 = 5;
+/// Per-request budget for a Blossom attachment upload: sized for the protocol's
+/// per-turn attachment ceiling on a slow uplink, unlike the small-call default
+/// every other transport request uses.
+const ATTACHMENT_UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_PROFILE_CACHE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 const MAX_PROFILE_DISPLAY_NAME_BYTES: u32 = 128;
 const MAX_PROFILE_ABOUT_BYTES: u32 = 4 * 1024;
@@ -8555,6 +8559,10 @@ impl CoreState {
             .put(upload_url)
             .header(CONTENT_TYPE, request.content_type)
             .body(request.body.to_vec())
+            // Attachment bodies run up to the protocol's per-turn byte
+            // ceiling, so this one request overrides the client's small-call
+            // default with a budget that fits a large upload on a slow link.
+            .timeout(ATTACHMENT_UPLOAD_TIMEOUT)
             .send()
             .map_err(delivery_error)?;
         let status = response.status();
@@ -12468,9 +12476,15 @@ fn nostr_identity_from_secret(
 /// construction both deepens the exhaustion and turns it into a panic storm
 /// (2026-08-12: ~275k panics in 8 minutes from the hosted-device long-poll
 /// loops). Construct once, clone the handle (it is an Arc internally).
+/// Every call through it is bounded: the runtime actor and the resident
+/// bridge sync thread park on these calls, so one silently-stalled
+/// connection would otherwise wedge the whole process
+/// (`scripts/repro-hermes-wedge`).
 fn shared_blocking_http_client() -> reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::blocking::Client::new).clone()
+    CLIENT
+        .get_or_init(finitechat_client::blocking_http_client)
+        .clone()
 }
 
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {

@@ -67,6 +67,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::Duration;
 use thiserror::Error;
 
 pub mod rejected_entry_diagnostic;
@@ -4839,9 +4840,55 @@ pub struct ReqwestHttpRuntimeTransport {
     client: reqwest::blocking::Client,
 }
 
+/// Default bounds for every runtime-transport HTTP call. The connect bound
+/// mirrors the server-contract health check; the total bound applies per
+/// request and, for streaming responses, per body read (reqwest resets it on
+/// every successful read, so a heartbeat-driven SSE stream stays alive while
+/// a silent connection errors out).
+pub const DEFAULT_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub const HTTP_CONNECT_TIMEOUT_ENV: &str = "FINITECHAT_HTTP_CONNECT_TIMEOUT_MILLIS";
+pub const HTTP_TIMEOUT_ENV: &str = "FINITECHAT_HTTP_TIMEOUT_MILLIS";
+
+fn env_timeout_millis(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+/// The standard blocking HTTP client for runtime transports: every call is
+/// bounded. An unbounded `reqwest::blocking` call parks its calling thread on
+/// the client's internal channel for as long as the server stays silent, and
+/// the callers here include the single-threaded runtime actor and the resident
+/// bridge sync thread — one silently-stalled connection (half-open TCP, edge
+/// hiccup, server pause) then wedges the whole sidecar with no error, no
+/// retry, and no restart (`scripts/repro-hermes-wedge` reproduces it).
+pub fn blocking_http_client() -> reqwest::blocking::Client {
+    blocking_http_client_with_timeouts(
+        env_timeout_millis(HTTP_CONNECT_TIMEOUT_ENV, DEFAULT_HTTP_CONNECT_TIMEOUT),
+        env_timeout_millis(HTTP_TIMEOUT_ENV, DEFAULT_HTTP_TIMEOUT),
+    )
+}
+
+/// Testable core of [`blocking_http_client`].
+pub fn blocking_http_client_with_timeouts(
+    connect_timeout: Duration,
+    timeout: Duration,
+) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(timeout)
+        .build()
+        .expect("static reqwest blocking client configuration is valid")
+}
+
 impl ReqwestHttpRuntimeTransport {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(base_url, reqwest::blocking::Client::new())
+        Self::with_client(base_url, blocking_http_client())
     }
 
     pub fn with_client(base_url: impl Into<String>, client: reqwest::blocking::Client) -> Self {
@@ -13848,5 +13895,139 @@ mod tests {
         child.wait().unwrap();
         SqliteClientStore::open(&db_path, lease_test_options(&secret, "parent"))
             .expect("the lease is released when the child process exits");
+    }
+
+    // ---- bounded HTTP transport ------------------------------------------
+    //
+    // These pin the sidecar wedge class (repro: scripts/repro-hermes-wedge):
+    // `reqwest::blocking` parks its calling thread on the client's internal
+    // channel until the server speaks, and the callers are the single-
+    // threaded runtime actor and the resident bridge sync thread. A server
+    // that accepts but never answers — or an SSE stream that goes silent —
+    // must surface as an Err within the configured bound, not a forever-park.
+
+    /// One-connection TCP server whose handler gets the accepted stream.
+    fn once_server(
+        respond: impl Fn(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                respond(&mut stream);
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Drain the request head (plus any short body) so the client's write
+    /// side never blocks, without bothering to parse it.
+    fn drain_request_head(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut scratch = [0u8; 8192];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        let _ = stream.read(&mut scratch);
+    }
+
+    fn bounded_transport(timeout: Duration, base_url: String) -> ReqwestHttpRuntimeTransport {
+        ReqwestHttpRuntimeTransport::with_client(
+            base_url,
+            blocking_http_client_with_timeouts(Duration::from_secs(5), timeout),
+        )
+    }
+
+    #[test]
+    fn post_json_errors_within_bound_when_server_never_responds() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let started = std::time::Instant::now();
+        let result: Result<serde_json::Value, _> =
+            transport.post_json("/health", &serde_json::json!({}));
+
+        assert!(
+            result.is_err(),
+            "a never-answering server must error, not hang"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout must fire near the configured bound, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn sync_stream_read_errors_within_bound_when_stream_goes_silent() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            let _ = stream.flush();
+            // Established stream that never sends another byte: no hint, no
+            // heartbeat, no EOF — the production canary wedge shape.
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(50),
+            })
+            .expect("headers arrive, so the stream opens");
+        let started = std::time::Instant::now();
+        let result = stream.next_hint();
+
+        assert!(result.is_err(), "a silent stream must error, not hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "read timeout must fire near the configured bound, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn sync_stream_survives_healthy_heartbeats_longer_than_the_timeout() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            for _ in 0..40 {
+                let _ = stream.write_all(b"data: {\"type\":\"heartbeat\"}\n\n");
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(50),
+            })
+            .expect("healthy stream opens");
+
+        // 40 heartbeats at 50 ms = ~2 s of stream life, far past the 250 ms
+        // per-read bound: every read reset proves heartbeats keep a healthy
+        // stream alive under the same timeout that kills a silent one.
+        let mut received = 0usize;
+        for _ in 0..40 {
+            match stream.next_hint() {
+                Ok(SyncHintEvent::Heartbeat) => received += 1,
+                Ok(_) => {}
+                Err(error) => panic!("healthy heartbeat stream must not time out: {error}"),
+            }
+        }
+        assert!(received >= 30, "expected mostly heartbeats, got {received}");
     }
 }
