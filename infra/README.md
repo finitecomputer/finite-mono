@@ -83,7 +83,8 @@ infra/
   runbooks/    # per-service: deploy, rollback, backup/restore, break-glass
 ```
 
-`infra/nixos/` is the declared source of truth for lat1. Every
+`infra/nixos/` is the declared source of truth for the NixOS fleet (lat2,
+lat3, lat4; lat1 is retired). Every
 `infra/hosts/<name>/` directory is a dated capture or migration record unless
 its own banner explicitly says otherwise; it is not permission to deploy its
 old units. `hosts/lat1/` describes the wiped pre-cutover k3s control plane, and
@@ -112,8 +113,9 @@ capacity. The one accepted next candidate and its hard gates live in
 ## DNS (current)
 
 - `finite.computer`, `brain.finite.computer`, `chat.finite.computer` → **lat2** (`64.34.80.19`, Namecheap).
-- `*.finite.chat` → **Cloudflare** (Full strict) → lat1 origin (Cloudflare
-  Origin CA cert); `*.docs.finite.chat` same edge.
+- `*.finite.chat` → **Cloudflare** (Full strict) → lat2 origin (Cloudflare
+  Origin CA cert, served by lat2's Caddy since the 2026-08-29 cutover);
+  `*.docs.finite.chat` same edge.
 - `brain.finite.computer` is the canonical production Brain signing/API
   origin. The WorkOS-protected embedded client remains under
   `finite.computer/client`; its capability names the canonical Brain origin.
