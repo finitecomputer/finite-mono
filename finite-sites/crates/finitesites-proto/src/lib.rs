@@ -1,9 +1,11 @@
 //! Wire-level protocol types for Finite Sites.
 //!
 //! This crate owns everything both the server and the CLI must agree on:
-//! nostr event encoding and signature verification, NIP-98 request
-//! authorization, site name rules, publish manifests, request/response DTOs,
-//! and the explicit limits that bound every loop and payload in the system.
+//! NIP-98 request authorization (the canonical nostr implementation lives
+//! in `finite-nostr`; this crate keeps only the Sites wire policy), pubkey
+//! derivation for key files, site name rules, publish manifests,
+//! request/response DTOs, and the explicit limits that bound every loop
+//! and payload in the system.
 
 pub mod dto;
 pub mod event;
@@ -16,7 +18,6 @@ pub mod nip98;
 pub mod npub;
 pub mod project_config;
 
-pub use event::NostrEvent;
 pub use manifest::{ManifestFile, PublishManifest};
 
 use thiserror::Error;
