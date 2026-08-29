@@ -45,7 +45,6 @@ containers:
         "bfloat16",
         "--moe-runner-backend",
         "deep_gemm",
-        "--disable-shared-experts-fusion",
         "--reasoning-parser",
         "glm45",
         "--tool-call-parser",

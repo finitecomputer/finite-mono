@@ -1,12 +1,12 @@
 # TEMPORARY overlay. Not the production-default candidate.
 #
-# Live on 2026-08-28 as Tinfoil release v2026-08-28-glm-5-3-flash-2 while
-# finite.computer's usage-admission route is missing (POST
-# /internal/finite-private/v1/reservations redirects to the homepage).
-# Same GLM checkpoint and SGLang pin as
-# tinfoil-config.glm-5.3-flash.candidate.yml; the only deltas are the
-# limiter image (2026-08-28.5), FINITE_ADMISSION_MODE=allowlist, and the
-# FINITE_ADMISSION_ALLOWLIST secret.
+# Intended live tag: v2026-08-28-glm-5-3-flash-3. Same GLM checkpoint and
+# SGLang image as the candidate; DSA backends are the measured H200 pair
+# (flashmla_sparse / fa3). Deltas from the candidate are the limiter image
+# that carries fill-if-absent reasoning_effort=high, FINITE_ADMISSION_MODE=
+# allowlist, and the FINITE_ADMISSION_ALLOWLIST secret. Usage admission on
+# finite.computer is still missing (POST /internal/finite-private/v1/reservations
+# redirects to the homepage).
 #
 # Trade-off, revert, and mature path:
 #   docs/runs/glm-5-3-flash-degraded-admission.md
@@ -57,7 +57,6 @@ containers:
         "bfloat16",
         "--moe-runner-backend",
         "deep_gemm",
-        "--disable-shared-experts-fusion",
         "--reasoning-parser",
         "glm45",
         "--tool-call-parser",

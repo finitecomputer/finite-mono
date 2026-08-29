@@ -109,11 +109,15 @@ batch is the point. MTP helps decode; it does not fix a 33s time-to-first-token
 under 32-way thinking, and it is a second correctness variable. Keep it as the
 next one-variable A/B after the DSA swap.
 
-Also add `--disable-shared-experts-fusion` when we retune. Cookbook restored it
-on every cell after fusion silently degenerated answers on the final weights
-(4x GB300 isolation: fusion on = garbage, off = pass). Speed-neutral,
-correctness-not-optional.
-[PR #36519](https://github.com/sgl-project/sglang/pull/36519).
+Do not add `--disable-shared-experts-fusion` on this image. Cookbook restored
+it in PR #36519 after fusion silently degenerated answers, then dropped it
+again in PR #36544 once the fusion-gate fix made EP>1 build the unfused path
+with no flag. Live `flash-2` (this image, no flag) already returns real
+answers and stops. Forcing the flag on `glm5_next` has a recorded startup
+crash with some MoE runners (SGLang issue #36830's neighbor #36711). Leave
+the serving command matching the live-proven fusion path.
+[PR #36519](https://github.com/sgl-project/sglang/pull/36519),
+[PR #36544](https://github.com/sgl-project/sglang/pull/36544).
 
 ### 3. Memory split is a real lever we cannot copy as a flag
 
@@ -155,8 +159,8 @@ Runtime configuration in the model window).
 
 ## Recommended order
 
-1. DSA pin → `flashmla_sparse` / `fa3`, plus `--disable-shared-experts-fusion`.
-   Same GLM image, new measured Tinfoil tag, one replace. Re-run 1/32-way.
+1. DSA pin → `flashmla_sparse` / `fa3`. Same GLM image, new measured Tinfoil
+   tag, one replace. Re-run 1/32-way. Do not add `--disable-shared-experts-fusion`.
 2. Limiter default `reasoning_effort=high` when omitted.
 3. After boot logs exist: recompute `--mamba-full-memory-ratio`.
 4. Separate window: adaptive MTP 5/1/6, one variable, protocol gate first.
