@@ -225,8 +225,23 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn('nix copy --no-check-sigs --option builders \'\'', source)
         self.assertIn('--from "file://$CACHE_DIR"', source)
         self.assertIn('"$SYSTEM" "$DISKO" "$KEXEC"', source)
-        self.assertIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
-        self.assertIn("--kexec \"$KEXEC\"", source)
+        # Proven at the 2026-08-29 install: --store-paths takes the DISKO
+        # script first and the SYSTEM closure second (the first path is
+        # exec'd as the disko script; the reversed order failed with
+        # "Is a directory" before any partitioning ran).
+        self.assertIn("--store-paths \"$DISKO\" \"$SYSTEM\"", source)
+        self.assertNotIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
+        # Proven: --kexec is a URL the TARGET fetches. The tarball is scp'd
+        # over and served from the target's loopback via a transient unit
+        # (plain ssh-spawned processes die with the session in rescue).
+        self.assertIn("scp \"$KEXEC\" \"$target_host:/root/kexec-serve/kexec.tar.gz\"", source)
+        self.assertIn(
+            "systemd-run --unit=lat2-kexec-serve python3 -m http.server 8043"
+            " --bind 127.0.0.1 --directory /root/kexec-serve",
+            source,
+        )
+        self.assertIn("--kexec \"http://127.0.0.1:8043/kexec.tar.gz\"", source)
+        self.assertNotIn("--kexec \"$KEXEC\"", source)
         self.assertIn("--build-on local", source)
         self.assertIn("packages.x86_64-linux.finite-lat-2-nixos-anywhere", source)
         # Substitution from the artifact cache only: no build invocation.

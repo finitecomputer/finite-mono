@@ -151,12 +151,25 @@ else
 fi
 
 echo "==> driving the bare-metal install on $target_host"
-# TODO(prove) at Gate C first execution: exact nixos-anywhere flag
-# spellings. The invariants are: kexec from the artifact, store paths from
-# the artifact, no build fallback.
+# Proven at the 2026-08-29 install:
+#   - nixos-anywhere's --kexec takes a URL or path that the TARGET fetches,
+#     never a local driver path. Copy the tarball over and serve it from
+#     the target's loopback with a transient unit — a plain process spawned
+#     over ssh dies with the session in the rescue environment. The serve
+#     unit dies with the rescue system itself at kexec; no cleanup needed.
+#   - --store-paths is DISKO FIRST, SYSTEM SECOND: the first path is exec'd
+#     as the disko script, so the reversed order fails with "Is a directory"
+#     before any partitioning runs.
+ssh "$target_host" 'mkdir -p /root/kexec-serve'
+scp "$KEXEC" "$target_host:/root/kexec-serve/kexec.tar.gz"
+# Best-effort reset so a re-run after a failed attempt can recreate the unit.
+ssh "$target_host" \
+  'systemctl stop lat2-kexec-serve 2>/dev/null || true; systemctl reset-failed lat2-kexec-serve 2>/dev/null || true'
+ssh "$target_host" \
+  'systemd-run --unit=lat2-kexec-serve python3 -m http.server 8043 --bind 127.0.0.1 --directory /root/kexec-serve'
 "${nixos_anywhere_cmd[@]}" \
-  --kexec "$KEXEC" \
-  --store-paths "$SYSTEM" "$DISKO" \
+  --kexec "http://127.0.0.1:8043/kexec.tar.gz" \
+  --store-paths "$DISKO" "$SYSTEM" \
   --build-on local \
   "$target_host" \
   "${extra_args[@]+"${extra_args[@]}"}"

@@ -315,7 +315,18 @@ in
           };
         };
       })
-      (lib.mkIf logsEnabled {
+      # Proven first-boot failure mode (finite-lat-2, 2026-08-29): a host
+      # booting in import mode has NO monitoring secrets placed yet, and this
+      # check's non-zero exit aborted the activation script sequence
+      # mid-run — /etc partially populated, every later snippet (including
+      # the networkd config writer) never executed, and the box looked
+      # booted while half-configured. Skip the check until the go-live
+      # closure turns import mode off (the runbook places the monitoring
+      # secrets before Gate E). The `or false` keeps eval green on hosts
+      # that do not import import-mode.nix (lat1/lat3/lat4): a bare
+      # `config.finite.importMode.enable` read fails their evaluation
+      # because the option does not exist there.
+      (lib.mkIf (logsEnabled && !(config.finite.importMode.enable or false)) {
         system.activationScripts.finite-lat-monitoring-secrets.text = ''
           ${latMonitoringSecretsCheck}/bin/check-lat-monitoring-secrets
         '';
