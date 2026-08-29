@@ -475,3 +475,4 @@ Append only decisive checkpoints here:
 | 2026-08-26 | Owner authorized raising the declarative lat3 admission ceiling from 32 to 42 with explicit memory overcommit | Pending merged closure activation and post-deploy verification |
 | 2026-08-27 | ADR 0007 draft: lat2 as second Runner (superseded next day) | Withdrawn |
 | 2026-08-28 | ADR 0007 final: lat1 thermal failure; lat2 becomes the replacement app-plane host; runner lane moves to a future host | `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md` |
+| 2026-08-28 | finite-lat-4 (152.236.34.15) drafted as the third storage-qualified Runner host per the ADR 0007 model: captured storage identities, lat3 geometry re-proven against the real disks, ceiling mirrored at 42, admitted drained; prep evidence in `docs/runs/lat4-provisioning-prep.md` | Host config + activation scaffold pending review; install gated on the PR #715 /29 widening |

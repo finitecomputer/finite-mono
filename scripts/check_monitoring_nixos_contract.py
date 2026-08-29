@@ -135,6 +135,16 @@ LAT_LOG_UNITS = {
         "podman-searxng.service",
         "podman-firecrawl-api.service",
     ],
+    "finite-lat-4": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd-persistent-storage.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
 }
 
 LAT_ROLES = {
@@ -142,6 +152,7 @@ LAT_ROLES = {
     "finite-lat-3": "runner",
     # Emergency replacement app-plane host (lat1's stack, no runner).
     "finite-lat-2": "app",
+    "finite-lat-4": "runner",
 }
 
 
@@ -226,6 +237,12 @@ def nix_eval() -> dict[str, Any]:
             envFiles = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
             activation = flake.nixosConfigurations.finite-lat-2.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-4 = {
+            config = flake.nixosConfigurations.finite-lat-4.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-4.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-4.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-4.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }

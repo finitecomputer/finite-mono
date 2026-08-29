@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Verify both Kata Runner hosts share one runner-role declaration.
+"""Verify all Kata Runner hosts share one runner-role declaration.
 
-finite-lat-1 and finite-lat-3 import infra/nixos/modules/kata-runner-host.nix,
+finite-lat-1, finite-lat-3, and finite-lat-4 import
+infra/nixos/modules/kata-runner-host.nix,
 which renders the shared non-secret environment to
 /etc/finite/runner-shared.env and owns the finite-saas-runner unit shape. Host
 configs pass only the declared per-host inputs. This guard evaluates both
 nixosConfigurations and fails on any runner-role drift outside that declared
 per-host set, so a future hand-edit to one host breaks CI instead of
 production. (finite-lat-2 is the app-plane replacement host and deliberately
-runs no runner; the runner lane moves to a future host.)
+runs no runner; the runner lane moves to finite-lat-4.)
 """
 
 from __future__ import annotations
@@ -18,11 +19,14 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ["finite-lat-1", "finite-lat-3"]
+HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4"]
 
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
     "finite-lat-3": "42",
+    # finite-lat-4 mirrors lat3's owner-authorized ceiling; it is admitted
+    # drained (FC_RUNNER_DRAIN is operator env, not shared env).
+    "finite-lat-4": "42",
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"

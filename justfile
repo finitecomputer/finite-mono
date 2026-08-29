@@ -80,6 +80,14 @@ deploy-lat1-closure artifact_dir *args:
 deploy-lat3-closure artifact_dir *args:
     just nixos deploy-lat3-closure "$@"
 
+[positional-arguments]
+deploy-lat4-closure artifact_dir *args:
+    just nixos deploy-lat4-closure "$@"
+
+[positional-arguments]
+install-lat4-from-artifact artifact_dir target_host *args:
+    just nixos install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 
@@ -122,6 +130,9 @@ lat2-runner-guardrails-contract:
 lat3-runner-rollout-contract:
     just nixos lat3-runner-rollout-contract
 
+lat4-runner-rollout-contract:
+    just nixos lat4-runner-rollout-contract
+
 litestream-recovery-contract:
     just infra litestream-recovery-contract
 
@@ -133,6 +144,9 @@ nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
 
 nixos-build-lat3-closure rev out_dir="target/lat3-nixos-closure":
     just nixos nixos-build-lat3-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+nixos-build-lat4-closure rev out_dir="target/lat4-nixos-closure":
+    just nixos nixos-build-lat4-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
 runbook-facts-contract:
     just infra runbook-facts-contract

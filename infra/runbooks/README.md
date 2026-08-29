@@ -45,6 +45,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
 | [decommission-lat2.md](decommission-lat2.md) | **Superseded for the emergency** — legacy credential rotation and runner-removal inventory only; the wipe is Gate A of the cutover |
 | [lat2-replacement-cutover.md](lat2-replacement-cutover.md) | **THE emergency runbook** — wipe, storage capture, artifact-driven install, lat1 state import, go-live, and DNS cutover for finite-lat-2 as the replacement app server (ADR 0007) |
+| [lat4-nixos-runner-install.md](lat4-nixos-runner-install.md) | **ADR 0007 model, third Runner host** — pre-wipe verification, CI-artifact bare-metal install, drained bring-up, and the admission decision for finite-lat-4 |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
 | [finite-private-deepseek-production-update.md](finite-private-deepseek-production-update.md) | Guarded promotion of the measured DeepSeek 128/2048 scheduler and canonical model label, with exact current DeepSeek rollback |
