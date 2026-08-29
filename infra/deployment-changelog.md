@@ -49,6 +49,20 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-28 — Finite Private GLM-5.3-Flash live under temporary degraded admission
+
+- GPU container `finite-private` now serves GLM-5.3-Flash on 8xH200.
+  Release `v2026-08-28-glm-5-3-flash-2` (overlay
+  `tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`). DeepSeek
+  `v2026-08-13-deepseek-v4-flash-0731-128-2048-1` remains the rollback tag.
+- Usage admission on `finite.computer` was missing
+  (`POST /internal/finite-private/v1/reservations` 307'd home), so the
+  limiter is in env-gated allowlist mode (PR #746): listed keys only, no
+  reservation or settlement. Full trade-off and revert:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+- Historical `kimi-k2-6` hostname retired by operator decision; issued
+  Runtime readers still need a follow-up migration onto `finite-private`.
+
 ### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
 
 - Brain sync went incremental (#699): `fbrain sync`/`open` now reconcile

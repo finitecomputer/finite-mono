@@ -9,10 +9,10 @@
 - Feature branch: `codex/glm-5-3-flash-cutover-prep`
 - Human owner: Finite operator
 - Started: 2026-08-27
-- Current status: first execution window (2026-08-28 02:31 America/Chicago)
-  stopped no-go before any production mutation; all published artifacts
-  verified reusable; retry pending runbook-exception review and operator
-  scheduling
+- Current status: GLM-5.3-Flash live on `finite-private` under temporary
+  degraded admission (`v2026-08-28-glm-5-3-flash-2`). Allowlist canary
+  proven. See `docs/runs/glm-5-3-flash-degraded-admission.md`. 120-user
+  gate not run; 32-way TTFT and aggregate miss the hard bars.
 - Skill setup status: complete (`docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md` are present)
 
@@ -177,6 +177,39 @@ Rollback is unaffected: it recreates DeepSeek from release
 authorization for this window; migrating issued Runtime readers to the
 stable `finite-private` endpoint is the follow-up that makes the retirement
 permanent.
+
+## 2026-08-28 degraded admission overlay (authorized)
+
+The product edge still 307'd `POST /internal/finite-private/v1/reservations`
+to the homepage, so every request 503'd `usage_api_unavailable` before a
+GPU was touched. Operator chose option 2: an env-gated allowlist mode in
+the limiter (PR #746), measured as `v2026-08-28-glm-5-3-flash-2`, rather
+than waiting on the outage.
+
+Trade-off (full write-up:
+`docs/runs/glm-5-3-flash-degraded-admission.md`):
+
+- Only keys in the Tinfoil secret `FINITE_ADMISSION_ALLOWLIST` are
+  admitted. No reservation, no settlement; tokens in this mode are
+  unaccounted. Every response carries `x-finite-admission: degraded-allowlist`.
+- GLM checkpoint, SGLang pin, and MPK are identical to `flash-1`.
+- Revert is one `--replace` back to `v2026-08-28-glm-5-3-flash-1` (or a
+  later measured usage-api tag). The limiter defaults to usage-api when
+  `FINITE_ADMISSION_MODE` is unset. Overlay config lives beside the
+  candidate and is not the production default:
+  `infra/tinfoil/confidential-finite-private/tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`.
+
+Container `197d6a7b-f7a3-458c-bfa6-613f49e0e7cd` created 2026-08-29
+01:52 UTC consuming `52cd8373…` (`flash-1`). Ready 2026-08-29 02:20 UTC.
+Listed-key canary 200 with `x-finite-admission: degraded-allowlist`;
+unlisted key 401. Rollback to DeepSeek
+`v2026-08-13-deepseek-v4-flash-0731-128-2048-1` is unchanged.
+
+First speed numbers (see degraded-admission doc for the tables): 1-way
+~88–90 tok/s at 0.3–0.5s TTFT; 32-way thinking-on 57 tok/s per request
+but 33s TTFT and 218 aggregate tok/s. The 120-user gate's 10s p95 TTFT
+and 2,400 aggregate bars are not in reach on this topology without a
+separate candidate.
 
 ## Parked HITL Slices
 
