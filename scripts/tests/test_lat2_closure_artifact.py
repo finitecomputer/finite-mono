@@ -95,11 +95,17 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
 
     def test_artifact_includes_the_bare_metal_install_inputs(self) -> None:
         source = BUILD.read_text(encoding="utf-8")
-        self.assertIn("config.system.build.diskoScript", source)
+        # Partitioning uses the plain (unguarded-eval) disko script so the
+        # build realizes exactly one disko derivation.
+        self.assertIn("packages.x86_64-linux.finite-lat-2-disko", source)
         self.assertIn("finite-lat-2-kexec", source)
         self.assertIn('"disko": "$disko_path"', source)
         self.assertIn('"kexec": "$kexec_path"', source)
-        self.assertEqual(source.count("nixosConfigurations.finite-lat-2."), 2)
+        self.assertEqual(source.count("nixosConfigurations.finite-lat-2."), 1)
+        # No out-links: the artifact carries store paths, and each build
+        # result is filtered to a single expected store path.
+        self.assertNotIn("--out-link", source)
+        self.assertNotIn("readlink", source)
 
     def test_valid_manifest_requires_file_binary_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
