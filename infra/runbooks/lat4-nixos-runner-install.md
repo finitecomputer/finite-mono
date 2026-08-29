@@ -7,10 +7,9 @@ second storage-qualified Runner host. Lat4-specific evidence, decisions, and
 open items:
 [`docs/runs/lat4-provisioning-prep.md`](../../docs/runs/lat4-provisioning-prep.md).
 This runbook is the execution surface. Every gate that mutates production
-requires the owner's fresh approval per the deployment-queue discipline. The
-wipe/install steps are `TODO:`-marked until first exercised: this procedure
-has not been run yet, and it must be proven before or at the moment of its
-first execution, not reconstructed after.
+requires the owner's fresh approval per the deployment-queue discipline.
+Gate C was first-exercised 2026-08-29; the nixos-anywhere spellings and
+first-boot secret landmines below are proven, not reconstructed.
 
 ## PRECONDITIONS
 
@@ -100,35 +99,71 @@ current.
 ### Gate C — wipe and install (provider console + artifact install)
 
 1. Provider console: launch Rescue Mode for finite-lat-4; note the one-time
-   root password. The rescue environment must show all four NVMe devices
-   attached (compare against the Gate B capture).
-2. `ssh root@152.236.34.15` (accept the new host key; this is rescue Ubuntu).
-   TODO(prove): confirm the rescue kernel exposes all four disks and that
-   the disko script's by-id paths resolve.
+   root password (Latitude 2026-08-29 offered `ubuntu`, not `root`). The
+   rescue environment must show all four NVMe devices attached (compare
+   against the Gate B capture). Latitude rescue stays enabled across
+   reboots until you **Exit rescue mode** in the console — a post-install
+   reboot otherwise silently reloads rescue Ubuntu and looks like the
+   install was wiped. Disks are fine. Never use the console "reinstall OS"
+   (provider reimage = wipe).
+2. `ssh ubuntu@152.236.34.15` (accept the new host key; this is rescue
+   Ubuntu — `ssh -v` banner `OpenSSH_9.6p1 Ubuntu-…`). Rescue exposed all
+   four NVMe devices; disko by-id paths resolved; old RAID was stopped
+   before wipe. `OpenSSH_10.x` is NixOS.
 3. From a Linux driver machine (or CI job) that can realize x86_64-linux
    store paths, drive the whole install with the artifact driver — it
    validates the manifest, proves the rev is on origin/main, realizes the
    SYSTEM/DISKO/KEXEC paths from the artifact's file cache (pure
    substitution, nothing built), and invokes the flake-pinned
-   nixos-anywhere:
+   nixos-anywhere. Proven 2026-08-29 (v1.13): `--kexec` is the `.tar.gz`
+   inside the kexec-tarball store path (a directory is treated as a URL
+   the *target* fetches); `--store-paths` is **DISKO then SYSTEM**;
+   `--build-on local`; unsigned `nix copy --from file://… --no-check-sigs`
+   as a trusted Nix user (root on lat3, whose `trusted-users` is only
+   root). If `--kexec` is still fetched by the target, scp the tarball
+   over and serve it from a unit that outlives the SSH session:
+   `systemd-run --unit=lat4-kexec python3 -m http.server 8043 --bind 127.0.0.1 --directory …`
+   then pass `http://127.0.0.1:8043/<tarball>`.
 
    ```sh
-   # TODO(prove): exact nixos-anywhere flag spellings are proven here on
-   # first execution; the invariants are: kexec from the artifact, store
-   # paths from the artifact, no build fallback.
    scripts/install-lat4-from-artifact target/lat4-nixos-closure-<REV> \
      root@152.236.34.15
    ```
 
    The kexec tarball is the same-pin NixOS 26.05 installer built by the CI
    workflow; do not let nixos-anywhere substitute its default.
-4. Reboot into NixOS. `ssh root@152.236.34.15` (new host key again).
+4. **Before the first NixOS boot**, rescue-mount the new root and place
+   the three files whose absence is fatal to bring-up (lat2 first-boot
+   landmines, both hit lat4's first disk boot):
+
+   - `/etc/finite/wireguard-private-key` (0600). With `useNetworkd`,
+     NixOS `LoadCredential`s this onto `systemd-networkd`. A missing
+     file is `status=243/CREDENTIALS`, start-limit, **no interface at
+     all — WAN included**. Console still shows a login prompt. Preflight
+     on the built closure: `grep -r LoadCredential $SYSTEM/etc/systemd/system/`
+     and every referenced path must exist on disk.
+   - `/etc/finite/metrics-remote-write.env` and `/etc/finite/logs-write.env`
+     (0600, exact var names). `metrics.nix` runs
+     `check-lat-monitoring-secrets` as an activation script; a miss
+     **aborts first-boot activation mid-sequence**. Prove it from rescue
+     before reboot: `check-lat-monitoring-secrets --root /mnt/nixos-root`.
+
+   Rescue-mount is the access path (root console has no password). Arrays
+   are safe to mount read-write from RAM-based rescue. Unmount, then
+   `mdadm --stop` if you assembled them, then Exit rescue + power cycle
+   if the box landed back in rescue. RAID bitmap resync interrupted by
+   install/rescue reboots resumes at next assemble — non-blocking; do
+   not wait. `finite-storage-health` fail-closes with
+   `/dev/md/root is synchronizing` until `sync_action=idle`.
+5. Reboot into NixOS. `ssh ubuntu@152.236.34.15` (new host key again;
+   `OpenSSH_10.x`). Timeout on port 22 = address never bound (bug 2);
+   refused = host up, listener/firewall.
 
 VERIFY: `readlink -f /run/current-system` is the artifact's SYSTEM path;
-`cat /proc/mdstat` shows both arrays `[UU]` and idle; the storage health
-unit exits clean; both ESPs mount at `/boot-a` and `/boot-b`; the storage
-identity file `/data/.finite-filesystem-identity` matches
-`storage-ids.nix`.
+`cat /proc/mdstat` shows both arrays `[UU]` (idle once resync finishes);
+both ESPs mount at `/boot-a` and `/boot-b`; the storage identity file
+`/data/.finite-filesystem-identity` matches `storage-ids.nix`. The
+storage health unit exits clean only after arrays are idle.
 
 ### Gate D — secrets, overlay, drained bring-up
 
@@ -142,11 +177,14 @@ identity file `/data/.finite-filesystem-identity` matches
    - `/etc/finite/identity-operator.env` (0600) — the replaceable operator
      token per `infra/runbooks/identity-authority.md`.
    - `/etc/finite/runtime-secrets.env` (0600) — direct copy of lat3's.
-   - `/etc/finite/wireguard-private-key` (0600) — the private half of the
-     keypair whose public key is already registered on the lat2 hub.
+   - `/etc/finite/wireguard-private-key` (0600) — already required at Gate C
+     first boot (networkd `LoadCredential`). Replace the first-boot key
+     with the Gate B keypair whose public half is registered on the lat2
+     hub if a throwaway was used to unblock WAN.
    - `/etc/finite/metrics-remote-write.env` and `/etc/finite/logs-write.env`
-     (0600) — monitoring write credentials; the activation preflight
-     `check-lat-monitoring-secrets` blocks activation without them.
+     (0600) — already required at Gate C first boot (activation
+     preflight). Confirm they are still present; do not wait until after
+     the first disk boot.
 2. WireGuard: confirm the handshake with the lat2 hub (`wg show` on both
    ends; the endpoint is `64.34.80.19:51820`, local `10.254.3.4`). From
    lat4, the Core URL from `runner.env` must answer over the overlay (an

@@ -150,13 +150,28 @@ else
   nixos_anywhere_cmd=(nix run .#packages.x86_64-linux.finite-lat-4-nixos-anywhere --)
 fi
 
+# Proven at Gate C first execution (nixos-anywhere 1.13, 2026-08-29):
+# `--kexec` must be the .tar.gz *inside* the kexec-tarball store path, not
+# the directory (a directory is treated as a URL the *target* fetches and
+# fails). `--store-paths` is DISKO then SYSTEM; reverse order makes disko
+# die with "Is a directory". Unsigned artifact cache import requires a
+# trusted Nix user on the driver (root on lat3).
+kexec_tarball=""
+shopt -s nullglob
+for candidate in "$KEXEC"/*.tar.gz; do
+  kexec_tarball="$candidate"
+done
+shopt -u nullglob
+if [[ -z "$kexec_tarball" || ! -f "$kexec_tarball" ]]; then
+  echo "kexec tarball missing inside $KEXEC" >&2
+  exit 67
+fi
+
 echo "==> driving the bare-metal install on $target_host"
-# TODO(prove) at Gate C first execution: exact nixos-anywhere flag
-# spellings. The invariants are: kexec from the artifact, store paths from
-# the artifact, no build fallback.
+echo "    kexec-tarball=$kexec_tarball"
 "${nixos_anywhere_cmd[@]}" \
-  --kexec "$KEXEC" \
-  --store-paths "$SYSTEM" "$DISKO" \
+  --kexec "$kexec_tarball" \
+  --store-paths "$DISKO" "$SYSTEM" \
   --build-on local \
   "$target_host" \
   "${extra_args[@]+"${extra_args[@]}"}"

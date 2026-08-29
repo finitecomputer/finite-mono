@@ -202,8 +202,9 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertIn('nix copy --no-check-sigs --option builders \'\'', source)
         self.assertIn('--from "file://$CACHE_DIR"', source)
         self.assertIn('"$SYSTEM" "$DISKO" "$KEXEC"', source)
-        self.assertIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
-        self.assertIn("--kexec \"$KEXEC\"", source)
+        self.assertIn("--store-paths \"$DISKO\" \"$SYSTEM\"", source)
+        self.assertIn("--kexec \"$kexec_tarball\"", source)
+        self.assertIn('"$KEXEC"/*.tar.gz', source)
         self.assertIn("--build-on local", source)
         self.assertIn("packages.x86_64-linux.finite-lat-4-nixos-anywhere", source)
         # Substitution from the artifact cache only: no build invocation.
