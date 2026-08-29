@@ -186,6 +186,16 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
 
 
 def _check_bridge(text: str) -> list[str]:
+    # The bridge must rewrite the Host header to the upstream (the caddy
+    # one-liner's --change-host-header, or its Caddyfile equivalent).
+    if (
+        '"--change-host-header"' not in text
+        and "header_up Host {upstream_hostport}" not in text
+    ):
+        return [
+            "compatibility bridge lacks required anchor: "
+            '"--change-host-header" (or header_up Host {upstream_hostport})'
+        ]
     violations = _require(
         text,
         (
@@ -194,7 +204,6 @@ def _check_bridge(text: str) -> list[str]:
             "memory: 2048",
             BRIDGE_IMAGE,
             "finite-private.finite.containers.tinfoil.dev",
-            '"--change-host-header"',
             "upstream-container: finite-private-compatibility-bridge",
             "authenticated: false",
             '- "/*"',
