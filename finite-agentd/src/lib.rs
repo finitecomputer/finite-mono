@@ -16,8 +16,7 @@ pub use config::{
     redact_value,
 };
 pub use daemon::{
-    AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, StartupSpecializationBundleConfig,
-    read_status, run_daemon,
+    AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, read_status, run_daemon,
 };
 pub use ledger::{CommandDecision, Ledger};
 pub use supervisor::{ProcessState, ProcessStatus, SupervisorStatus};

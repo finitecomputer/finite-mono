@@ -10,7 +10,9 @@
 > [`finitechat-server.md`](finitechat-server.md)).
 
 The current finite-mono deployment exceptions are the first-party AEON
-specialization request worker and the narrow `finite.vip` NIP-05 path proxy.
+specialization request worker (in staged retirement: Runner/agentd no longer
+hand the bundle to new runtimes; the worker stays up until the live image
+request counter is flat) and the narrow `finite.vip` NIP-05 path proxy.
 Their manifests and rollback procedures are owned here in
 [`finite-specialization-worker.yaml`](finite-specialization-worker.yaml),
 [`finite-specialization-worker.md`](finite-specialization-worker.md), and

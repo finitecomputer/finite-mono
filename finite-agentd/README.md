@@ -35,7 +35,6 @@ Platform Channel:
 - `agent.chat.recover`
 - `agent.connections.status`
 - `agent.inference.apply`
-- `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
@@ -43,55 +42,14 @@ Platform Channel:
 - `agent.hermes.config.apply`
 - `agent.hermes.config.rollback`
 
-Specialization reconciliation owns only the `auxiliary.vision` Hermes config
-field. Its typed AEON desired state includes the worker endpoint, canonical
-model alias, independently declared image/audio/video capabilities, prompt
-versions, and normalization limits. Existing worker credentials are retained
-unless a replacement credential is supplied through the encrypted command.
-Finite-applied values carry a durable pre-image and ownership hash; validation
-failure restores the exact previous bytes, and later user/Hermes drift blocks
-automatic rollback. Remote commands fail closed unless the sending Finite Chat
-Principal is in the durable authorization ledger.
+AEON specialization is retired. Runner no longer injects
+`FINITE_SPECIALIZATION_BUNDLE` / `FINITE_SPECIALIZATION_WORKER_API_KEY`.
+`finite-agentd` ignores leftover copies of those variables, does not activate
+or probe `auxiliary.vision`, and rejects `agent.specialization.aeon.reconcile`
+as unsupported. Status still includes a `specialization` object so mixed-version
+readers keep working; it is always `desired=false` / `effective=false`.
+Persisted Hermes `auxiliary.vision` rows are left alone.
 
-Specialization reconciliation is deliberately a model-profile operation. It
-does not register model-named tools, intercept attachments, or add behavioral
-instructions to the main agent. Hermes keeps its normal tool catalog and the
-main model decides when to use a native capability. The current AEON profile
-backs Hermes's `vision_analyze` and `video_analyze` tools through
-`auxiliary.vision`. The capability flags constrain requests accepted by the
-worker; they do not create a missing Hermes tool surface. Semantic audio
-interpretation therefore remains unavailable to the agent until Hermes has a
-generic instruction-preserving audio-analysis capability. This profile-first
-rule applies to every Finite specialization, not only AEON or vision.
-
-At runtime creation, the trusted Runner can declare
-`FINITE_SPECIALIZATION_BUNDLE=aeon-multimodal` and provide the separate
-`FINITE_SPECIALIZATION_WORKER_API_KEY`. After Hermes prepares `config.yaml` and
-before Hermes starts, `finite-agentd` applies that bundle only when
-`auxiliary.vision` is unset or still Finite-owned. It also adds
-`platform_toolsets.finitechat: [hermes-cli, video]` only when that platform
-toolset is absent; a user-owned toolset list is preserved rather than merged or
-replaced. Automatic activation writes native Hermes provider and toolset
-configuration only; it does not add capability or prompt-policy metadata.
-Runtime status reports the bundle identifier plus `desired` and `effective`
-booleans without serializing the credential. `effective` becomes true only
-after the running Hermes catalog admits `video_analyze` and the installed
-Hermes-native vision tool passes the fixed semantic probe for the current
-Hermes process generation. Matching configuration bytes alone are not
-sufficient, and a restart triggers a new probe.
-
-The Runner makes this admission solely from the canonical Finite Private
-`glm-5-2` profile. It has no box, user, project, or agent-name condition: every
-new runtime launched with that profile receives the bundle when its Runner is
-configured with the worker credential. A missing credential remains a
-non-blocking deployment configuration gap, so ordinary Finite Private launches
-continue without the bundle instead of failing creation.
-
-An AEON image reconciliation becomes effective only after Hermes restarts and
-its installed `vision_analyze_tool` returns exact semantic output for a fixed
-image through `auxiliary.vision`. The packaged probe uses the same
-`HERMES_HOME` as the resident process and emits only a bounded pass/fail result;
-it does not expose the worker credential or provider response.
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill
 an empty ledger; later claims and every other unauthorized command fail

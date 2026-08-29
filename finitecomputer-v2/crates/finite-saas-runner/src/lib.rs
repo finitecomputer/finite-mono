@@ -68,16 +68,10 @@ pub const HISTORICAL_FINITE_PRIVATE_BASE_URL: &str =
 pub const FINITE_PRIVATE_MODEL_ALIASES: &[&str] =
     &["deepseek-v4-flash-0731", "glm-5-2", "glm-5.3-flash"];
 pub const DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH: usize = 393_216;
-pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
 pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
     "https://avatars.githubusercontent.com/u/274919006?v=4";
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
-const FINITE_SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
-const FINITE_SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
-const FBRAIN_EMBEDDING_ENDPOINT_ENV: &str = "FBRAIN_EMBEDDING_ENDPOINT";
-const FBRAIN_EMBEDDING_BEARER_TOKEN_ENV: &str = "FBRAIN_EMBEDDING_BEARER_TOKEN";
-const DEFAULT_FBRAIN_EMBEDDING_ENDPOINT: &str = "https://specialization.finite.vip";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
@@ -1083,7 +1077,6 @@ where
                 "RuntimeSpec omitted the Finite Private secret reference".to_string(),
             ));
         }
-        let specialization_bundle = specialization_bundle_for_finite_private_profile(&defaults)?;
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -1096,7 +1089,6 @@ where
                 base_url: defaults.base_url,
                 model: defaults.model,
                 revoke_on_launch_failure: false,
-                specialization_bundle,
             });
             return Ok(options);
         }
@@ -1122,7 +1114,6 @@ where
             base_url: defaults.base_url,
             model: defaults.model,
             revoke_on_launch_failure: true,
-            specialization_bundle,
         });
         Ok(options)
     }
@@ -1548,7 +1539,6 @@ pub struct FinitePrivateRuntimeDefaults {
     pub base_url: String,
     pub model: String,
     pub api_key_override: Option<String>,
-    pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 impl Default for FinitePrivateRuntimeDefaults {
@@ -1557,63 +1547,7 @@ impl Default for FinitePrivateRuntimeDefaults {
             base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
             model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
             api_key_override: None,
-            specialization_bundle: None,
         }
-    }
-}
-
-fn is_canonical_finite_private_profile(model: &str) -> bool {
-    model == DEFAULT_FINITE_PRIVATE_MODEL || FINITE_PRIVATE_MODEL_ALIASES.contains(&model)
-}
-
-fn specialization_bundle_for_finite_private_profile(
-    defaults: &FinitePrivateRuntimeDefaults,
-) -> Result<Option<SpecializationBundleRuntimeDefaults>, RunnerError> {
-    // This is a profile decision, never a host, customer, or agent-name decision.
-    // Mixed-version aliases still hit the same GLM replica, so they keep the
-    // Finite Private specialization bundle.
-    if !is_canonical_finite_private_profile(&defaults.model) {
-        return Ok(None);
-    }
-    defaults
-        .specialization_bundle
-        .clone()
-        .map(|mut specialization_bundle| {
-            if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
-                return Err(RunnerError::InvalidRuntimeEnvironment(format!(
-                    "unsupported Finite Private specialization bundle {:?}",
-                    specialization_bundle.bundle_id
-                )));
-            }
-            specialization_bundle.worker_api_key =
-                specialization_bundle.worker_api_key.trim().to_owned();
-            if specialization_bundle.worker_api_key.is_empty()
-                || specialization_bundle.worker_api_key.len()
-                    > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
-            {
-                return Err(RunnerError::InvalidRuntimeEnvironment(
-                    "Finite Private specialization worker credential is empty or oversized"
-                        .to_string(),
-                ));
-            }
-            Ok(specialization_bundle)
-        })
-        .transpose()
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct SpecializationBundleRuntimeDefaults {
-    pub bundle_id: String,
-    pub worker_api_key: String,
-}
-
-impl std::fmt::Debug for SpecializationBundleRuntimeDefaults {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SpecializationBundleRuntimeDefaults")
-            .field("bundle_id", &self.bundle_id)
-            .field("worker_api_key", &"<redacted>")
-            .finish()
     }
 }
 
@@ -1817,9 +1751,6 @@ pub struct FinitePrivateLaunchKey {
     pub base_url: String,
     pub model: String,
     pub revoke_on_launch_failure: bool,
-    /// Optional automatic profile activation. A missing host credential must
-    /// never prevent a normal Finite Private agent launch.
-    pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 fn provisioned_key_to_revoke(options: &RuntimeLaunchOptions) -> Option<String> {
@@ -2057,6 +1988,8 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
             | "FINITECHAT_HERMES_PROVIDER"
             | "FINITECHAT_HERMES_BASE_URL"
             | "FINITECHAT_HERMES_API_MODE"
+            // Retired AEON worker keys. Keep reserved so leftover host or
+            // operator env cannot re-inject the clawland specialization bundle.
             | "FINITE_SPECIALIZATION_BUNDLE"
             | "FINITE_SPECIALIZATION_WORKER_API_KEY"
             | "FBRAIN_EMBEDDING_ENDPOINT"
@@ -2080,7 +2013,6 @@ impl std::fmt::Debug for FinitePrivateLaunchKey {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("revoke_on_launch_failure", &self.revoke_on_launch_failure)
-            .field("specialization_bundle", &self.specialization_bundle)
             .finish()
     }
 }
@@ -2994,26 +2926,6 @@ fn docker_equivalent_runtime_env(
                 finite_private.raw_api_key.clone(),
             ),
         ]);
-        if let Some(specialization_bundle) = finite_private.specialization_bundle.as_ref() {
-            entries.extend([
-                (
-                    FINITE_SPECIALIZATION_BUNDLE_ENV.to_string(),
-                    specialization_bundle.bundle_id.clone(),
-                ),
-                (
-                    FINITE_SPECIALIZATION_WORKER_API_KEY_ENV.to_string(),
-                    specialization_bundle.worker_api_key.clone(),
-                ),
-                (
-                    FBRAIN_EMBEDDING_ENDPOINT_ENV.to_string(),
-                    DEFAULT_FBRAIN_EMBEDDING_ENDPOINT.to_string(),
-                ),
-                (
-                    FBRAIN_EMBEDDING_BEARER_TOKEN_ENV.to_string(),
-                    specialization_bundle.worker_api_key.clone(),
-                ),
-            ]);
-        }
     }
 
     entries.extend(
@@ -3879,63 +3791,8 @@ mod tests {
     };
     use std::collections::VecDeque;
 
-    fn specialization_bundle_defaults() -> SpecializationBundleRuntimeDefaults {
-        SpecializationBundleRuntimeDefaults {
-            bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-            worker_api_key: "specialization-worker-secret".to_owned(),
-        }
-    }
-
     fn finite_private_defaults() -> FinitePrivateRuntimeDefaults {
-        FinitePrivateRuntimeDefaults {
-            specialization_bundle: Some(specialization_bundle_defaults()),
-            ..FinitePrivateRuntimeDefaults::default()
-        }
-    }
-
-    #[test]
-    fn specialization_bundle_is_scoped_only_to_the_canonical_finite_private_profile() {
-        let configured_profile = finite_private_defaults();
-        let bundle = specialization_bundle_for_finite_private_profile(&configured_profile)
-            .unwrap()
-            .expect("the canonical Finite Private profile should activate AEON");
-        assert_eq!(
-            bundle.bundle_id,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
-        );
-
-        let other_finite_private_profile = FinitePrivateRuntimeDefaults {
-            model: "another-finite-private-model".to_owned(),
-            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
-                bundle_id: "not-validated-for-this-profile".to_owned(),
-                worker_api_key: "unused-for-noncanonical-profile".to_owned(),
-            }),
-            ..FinitePrivateRuntimeDefaults::default()
-        };
-        assert!(
-            specialization_bundle_for_finite_private_profile(&other_finite_private_profile)
-                .unwrap()
-                .is_none(),
-            "specialization admission must depend on the canonical Finite Private profile, not a runner host or user"
-        );
-    }
-
-    #[test]
-    fn specialization_bundle_stays_on_for_mixed_version_finite_private_aliases() {
-        for alias in FINITE_PRIVATE_MODEL_ALIASES {
-            let profile = FinitePrivateRuntimeDefaults {
-                model: (*alias).to_owned(),
-                specialization_bundle: Some(specialization_bundle_defaults()),
-                ..FinitePrivateRuntimeDefaults::default()
-            };
-            let bundle = specialization_bundle_for_finite_private_profile(&profile)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{alias} should keep the Finite Private bundle"));
-            assert_eq!(
-                bundle.bundle_id,
-                DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
-            );
-        }
+        FinitePrivateRuntimeDefaults::default()
     }
 
     #[test]
@@ -5202,19 +5059,6 @@ mod tests {
         assert_eq!(finite_private.base_url, DEFAULT_FINITE_PRIVATE_BASE_URL);
         assert_eq!(finite_private.model, DEFAULT_FINITE_PRIVATE_MODEL);
         assert_eq!(finite_private.model, "glm-5-3-flash");
-        let specialization_bundle = finite_private
-            .specialization_bundle
-            .as_ref()
-            .expect("configured specialization should be passed to launcher");
-        assert_eq!(
-            specialization_bundle.bundle_id,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
-        );
-        assert_eq!(
-            specialization_bundle.worker_api_key,
-            "specialization-worker-secret"
-        );
-        assert!(!format!("{finite_private:?}").contains("specialization-worker-secret"));
         assert_eq!(runner.queue.registered.len(), 1);
         assert_eq!(
             runner.queue.registered[0]
@@ -5308,66 +5152,6 @@ mod tests {
                 .is_none()
         );
         assert!(runner.queue.registered.is_empty());
-    }
-
-    #[test]
-    fn run_once_launches_without_specialization_when_credential_is_missing() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
-        assert_eq!(runner.launcher.launch_count, 1);
-        assert_eq!(runner.queue.provisioned.len(), 1);
-        assert!(
-            runner.launcher.launch_options[0]
-                .finite_private
-                .as_ref()
-                .expect("Finite Private key should be passed to launcher")
-                .specialization_bundle
-                .is_none()
-        );
-        assert!(runner.queue.failed.is_empty());
-    }
-
-    #[test]
-    fn run_once_fails_closed_when_configured_specialization_is_invalid() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
-            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
-                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-                worker_api_key: " ".to_owned(),
-            }),
-            ..FinitePrivateRuntimeDefaults::default()
-        });
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
-        assert_eq!(runner.launcher.launch_count, 0);
-        assert!(runner.queue.provisioned.is_empty());
-        assert!(
-            runner.queue.failed[0]
-                .failure_message
-                .contains("specialization worker credential is empty or oversized")
-        );
     }
 
     #[test]
@@ -5607,7 +5391,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::from([(
@@ -5647,46 +5430,11 @@ mod tests {
         );
         assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
         assert_env(&env, "OPENAI_API_KEY", "fpk_live_test");
-        assert_env(
-            &env,
-            FINITE_SPECIALIZATION_BUNDLE_ENV,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
-        );
-        assert_env(
-            &env,
-            FINITE_SPECIALIZATION_WORKER_API_KEY_ENV,
-            "specialization-worker-secret",
-        );
-        assert_env(
-            &env,
-            FBRAIN_EMBEDDING_ENDPOINT_ENV,
-            DEFAULT_FBRAIN_EMBEDDING_ENDPOINT,
-        );
-        assert_env(
-            &env,
-            FBRAIN_EMBEDDING_BEARER_TOKEN_ENV,
-            "specialization-worker-secret",
-        );
-        let mut options_without_specialization = options.clone();
-        options_without_specialization
-            .finite_private
-            .as_mut()
-            .expect("Finite Private key should be present")
-            .specialization_bundle = None;
-        let env_without_specialization =
-            docker_runtime_env(&config, &plan, &lease, &options_without_specialization);
-        assert!(
-            env_without_specialization
-                .iter()
-                .all(|(key, _)| key != FINITE_SPECIALIZATION_BUNDLE_ENV)
-        );
-        assert!(
-            env_without_specialization
-                .iter()
-                .all(|(key, _)| key != FINITE_SPECIALIZATION_WORKER_API_KEY_ENV)
-        );
-        assert!(env_without_specialization.iter().all(|(key, _)| {
-            key != FBRAIN_EMBEDDING_ENDPOINT_ENV && key != FBRAIN_EMBEDDING_BEARER_TOKEN_ENV
+        assert!(env.iter().all(|(key, _)| {
+            key != "FINITE_SPECIALIZATION_BUNDLE"
+                && key != "FINITE_SPECIALIZATION_WORKER_API_KEY"
+                && key != "FBRAIN_EMBEDDING_ENDPOINT"
+                && key != "FBRAIN_EMBEDDING_BEARER_TOKEN"
         }));
         assert_env(&env, "FINITE_SITES_API", "http://192.168.64.1:18789");
         assert!(
@@ -5759,7 +5507,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: Some("https://chat.finite.computer/blobs/profile".to_string()),
             environment: BTreeMap::from([(
@@ -6015,7 +5762,6 @@ mod tests {
                 base_url: "http://192.168.64.1:18002/v1".to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -6114,7 +5860,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
