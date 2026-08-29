@@ -249,10 +249,13 @@ if [[ "$mode" == "prepare" ]]; then
 fi
 
 echo "==> activating the fenced app-plane closure"
-ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" <<'LAT2'
+# shellcheck disable=SC2034
+ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT2'
 set -euo pipefail
 system="$1"
 expect_startup="$2"
+shift 2
+approved_units=("${@-}")
 [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$ ]] || exit 64
 test -x "$system/bin/switch-to-configuration"
 nix-store --check-validity "$system" >/dev/null
@@ -316,8 +319,23 @@ nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$syst
 test "$(readlink -f /run/current-system)" = "$system"
 test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
 
-test "$(systemctl show containerd.service --property=MainPID --value)" = "$containerd_pid"
-test "$(systemctl show systemd-networkd.service --property=MainPID --value)" = "$networkd_pid"
+# Infra units whose PID must survive the switch UNLESS the operator
+# explicitly approved restarting them via --allow-unit (the dry-activation
+# fence and this assertion must agree; the lat4 peer wiring legitimately
+# restarts networkd at the Gate E go-live).
+pid_unchanged_unless_approved() {
+  local unit="$1" before="$2" u now
+  for u in "${approved_units[@]-}"; do
+    [[ "$u" = "$unit" ]] && return 0
+  done
+  now="$(systemctl show "$unit" --property=MainPID --value)"
+  if [[ "$now" != "$before" ]]; then
+    echo "$unit restarted during activation (pid $before -> $now) without --allow-unit approval" >&2
+    return 1
+  fi
+}
+pid_unchanged_unless_approved containerd.service "$containerd_pid"
+pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid"
 systemctl is-active --quiet containerd.service
 systemctl is-active --quiet systemd-networkd.service
 
