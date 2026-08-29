@@ -54,7 +54,7 @@ use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use futures_util::StreamExt;
 use nostr::event::FinalizeEvent;
 use nostr::{EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp as NostrTimestamp};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -2468,6 +2468,9 @@ async fn sqlite_submit_commit_replay_repairs_projection_after_partial_durable_pu
     // durable but before the finite projection writes run.
     insert_durable_commit_publish_without_projection(&db_path, &commit_publish, 1);
 
+    // Boot reconciliation now repairs the missing projection/directory rows
+    // from the replayed op log before any request runs (the frozen-table
+    // incident fix), so the directory already reflects the durable commit.
     let app = persistent_app(&db_path);
     let response = post_json(
         app.clone(),
@@ -2482,7 +2485,13 @@ async fn sqlite_submit_commit_replay_repairs_projection_after_partial_durable_pu
     assert_eq!(response.status(), StatusCode::OK);
     let before_retry: ListAccountRoomDirectoryResponse = read_json(response).await;
     assert_eq!(before_retry.rooms.len(), 1);
-    assert_eq!(before_retry.rooms[0]["current_epoch"], 0);
+    assert_eq!(before_retry.rooms[0]["current_epoch"], 1);
+    assert_eq!(before_retry.rooms[0]["last_seq"], 1);
+    assert_eq!(
+        before_retry.rooms[0]["devices"][1]["device"]["device_id"],
+        "alice-phone"
+    );
+    assert_eq!(before_retry.rooms[0]["devices"][1]["active"], false);
 
     let response = post_json(app.clone(), "/commits", &request).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -8710,4 +8719,688 @@ async fn sqlite_sync_stream_wakes_zero_room_device_for_persisted_welcome() {
         read_next_sync_hint(&mut restarted_stream).await,
         SyncHintEvent::InboxAdvanced { seq: 1 }
     );
+}
+
+// Production shape (lat2, 2026-08-29): the durable op log and the replayed
+// delivery service run far ahead of a FROZEN `http_room_memberships` table and
+// a stale `http_state_snapshots_v2` row (both stuck at the op-198825 era,
+// 2026-08-27 ~02:37 UTC, since the platform-wave deploy b9254c81). A process
+// that boots from that split state must keep serving: new publishes above the
+// pre-boot head, hints for already-ahead clients, and durable projection +
+// snapshot persistence. These tests freeze the table on purpose and prove the
+// boot reconciles it.
+#[tokio::test]
+async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publishes() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let room_id = "room-frozen-projection-boot".to_owned();
+    let mls_group_id = "mls-frozen-projection-boot".to_owned();
+
+    // Era 1 (pre-freeze): one event, then a state snapshot at op seq N.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"pre-freeze message",
+        "pre-freeze-msg",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    state.snapshot_now().expect("era-1 snapshot");
+
+    let (frozen_projection_json, snapshot_op_seq) = {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let frozen: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("frozen-era projection row");
+        let snapshot_seq: i64 = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("era-1 snapshot row");
+        (frozen, snapshot_seq)
+    };
+
+    // Era 2 (the frozen window): a membership commit adds bob (epoch 0 -> 1),
+    // bob claims+acks the Welcome (his interval activates), and bob chats at
+    // epoch 1. The op log and the live service advance; the durable
+    // projection table, in production, did not follow.
+    add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-frozen-projection-boot",
+        "commit-frozen-projection-boot",
+    )
+    .await;
+    let mut pre_boot_head = 0;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &bob,
+            1,
+            format!("frozen-window message {index}").as_bytes(),
+            &format!("frozen-window-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        pre_boot_head = accepted.seq;
+    }
+    drop(app);
+    drop(state);
+
+    // Freeze the durable projection at its era-1 value, exactly as the lat2
+    // store looks after the 2026-08-27 deploy: op log (and snapshot replay)
+    // run ahead while http_room_memberships lags behind.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute(
+            "UPDATE http_room_memberships SET projection_json = ?1 WHERE room_id = ?2",
+            params![frozen_projection_json, room_id],
+        )
+        .expect("freeze projection row");
+    }
+
+    // Era 3: the 06:22 boot from snapshot + op tail + stale table.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+
+    // Sanity: the replayed service still serves the tail above the frozen
+    // projection's last_seq (clients' cursors are already at the head).
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: pre_boot_head - 1,
+            limit: 10,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(
+        page.entries.last().map(|entry| entry.seq),
+        Some(pre_boot_head)
+    );
+
+    // A client at the current room epoch publishes a NEW message above the
+    // pre-boot head. On the stale boot this is exactly the fleet-wide stuck
+    // outbox: the frozen projection rejects the current epoch/sender.
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"post-boot message",
+        "post-boot-msg",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "boot from a frozen projection must accept current-epoch publishes"
+    );
+    let accepted: EventAccepted = read_json(response).await;
+    assert!(accepted.seq > pre_boot_head);
+
+    // The new message is visible to an ahead client above its cursor.
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: pre_boot_head,
+            limit: 10,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].seq, accepted.seq);
+
+    // RoomAdvanced hints fire again: the projection head is above the cursor.
+    let response = post_json(
+        app.clone(),
+        "/sync/wait",
+        &SyncWaitRequest {
+            rooms: vec![SyncWaitRoom {
+                room_id: room_id.clone(),
+                after_seq: pre_boot_head,
+            }],
+            wait_ms: 250,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let waited: SyncWaitResponse = read_json(response).await;
+    assert!(waited.woke, "hints must advance for ahead clients");
+
+    // Durable: the room projection row unfreezes past its era-1 value.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let projection_json: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("post-boot projection row");
+        let frozen: serde_json::Value =
+            serde_json::from_str(&frozen_projection_json).expect("frozen projection json");
+        let repaired: serde_json::Value =
+            serde_json::from_str(&projection_json).expect("repaired projection json");
+        assert!(
+            repaired["last_seq"].as_u64().unwrap_or(0) > frozen["last_seq"].as_u64().unwrap_or(0),
+            "projection row must persist past the frozen last_seq"
+        );
+    }
+
+    // Durable: the state snapshot persists past its era-1 last_op_seq.
+    state.snapshot_now().expect("post-boot snapshot");
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let snapshot_seq: i64 = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("post-boot snapshot row");
+        assert!(snapshot_seq > snapshot_op_seq);
+    }
+}
+
+#[tokio::test]
+async fn sqlite_boot_from_frozen_projection_serves_devices_added_in_frozen_window() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let room_id = "room-frozen-added-device".to_owned();
+    let mls_group_id = "mls-frozen-added-device".to_owned();
+
+    // Era 1: bootstrap + snapshot; the frozen row knows only alice.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    state.snapshot_now().expect("era-1 snapshot");
+    let frozen_projection_json: String = {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )
+        .expect("frozen-era projection row")
+    };
+
+    // Era 2 (frozen window): bob joins (Welcome claimed+acked) and sends; the
+    // table never learns.
+    add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-frozen-added-device",
+        "commit-frozen-added-device",
+    )
+    .await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"frozen window from bob",
+        "frozen-window-bob",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pre_boot_head: EventAccepted = read_json(response).await;
+    drop(app);
+    drop(state);
+
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute(
+            "UPDATE http_room_memberships SET projection_json = ?1 WHERE room_id = ?2",
+            params![frozen_projection_json, room_id],
+        )
+        .expect("freeze projection row");
+    }
+
+    // Boot: bob (added inside the frozen window, missing from the frozen row)
+    // must be able to publish and read back above the head.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"post-boot from bob",
+        "post-boot-bob",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "devices added during the frozen window must be sendable after boot repair"
+    );
+    let accepted: EventAccepted = read_json(response).await;
+    assert!(accepted.seq > pre_boot_head.seq);
+
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: pre_boot_head.seq,
+            limit: 10,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].seq, accepted.seq);
+}
+
+// The 2026-08-27..29 durable freeze: `http_state_snapshots_v2` stuck at
+// last_op_seq=198825 while ~8000 ops accumulated, because the snapshot
+// cadence only counted /commits and /events successes — key-package,
+// lease, and revoke ops grow the log without ever tripping the snapshot
+// interval, and once stale projections reject typed traffic the counter
+// never moves again. These tests pin the unfrozen contract: every appended
+// op counts toward the cadence, persists survive restarts, and the
+// readiness probe never stalls them.
+#[tokio::test]
+async fn sqlite_snapshot_cadence_counts_ops_from_every_delivery_path() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+
+    // Key-package traffic only: no typed commits, no events. On the frozen
+    // build this appends thousands of ops without one snapshot attempt.
+    let state = persistent_state(&db_path);
+    let interval_ops = 4_096usize;
+    let total_ops = interval_ops + 64;
+    for index in 0..total_ops {
+        let publication = key_package_publication(
+            &format!("cadence-kp-{index}"),
+            member(&format!("cadence-owner-{index}")),
+            format!("cadence key package {index}").as_bytes(),
+        );
+        state
+            .publish_key_package(publication)
+            .expect("key package publication");
+    }
+
+    // The interval trigger runs on its own background thread; wait for the
+    // durable row to appear with a head past the interval boundary.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut snapshot_seq = None;
+    while std::time::Instant::now() < deadline {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let row: Option<i64> = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("snapshot row query");
+        if let Some(seq) = row {
+            snapshot_seq = Some(seq);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let snapshot_seq = snapshot_seq.expect("key-package-only ops must trip the snapshot interval");
+    assert!(snapshot_seq >= interval_ops as i64);
+
+    // Persisting keeps advancing across a restart from the fresh snapshot:
+    // more ops, then the next snapshot must move past the previous one.
+    drop(state);
+    let state = persistent_state(&db_path);
+    for index in 0..4 {
+        let publication = key_package_publication(
+            &format!("cadence-restart-kp-{index}"),
+            member(&format!("cadence-restart-owner-{index}")),
+            format!("restart key package {index}").as_bytes(),
+        );
+        state
+            .publish_key_package(publication)
+            .expect("post-restart publication");
+    }
+    state.snapshot_now().expect("post-restart snapshot");
+    let conn = Connection::open(&db_path).expect("open raw");
+    let restarted_seq: i64 = conn
+        .query_row(
+            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("restarted snapshot row");
+    assert!(restarted_seq > snapshot_seq);
+}
+
+#[tokio::test]
+async fn sqlite_readiness_probes_concurrent_with_publishes_do_not_stall_persistence() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-readyz-concurrent".to_owned();
+    let mls_group_id = "mls-readyz-concurrent".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"before probes",
+        "readyz-concurrent-before",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    state.snapshot_now().expect("baseline snapshot");
+    let conn = Connection::open(&db_path).expect("open raw");
+    let baseline_seq: i64 = conn
+        .query_row(
+            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("baseline snapshot row");
+
+    // Interleave public readiness probes (the semantic-serving readiness
+    // path from 2026-08-26, which writes through the shared SQLite
+    // connection under the ordering-authoritative service lock) with typed
+    // publishes. Every publish must be accepted and the durable state must
+    // keep advancing.
+    let probe_app = app.clone();
+    let probes = tokio::spawn(async move {
+        for _ in 0..40 {
+            let response = probe_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/readyz")
+                        .body(Body::empty())
+                        .expect("readyz request"),
+                )
+                .await
+                .expect("readyz response");
+            assert_eq!(response.status(), StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    });
+    for index in 0..40 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("during probes {index}").as_bytes(),
+            &format!("readyz-concurrent-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "publishes must not be stalled by readiness probes"
+        );
+    }
+    probes.await.expect("probe loop");
+
+    state.snapshot_now().expect("post-probe snapshot");
+    let conn = Connection::open(&db_path).expect("open raw");
+    let final_seq: i64 = conn
+        .query_row(
+            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("final snapshot row");
+    assert!(final_seq > baseline_seq);
+
+    // And the served log is intact above the baseline cursor.
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 1,
+            limit: 100,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), 40);
+}
+
+// Paul's review of the boot-reconciliation fix: the repaired room
+// projections and the account-room directory rows must move in ONE SQLite
+// transaction. If the membership rows advance first (autocommit) and the
+// directory writes then fail or the process dies, the next boot loads the
+// advanced projection and skips the replayed publishes
+// (`publish.seq <= projection.last_seq`), so the directory repair is never
+// replayable again — http_account_rooms is stranded stale forever. This
+// test injects a directory-write failure at boot and proves nothing
+// persists (fail-closed), then proves the retry boot converges both
+// tables.
+#[tokio::test]
+async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let room_id = "room-reconcile-atomic".to_owned();
+    let mls_group_id = "mls-reconcile-atomic".to_owned();
+
+    // Era 1 (pre-freeze): bootstrap, one event, snapshot; capture the
+    // frozen projection row.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"pre-freeze message",
+        "reconcile-atomic-pre",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    state.snapshot_now().expect("era-1 snapshot");
+    let frozen_projection_json: String = {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )
+        .expect("frozen-era projection row")
+    };
+
+    // Era 2 (the frozen window): bob joins (Welcome claimed+acked) and
+    // sends; then the membership table is frozen at its era-1 value.
+    let add_accepted = add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-reconcile-atomic",
+        "commit-reconcile-atomic",
+    )
+    .await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"frozen window message",
+        "reconcile-atomic-window",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pre_boot_head: EventAccepted = read_json(response).await;
+    drop(app);
+    drop(state);
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute(
+            "UPDATE http_room_memberships SET projection_json = ?1 WHERE room_id = ?2",
+            params![frozen_projection_json, room_id],
+        )
+        .expect("freeze projection row");
+    }
+
+    // Fault injection: every http_account_rooms write aborts, modeling a
+    // crash or SQLite failure after the membership rows would have advanced
+    // under a non-atomic write order.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER finitechat_http_test_fail_account_rooms_insert
+            BEFORE INSERT ON http_account_rooms
+            BEGIN
+                SELECT RAISE(ABORT, 'finitechat http test: injected directory write failure');
+            END;
+            CREATE TRIGGER finitechat_http_test_fail_account_rooms_update
+            BEFORE UPDATE ON http_account_rooms
+            BEGIN
+                SELECT RAISE(ABORT, 'finitechat http test: injected directory write failure');
+            END;
+            "#,
+        )
+        .expect("install directory fault trigger");
+    }
+
+    // Boot fails closed — and, the crash-safety contract, NOTHING persisted:
+    // the membership row must still be exactly the frozen era-1 row, or a
+    // later boot would skip the replayed publishes and strand the directory
+    // stale forever.
+    let failed_boot = HttpServerState::from_sqlite_path(&db_path);
+    assert!(
+        failed_boot.is_err(),
+        "boot must fail when the reconciliation transaction cannot commit"
+    );
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let membership_json: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("membership row survives failed boot");
+        assert_eq!(
+            membership_json, frozen_projection_json,
+            "a failed reconciliation must not advance the membership watermark"
+        );
+    }
+
+    // Clear the fault: the retry boot converges BOTH tables in one pass.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(
+            "DROP TRIGGER finitechat_http_test_fail_account_rooms_insert;
+             DROP TRIGGER finitechat_http_test_fail_account_rooms_update;",
+        )
+        .expect("clear directory fault trigger");
+    }
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+
+    // Serving works above the pre-boot head for the current-epoch sender.
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"post-repair message",
+        "reconcile-atomic-post",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: EventAccepted = read_json(response).await;
+    assert!(accepted.seq > pre_boot_head.seq);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: pre_boot_head.seq,
+            limit: 10,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].seq, accepted.seq);
+
+    // Both durable tables moved together: the membership projection is past
+    // the frozen row, and the directory reflects the replayed room head.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let membership_json: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("repaired membership row");
+        assert_ne!(membership_json, frozen_projection_json);
+        let repaired: serde_json::Value =
+            serde_json::from_str(&membership_json).expect("repaired projection json");
+        assert!(repaired["last_seq"].as_u64().expect("last_seq") > pre_boot_head.seq);
+        let directory_json: String = conn
+            .query_row(
+                "SELECT record_json FROM http_account_rooms WHERE account_id = 'bob' AND room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("bob directory row");
+        let record: serde_json::Value =
+            serde_json::from_str(&directory_json).expect("directory record json");
+        assert_eq!(record["current_epoch"], 1);
+        // Directory rows advance on commits (the live /events path never
+        // writes them), so the replayed add commit is the expected head.
+        assert_eq!(
+            record["last_seq"].as_u64().expect("directory last_seq"),
+            add_accepted.seq
+        );
+    }
 }

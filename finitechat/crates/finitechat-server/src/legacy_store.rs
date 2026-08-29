@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use finitechat_delivery::{
     HttpDeliveryService, HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishTarget,
+    HttpSequence,
 };
 use finitechat_http::{
     HttpApplicationDeliveryEffect, HttpPairingSessionRecord, NostrProfileRecord, PushTokenRecord,
@@ -251,6 +252,14 @@ impl SqliteHttpDeliveryStore {
             Ok(observed) => observed,
             Err(error) => {
                 eprintln!("finitechat-server: readiness SQLite commit failed: {error}");
+                // A failed IMMEDIATE transaction can leave the shared
+                // connection with the transaction still open (rusqlite's
+                // drop-time rollback swallows a busy rollback). Clear it so
+                // the next delivery write is not poisoned with "cannot start
+                // a transaction within a transaction".
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
                 return Err("commit_failed");
             }
         };
@@ -1014,6 +1023,53 @@ impl SqliteHttpDeliveryStore {
         Ok(())
     }
 
+    /// Persist one boot-reconciliation pass atomically: every repaired
+    /// `http_room_memberships` row and every `http_account_rooms`
+    /// delete/upsert moves in a single SQLite transaction, mirroring the
+    /// coupling of `append_submit_commit_mutation`. A crash or SQLite error
+    /// between the two tables must never advance the membership watermark
+    /// past directory writes a later boot would skip
+    /// (`publish.seq <= projection.last_seq`), which would strand the
+    /// directory stale forever.
+    pub(crate) fn persist_room_reconciliation(
+        &self,
+        projections: &[HttpRoomMembershipProjection],
+        directory_mutation: &AccountRoomDirectoryMutation,
+    ) -> Result<(), DurableStoreError> {
+        let mut conn = self.connection();
+        let transaction = conn.transaction()?;
+        for projection in projections {
+            transaction.execute(
+                "INSERT INTO http_room_memberships (room_id, projection_json)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(room_id) DO UPDATE SET
+                    projection_json = excluded.projection_json",
+                params![projection.room_id, serde_json::to_string(projection)?],
+            )?;
+        }
+        for (account_id, room_id) in &directory_mutation.deletes {
+            transaction.execute(
+                "DELETE FROM http_account_rooms WHERE account_id = ?1 AND room_id = ?2",
+                params![account_id, room_id],
+            )?;
+        }
+        for record in &directory_mutation.upserts {
+            transaction.execute(
+                "INSERT INTO http_account_rooms (account_id, room_id, record_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account_id, room_id) DO UPDATE SET
+                    record_json = excluded.record_json",
+                params![
+                    record.account_id,
+                    record.room_id,
+                    serde_json::to_string(&record.record)?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn load_room_memberships(
         &self,
     ) -> Result<BTreeMap<String, HttpRoomMembershipProjection>, DurableStoreError> {
@@ -1214,15 +1270,31 @@ fn upsert_push_wake_in_transaction(
     Ok(())
 }
 
+/// Replay one persisted operation into the live service. Group publishes are
+/// also recorded (room, message, assigned seq) so boot can reconcile Finite's
+/// room-membership projections with the log the service was rebuilt from —
+/// the durable projection table can lag the op log (frozen-table boot), and
+/// the replayed entries carry the seqs and membership deltas the live path
+/// would have applied.
 pub(crate) fn replay_operation(
     service: &mut HttpDeliveryService,
     operation: PersistedOperation,
+    replayed_group_publishes: &mut Vec<ReplayedGroupPublish>,
 ) -> Result<(), DurableStoreError> {
     match operation {
         PersistedOperation::PublishMessage {
             target, message, ..
         } => {
-            service.publish(target, message)?;
+            let receipt = service.publish(target.clone(), message.clone())?;
+            if let HttpPublishTarget::Group { group_id, .. } = &target
+                && let Ok(room_id) = String::from_utf8(group_id.as_slice().to_vec())
+            {
+                replayed_group_publishes.push(ReplayedGroupPublish {
+                    room_id,
+                    message,
+                    seq: receipt.seq,
+                });
+            }
         }
         // KeyPackage lease/reclaim/consume state is rebuilt in the finite wrapper
         // inventory; Finite Chat's core store has no claimed lease state.
@@ -1233,6 +1305,15 @@ pub(crate) fn replay_operation(
         | PersistedOperation::ExpireKeyPackageLease { .. } => {}
     }
     Ok(())
+}
+
+/// One group publish observed during boot replay, with the per-room seq the
+/// service assigned it.
+#[derive(Clone, Debug)]
+pub(crate) struct ReplayedGroupPublish {
+    pub(crate) room_id: String,
+    pub(crate) message: finitechat_transport::transport::TransportMessage,
+    pub(crate) seq: HttpSequence,
 }
 
 pub(crate) fn apply_operations_to_revoked_devices(
