@@ -132,8 +132,6 @@ LAT_LOG_UNITS = {
         "finite-brain-app.service",
         "prometheus-node-exporter.service",
         "podman-finite-saas-dashboard.service",
-        "podman-searxng.service",
-        "podman-firecrawl-api.service",
     ],
     "finite-lat-4": [
         "alloy.service",

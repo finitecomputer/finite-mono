@@ -56,7 +56,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
             "rust",
             "electron-alpha",
             "skills-check",
-            "search-check",
             "monitoring-nixos-contract",
             "finite-status-contract",
             "nix-checks",

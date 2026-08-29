@@ -11,7 +11,6 @@ mod infra 'infra/justfile'
 mod monitoring 'infra/monitoring/justfile'
 mod nixos 'infra/nixos/justfile'
 mod runtime-images 'finitecomputer-v2/deploy/finite-computer/images/justfile'
-mod search 'finite-search/justfile'
 mod sites 'finite-sites/justfile'
 mod skills 'finite-skills/justfile'
 

@@ -27,7 +27,6 @@ verification note says otherwise.
 | iOS app build or local Hermes simulator work | repository root | `just dev ios-local-agent` | The pinned dev shell includes Rust's Apple targets and launches the encrypted local chat stack, automatic Device Link, Hermes, and Simulator. Requires Xcode; physical phone work also needs a paired phone and signing team. |
 | Hermes chat bridge canary | `finitechat` | `cp .env.example .env`, set provider key, run `scripts/hermes-phone-canary.py ...` | Real-Hermes proof is stricter than echo/adapter smokes. |
 | FiniteBrain brain, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Brain/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
-| Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat1`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
 | Managed skill edits | `finite-skills` | `just skills check`, then follow `finite-skills/docs/runtime-delivery-contract.md` for promotion proof | A basic static checker exists. It does not yet prove artifact integrity, compatibility, activation, rollback, or real Hermes behavior; those climb the v2 runtime matrix. |
 | Reusable Nostr primitives | `finite-nostr` | `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` | Small Rust crate. No repo-local toolchain pin. |
 | Reporting snapshots/site data | `reporting` plus legacy `finitecomputer` | `python3 ../finitecomputer/scripts/bootstrap_ai_training_stats.py`, then `python3 ai-training-stats/build_site_data.py` | Generator ownership is currently split; live probes depend on local env/SSH availability. |
@@ -337,38 +336,6 @@ Friction:
   `https://brain.finite.computer`. Existing working trees stay pinned to the
   server they were opened against; never silently move a smoke tree.
 
-### `finite-search`
-
-Owns self-hosted SearXNG and Firecrawl operations/integration for agent web
-tools.
-
-Documented tools:
-
-- Shell smoke scripts.
-- `just` recipes for check, doctor, and smoke wrappers.
-- Loopback-only finite-search services on the `lat1` NixOS host.
-- SSH tunnels from an operator machine to host-local service ports.
-- A local Docker smoke for the SearXNG Tinfoil bundle.
-
-Quick checks:
-
-```bash
-cd finite-search
-scripts/check-static.sh
-just doctor lat1
-ssh -L 18080:127.0.0.1:8080 -L 13002:127.0.0.1:3002 lat1 -N
-SEARXNG_URL=http://127.0.0.1:18080 scripts/smoke-searxng.sh
-FIRECRAWL_URL=http://127.0.0.1:13002 scripts/smoke-firecrawl.sh
-```
-
-Friction:
-
-- The happy path assumes SSH access to `lat1`.
-- Static checks are easy to run, but full service proof is not currently a
-  no-access local onboarding path.
-- SearXNG has a small local Compose profile; Firecrawl uses an upstream
-  checkout plus a Finite override, so a one-command local stack is not present.
-
 ### `finite-skills`
 
 Owns the Finite-managed Hermes skill baseline.
@@ -456,8 +423,8 @@ The current fragmentation falls into a few concrete buckets:
 
 1. The monorepo now has a checked-in root `just` facade and pinned Nix
    environment. Some component-specific onboarding still bypasses that facade.
-2. Command runners differ by repo. Legacy `finitecomputer` and `finite-search`
-   use `just`; `finitecomputer-v2` currently uses Cargo, npm scripts, and
+2. Command runners differ by repo. Legacy `finitecomputer`
+   uses `just`; `finitecomputer-v2` currently uses Cargo, npm scripts, and
    deployment shell scripts; `finite-brain` currently uses Cargo plus
    repo-specific Node checks; `finitechat`, `finite-nostr`, `finite-skills`,
    and `reporting` do not expose the same facade.
@@ -471,7 +438,7 @@ The current fragmentation falls into a few concrete buckets:
    recipes live in the same command surface. v2 avoids some of that by being
    newly split, but its deployment lane is still mostly operator-runbook shaped.
 5. Docs route by subsystem more than by contributor profile. A designer, Rust
-   contributor, search operator, and iOS tester need different first commands.
+   contributor, and iOS tester need different first commands.
 6. Validation is uneven. Some repos have strong CI/local checks; `finite-skills`
    has almost none at the repo level.
 7. Full-fidelity local work often needs privileged context: model keys,
@@ -494,7 +461,6 @@ just doctor
 just list-repos
 just setup ui-chat
 just setup chat-rust
-just setup search-local
 just check all-light
 just dev ui-chat
 ```
@@ -516,8 +482,7 @@ Every repo should expose the same small command vocabulary where possible:
 | `just clean-state` | Delete only repo-owned generated local state. |
 
 Repos can add profile arguments, for example `just dev chat-local`,
-`just dev dashboard-admin`, `just smoke ios-simulator`, or
-`just smoke search-tunnel`.
+`just dev dashboard-admin`, or `just smoke ios-simulator`.
 
 ### 3. Pin Tools Once
 
@@ -570,21 +535,7 @@ Target shape:
 This would make visual contributions possible from machines without KVM,
 provider keys, or the full platform checkout.
 
-### 6. Make Search Locally Reproducible
-
-Add a `finite-search` local stack profile that does not require production SSH:
-
-```bash
-just local-up
-just smoke-stack
-just local-down
-```
-
-It can start with SearXNG-only and add Firecrawl when the upstream checkout
-wrapper is stable enough. Keep SSH tunnel smokes as operator validation, not the
-first external contributor path.
-
-### 7. Strengthen The Skill Linter And Delivery Gate
+### 6. Strengthen The Skill Linter And Delivery Gate
 
 Extend the existing lightweight `just skills check`:
 
@@ -598,7 +549,7 @@ Extend the existing lightweight `just skills check`:
 Then add deterministic artifact/provenance checks and the real-Hermes
 activation/rollback matrix. Static validity alone is not release readiness.
 
-### 8. Align Local Checks With CI
+### 7. Align Local Checks With CI
 
 Each repo's README should have one "before PR" command that matches CI as
 closely as practical. Heavy canaries can stay opt-in, but the light checks
@@ -613,7 +564,6 @@ Suggested first-pass targets:
 - `finitechat`: `just check` for Cargo fmt/clippy/tests plus Python lint/tests.
 - `finite-brain`: Cargo fmt/test/clippy/build plus Product Client and Smoke UI
   JavaScript syntax checks.
-- `finite-search`: existing `just check`.
 - `finite-skills`: existing static check plus bundled first-turn and explicit
   sync gates.
 - `finite-nostr`: Cargo fmt/test/clippy/build.
@@ -631,8 +581,7 @@ Suggested first-pass targets:
    already assume versions.
 4. Strengthen the `finite-skills` linter and add bundled first-turn plus
    explicit-sync CI without introducing an automatic updater.
-5. Add a no-SSH `finite-search` local smoke profile.
-6. Build the workspace facade after the per-repo commands are stable enough to
+5. Build the workspace facade after the per-repo commands are stable enough to
    wrap cleanly.
-7. Add the remote design sandbox once the exact local chat acceptance path is
+6. Add the remote design sandbox once the exact local chat acceptance path is
    stable and documented.

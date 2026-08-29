@@ -18,7 +18,7 @@ The current model/container/alias map and retired lab state are recorded in
 |---|---|---|
 | `finitecomputer/confidential-finite-private` | Finite Private GLM-5.3-Flash inference (8×H200) + finite-private-limiter shim (:8002) | Live as external container `finite-private` (`v2026-08-28-glm-5-3-flash-4`). Canonical model `glm-5-3-flash`; aliases `deepseek-v4-flash-0731`, `glm-5-2`, and dotted `glm-5.3-flash`. |
 | `finitecomputer/confidential-kimi-k2-6` | Historical Finite Private satellite (DeepSeek V4 Flash 0731, 8×H200) | The generated hostname is retired. DeepSeek rollback still recreates from this satellite under the historical name. Measured 128/2048 scheduler candidate lives under `infra/tinfoil/confidential-kimi-k2-6/`. |
-| `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Config/proxy sources under `finite-search/tinfoil/searxng-public/` in this repo (that dir mirrors the satellite's content, including its release workflows). |
+| `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Self-contained satellite (config/proxy sources and release workflows live in that repo). Its former mono mirror `finite-search/tinfoil/searxng-public/` was removed with the finite-search retirement (2026-08-29); nothing in mono consumes this enclave. |
 | `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
 
 ## Update flow (limiter example)

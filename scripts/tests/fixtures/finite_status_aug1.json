@@ -85,8 +85,6 @@
       "finitechat-hosted-device.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
       "finite-brain-app.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
       "finite-saas-sites.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "podman-searxng.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "podman-firecrawl-api.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
       "prometheus-node-exporter.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
       "finite-healthcheck.service": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0", "InvocationID": "fixture-healthcheck"},
       "finite-saas-runner.service": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
@@ -99,8 +97,6 @@
       "hosted-web-device": "OK",
       "finite-brain": "OK",
       "finitesitesd": "OK",
-      "searxng": "OK",
-      "firecrawl": "OK",
       "node-exporter": "OK"
     },
     "filesystems": [

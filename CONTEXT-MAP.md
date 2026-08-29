@@ -7,7 +7,6 @@
 - [Finite Identity](./finite-identity/CONTEXT.md) — public Principal
   resolution and identity lifecycle
 - [Finite Nostr](./finite-nostr/CONTEXT.md) — reusable Nostr primitives
-- [Finite Search](./finite-search/CONTEXT.md) — reusable search primitives
 - [Finite Sites](./finite-sites/CONTEXT.md) — Sites publishing and hosting
 - [Finite Skills](./finite-skills/CONTEXT.md) — managed Agent behavior and
   skill delivery

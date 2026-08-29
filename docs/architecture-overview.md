@@ -81,7 +81,6 @@ flowchart TB
   subgraph Supporting["Supporting Services"]
     ChatServer["finitechat server"]
     Brain["finite-brain knowledge system"]
-    Search["finite-search: SearXNG / Firecrawl"]
     Nostr["finite-nostr primitives"]
     Reporting["reporting snapshots"]
   end
@@ -108,7 +107,6 @@ flowchart TB
   SkillBaseline --> Hermes
   Runtime --> FSite
   FBrainCli --> Brain
-  Hermes --> Search
   NativeChat --> Nostr
   Reporting -. "reads/summarizes state" .-> LegacyFiniteComputer
   Reporting -. "future SaaS reporting input" .-> Core
@@ -203,9 +201,6 @@ through a narrow Runtime Capability. A Finite Sites repository is a read-only
 distribution mirror, and neither it nor the dashboard nor an old GitHub repo is
 an authoring source. User-local skills remain runtime-owned data.
 
-`finite-search` owns the self-hosted search and extraction services consumed by
-agent tools. It is an ops/integration repo, not a product app.
-
 `finite-brain` owns the encrypted Brain/Folder knowledge system, trusted
 Product Client, `fbrain` CLI, Brain Working Tree sync, and FiniteBrain-specific
 policy. Reusable Nostr primitives still belong in `finite-nostr`; FiniteBrain
@@ -277,7 +272,6 @@ Other repos have local loops, but they are scoped:
 - `finitechat`: local server, iOS simulator, Hermes gateway/canary scripts.
 - `finite-brain`: Cargo workspace checks, local `finite-brain-app` server,
   Product Client at `/client`, Smoke UI at `/smoke/ui`, and the `fbrain` CLI.
-- `finite-search`: static checks plus remote-service smokes through SSH tunnels.
 - `finite-nostr`: Rust library checks.
 - `finite-skills`: content validation through managed runtime usage.
 - `reporting`: local snapshot/site generation, with optional live probes.
