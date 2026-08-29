@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import platform as host_platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,24 @@ def git_value(repo: Path, *args: str) -> str | None:
         return run(["git", "-C", str(repo), *args], timeout=60).stdout.strip()
     except subprocess.CalledProcessError:
         return None
+
+
+def rust_toolchain_channel(repo: Path) -> str:
+    """The single Rust pin (rust-toolchain.toml channel) for the image build.
+
+    rust-toolchain.toml is the only Rust version string in the repo; the
+    runtime image builder base is parameterized on it via the
+    RUST_TOOLCHAIN build-arg instead of carrying its own pin.
+    """
+    path = repo / "rust-toolchain.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"cannot read Rust toolchain pin {path}: {error}") from error
+    match = re.search(r'^channel\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if not match:
+        raise SystemExit(f"{path} declares no [toolchain] channel")
+    return match.group(1)
 
 
 def repo_metadata(name: str, repo: Path) -> dict[str, Any]:
@@ -315,6 +334,8 @@ def build_image(
             ),
             "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",
+            "--build-arg",
+            f"RUST_TOOLCHAIN={rust_toolchain_channel(MONOREPO_ROOT)}",
         ]
     )
     build.extend(["--platform", platform])

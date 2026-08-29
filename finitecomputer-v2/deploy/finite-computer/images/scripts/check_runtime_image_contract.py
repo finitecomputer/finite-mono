@@ -18,6 +18,8 @@ CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
 PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
+    "ARG RUST_TOOLCHAIN",
+    "FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder",
     "COPY finite-mail ./finite-mail",
     "COPY .finite-hermes-nix-store/nix/store /nix/store",
     "ARG HERMES_AGENT_STORE_PATH",
@@ -180,6 +182,12 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
                 violations.append(
                     f"{CANONICAL_DOCKERFILE}: missing canonical Runtime anchor {anchor!r}"
                 )
+        if re.search(r"FROM rust:\d", dockerfile):
+            violations.append(
+                f"{CANONICAL_DOCKERFILE}: the Rust version must come from "
+                "rust-toolchain.toml via the RUST_TOOLCHAIN build-arg, not a "
+                "second pin here"
+            )
 
     if CANONICAL_BUILDER in file_set:
         builder = (root / CANONICAL_BUILDER).read_text(encoding="utf-8")
@@ -190,6 +198,11 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
         if expected not in builder:
             violations.append(
                 f"{CANONICAL_BUILDER}: must select only {CANONICAL_DOCKERFILE}"
+            )
+        if "RUST_TOOLCHAIN=" not in builder:
+            violations.append(
+                f"{CANONICAL_BUILDER}: must pass the rust-toolchain.toml "
+                "channel as the RUST_TOOLCHAIN build-arg"
             )
 
     if CANONICAL_WORKFLOW in file_set:
