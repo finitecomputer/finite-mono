@@ -49,6 +49,18 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-28 — Finite Private GLM flash-3 (H200 DSA auto + thinking high)
+
+- Replaced `v2026-08-28-glm-5-3-flash-2` with
+  `v2026-08-28-glm-5-3-flash-3` on the same host (`fa79c9b9…`, 8xH200).
+  Checkpoint and SGLang image unchanged. DSA backends are now
+  `flashmla_sparse`/`fa3`; limiter `2026-08-28.6` fills omitted
+  `reasoning_effort` with `high`. Degraded allowlist admission unchanged.
+- 32-way thinking-on TTFT stayed ~34s. Recipe notes:
+  [`docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md`](../docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md),
+  measurements:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+
 ### 2026-08-28 — Finite Private GLM-5.3-Flash live under temporary degraded admission
 
 - GPU container `finite-private` now serves GLM-5.3-Flash on 8xH200.

@@ -1,9 +1,10 @@
 # TEMPORARY overlay. Not the production-default candidate.
 #
-# Intended live tag: v2026-08-28-glm-5-3-flash-3. Same GLM checkpoint and
+# Live on 2026-08-28 as Tinfoil release v2026-08-28-glm-5-3-flash-3
+# (container fa79c9b9-551c-4307-9ee0-cba2e5662e2d). Same GLM checkpoint and
 # SGLang image as the candidate; DSA backends are the measured H200 pair
-# (flashmla_sparse / fa3). Deltas from the candidate are the limiter image
-# that carries fill-if-absent reasoning_effort=high, FINITE_ADMISSION_MODE=
+# (flashmla_sparse / fa3). Deltas from the candidate are limiter
+# 2026-08-28.6 (fill-if-absent reasoning_effort=high), FINITE_ADMISSION_MODE=
 # allowlist, and the FINITE_ADMISSION_ALLOWLIST secret. Usage admission on
 # finite.computer is still missing (POST /internal/finite-private/v1/reservations
 # redirects to the homepage).

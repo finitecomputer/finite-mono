@@ -10,9 +10,10 @@
 - Human owner: Finite operator
 - Started: 2026-08-27
 - Current status: GLM-5.3-Flash live on `finite-private` under temporary
-  degraded admission (`v2026-08-28-glm-5-3-flash-2`). Allowlist canary
-  proven. See `docs/runs/glm-5-3-flash-degraded-admission.md`. 120-user
-  gate not run; 32-way TTFT and aggregate miss the hard bars.
+  degraded admission (`v2026-08-28-glm-5-3-flash-3`). DSA backends are the
+  measured H200 pair (`flashmla_sparse`/`fa3`); omitted requests get
+  `reasoning_effort=high`. 32-way TTFT still ~34s. See
+  `docs/runs/glm-5-3-flash-degraded-admission.md`.
 - Skill setup status: complete (`docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md` are present)
 
@@ -210,6 +211,27 @@ First speed numbers (see degraded-admission doc for the tables): 1-way
 but 33s TTFT and 218 aggregate tok/s. The 120-user gate's 10s p95 TTFT
 and 2,400 aggregate bars are not in reach on this topology without a
 separate candidate.
+
+## 2026-08-28 flash-3 DSA + thinking-high (authorized)
+
+Operator authorized a one-mutation retune: keep degraded admission, swap
+TileLang DSA for the LMSYS-measured H200 pair (`flashmla_sparse`/`fa3`),
+and fill omitted `reasoning_effort` with `high`. Did not add
+`--disable-shared-experts-fusion` (later cookbook dropped it; live
+`flash-2` already answered without it). Did not add MTP or retune
+`--mamba-full-memory-ratio`.
+
+- Limiter image `2026-08-28.6` from branch SHA `06a538b2` (linux/amd64
+  manifest `sha256:47463982…23461`).
+- Satellite `v2026-08-28-glm-5-3-flash-3` from
+  `confidential-finite-private@c8533b5`. Deployment hash
+  `164d4b8fef024823fc9a451c9634be4dea669f1f73746f5eff38e97a51ce3043`.
+- `--replace` consumed `197d6a7b…` (`flash-2`). New container
+  `fa79c9b9-551c-4307-9ee0-cba2e5662e2d` created 2026-08-29 02:57 UTC,
+  ready 03:25 UTC. `/live` reports `defaultReasoningEffort=high`.
+- Diagnostic 1/32-way vs `flash-2`: decode +4–8%; 32-way thinking-on TTFT
+  still 33.8s (was 33.1s). Short-prompt load does not show LMSYS's 24k-prefix
+  TTFT win. 120-user bars still out of reach.
 
 ## Parked HITL Slices
 

@@ -79,6 +79,13 @@ GSM8K A/B on the same box: 92.2% tilelang vs 91.9% auto, not significant.
 DeepGEMM stays; swapping MoE to Triton was 6–12% slower.
 [PR #36895](https://github.com/sgl-project/sglang/pull/36895).
 
+Finite's own 1/32-way A/B on this box (2026-08-28 night, `flash-2` TileLang
+vs `flash-3` `flashmla_sparse`/`fa3`, same checkpoint, thinking-on high,
+256 output tokens) saw +8% 1-way decode (88→95 tok/s) and +4% 32-way
+decode (57→59 tok/s). 32-way TTFT did not improve (33.1s → 33.8s). That
+is the short-prompt caveat LMSYS called out, not a failed pin. Do not
+expect this swap to move the 10s TTFT bar on chat-sized prompts.
+
 This is the one small flag change with first-party 8xH200 evidence. Our 32-way
 thinking-on aggregate tonight was 218 tok/s with 33s TTFT; this will not close
 the 2,400 aggregate / 10s TTFT bars by itself, but it is the cheapest win and

@@ -6,19 +6,25 @@ Default remains usage-api; this overlay exists to be torn down.
 
 Live identity:
 
-- Container: `finite-private` (`197d6a7b-f7a3-458c-bfa6-613f49e0e7cd`)
-- Release: `v2026-08-28-glm-5-3-flash-2`
+- Container: `finite-private` (`fa79c9b9-551c-4307-9ee0-cba2e5662e2d`)
+- Release: `v2026-08-28-glm-5-3-flash-3`
 - Overlay: `infra/tinfoil/confidential-finite-private/tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`
-- Limiter image: `ghcr.io/finitecomputer/private-limiter:2026-08-28.5@sha256:67eca4b21d5c0dc731eb008af6ad4dfd76ad2a27ead72809ce40297dafed426a`
-- Code: PR #746 (`FINITE_ADMISSION_MODE=allowlist`)
+- Limiter image: `ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461`
+- SGLang image: unchanged `glm-5-3-flash-sglang:2026-08-28.3`
+- DSA: `--dsa-prefill-backend flashmla_sparse --dsa-decode-backend fa3`
+- Default thinking: `FINITE_PRIVATE_DEFAULT_REASONING_EFFORT=high` (fill-if-absent)
+- Code: PR #746 (allowlist) + PR #748 (DSA pin + thinking default)
 
-The GLM checkpoint, SGLang pin, and MPK are unchanged from
-`v2026-08-28-glm-5-3-flash-1`.
+The GLM checkpoint, SGLang image, and MPK are unchanged from
+`v2026-08-28-glm-5-3-flash-1`. `flash-2` was the same overlay with TileLang
+DSA and limiter `.5` (no thinking default).
 
-Proved 2026-08-28 21:20 America/Chicago: `/live` and `/health` 200,
-`admissionMode=allowlist`, listed-key canary HTTP 200 with
+Proved 2026-08-28 22:25 America/Chicago: `/live` and `/health` 200,
+`admissionMode=allowlist`, `defaultReasoningEffort=high`,
+`defaultEnableThinking=true`, listed-key canary HTTP 200 with
 `x-finite-admission: degraded-allowlist` and `model=glm-5-3-flash`,
-unlisted key HTTP 401 `invalid_api_key`.
+unlisted key HTTP 401 `invalid_api_key`. Omitted `reasoning_effort` still
+returns `reasoning_content`.
 
 ## Why it exists
 
@@ -121,3 +127,31 @@ aggregate throughput are not. DeepSeek on this same box did ~33 tok/s
 per request and ~967 aggregate at 32-way with 0.14s p50 TTFT. GLM's TP8/EP8
 replica is faster per request and much slower to start a batch. A 120-way
 run is not worth burning until TTFT is in the same zip code as 10s.
+
+## flash-3 DSA swap (2026-08-28 night)
+
+Same overlay, one `--replace` onto `v2026-08-28-glm-5-3-flash-3`. Only serving
+deltas vs `flash-2`: DSA `flashmla_sparse`/`fa3` instead of TileLang, and
+limiter `.6` filling omitted `reasoning_effort` with `high`. Checkpoint, MPK,
+SGLang image, degraded admission, and 8xH200 TP8/EP8 are unchanged.
+
+Thinking off, 64 output tokens (`load-canary`):
+
+| concurrency | flash-2 p50 tok/s | flash-3 p50 | flash-2 TTFB p50 | flash-3 TTFB p50 | flash-3 aggregate |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 90.5 | 96.9 | 0.29s | 0.68s | 47 |
+| 32 | 78.1 | 82.9 | 15.9s | 15.7s | 124 |
+
+Thinking on, reasoning_effort=high, 256 output tokens (capacity CLI):
+
+| concurrency | flash-2 p50 tok/s | flash-3 p50 | flash-2 TTFT p50 | flash-3 TTFT p50 | flash-3 aggregate |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 88.3 | 95.3 | 0.50s | 0.52s | 80 |
+| 32 | 56.9 | 59.4 | 33.1s | 33.8s | 215 |
+
+Decode is a few percent faster. 32-way TTFT did not move. That matches LMSYS's
+caveat: the TileLang penalty is large on 24k shared-prefix traffic and inside
+noise on short prompts. Our 32-way thinking-on load is the short-prompt case,
+so this was the cheapest correct recipe change, not a 120-user fix. Next
+one-variable lever is still `--mamba-full-memory-ratio` from boot pool sizes,
+then adaptive MTP.
