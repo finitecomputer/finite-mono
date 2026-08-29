@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use finitechat_delivery::{
     HttpDeliveryService, HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishTarget,
+    HttpSequence,
 };
 use finitechat_http::{
     HttpApplicationDeliveryEffect, HttpPairingSessionRecord, NostrProfileRecord, PushTokenRecord,
@@ -251,6 +252,14 @@ impl SqliteHttpDeliveryStore {
             Ok(observed) => observed,
             Err(error) => {
                 eprintln!("finitechat-server: readiness SQLite commit failed: {error}");
+                // A failed IMMEDIATE transaction can leave the shared
+                // connection with the transaction still open (rusqlite's
+                // drop-time rollback swallows a busy rollback). Clear it so
+                // the next delivery write is not poisoned with "cannot start
+                // a transaction within a transaction".
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
                 return Err("commit_failed");
             }
         };
@@ -1214,15 +1223,31 @@ fn upsert_push_wake_in_transaction(
     Ok(())
 }
 
+/// Replay one persisted operation into the live service. Group publishes are
+/// also recorded (room, message, assigned seq) so boot can reconcile Finite's
+/// room-membership projections with the log the service was rebuilt from —
+/// the durable projection table can lag the op log (frozen-table boot), and
+/// the replayed entries carry the seqs and membership deltas the live path
+/// would have applied.
 pub(crate) fn replay_operation(
     service: &mut HttpDeliveryService,
     operation: PersistedOperation,
+    replayed_group_publishes: &mut Vec<ReplayedGroupPublish>,
 ) -> Result<(), DurableStoreError> {
     match operation {
         PersistedOperation::PublishMessage {
             target, message, ..
         } => {
-            service.publish(target, message)?;
+            let receipt = service.publish(target.clone(), message.clone())?;
+            if let HttpPublishTarget::Group { group_id, .. } = &target
+                && let Ok(room_id) = String::from_utf8(group_id.as_slice().to_vec())
+            {
+                replayed_group_publishes.push(ReplayedGroupPublish {
+                    room_id,
+                    message,
+                    seq: receipt.seq,
+                });
+            }
         }
         // KeyPackage lease/reclaim/consume state is rebuilt in the finite wrapper
         // inventory; Finite Chat's core store has no claimed lease state.
@@ -1233,6 +1258,15 @@ pub(crate) fn replay_operation(
         | PersistedOperation::ExpireKeyPackageLease { .. } => {}
     }
     Ok(())
+}
+
+/// One group publish observed during boot replay, with the per-room seq the
+/// service assigned it.
+#[derive(Clone, Debug)]
+pub(crate) struct ReplayedGroupPublish {
+    pub(crate) room_id: String,
+    pub(crate) message: finitechat_transport::transport::TransportMessage,
+    pub(crate) seq: HttpSequence,
 }
 
 pub(crate) fn apply_operations_to_revoked_devices(

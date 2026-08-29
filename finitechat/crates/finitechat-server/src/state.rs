@@ -59,8 +59,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::legacy_store::{
-    PersistedOperation, SqliteHttpDeliveryStore, apply_operations_to_key_package_inventory,
-    apply_operations_to_revoked_devices, replay_operation,
+    PersistedOperation, ReplayedGroupPublish, SqliteHttpDeliveryStore,
+    apply_operations_to_key_package_inventory, apply_operations_to_revoked_devices,
+    replay_operation,
 };
 use crate::projections::{
     HttpRoomMembershipProjection, ObservedRoomHead, apply_room_membership_delta,
@@ -316,8 +317,9 @@ impl HttpServerState {
                 ),
             };
         let operations = store.load_operations_after(snapshot_seq)?;
+        let mut replayed_group_publishes = Vec::new();
         for operation in operations.iter().cloned() {
-            replay_operation(&mut service, operation)?;
+            replay_operation(&mut service, operation, &mut replayed_group_publishes)?;
         }
         apply_operations_to_key_package_inventory(&mut key_package_inventory, &operations);
         apply_operations_to_revoked_devices(&mut revoked_devices, &operations);
@@ -334,11 +336,23 @@ impl HttpServerState {
             }
         }
         let pairing_sessions = store.load_pairing_sessions()?;
-        let account_rooms = store.load_account_room_directory()?;
-        let room_memberships = store.load_room_memberships()?;
+        let mut account_rooms = store.load_account_room_directory()?;
+        let mut room_memberships = store.load_room_memberships()?;
         let application_effects = store.load_application_effects()?;
         let nostr_profiles = store.load_nostr_profiles()?;
         let welcome_claims = store.load_welcome_claims()?;
+        // The op log is authoritative: when the durable projection rows lag
+        // the replayed tail (the frozen-table boot observed on lat2,
+        // 2026-08-29), reconcile them from the same entries the service was
+        // rebuilt from, or every current-epoch publish is rejected against a
+        // stale epoch/last_seq and nothing durable advances again.
+        Self::reconcile_room_projections_with_replayed_log(
+            &mut room_memberships,
+            &mut account_rooms,
+            &replayed_group_publishes,
+            &welcome_claims,
+            &store,
+        )?;
         let push_tokens = store.load_push_tokens()?;
         let push_wakes = store.load_push_wakes()?;
         // Meta only: payload bytes stay in SQLite and are read per request,
@@ -587,6 +601,8 @@ impl HttpServerState {
             // of a panic.
             let published = service.publish(request.target, request.message)?;
             debug_assert_eq!(published, receipt);
+            drop(service);
+            self.note_op_for_snapshot();
             return Ok(published);
         };
 
@@ -628,6 +644,11 @@ impl HttpServerState {
             debug_assert_eq!(published, receipt);
         }
         idempotency.insert(idempotency_key, record);
+        drop(service);
+        drop(idempotency);
+        if operation.is_some() {
+            self.note_op_for_snapshot();
+        }
         Ok(receipt)
     }
 
@@ -691,6 +712,8 @@ impl HttpServerState {
             store.append_key_package_claim_mutation(Some(&operation), None, &changed)?;
         }
         *inventory = candidate;
+        drop(inventory);
+        self.note_op_for_snapshot();
         Ok(PublishKeyPackageResponse { published: true })
     }
 
@@ -730,6 +753,10 @@ impl HttpServerState {
             )?;
         }
         *inventory = candidate;
+        drop(inventory);
+        if operation.is_some() {
+            self.note_op_for_snapshot();
+        }
         Ok(claimed)
     }
 
@@ -766,6 +793,10 @@ impl HttpServerState {
             )?;
         }
         *inventory = candidate;
+        drop(inventory);
+        if operation.is_some() {
+            self.note_op_for_snapshot();
+        }
         Ok(claimed)
     }
 
@@ -801,6 +832,10 @@ impl HttpServerState {
                 )?;
             }
             *inventory = candidate;
+            drop(inventory);
+            if operation.is_some() {
+                self.note_op_for_snapshot();
+            }
             return Ok(claims);
         };
 
@@ -850,6 +885,11 @@ impl HttpServerState {
         }
         *inventory = candidate;
         idempotency.insert(idempotency_key, record);
+        drop(inventory);
+        drop(idempotency);
+        if operation.is_some() {
+            self.note_op_for_snapshot();
+        }
         Ok(claims)
     }
 
@@ -893,6 +933,8 @@ impl HttpServerState {
             store.append_key_package_inventory_operation(&operation, &changed)?;
         }
         *inventory = candidate;
+        drop(inventory);
+        self.note_op_for_snapshot();
         Ok(ExpireKeyPackageLeaseResponse { expired: true })
     }
 
@@ -916,6 +958,7 @@ impl HttpServerState {
             }
             revoked_devices.insert(device_key.clone());
             drop(revoked_devices);
+            self.note_op_for_snapshot();
             // A revoked device must never be woken again.
             let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
             if tokens.remove(&device_key).is_some()
@@ -1848,6 +1891,139 @@ impl HttpServerState {
             last_seq,
             raw_commit_without_projection,
         })
+    }
+
+    /// Boot-time repair for durable Finite room state that lags the replayed
+    /// op log: replay each room's group entries above the projection row's
+    /// `last_seq` through the same semantics the live path applies
+    /// (membership deltas for typed commits — to both the projection and the
+    /// account-room directory — head advances for everything else), then
+    /// activate intervals whose Welcomes were already ACKED durably. The
+    /// service rebuilt from the op log stays authoritative for heads; after
+    /// this the live service head, the projection, the directory, and future
+    /// seq assignment agree, so current-epoch clients can publish, hints
+    /// advance, and the durable rows resume persisting.
+    fn reconcile_room_projections_with_replayed_log(
+        rooms: &mut BTreeMap<String, HttpRoomMembershipProjection>,
+        directory: &mut BTreeMap<String, BTreeMap<String, Value>>,
+        replayed: &[ReplayedGroupPublish],
+        welcome_claims: &HashMap<MessageId, WelcomeClaimRecord>,
+        store: &SqliteHttpDeliveryStore,
+    ) -> Result<(), DurableStoreError> {
+        let mut changed: BTreeSet<String> = BTreeSet::new();
+        let mut directory_mutation = AccountRoomDirectoryMutation::default();
+        for publish in replayed {
+            let Some(projection) = rooms.get(&publish.room_id) else {
+                // Rooms without a durable row keep using the typed bootstrap
+                // path, which derives its projection from the log already.
+                continue;
+            };
+            if publish.seq <= projection.last_seq {
+                // The durable rows already reflect everything through the
+                // projection's head: the live paths persist the projection
+                // and directory rows in one transaction. Replaying below the
+                // watermark could resurrect state that later durable writes
+                // (e.g. a leave) legitimately removed.
+                continue;
+            }
+            // Typed commit payloads carry the membership delta the live path
+            // applied at this seq; every other entry only advances the head.
+            let commit = serde_json::from_slice::<FiniteAccountRoomCommitProjection>(
+                &publish.message.payload,
+            )
+            .ok()
+            .filter(|commit| {
+                commit.entry.room_id == publish.room_id && commit.entry.kind == LogEntryKind::Commit
+            });
+            // The account-room directory mirrors the same delta (the live
+            // commit path updates both maps in one durable transaction).
+            if let Some(commit) = &commit
+                && let Ok(mutation) = apply_account_room_membership_delta(
+                    directory,
+                    &publish.room_id,
+                    &projection.mls_group_id,
+                    commit.membership_delta.post_commit_epoch,
+                    &commit.membership_delta,
+                    publish.seq,
+                )
+            {
+                directory_mutation.deletes.extend(mutation.deletes);
+                directory_mutation.upserts.extend(mutation.upserts);
+            }
+            if let Some(commit) = commit {
+                let mls_group_id = projection.mls_group_id.clone();
+                if let Err(error) = apply_room_membership_delta(
+                    rooms,
+                    &publish.room_id,
+                    &mls_group_id,
+                    &commit.entry.sender,
+                    commit.entry.epoch,
+                    &commit.membership_delta,
+                    publish.seq,
+                ) {
+                    // The frozen row predates the replayed window's epoch
+                    // chain (or refuses one of its deltas). Fall back to the
+                    // bootstrap rule — the log is authoritative for heads —
+                    // so serving continues; membership intervals stay at
+                    // their frozen state and the skew is loud.
+                    eprintln!(
+                        "finitechat-server: room {} projection replay broke at seq {} ({:?}); advancing head only",
+                        publish.room_id, publish.seq, error
+                    );
+                    let observed_epoch = commit.entry.epoch.saturating_add(1);
+                    if let Some(projection) = rooms.get_mut(&publish.room_id) {
+                        projection.last_seq = publish.seq;
+                        projection.current_epoch = projection.current_epoch.max(observed_epoch);
+                    }
+                }
+            } else if let Some(projection) = rooms.get_mut(&publish.room_id) {
+                projection.last_seq = publish.seq;
+            }
+            changed.insert(publish.room_id.clone());
+        }
+        // Welcome ACKs are durable delivery events, not group-log entries:
+        // the delta replay above re-creates added intervals (and directory
+        // rows) as pending, so activate the ones whose Welcomes were already
+        // acked before this boot. Mere claims stay pending, exactly like the
+        // live claim/ack routes.
+        for claim in welcome_claims.values() {
+            if claim.state != WelcomeClaimState::Acked {
+                continue;
+            }
+            let Ok(welcome) = serde_json::from_slice::<WelcomeRecord>(&claim.message.payload)
+            else {
+                continue;
+            };
+            if claim.message.id.as_slice() != welcome.welcome_id.as_bytes() {
+                continue;
+            }
+            let Some(projection) = rooms.get_mut(&welcome.room_id) else {
+                continue;
+            };
+            if projection.activate_interval(&welcome.recipient, welcome.commit_seq) {
+                changed.insert(welcome.room_id.clone());
+            }
+            // Mirror the ack path's directory activation for the recipient.
+            if let Some(record) = activate_account_room_device_in_directory(
+                directory,
+                &welcome.recipient,
+                &welcome.room_id,
+            ) {
+                directory_mutation.upserts.push(record);
+            }
+        }
+        for room_id in changed {
+            if let Some(projection) = rooms.get(&room_id) {
+                store.upsert_room_membership(projection)?;
+            }
+        }
+        for (account_id, room_id) in directory_mutation.deletes {
+            store.delete_account_room(&account_id, &room_id)?;
+        }
+        for record in directory_mutation.upserts {
+            store.upsert_account_room(&record)?;
+        }
+        Ok(())
     }
 
     fn record_submit_commit_projection(
@@ -3039,13 +3215,19 @@ impl HttpServerState {
             return;
         }
         // Snapshotting is an optimization; it runs on its own thread so the
-        // triggering request neither waits for it nor fails with it.
+        // triggering request neither waits for it nor fails with it. The
+        // guard clears the in-flight flag on scope exit — including a panic,
+        // which would otherwise leave it stuck true and silently freeze
+        // snapshots for the rest of the process lifetime.
         let state = self.clone();
+        let guard = SnapshotInFlightGuard(self.snapshot_in_flight.clone());
         std::thread::spawn(move || {
+            let _guard = guard;
             if let Err(error) = state.snapshot_now() {
-                eprintln!("finitechat-server: state snapshot failed: {error:?}");
+                eprintln!(
+                    "finitechat-server: state snapshot persist failed; the op log keeps growing and the next interval retries: {error:?}"
+                );
             }
-            state.snapshot_in_flight.store(false, Ordering::Release);
         });
     }
 
@@ -3318,6 +3500,18 @@ enum PushWakeOutboxState {
         lease_expires_at_ms: u64,
         attempts: u32,
     },
+}
+
+/// Releases the snapshot in-flight flag when the background snapshot thread
+/// exits, even on panic: a flag stuck at `true` would stop every future
+/// snapshot attempt with no further error to observe — exactly the silent
+/// durable-state freeze to guard against.
+struct SnapshotInFlightGuard(Arc<AtomicBool>);
+
+impl Drop for SnapshotInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Result of a read-only publish admission check inside a typed commit.
@@ -3978,6 +4172,48 @@ fn account_scoped_account_room_record(
             reason: error.to_string(),
         })?;
     Ok(Some(record))
+}
+
+/// Boot-replay half of the Welcome-ack activation: mark the recipient's
+/// device active in the account-room directory record (mirroring
+/// `activate_account_room_from_welcome`) and return the record to persist,
+/// or `None` when nothing changed. Corrupt or absent records are left
+/// untouched — the live ack path keeps that behavior.
+fn activate_account_room_device_in_directory(
+    directory: &mut BTreeMap<String, BTreeMap<String, Value>>,
+    recipient: &DeviceRef,
+    room_id: &str,
+) -> Option<AccountRoomDirectoryRecord> {
+    let account_id = recipient.account_id.clone();
+    let existing_value = directory
+        .get(&account_id)
+        .and_then(|rooms| rooms.get(room_id))
+        .cloned()?;
+    let mut record = account_scoped_account_room_record(&account_id, room_id, &existing_value)
+        .ok()
+        .flatten()?;
+    if !record
+        .devices
+        .iter()
+        .any(|device| device.device == *recipient && !device.active)
+    {
+        return None;
+    }
+    for device in &mut record.devices {
+        if device.device == *recipient {
+            device.active = true;
+        }
+    }
+    let value = serde_json::to_value(&record).ok()?;
+    directory
+        .entry(account_id.clone())
+        .or_default()
+        .insert(room_id.to_owned(), value.clone());
+    Some(AccountRoomDirectoryRecord {
+        account_id,
+        room_id: room_id.to_owned(),
+        record: value,
+    })
 }
 
 fn claim_key_packages_from_inventory(
