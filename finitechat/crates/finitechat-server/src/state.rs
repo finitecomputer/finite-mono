@@ -2012,17 +2012,18 @@ impl HttpServerState {
                 directory_mutation.upserts.push(record);
             }
         }
-        for room_id in changed {
-            if let Some(projection) = rooms.get(&room_id) {
-                store.upsert_room_membership(projection)?;
-            }
-        }
-        for (account_id, room_id) in directory_mutation.deletes {
-            store.delete_account_room(&account_id, &room_id)?;
-        }
-        for record in directory_mutation.upserts {
-            store.upsert_account_room(&record)?;
-        }
+        // One transaction moves both tables together — the same coupling as
+        // `append_submit_commit_mutation`. Persisting the membership rows
+        // and directory rows separately would let a crash or SQLite error
+        // between them advance the projection watermark past directory
+        // writes the next boot then skips (`publish.seq <=
+        // projection.last_seq`), stranding `http_account_rooms` stale
+        // forever; failing closed here is the safe outcome.
+        let repaired_projections = changed
+            .into_iter()
+            .filter_map(|room_id| rooms.get(&room_id).cloned())
+            .collect::<Vec<_>>();
+        store.persist_room_reconciliation(&repaired_projections, &directory_mutation)?;
         Ok(())
     }
 

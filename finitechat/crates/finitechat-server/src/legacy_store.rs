@@ -1023,6 +1023,53 @@ impl SqliteHttpDeliveryStore {
         Ok(())
     }
 
+    /// Persist one boot-reconciliation pass atomically: every repaired
+    /// `http_room_memberships` row and every `http_account_rooms`
+    /// delete/upsert moves in a single SQLite transaction, mirroring the
+    /// coupling of `append_submit_commit_mutation`. A crash or SQLite error
+    /// between the two tables must never advance the membership watermark
+    /// past directory writes a later boot would skip
+    /// (`publish.seq <= projection.last_seq`), which would strand the
+    /// directory stale forever.
+    pub(crate) fn persist_room_reconciliation(
+        &self,
+        projections: &[HttpRoomMembershipProjection],
+        directory_mutation: &AccountRoomDirectoryMutation,
+    ) -> Result<(), DurableStoreError> {
+        let mut conn = self.connection();
+        let transaction = conn.transaction()?;
+        for projection in projections {
+            transaction.execute(
+                "INSERT INTO http_room_memberships (room_id, projection_json)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(room_id) DO UPDATE SET
+                    projection_json = excluded.projection_json",
+                params![projection.room_id, serde_json::to_string(projection)?],
+            )?;
+        }
+        for (account_id, room_id) in &directory_mutation.deletes {
+            transaction.execute(
+                "DELETE FROM http_account_rooms WHERE account_id = ?1 AND room_id = ?2",
+                params![account_id, room_id],
+            )?;
+        }
+        for record in &directory_mutation.upserts {
+            transaction.execute(
+                "INSERT INTO http_account_rooms (account_id, room_id, record_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account_id, room_id) DO UPDATE SET
+                    record_json = excluded.record_json",
+                params![
+                    record.account_id,
+                    record.room_id,
+                    serde_json::to_string(&record.record)?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn load_room_memberships(
         &self,
     ) -> Result<BTreeMap<String, HttpRoomMembershipProjection>, DurableStoreError> {

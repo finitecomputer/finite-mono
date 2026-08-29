@@ -9204,3 +9204,203 @@ async fn sqlite_readiness_probes_concurrent_with_publishes_do_not_stall_persiste
     let page: HttpSyncPage = read_json(response).await;
     assert_eq!(page.entries.len(), 40);
 }
+
+// Paul's review of the boot-reconciliation fix: the repaired room
+// projections and the account-room directory rows must move in ONE SQLite
+// transaction. If the membership rows advance first (autocommit) and the
+// directory writes then fail or the process dies, the next boot loads the
+// advanced projection and skips the replayed publishes
+// (`publish.seq <= projection.last_seq`), so the directory repair is never
+// replayable again — http_account_rooms is stranded stale forever. This
+// test injects a directory-write failure at boot and proves nothing
+// persists (fail-closed), then proves the retry boot converges both
+// tables.
+#[tokio::test]
+async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let room_id = "room-reconcile-atomic".to_owned();
+    let mls_group_id = "mls-reconcile-atomic".to_owned();
+
+    // Era 1 (pre-freeze): bootstrap, one event, snapshot; capture the
+    // frozen projection row.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"pre-freeze message",
+        "reconcile-atomic-pre",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    state.snapshot_now().expect("era-1 snapshot");
+    let frozen_projection_json: String = {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )
+        .expect("frozen-era projection row")
+    };
+
+    // Era 2 (the frozen window): bob joins (Welcome claimed+acked) and
+    // sends; then the membership table is frozen at its era-1 value.
+    let add_accepted = add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-reconcile-atomic",
+        "commit-reconcile-atomic",
+    )
+    .await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"frozen window message",
+        "reconcile-atomic-window",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pre_boot_head: EventAccepted = read_json(response).await;
+    drop(app);
+    drop(state);
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute(
+            "UPDATE http_room_memberships SET projection_json = ?1 WHERE room_id = ?2",
+            params![frozen_projection_json, room_id],
+        )
+        .expect("freeze projection row");
+    }
+
+    // Fault injection: every http_account_rooms write aborts, modeling a
+    // crash or SQLite failure after the membership rows would have advanced
+    // under a non-atomic write order.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER finitechat_http_test_fail_account_rooms_insert
+            BEFORE INSERT ON http_account_rooms
+            BEGIN
+                SELECT RAISE(ABORT, 'finitechat http test: injected directory write failure');
+            END;
+            CREATE TRIGGER finitechat_http_test_fail_account_rooms_update
+            BEFORE UPDATE ON http_account_rooms
+            BEGIN
+                SELECT RAISE(ABORT, 'finitechat http test: injected directory write failure');
+            END;
+            "#,
+        )
+        .expect("install directory fault trigger");
+    }
+
+    // Boot fails closed — and, the crash-safety contract, NOTHING persisted:
+    // the membership row must still be exactly the frozen era-1 row, or a
+    // later boot would skip the replayed publishes and strand the directory
+    // stale forever.
+    let failed_boot = HttpServerState::from_sqlite_path(&db_path);
+    assert!(
+        failed_boot.is_err(),
+        "boot must fail when the reconciliation transaction cannot commit"
+    );
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let membership_json: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("membership row survives failed boot");
+        assert_eq!(
+            membership_json, frozen_projection_json,
+            "a failed reconciliation must not advance the membership watermark"
+        );
+    }
+
+    // Clear the fault: the retry boot converges BOTH tables in one pass.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(
+            "DROP TRIGGER finitechat_http_test_fail_account_rooms_insert;
+             DROP TRIGGER finitechat_http_test_fail_account_rooms_update;",
+        )
+        .expect("clear directory fault trigger");
+    }
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+
+    // Serving works above the pre-boot head for the current-epoch sender.
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &bob,
+        1,
+        b"post-repair message",
+        "reconcile-atomic-post",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: EventAccepted = read_json(response).await;
+    assert!(accepted.seq > pre_boot_head.seq);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: pre_boot_head.seq,
+            limit: 10,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].seq, accepted.seq);
+
+    // Both durable tables moved together: the membership projection is past
+    // the frozen row, and the directory reflects the replayed room head.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let membership_json: String = conn
+            .query_row(
+                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("repaired membership row");
+        assert_ne!(membership_json, frozen_projection_json);
+        let repaired: serde_json::Value =
+            serde_json::from_str(&membership_json).expect("repaired projection json");
+        assert!(repaired["last_seq"].as_u64().expect("last_seq") > pre_boot_head.seq);
+        let directory_json: String = conn
+            .query_row(
+                "SELECT record_json FROM http_account_rooms WHERE account_id = 'bob' AND room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .expect("bob directory row");
+        let record: serde_json::Value =
+            serde_json::from_str(&directory_json).expect("directory record json");
+        assert_eq!(record["current_epoch"], 1);
+        // Directory rows advance on commits (the live /events path never
+        // writes them), so the replayed add commit is the expected head.
+        assert_eq!(
+            record["last_seq"].as_u64().expect("directory last_seq"),
+            add_accepted.seq
+        );
+    }
+}
