@@ -10,8 +10,9 @@
 #
 # The host boots in import mode (finite.importMode.enable): product units do
 # not start until lat1's state is imported and verified; the go-live closure
-# flips that option. Storage identities are placeholders until the Gate A
-# capture (scripts/capture-lat2-host-evidence) is reviewed into
+# flips that option. Storage identities were captured from the physical
+# host in rescue mode on 2026-08-28 (Gate A,
+# scripts/capture-lat2-host-evidence) and are reviewed into
 # ./storage-ids.nix.
 {
   config,
@@ -167,14 +168,16 @@ in
   systemd.network.enable = true;
   systemd.network.networks = {
     "10-wan" = {
-      matchConfig.MACAddress = "REPLACE-ME-wan-nic-mac";
+      # WAN NIC captured in rescue mode 2026-08-28 (enp1s0f1, holds the
+      # 64.34.80.19/31 address; gateway .18). IPv6 pending a Latitude
+      # console allocation — IPv4-only at go-live, add it as a normal
+      # deploy once assigned.
+      matchConfig.MACAddress = "7c:c2:55:6e:90:e7";
       address = [
         "64.34.80.19/31"
-        "REPLACE-ME-ipv6-address"
       ];
       routes = [
-        { Gateway = "REPLACE-ME-ipv4-gateway"; }
-        { Gateway = "REPLACE-ME-ipv6-gateway"; }
+        { Gateway = "64.34.80.18"; }
       ];
       networkConfig = {
         DHCP = "no";
@@ -187,7 +190,7 @@ in
     };
 
     "20-unused-lan" = {
-      matchConfig.MACAddress = "REPLACE-ME-lan-nic-mac";
+      matchConfig.MACAddress = "7c:c2:55:6e:90:e6";
       networkConfig = {
         DHCP = "no";
         IPv6AcceptRA = false;
