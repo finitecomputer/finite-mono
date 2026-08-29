@@ -136,6 +136,37 @@ before-report baselines re-captured fresh, and an authorized window.
 Retained evidence: `.local-state/glm53-cutover-2026-08-28/` (operator
 worktree `finite-mono-glm-5-3-flash-cutover`; not in git).
 
+## 2026-08-28 evening execution (authorized, product outage in progress)
+
+The operator authorized immediate execution during an unrelated product
+outage: live traffic was zero, so the swap's maintenance cost was nil. State
+at time of writing:
+
+- GPU replacement executed exactly per runbook: `finite-private` created
+  (container `52cd8373-fb40-485b-be68-d35bfcbfdb5a`) consuming rollback ID
+  `a1220ca5…`, bridge created at the historical name. DeepSeek rollback
+  identity unchanged and restorable (~35-45 min readiness).
+- **GLM-5.3-Flash is `ready` on 8×H200**: `/live`, `/health` 200, release
+  `v2026-08-28-glm-5-3-flash-1`, config sha `91fe432e…cc9d35`.
+- Qualification gates are blocked by the unrelated outage: the limiter
+  returns 503 `usage_api_unavailable` for every request (usage admission
+  down), so protocol/quality/capacity/settlement gates cannot pass for any
+  model. A watcher polls admission and will run the canary battery the
+  moment it recovers.
+- Bridge (historical `kimi-k2-6` name) is the one open item: its first-ever
+  live deploy surfaced three defects the review-and-measure process could
+  not catch, because measurement hashes bytes and never boots: (1) network
+  name `finite-private-upstream` exceeded the 15-char interface limit
+  (renamed `fp-upstream`); (2) short start periods fail the container before
+  GLM finishes loading; (3) even with upstream live, proxy/admin/wget
+  healthchecks in `caddy:alpine` all fail on the platform's health model at
+  ~45s while identical shapes pass in the GPU images (curl, own process
+  port). Releases `.2`-`.5` cut on
+  `codex/glm53-compatibility-bridge`; `.5` (Caddyfile, dedicated :8888
+  liveness endpoint) is the current best config. Parked for a daylight
+  debugging session; the historical name was already dark due to the outage,
+  so no additional availability was lost.
+
 ## Parked HITL Slices
 
 | Slice | Why parked | Blocks | Required human action | Draft PR decision |
