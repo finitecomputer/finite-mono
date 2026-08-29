@@ -33,7 +33,6 @@ jobs:
       run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
       run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
       run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
-      run_search_check: ${{ steps.detect.outputs.run_search_check }}
       run_monitoring_nixos_contract: ${{ steps.detect.outputs.run_monitoring_nixos_contract }}
       run_finite_status_contract: ${{ steps.detect.outputs.run_finite_status_contract }}
       run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
@@ -465,22 +464,6 @@ jobs:
       - name: Skills check
         run: nix develop --command just skills check
 
-  search-check:
-    name: Search static check
-    needs: changes
-    if: needs.changes.outputs.run_search_check == 'true'
-    runs-on: depot-ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Configure Cachix read-only cache
-        uses: cachix/cachix-action@v17
-        with:
-          name: ${{ env.CACHIX_CACHE_NAME }}
-          skipPush: true
-      - name: Search check
-        run: nix develop --command just search check
-
   monitoring-nixos-contract:
     name: Monitoring NixOS contract
     needs: changes
@@ -864,7 +847,6 @@ jobs:
       - electron-alpha
       - hermes-bridge
       - skills-check
-      - search-check
       - monitoring-nixos-contract
       - finite-status-contract
       - nix-checks
@@ -885,8 +867,6 @@ jobs:
       RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
       RUN_SKILLS_CHECK: ${{ needs.changes.outputs.run_skills_check }}
       RESULT_SKILLS_CHECK: ${{ needs['skills-check'].result }}
-      RUN_SEARCH_CHECK: ${{ needs.changes.outputs.run_search_check }}
-      RESULT_SEARCH_CHECK: ${{ needs['search-check'].result }}
       RUN_MONITORING_NIXOS_CONTRACT: ${{ needs.changes.outputs.run_monitoring_nixos_contract }}
       RESULT_MONITORING_NIXOS_CONTRACT: ${{ needs['monitoring-nixos-contract'].result }}
       RUN_FINITE_STATUS_CONTRACT: ${{ needs.changes.outputs.run_finite_status_contract }}
@@ -937,7 +917,6 @@ jobs:
           check_selected "Electron alpha" "$RUN_ELECTRON_ALPHA" "$RESULT_ELECTRON_ALPHA"
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
           check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
-          check_selected "Search check" "$RUN_SEARCH_CHECK" "$RESULT_SEARCH_CHECK"
           check_selected "Monitoring NixOS contract" "$RUN_MONITORING_NIXOS_CONTRACT" "$RESULT_MONITORING_NIXOS_CONTRACT"
           check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
           check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"

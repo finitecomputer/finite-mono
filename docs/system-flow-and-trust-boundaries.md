@@ -26,7 +26,7 @@ Finite has five planes:
 | Runtime execution plane | Hosted Agent Runtime | `finitecomputer-v2` runner plus runtime image | Hermes, Finite Chat plugin, `fsite`, `fbrain`, workspace files, Agent Principal Key, runtime-local auth, and decrypted agent state |
 | Managed product-input plane | Finite Product Release plus `finite-skills` Distribution Mirror | `finite-skills`, release automation, Core desired state, Runtime updater | Immutable skill manifests/content, compatibility evidence, baked/desired/active/last-good digests, and atomic activation; never user-local skills |
 | Chat and encrypted collaboration plane | Hosted Web, Electron/native Finite Chat, and FiniteBrain clients | `finitechat`, `finite-brain`, `finite-identity` | MLS chat payloads, encrypted Folder Objects, separate user/agent Nostr identities, Device state, and Folder Keys. Hosted Web is a trusted Finite-operated Device that decrypts in a Finite process; server-side ciphertext does not make that surface operator-blind. |
-| Publishing and retrieval plane | Sites, apps, docs, search/extract tools | `finite-sites`, `finite-search` | Git-backed publishing, private/shared/public output ACLs, app hosting, SearXNG, Firecrawl, Tinfoil search candidates |
+| Publishing and retrieval plane | Sites, apps, docs, search/extract tools | `finite-sites` | Git-backed publishing, private/shared/public output ACLs, app hosting; agent web retrieval runs on rented cloud APIs (Firecrawl, Perplexity) keyed per RuntimeSpec |
 
 The most important rule is that **Account Auth is not cryptographic identity**.
 WorkOS authorizes dashboard, billing, and Hosted Web Device access. A human's
@@ -69,10 +69,10 @@ Users mainly interact with the system through these surfaces:
 | --- | --- | --- | --- |
 | SaaS dashboard | Sign in, create Project, use Hosted Web chat, connect services, manage Sites/Brain, inspect status and lifecycle | WorkOS -> dashboard -> Core/services/Hosted Web Device | Account-authenticated product plane. May render decrypted chat from the Hosted Web Device but must not expose user/agent nsecs, runtime files, or provider internals. |
 | Native Finite Chat | Join a no-PIN invite and chat with the agent | Native app -> `chat.finite.computer` -> Agent Runtime Finite Chat plugin -> Hermes | Chat server orders and stores opaque MLS ciphertext. User device and runtime decrypt. |
-| Agent runtime | Receives chat, runs Hermes/tools, edits workspace, publishes, searches, uses private inference | Runtime process -> Finite Private, Sites, Brain, Search, external web | Decrypted user/agent data exists here. This is the sensitive execution boundary. |
+| Agent runtime | Receives chat, runs Hermes/tools, edits workspace, publishes, searches, uses private inference | Runtime process -> Finite Private, Sites, Brain, cloud search/extract APIs, external web | Decrypted user/agent data exists here. This is the sensitive execution boundary. |
 | FiniteBrain Product Client / `fbrain` | Open Brains and sync encrypted knowledge with operation-scoped Folder Keys | Trusted client/runtime -> FiniteBrain server | Server stores encrypted Folder Objects and grants; trusted clients/runtimes open Folder Keys locally for the current operation or explicit client session. |
 | Finite Sites viewers/editors | View, share, publish sites/docs/apps | `fsite`/git/API -> Finite Sites registry/blob/app host -> `*.finite.chat` | Private by default and ACL-gated, but served output bytes are not automatically E2EE. Treat as access-controlled publishing. |
-| Public/search web | Agent searches and extracts pages | Hermes tools -> SearXNG/Firecrawl, possibly Tinfoil SearXNG | Search/extract services can see queries and fetched content. Tinfoil can improve operator privacy for supported pieces, not make public web data secret. |
+| Public/search web | Agent searches and extracts pages | Hermes tools -> cloud Firecrawl/Perplexity (per-runtime API keys) or the keyless DuckDuckGo skill | Search/extract providers can see queries and fetched content; rented APIs move that exposure from Finite hosts to the provider. |
 
 ## Full Flow
 
@@ -117,7 +117,6 @@ flowchart LR
   subgraph OtherServices["Publishing, Inference, Retrieval"]
     Private["Finite Private limiter\nTinfoil CVM + model"]
     Sites["Finite Sites\nregistry, blobs, apps"]
-    Search["Finite Search\nSearXNG / Firecrawl"]
   end
 
   User --> Dashboard
@@ -141,7 +140,6 @@ flowchart LR
   Tools --> Private
   Tools --> Sites
   Tools --> BrainServer
-  Tools --> Search
 
   User --> BrainClient
   BrainClient --> BrainServer
@@ -156,7 +154,7 @@ flowchart LR
   class Dashboard,WorkOS,Core,CoreDb,Runner account;
   class ChatServer,BrainServer,NativeChat,BrainClient encrypted;
   class AgentRoot,DataMount,Hermes,ChatPlugin,ManagedSkills,Tools runtime;
-  class Private,Sites,Search,SitesViewer service;
+  class Private,Sites,SitesViewer service;
 ```
 
 Read the flow left to right:
@@ -176,7 +174,7 @@ Read the flow left to right:
    opaque encrypted room events; the user device and runtime decrypt.
 6. Hermes handles the agent behavior and reaches tools: Finite Private for
    managed private inference, Finite Sites for publishing, FiniteBrain for
-   encrypted knowledge, and finite-search for web retrieval.
+   encrypted knowledge, and cloud search/extract APIs for web retrieval.
 
 ## Security Boundaries
 
@@ -191,7 +189,7 @@ Read the flow left to right:
 | FiniteBrain server | Gate Brain/Folder access, store encrypted objects/grants/sync records | Decrypt Page paths, Page titles, links, Page contents, graph/search/replay data |
 | Finite Sites | Store, version, serve, and ACL-gate published project outputs | Provide E2EE semantics for served bytes unless an output explicitly implements its own encryption |
 | Finite Private limiter | Reserve/settle usage and proxy model calls inside the private-inference lane | Become a general storage or chat authority |
-| Search/extract services | Fetch public web search results and page content for agents | Hide queries/content from the service itself unless the specific deployment is designed and verified for that privacy property |
+| Search/extract providers (cloud Firecrawl/Perplexity) | Fetch public web search results and page content for agents | Hide queries/content from the provider itself; rented APIs see plaintext queries and fetched pages |
 
 ## Key And Secret Custody
 
@@ -218,7 +216,7 @@ Read the flow left to right:
 | Finite Skills Revision prose and helper scripts | Trusted executable product input | Publicly inspectable content can still steer the agent or execute code. Its verified digest, compatibility evidence, and active status are part of the effective Runtime measurement. |
 | User Skills and User Skill Overrides | Decrypted user runtime data | User/agent-owned behavior and helpers are writable, recoverable data; the managed updater must never rewrite or prune them. |
 | Finite Sites source repos, rendered outputs, stateful app data | Access-controlled publishing data | Private/shared/public ACL controls visibility. Do not assume E2EE; public outputs are intentionally readable. |
-| Search queries, extracted pages, web results | Retrieval data | Self-hosted/Tinfoil deployment can change operator exposure, but search/extract workloads still process plaintext queries and public web content. |
+| Search queries, extracted pages, web results | Retrieval data | Web retrieval runs on rented cloud APIs (Firecrawl, Perplexity); the provider processes plaintext queries and public web content. |
 | Recovery Snapshots in off-host storage | Encrypted recovery data | A snapshot covers the declared Recovery Set and uses per-user or per-agent key material. O1 permits an audited Finite-assisted wrap; later levels require user-gated or operator-blind key release. |
 
 An encrypted backup without a tested path to recover its decryption keys does
@@ -234,7 +232,6 @@ There are three separate TEE/confidential-compute conversations:
 | --- | --- | --- |
 | Agent Runtime | Kata is the first production runner; Phala is the confidential fast-follow candidate. Docker remains the local preflight backend. | A Provider Durable Volume may survive normal restart but is not a backup. Kata trusts the privileged host operator; Phala earns stronger claims only after attestation, key release, volume visibility, backup, empty-target restore, and active Finite Skills Revision evidence pass. |
 | Finite Private inference | The limiter and model path run through a Tinfoil CVM lane. Core does accounting and grant checks. | The runtime sends prompts to this lane. It is private inference, not a general encrypted storage system. |
-| Search/extract | SearXNG has a Tinfoil prototype with bearer-token gating. Firecrawl remains plain Docker until its state, browser, egress, and auth model are designed for Tinfoil. | Tinfoil containers are public-inbound through the shim and have no persistent disk by default. Do not describe a service as Tinfoil-ready without verifier/proxy proof. |
 
 The older Tinfoil full-agent-runtime path is a useful privacy target and spike,
 but it is not the current v2 launch default because Tinfoil lacks durable mounts.
@@ -259,8 +256,6 @@ Break-Glass Recovery disclosure by itself.
   Finite Break-Glass Recovery authority?
 - Which verified Account Auth, email-challenge, or Google-consent flow issues
   and revokes each product's accepted Email Access Delegation?
-- Where should long-lived Tinfoil search tokens live when SearXNG moves beyond
-  prototype use?
 - Which user-facing labels should distinguish access-controlled private Sites
   from genuinely encrypted Chat/Brain data?
 
@@ -283,5 +278,3 @@ Break-Glass Recovery disclosure by itself.
 - `finite-identity`: [README](../finite-identity/README.md),
   [Identity Authority](../finite-identity/docs/identity-authority.md),
   [Separate user and agent identities ADR](../finite-identity/docs/adr/0015-user-and-agent-nostr-identities-are-separate.md).
-- `finite-search`: [README](../../finite-search/README.md),
-  [Tinfoil evaluation](../../finite-search/docs/tinfoil-evaluation-2026-07-01.md).

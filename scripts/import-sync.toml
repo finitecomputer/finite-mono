@@ -37,11 +37,6 @@ mono_dir = "finite-nostr"
 source_url = "https://github.com/finitecomputer/finite-nostr"
 last_import_sha = "fefd22b3f3c39481225a28000bba0b2b9354d1ce"
 
-[finite-search]
-mono_dir = "finite-search"
-source_url = "https://github.com/finitecomputer/finite-search"
-last_import_sha = "02d7628922e418405c059753ceaf3449e40a24e7"
-
 [finite-skills]
 mono_dir = "finite-skills"
 source_url = "https://github.com/finitecomputer/finite-skills"

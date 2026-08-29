@@ -20,7 +20,6 @@ OUTPUT_NAMES = (
     "run_hermes_bridge",
     "run_nix_checks",
     "run_skills_check",
-    "run_search_check",
     "run_monitoring_nixos_contract",
     "run_finite_status_contract",
     "run_nix_service_packages",
@@ -159,7 +158,6 @@ class HarnessSelection:
     run_hermes_bridge: bool = False
     run_nix_checks: bool = False
     run_skills_check: bool = False
-    run_search_check: bool = False
     run_monitoring_nixos_contract: bool = False
     run_finite_status_contract: bool = False
     run_nix_service_packages: bool = False
@@ -389,10 +387,6 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path.startswith("finite-skills/"):
         selection.run_skills_check = True
-        return
-
-    if path.startswith("finite-search/"):
-        selection.run_search_check = True
         return
 
     if path.startswith("finitecomputer-v2/apps/dashboard/"):

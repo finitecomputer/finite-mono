@@ -80,6 +80,8 @@ auxiliary:
     model: spark-fast-mcp-helper-alias
 
 web:
+  # Self-hosted SearXNG/Firecrawl endpoints were retired 2026-08-29; live agent
+  # web retrieval is the cloud firecrawl provider keyed by FIRECRAWL_API_KEY.
   search_backend: searxng
   extract_backend: firecrawl
   use_gateway: false

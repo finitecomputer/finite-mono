@@ -442,7 +442,7 @@ in
     "z /etc/finite/wireguard-private-key 0600 root root - -"
   ];
 
-  # Container-shaped services (dashboard, finite-search) run under podman.
+  # Container-shaped services (dashboard) run under podman.
   virtualisation.podman.enable = true;
   virtualisation.oci-containers.backend = "podman";
 

@@ -89,7 +89,6 @@ Docs copied with each source repo remain inside their owning folders for now:
 - [`finite-sites/docs`](../finite-sites/docs)
 - [`finite-nostr/docs`](../finite-nostr/docs)
 - [`finite-brain/docs`](../finite-brain/docs)
-- [`finite-search/docs`](../finite-search/docs)
 - [`finite-skills/skills`](../finite-skills/skills)
 - [`finite-skills/docs`](../finite-skills/docs)
 - [`finite-specialization/docs`](../finite-specialization/docs)
@@ -102,7 +101,6 @@ Some imported repos also have root-level source repo docs:
 - [`finite-nostr/README.md`](../finite-nostr/README.md)
 - [`finite-brain/README.md`](../finite-brain/README.md)
 - [`finite-brain/development.md`](../finite-brain/development.md)
-- [`finite-search/README.md`](../finite-search/README.md)
 - [`finite-skills/README.md`](../finite-skills/README.md)
 - [`finite-specialization/README.md`](../finite-specialization/README.md)
 

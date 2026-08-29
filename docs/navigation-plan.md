@@ -27,7 +27,7 @@ detail. It should stay short enough to scan before making a change.
 
 | Task | Start here | Why |
 | --- | --- | --- |
-| Understand the end-to-end user flow, front ends, security boundaries, encryption boundaries, and key custody | `system-flow-and-trust-boundaries.md` | Conversation-level map of dashboard, native chat, runtime, Core, runner, Finite Chat, FiniteBrain, Sites, Finite Private, search, TEEs, and encrypted storage |
+| Understand the end-to-end user flow, front ends, security boundaries, encryption boundaries, and key custody | `system-flow-and-trust-boundaries.md` | Conversation-level map of dashboard, native chat, runtime, Core, runner, Finite Chat, FiniteBrain, Sites, Finite Private, TEEs, and encrypted storage |
 | Choose a local development setup | root `CONTRIBUTING.md`, then `local-dev-matrix.md` | Current copy-paste web/full-stack entrypoints, followed by the broader component map |
 | Understand the self-serve hosted-agent product | `../finitecomputer-v2/README.md`, `../finitecomputer-v2/CONTEXT.md`, and `../finitecomputer-v2/docs/finite-stack-deployment.md` | v2 is the hard-cut SaaS product: WorkOS, Projects, Core, generic Runner contract, Hosted Web Device chat, narrow runtime management, and durable runtime launch |
 | Change v2 dashboard/Core UI | `../finitecomputer-v2/apps/dashboard/README.md` and `../finitecomputer-v2/docs/carry-over-manifest.md` | The v2 dashboard owns signup/launch, the canonical BoxOne-derived web chat, typed connections, Site/Brain views, and lifecycle UX; product data paths stay in their owning services |
@@ -38,7 +38,6 @@ detail. It should stay short enough to scan before making a change.
 | Work on Hermes chat bridge behavior | `../finitechat/integrations/hermes/README.md` | Bridge code lives with `finitechat`; SaaS deployment handoff crosses into `finitecomputer-v2` |
 | Work on encrypted knowledge, Brain Working Trees, or the Product Client | `../../finite-brain/README.md`, `../../finite-brain/development.md`, and `../../finite-brain/docs/specs/finitebrain-portability-spec.md` | `finite-brain` owns Brains, Folders, `fbrain`, Product Client policy, access, sync, and asset/source-note behavior |
 | Add or change shared Hermes skills | `../finite-skills/README.md`, `../finite-skills/skills/AGENTS.md`, and `../finite-skills/docs/runtime-delivery-contract.md` | One editable source, a fresh-agent bundled baseline, and the explicit `finite skills sync` compatibility contract |
-| Work on web search/extract tools | `../../finite-search/README.md` | Search/extract ops and smokes live there |
 | Use reusable Nostr primitives | `../../finite-nostr/README.md` | Product-neutral Nostr helpers only |
 | Generate or inspect platform reports | `../../reporting/README.md` | Reporting outputs and notes live there |
 | Assess repo quality and shipping risk | `slop-audit.md` | First-pass map of jank, good choices, placeholders, and cleanup priorities |
@@ -53,7 +52,6 @@ detail. It should stay short enough to scan before making a change.
 | `finitechat` local server/simulator | Protocol, server, iOS, Rust client, native chat behavior | Hosted dashboard runtime provisioning |
 | `finitechat` phone/Docker canaries | Promotion evidence for real Hermes chat behavior | Fast inner-loop UI development |
 | `finite-brain` local server/Product Client | Brain, Folder, access, sync, Product Client, Smoke UI, and `fbrain` CLI work | Product-neutral Nostr helpers, hosted SaaS runtime provisioning |
-| `finite-search` SSH tunnel smokes | Proving deployed search/extract service behavior | Local product UI iteration |
 | Hosted production/staging boxes | Deployment, OAuth, k3s, backups, real runtime rollouts | First-pass code iteration |
 
 ## Cross-Component Change Checklist
