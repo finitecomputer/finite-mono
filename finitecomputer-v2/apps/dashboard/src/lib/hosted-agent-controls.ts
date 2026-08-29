@@ -135,14 +135,14 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
   }
 }
 
-type AgentCommandContext = {
+export type AgentCommandContext = {
   account: Awaited<ReturnType<typeof getAccountAuthContext>>;
   config: NonNullable<ReturnType<typeof hostedDeviceConfig>>;
   roomId: string;
   targetAccountId: string;
 };
 
-async function hostedAgentContext(machineId: string): Promise<AgentCommandContext> {
+export async function hostedAgentContext(machineId: string): Promise<AgentCommandContext> {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedAgentControlError("Sign in again to manage this agent.", 401);
@@ -198,7 +198,7 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
   };
 }
 
-async function claimOwner(context: AgentCommandContext) {
+export async function claimOwner(context: AgentCommandContext) {
   const response = await hostedDeviceRuntimeCommand(
     context.config,
     context.account,

@@ -16,6 +16,7 @@ import {
   stopCoreRuntimeAction,
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
+import { AgentAdmissionPanel } from "@/components/agent-admission-panel";
 import { AgentHeroCard } from "@/components/agent-hero-card";
 import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
 import {
@@ -190,6 +191,10 @@ async function ImportedMachineOverview({
       {!finitePrivateUsage.usage && finitePrivateUsage.error ? (
         <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
       ) : null}
+      <AgentAdmissionPanel
+        machineId={access.machineId}
+        agentName={access.displayName}
+      />
       {canRecoverRuntime || canRetireRuntime ? (
         <details className="group">
           <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
