@@ -74,7 +74,6 @@ in
         "finite-litestream-health.service"
         "finite-postgres-backup.service"
         "finite-runtime-metrics.service"
-        "finite-saas-runner-phala.service"
         "finite-saas-runner.service"
       ]
     );

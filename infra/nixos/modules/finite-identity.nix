@@ -121,8 +121,8 @@ in
     };
   };
 
-  # Managed Agent Email registration is part of creation completion for both
-  # Standard (Kata) and Confidential (Phala) runtimes. Make the shared
+  # Managed Agent Email registration is part of creation completion for
+  # Standard (Kata) runtimes. Make the shared
   # authority and Core hard startup dependencies, and inject only the
   # loopback URL plus the root-owned operator environment.
   #
@@ -133,19 +133,6 @@ in
   # deploy-lat2-closure-cache by unit-file existence. `or false` keeps
   # hosts that don't define the option evaluating.
   systemd.services.finite-saas-runner = lib.mkIf (config.finite.saasRunner or false) {
-    requires = [
-      "${serviceName}.service"
-      "finite-saas-core.service"
-    ];
-    after = [
-      "${serviceName}.service"
-      "finite-saas-core.service"
-    ];
-    environment.FINITE_IDENTITY_AUTHORITY = loopbackAuthority;
-    serviceConfig.EnvironmentFile = lib.mkAfter [ operatorEnvironmentFile ];
-  };
-
-  systemd.services.finite-saas-runner-phala = lib.mkIf (config.finite.saasRunner or false) {
     requires = [
       "${serviceName}.service"
       "finite-saas-core.service"
@@ -176,19 +163,8 @@ in
     {
       assertion =
         !(config.finite.saasRunner or false)
-        ||
-          config.systemd.services.finite-saas-runner-phala.environment.FINITE_IDENTITY_AUTHORITY
-          == loopbackAuthority;
-      message = "the Phala worker must use the loopback Identity Authority";
-    }
-    {
-      assertion =
-        !(config.finite.saasRunner or false)
-        || (
-          builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile
-          && builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner-phala.serviceConfig.EnvironmentFile
-        );
-      message = "both managed-agent workers must load the shared Identity Authority operator credential";
+        || builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile;
+      message = "the managed-agent worker must load the shared Identity Authority operator credential";
     }
     {
       assertion =

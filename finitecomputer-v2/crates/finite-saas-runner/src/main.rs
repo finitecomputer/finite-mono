@@ -3,13 +3,11 @@ use clap::{Parser, Subcommand};
 use finite_saas_runner::lifecycle_probe::{
     LifecycleProbeConfig, LifecycleProbeRequest, probe_runtime_lifecycle,
 };
-use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
     AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_FINITE_AGENT_PICTURE_URL,
     DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL,
-    DockerConfig, DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults,
-    KataConfig, KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher,
+    FinitePrivateRuntimeDefaults, KataConfig, KataLauncher, KataRetirementConfig,
     RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher, durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
@@ -18,13 +16,6 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PhalaWorkspaceIdentityOutput {
-    workspace_id: String,
-    workspace_slug: String,
-}
 
 #[derive(Debug, Parser)]
 #[command(name = "finite-saas-runner")]
@@ -41,12 +32,6 @@ enum Command {
     /// Continuously process generic runtime lifecycle work.
     #[command(name = "serve")]
     Serve,
-    /// Run authenticated, read-only Phala contract and inventory checks.
-    #[command(name = "phala-preflight")]
-    PhalaPreflight,
-    /// Print only the non-secret Phala workspace id and slug needed to fence preflight.
-    #[command(name = "phala-workspace-identity")]
-    PhalaWorkspaceIdentity,
     /// Hash a stopped Runtime durable directory for a cold relocation request.
     #[command(name = "state-manifest")]
     StateManifest {
@@ -75,8 +60,6 @@ fn main() -> Result<()> {
     match args.command.unwrap_or(Command::RunOnce) {
         Command::RunOnce => run_once(),
         Command::Serve => serve(),
-        Command::PhalaPreflight => phala_preflight(),
-        Command::PhalaWorkspaceIdentity => phala_workspace_identity(),
         Command::StateManifest { path } => {
             println!("{}", durable_state_manifest_sha256(&path)?);
             Ok(())
@@ -134,29 +117,6 @@ fn lifecycle_probe(
     Ok(())
 }
 
-fn phala_workspace_identity() -> Result<()> {
-    let api_key = required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?;
-    let current = PhalaApiClient::new(api_key)?.current_user()?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&PhalaWorkspaceIdentityOutput {
-            workspace_id: current.workspace.id,
-            workspace_slug: current.workspace.slug,
-        })?
-    );
-    Ok(())
-}
-
-fn phala_preflight() -> Result<()> {
-    let api_key = required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?;
-    let expected_workspace_id = required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID")?;
-    let expected_workspace_slug = required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG")?;
-    let summary = PhalaApiClient::new(api_key)?
-        .preflight_summary(&expected_workspace_id, &expected_workspace_slug)?;
-    println!("{}", serde_json::to_string_pretty(&summary)?);
-    Ok(())
-}
-
 fn run_once() -> Result<()> {
     let outcome = run_cycle()?;
     println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -193,62 +153,10 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     // This identifies the adapter offered by this worker. Placement remains
     // project-selected in Core; product code never toggles a process-global
     // backend to change an existing agent's runtime.
-    let runner_class = optional_env("FC_RUNNER_CLASS", "local_docker")
+    let runner_class = required_env("FC_RUNNER_CLASS")?
         .to_ascii_lowercase()
         .replace('-', "_");
     let outcome = match runner_class.as_str() {
-        "local_docker" => {
-            let launcher = DockerLauncher::new(DockerConfig {
-                docker_bin: optional_path("FC_RUNNER_DOCKER_BIN", "docker"),
-                source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
-                image: runtime_artifact.reference,
-                runtime_artifact_id: Some(runtime_artifact.id),
-                runtime_artifact_kind: Some(runtime_artifact.kind),
-                runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
-                work_root: required_path("FC_RUNNER_WORK_ROOT")?,
-                finitechat_server_url: optional_env(
-                    "FC_RUNNER_FINITECHAT_SERVER_URL",
-                    DEFAULT_FINITECHAT_SERVER_URL,
-                ),
-                agent_picture_url: optional_env(
-                    "FC_RUNNER_AGENT_PICTURE_URL",
-                    DEFAULT_FINITE_AGENT_PICTURE_URL,
-                ),
-                host_port: optional_u16("FC_RUNNER_DOCKER_HOST_PORT", 18080)?,
-                container_port: optional_u16("FC_RUNNER_DOCKER_CONTAINER_PORT", 8080)?,
-                public_base_url: optional_env_value("FC_RUNNER_DOCKER_PUBLIC_BASE_URL"),
-                pull_policy: optional_env_value("FC_RUNNER_DOCKER_PULL_POLICY")
-                    .or_else(|| Some("missing".to_string())),
-                max_container_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?,
-                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
-                available_memory_bytes: host_available_memory_bytes(),
-                command_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_COMMAND_TIMEOUT_SECS",
-                    15,
-                )?),
-                launch_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_LAUNCH_TIMEOUT_SECS",
-                    300,
-                )?),
-                readiness_timeout: runtime_ready_timeout,
-                readiness_interval: runtime_ready_interval,
-            });
-            run_once_with_launcher(
-                queue,
-                launcher,
-                RunOnceConfig {
-                    runner_id,
-                    lease_seconds,
-                    finite_private_base_url,
-                    finite_private_model,
-                    finite_private_api_key_override,
-                    runtime_environment,
-                    runtime_secret_environment,
-                    agent_identity_authority: agent_identity_authority.clone(),
-                    health_reports: health_reports.clone(),
-                },
-            )?
-        }
         "apple_container" => {
             let expected_image_descriptor_digest =
                 immutable_oci_descriptor_digest(&runtime_artifact.reference)?;
@@ -306,8 +214,8 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_api_key_override,
                     runtime_environment,
                     runtime_secret_environment,
-                    agent_identity_authority: agent_identity_authority.clone(),
-                    health_reports: health_reports.clone(),
+                    agent_identity_authority,
+                    health_reports,
                 },
             )?
         }
@@ -366,104 +274,12 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_api_key_override,
                     runtime_environment,
                     runtime_secret_environment,
-                    agent_identity_authority: agent_identity_authority.clone(),
-                    health_reports: health_reports.clone(),
-                },
-            )?
-        }
-        "phala" => {
-            let launcher = PhalaLauncher::new(PhalaConfig {
-                expected_workspace_id: required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID")?,
-                expected_workspace_slug: required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG")?,
-                api_key: required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?,
-                source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
-                image: runtime_artifact.reference,
-                runtime_artifact_id: Some(runtime_artifact.id),
-                runtime_artifact_kind: Some(runtime_artifact.kind),
-                runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
-                finitechat_server_url: optional_env(
-                    "FC_RUNNER_FINITECHAT_SERVER_URL",
-                    DEFAULT_FINITECHAT_SERVER_URL,
-                ),
-                agent_picture_url: optional_env(
-                    "FC_RUNNER_AGENT_PICTURE_URL",
-                    DEFAULT_FINITE_AGENT_PICTURE_URL,
-                ),
-                max_cvm_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?.or(Some(1)),
-                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", true)?,
-                available_memory_bytes: host_available_memory_bytes(),
-                readiness_timeout: runtime_ready_timeout,
-                readiness_interval: runtime_ready_interval,
-            });
-            run_once_with_launcher(
-                queue,
-                launcher,
-                RunOnceConfig {
-                    runner_id,
-                    lease_seconds,
-                    finite_private_base_url,
-                    finite_private_model,
-                    finite_private_api_key_override,
-                    runtime_environment,
-                    runtime_secret_environment,
-                    agent_identity_authority: agent_identity_authority.clone(),
-                    health_reports: health_reports.clone(),
-                },
-            )?
-        }
-        "enclavia" => {
-            let launcher = EnclaviaLauncher::new(EnclaviaConfig {
-                enclavia_bin: optional_path("FC_RUNNER_ENCLAVIA_BIN", "enclavia"),
-                docker_bin: optional_path("FC_RUNNER_DOCKER_BIN", "docker"),
-                source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
-                image: runtime_artifact.reference,
-                runtime_artifact_id: Some(runtime_artifact.id),
-                runtime_artifact_kind: Some(runtime_artifact.kind),
-                runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
-                finitechat_server_url: optional_env(
-                    "FC_RUNNER_FINITECHAT_SERVER_URL",
-                    DEFAULT_FINITECHAT_SERVER_URL,
-                ),
-                agent_picture_url: optional_env(
-                    "FC_RUNNER_AGENT_PICTURE_URL",
-                    DEFAULT_FINITE_AGENT_PICTURE_URL,
-                ),
-                enclave_id: required_env("FC_RUNNER_ENCLAVIA_ENCLAVE_ID")?,
-                pull_policy: optional_env_value("FC_RUNNER_ENCLAVIA_PULL_POLICY")
-                    .or_else(|| Some("missing".to_string())),
-                max_enclave_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?.or(Some(1)),
-                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
-                available_memory_bytes: host_available_memory_bytes(),
-                command_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_COMMAND_TIMEOUT_SECS",
-                    15,
-                )?),
-                launch_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_LAUNCH_TIMEOUT_SECS",
-                    900,
-                )?),
-                readiness_timeout: runtime_ready_timeout,
-                readiness_interval: runtime_ready_interval,
-            });
-            run_once_with_launcher(
-                queue,
-                launcher,
-                RunOnceConfig {
-                    runner_id,
-                    lease_seconds,
-                    finite_private_base_url,
-                    finite_private_model,
-                    finite_private_api_key_override,
-                    runtime_environment,
-                    runtime_secret_environment,
                     agent_identity_authority,
                     health_reports,
                 },
             )?
         }
-        other => bail!(
-            "FC_RUNNER_CLASS must be local_docker, apple_container, kata, phala, or enclavia, got {other:?}"
-        ),
+        other => bail!("FC_RUNNER_CLASS must be apple_container or kata, got {other:?}"),
     };
     Ok(outcome)
 }
@@ -559,8 +375,8 @@ where
 /// bounded cadence and posts health reports to Core. The poll-target registry
 /// lives on disk because `run_cycle` rebuilds the runner every cycle. The
 /// directory defaults to `<FC_RUNNER_WORK_ROOT>/health-reports`; runners
-/// without a work root (Phala, Enclavia) set FC_RUNNER_HEALTH_REPORTS_DIR
-/// explicitly. Without a directory the ferry stays off and Core projects
+/// without a work root set FC_RUNNER_HEALTH_REPORTS_DIR explicitly. Without
+/// a directory the ferry stays off and Core projects
 /// runtimes as health `unknown` rather than stale-ready.
 fn optional_health_report_config() -> Result<Option<finite_saas_runner::HealthReportConfig>> {
     let registry_dir = match optional_env_value("FC_RUNNER_HEALTH_REPORTS_DIR").or_else(|| {
@@ -613,15 +429,6 @@ fn required_env(name: &str) -> Result<String> {
         bail!("{name} must not be empty");
     }
     Ok(trimmed.to_string())
-}
-
-fn required_env_any(names: &[&str]) -> Result<String> {
-    for name in names {
-        if let Some(value) = optional_env_value(name) {
-            return Ok(value);
-        }
-    }
-    bail!("one of {} is required", names.join(", "))
 }
 
 fn optional_env(name: &str, default: &str) -> String {
@@ -799,15 +606,12 @@ mod tests {
     }
 
     #[test]
-    fn phala_preflight_is_an_explicit_subcommand() {
-        let args = Args::try_parse_from(["finite-saas-runner", "phala-preflight"]).unwrap();
-        assert!(matches!(args.command, Some(Command::PhalaPreflight)));
-        let args =
-            Args::try_parse_from(["finite-saas-runner", "phala-workspace-identity"]).unwrap();
-        assert!(matches!(
-            args.command,
-            Some(Command::PhalaWorkspaceIdentity)
-        ));
+    fn lifecycle_probe_is_an_explicit_subcommand() {
+        let args = Args::try_parse_from(["finite-saas-runner", "lifecycle-probe"]).unwrap_err();
+        assert!(
+            args.to_string()
+                .contains("the following required arguments were not provided")
+        );
     }
 
     #[test]

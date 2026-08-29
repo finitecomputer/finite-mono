@@ -1,14 +1,14 @@
 # Runner Contract v1
 
-Status: accepted boundary. Kata is the first production Runner; Phala is the
-fast follow. Both implementations are incomplete.
+Status: accepted boundary. Kata is the production Runner; Apple Container
+is the local development lane. Both implementations are incomplete.
 
 ## Decision
 
 A Runner is a generic adapter between Core's desired compute lifecycle and a
 hosting substrate. Core assigns a Runner class from product policy when
 creating an agent and stores that placement with the Project. The user does not
-choose Kata, Phala, or another provider during onboarding. A future
+choose Kata or another provider during onboarding. A future
 customer-facing hosting tier may select a class by promised product behavior,
 but provider names and handles remain internal. Placement is not a process-wide
 environment switch and does not change the dashboard or Runtime product
@@ -29,7 +29,7 @@ Core gives every Runner the same `RuntimeSpec`:
 - opaque environment and secret references that the adapter transports but
   does not interpret.
 
-Provider-specific ids, Kubernetes objects, Phala concepts, host paths, shell
+Provider-specific ids, Kubernetes objects, provider concepts, host paths, shell
 commands, and feature settings do not belong in `RuntimeSpec`.
 
 After provider creation, Core durably records an opaque Provider Runtime Handle
@@ -68,9 +68,10 @@ operation id and Provider Runtime Handle instead of blindly creating again.
 Kata ships first on finite-lat-1. Its adapter may use containerd and
 `io.containerd.kata.v2` internally, but that vocabulary stops at the adapter.
 
-Phala follows against this exact contract. It may add confidential-compute
-evidence as provider facts, but it may not add a second Project model,
-scheduler, dashboard flow, Runtime image, or feature-specific launch path.
+Any future confidential-compute adapter follows against this exact contract.
+It may add confidential-compute evidence as provider facts, but it may not add
+a second Project model, scheduler, dashboard flow, Runtime image, or
+feature-specific launch path.
 
 ## Data And Recovery Boundary
 
@@ -87,7 +88,7 @@ operations must not delete user data.
 
 ## Conformance Gate
 
-The same black-box suite runs against fake, Kata, and Phala adapters:
+The same black-box suite runs against fake and Kata adapters:
 
 - duplicate `ensure` returns the same Runtime rather than creating another;
 - a worker crash at each creation boundary is recoverable through `adopt`;
@@ -111,11 +112,10 @@ derive their desired spec from the persisted creation spec.
 Runtime controls use a separate versioned `runtime_capabilities.v1` envelope
 persisted on the Runtime and advertised by the worker. Core leases an operation
 only when both envelopes explicitly enable that exact kind; missing or empty
-advertisements enable no controls. Docker, Apple Container, Enclavia, and Phala
-currently advertise restart and stop. Kata additionally advertises the
-image-owned recover-known-good operation and Runtime Upgrade. Runtime
-Retirement is false everywhere, and Phala upgrade remains false until its
-opaque environment-encryption boundary is implemented. A draining worker
+advertisements enable no controls. Apple Container currently advertises
+restart and stop. Kata additionally advertises the image-owned
+recover-known-good operation and Runtime Upgrade. Runtime Retirement is false
+everywhere. A draining worker
 rejects new creation leases but may still service its explicitly advertised
 controls.
 

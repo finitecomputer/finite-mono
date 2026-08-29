@@ -154,9 +154,6 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
             "finite-saas-runner.service is active on the app-plane host", source
         )
         self.assertIn("candidate closure contains finite-saas-runner.service", source)
-        self.assertIn(
-            "candidate closure contains finite-saas-runner-phala.service", source
-        )
 
     def test_dry_activation_fences_the_declared_app_plane_unit_set(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

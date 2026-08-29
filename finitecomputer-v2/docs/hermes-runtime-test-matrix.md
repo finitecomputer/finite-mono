@@ -241,57 +241,6 @@ Acceptance:
 - logs and health endpoints make failures classifiable without shelling into
   random process internals.
 
-## Rung 4: Phala CVM Fast Follow
-
-Purpose: prove the production confidential-runtime path with durable mounts.
-
-Shape:
-
-- deploy the same runtime image with a Phala compose/CVM config;
-- mount the provider durable volume at the same path used in Docker;
-- provide the same env contract as Docker;
-- keep public ingress and invite/status behavior equivalent to Docker;
-- use Phala attestation/debug surfaces for canary evidence.
-
-Acceptance:
-
-- one-off CVM deploy succeeds from the v2 runbook;
-- invite/status API returns the expected agent identity/profile metadata;
-- Hosted Web Device and a second Device complete multiple real Hermes turns;
-- agent can save a memory, restart, and demonstrate that memory survived;
-- agent can publish a small site with `fsite`;
-- Finite Private request succeeds (runtime-scoped key provisioned by Core —
-  no operator key override — against the deployed limiter serving canonical
-  `glm-5-3-flash`);
-- Phala restart does not require re-pairing the user;
-- the unchanged fresh-agent skills seed, restart non-overwrite, and
-  user-override suite passes; attestation identifies the canonical image and
-  therefore its bundled baseline, not a Core-managed active revision;
-- Phala restores the same provider-independent Recovery Snapshot onto an empty
-  replacement CVM and documents which Recovery Authority released the keys;
-- deployment evidence includes image ref, finitechat commit, Hermes version,
-  plugin commit, Phala app id, and health output.
-
-## Rung 4b: Enclavia Enclave
-
-Purpose: evaluate Enclavia as a second confidential runner target before
-promoting it into the self-serve SaaS lane.
-
-Shape:
-
-- use a pre-created Enclavia enclave with container port `8080` and persistent
-  encrypted `/data` storage;
-- push the same promoted runtime image with an evaluation worker advertising
-  `FC_RUNNER_CLASS=enclavia`;
-- inject the same Docker-equivalent runtime env through Enclavia secrets;
-- reach health and invite through
-  `https://<enclave-id>.enclaves.beta.enclavia.io/proxy/...`;
-- record Enclavia status/PCR/build evidence alongside the normal runtime
-  health evidence.
-
-Acceptance is the same as the Phala rung, plus an explicit cost note for the
-configured storage size before any production decision.
-
 ## Rung 5: Dashboard-Controlled SaaS Product
 
 Purpose: prove the user-facing self-serve flow.

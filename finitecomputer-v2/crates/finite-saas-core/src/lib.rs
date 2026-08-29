@@ -689,8 +689,6 @@ pub enum CoreError {
     InvalidProviderOperationCorrelation,
     #[error("provider operation facts are invalid or contain secret material")]
     InvalidProviderOperationFacts,
-    #[error("Runner capacity could not produce a safe in-flight reservation")]
-    InvalidInFlightCapacityReservation,
     #[error("provider operation identity does not match the creation request")]
     ProviderOperationIdentityMismatch,
     #[error("provider operation transition is out of order")]
@@ -2254,13 +2252,6 @@ pub struct RunnerLeaseCapacity {
 }
 
 impl RunnerLeaseCapacity {
-    /// Phala provider inventory can lag an accepted paid provision. Core must
-    /// therefore reserve and count the in-flight creation atomically instead
-    /// of letting the worker make a second, racy capacity decision.
-    pub fn requires_core_in_flight_reservation(&self) -> bool {
-        self.runner_classes.as_slice() == [RunnerClass::Phala]
-    }
-
     pub fn validate_runtime_capability_policy(&self) -> CoreResult<()> {
         let Some(capabilities) = self.runtime_capabilities.as_ref() else {
             return Ok(());
@@ -2295,9 +2286,7 @@ impl RunnerLeaseCapacity {
     }
 
     pub fn accepts_agent_creation(&self) -> bool {
-        !self.runner_classes.is_empty()
-            && !self.draining
-            && (self.requires_core_in_flight_reservation() || !self.sandbox_limit_reached())
+        !self.runner_classes.is_empty() && !self.draining && !self.sandbox_limit_reached()
     }
 
     pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
@@ -2315,7 +2304,7 @@ impl RunnerLeaseCapacity {
             Some("runner advertises no classes")
         } else if self.draining {
             Some("runner is draining")
-        } else if !self.requires_core_in_flight_reservation() && self.sandbox_limit_reached() {
+        } else if self.sandbox_limit_reached() {
             Some("runner sandbox capacity is full")
         } else {
             None
@@ -2330,89 +2319,6 @@ impl RunnerLeaseCapacity {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct InFlightCapacityBounds {
-    runner_class: RunnerClass,
-    provider_inventory_count: u32,
-    max_sandbox_count: u32,
-}
-
-fn in_flight_capacity_bounds(
-    capacity: &RunnerLeaseCapacity,
-) -> CoreResult<Option<InFlightCapacityBounds>> {
-    if !capacity.requires_core_in_flight_reservation() {
-        return Ok(None);
-    }
-    let provider_inventory_count = capacity
-        .active_sandbox_count
-        .ok_or(CoreError::InvalidInFlightCapacityReservation)?;
-    let max_sandbox_count = capacity
-        .max_sandbox_count
-        .filter(|maximum| *maximum > 0)
-        .ok_or(CoreError::InvalidInFlightCapacityReservation)?;
-    if provider_inventory_count > max_sandbox_count {
-        return Err(CoreError::InvalidInFlightCapacityReservation);
-    }
-    Ok(Some(InFlightCapacityBounds {
-        runner_class: RunnerClass::Phala,
-        provider_inventory_count,
-        max_sandbox_count,
-    }))
-}
-
-fn in_flight_capacity_reservation(
-    request: &AgentCreationRequest,
-    placement: Option<RuntimePlacement>,
-    capacity: InFlightCapacityBounds,
-    core_in_flight_count: u32,
-) -> CoreResult<InFlightCapacityReservationEnvelope> {
-    let placement = placement.ok_or(CoreError::InvalidInFlightCapacityReservation)?;
-    if request.runner_class != capacity.runner_class
-        || placement.runner_class != capacity.runner_class
-        || core_in_flight_count == 0
-        || core_in_flight_count > capacity.max_sandbox_count
-    {
-        return Err(CoreError::InvalidInFlightCapacityReservation);
-    }
-    Ok(InFlightCapacityReservationEnvelope::V1(
-        InFlightCapacityReservationV1 {
-            request_id: request.id.clone(),
-            placement,
-            provider_inventory_count: capacity.provider_inventory_count,
-            core_in_flight_count,
-            max_sandbox_count: capacity.max_sandbox_count,
-        },
-    ))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "schema", content = "reservation")]
-pub enum InFlightCapacityReservationEnvelope {
-    #[serde(rename = "in_flight_capacity_reservation.v1")]
-    V1(InFlightCapacityReservationV1),
-}
-
-impl InFlightCapacityReservationEnvelope {
-    pub const fn v1(&self) -> &InFlightCapacityReservationV1 {
-        match self {
-            Self::V1(reservation) => reservation,
-        }
-    }
-}
-
-/// Core's atomic acknowledgement that one creation request owns an in-flight
-/// provider-capacity slot. `provider_inventory_count` is the exact count the
-/// Runner submitted with its lease request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct InFlightCapacityReservationV1 {
-    pub request_id: String,
-    pub placement: RuntimePlacement,
-    pub provider_inventory_count: u32,
-    pub core_in_flight_count: u32,
-    pub max_sandbox_count: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCreationLease {
@@ -2423,11 +2329,6 @@ pub struct AgentCreationLease {
     /// acknowledgment needed to reconcile an interrupted provider call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_operation: Option<ProviderOperationEnvelope>,
-    /// Present for Runner classes whose provider inventory can lag a paid
-    /// creation. Current Phala workers require this acknowledgement before
-    /// their first provider mutation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub in_flight_capacity_reservation: Option<InFlightCapacityReservationEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4794,99 +4695,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(created.request.runner_class, RunnerClass::Kata);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn phala_capacity_reservation_is_atomic_and_releases_only_the_existing_in_flight_request()
-    {
-        with_isolated_postgres(|db| async move {
-            promote_runtime_artifact(&db).await;
-            let mut request_ids = Vec::new();
-            for index in 0..2 {
-                let launch_code = issue_launch_code(&db, Some(HostingTier::Confidential)).await;
-                let requested = db
-                    .request_agent_creation(RequestAgentCreationInput {
-                        verified_email: format!("confidential-{index}@finite.vip"),
-                        workos_user_id: format!("user_workos_confidential_{index}"),
-                        display_name: format!("Confidential Agent {index}"),
-                        launch_code,
-                        idempotency_key: format!("confidential-submit-{index}"),
-                        now: Some(NOW.to_string()),
-                    })
-                    .await
-                    .unwrap();
-                request_ids.push(requested.request.id);
-            }
-
-            let first = db
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "phala-runner-a".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "phala-lease-a".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(0)),
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(request_ids.contains(&first.request.id));
-            let waiting_request_id = request_ids
-                .iter()
-                .find(|request_id| request_id.as_str() != first.request.id)
-                .unwrap();
-            let reservation = first.in_flight_capacity_reservation.as_ref().unwrap().v1();
-            assert_eq!(reservation.request_id, first.request.id);
-            assert_eq!(
-                reservation.placement,
-                RuntimePlacement::for_hosting_tier(HostingTier::Confidential)
-            );
-            assert_eq!(reservation.provider_inventory_count, 0);
-            assert_eq!(reservation.core_in_flight_count, 1);
-            assert_eq!(reservation.max_sandbox_count, 1);
-
-            let second = db
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "phala-runner-b".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "phala-lease-b".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(0)),
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap();
-            assert!(second.is_none());
-
-            let resumed = db
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "phala-runner-c".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "phala-lease-c".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(1)),
-                    now: Some("2026-05-25T14:00:00Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(resumed.request.id, first.request.id);
-            let reservation = resumed
-                .in_flight_capacity_reservation
-                .as_ref()
-                .unwrap()
-                .v1();
-            assert_eq!(reservation.provider_inventory_count, 1);
-            assert_eq!(reservation.core_in_flight_count, 1);
-            assert_eq!(
-                db.agent_creation_request(waiting_request_id)
-                    .await
-                    .unwrap()
-                    .status,
-                AgentCreationRequestStatus::Requested
-            );
         })
         .await;
     }

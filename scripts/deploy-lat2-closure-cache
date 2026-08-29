@@ -279,10 +279,6 @@ if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner.service"; the
   echo "refusing: candidate closure contains finite-saas-runner.service" >&2
   exit 74
 fi
-if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner-phala.service"; then
-  echo "refusing: candidate closure contains finite-saas-runner-phala.service" >&2
-  exit 74
-fi
 
 # Pre-mutation health gate. Steady state: the core product units must be
 # active BEFORE crossing the boundary — a steady-state deploy never runs
