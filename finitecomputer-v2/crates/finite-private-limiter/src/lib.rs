@@ -6,6 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use reqwest::Client;
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -44,7 +45,9 @@ pub struct LimiterConfig {
     /// unaccounted. Every degraded response carries the
     /// `x-finite-admission: degraded-allowlist` header so the mode is
     /// observable in captured traffic. Revert by switching the mode back to
-    /// `usage-api` (or removing the env); no data format changes either way.
+    /// `usage-api` (or removing the env) only after `FINITE_USAGE_API_URL`
+    /// reaches Core. A public HTML outage page on that origin is not a usage
+    /// API. No data format changes either way.
     pub admission_mode: AdmissionMode,
     pub admission_allowlist: Vec<String>,
     /// When set, omitted `reasoning_effort` on `/v1/chat/completions` is
@@ -186,6 +189,9 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         config: Arc::new(config),
         client: Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            // Core does not redirect health, reserve, or settle. Following a
+            // public outage origin 307 onto HTML 200 would look like success.
+            .redirect(Policy::none())
             .build()
             .map_err(|error| LimiterConfigError::HttpClient(error.to_string()))?,
     };
@@ -320,6 +326,7 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
         upstream_target,
         None,
         state.config.readiness_timeout,
+        HealthBody::AnySuccess,
     );
     let usage_api_check = check_component(
         &state.client,
@@ -327,6 +334,7 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
         usage_api_target,
         Some(&state.config.finite_usage_api_service_key),
         state.config.readiness_timeout,
+        HealthBody::CoreJsonOk,
     );
     let (upstream, usage_api) = tokio::join!(upstream_check, usage_api_check);
     // In allowlist mode the usage API is intentionally out of the request
@@ -346,12 +354,23 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
     }
 }
 
+/// What a component health response must look like. Upstream inference
+/// health is a status-only probe (SGLang may return plain text). The usage
+/// API is Core's JSON `{"ok": true}` contract — a 2xx HTML outage page is
+/// not that contract.
+#[derive(Clone, Copy)]
+enum HealthBody {
+    AnySuccess,
+    CoreJsonOk,
+}
+
 async fn check_component(
     client: &Client,
     name: &'static str,
     url: String,
     bearer_token: Option<&str>,
     timeout_duration: Duration,
+    body: HealthBody,
 ) -> ComponentCheck {
     let started = Instant::now();
     let mut request = client.get(url.clone());
@@ -361,15 +380,25 @@ async fn check_component(
     match timeout(timeout_duration, request.send()).await {
         Ok(Ok(response)) => {
             let status = response.status();
+            let (ok, error) = match body {
+                HealthBody::AnySuccess => {
+                    drop(response);
+                    (status.is_success(), None)
+                }
+                HealthBody::CoreJsonOk => match usage_api_health_ok(response).await {
+                    Ok(()) => (true, None),
+                    Err(error) => (false, Some(error)),
+                },
+            };
             ComponentCheck {
-                ok: status.is_success(),
+                ok,
                 name,
                 target_url: url,
                 authenticated: bearer_token.is_some(),
                 status: Some(status.as_u16()),
                 latency_ms: elapsed_millis(started),
                 timeout_ms: timeout_duration.as_millis(),
-                error: None,
+                error,
             }
         }
         Ok(Err(error)) => ComponentCheck {
@@ -396,6 +425,40 @@ async fn check_component(
             )),
         },
     }
+}
+
+/// Core usage-API health is `GET .../internal/finite-private/v1/health` →
+/// JSON `{"ok": true}`. Following a public origin 307 onto an HTML 200
+/// (the finite.computer outage page) must not count as ready.
+async fn usage_api_health_ok(response: reqwest::Response) -> Result<(), String> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("usage API health returned {status}"));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("application/json") {
+        let got = if content_type.is_empty() {
+            "missing Content-Type".to_string()
+        } else {
+            content_type
+        };
+        return Err(format!(
+            "usage API health returned {got} instead of application/json"
+        ));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("usage API health is not JSON: {error}"))?;
+    if body.get("ok") != Some(&json!(true)) {
+        return Err("usage API health JSON is not ok".to_string());
+    }
+    Ok(())
 }
 
 fn public_config_snapshot(config: &LimiterConfig) -> PublicConfigSnapshot {
@@ -1635,6 +1698,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_api_health_does_not_follow_html_outage_redirect() {
+        let origin = spawn(public_outage_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(origin, upstream_url);
+        config.admission_mode = AdmissionMode::Allowlist;
+        config.admission_allowlist = vec!["fpk_degraded_key".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let health: Value = reqwest::Client::new()
+            .get(format!("{limiter_url}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        // Allowlist keeps the limiter ready, but must not report the HTML
+        // origin as a healthy usage API.
+        assert_eq!(health["ok"], json!(true));
+        assert_eq!(health["components"]["upstream"]["ok"], json!(true));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["status"], json!(307));
+    }
+
+    #[tokio::test]
+    async fn usage_api_mode_is_not_ready_when_origin_is_html_outage_page() {
+        let origin = spawn(public_outage_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(origin, upstream_url)).unwrap()).await;
+
+        let response = reqwest::Client::new()
+            .get(format!("{limiter_url}/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let health: Value = response.json().await.unwrap();
+        assert_eq!(health["ok"], json!(false));
+        assert_eq!(health["config"]["admissionMode"], json!("usage-api"));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn usage_api_health_rejects_html_200_at_the_health_path() {
+        let origin = spawn(html_health_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(origin, upstream_url)).unwrap()).await;
+
+        let health: Value = reqwest::Client::new()
+            .get(format!("{limiter_url}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["status"], json!(200));
+        let error = health["components"]["usageApi"]["error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            error.contains("application/json"),
+            "expected content-type rejection, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn limiter_streams_and_settles_sse_usage() {
         let core = FakeCoreState::new("fpk_live_stream", 10_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
@@ -2300,6 +2435,39 @@ mod tests {
                 post(fake_core_settle),
             )
             .with_state(state)
+    }
+
+    /// Public finite.computer outage origin: usage-API path 307s to an HTML 200.
+    fn public_outage_origin_router() -> Router {
+        Router::new()
+            .route(
+                "/internal/finite-private/v1/health",
+                get(|| async { axum::response::Redirect::temporary("/") }),
+            )
+            .route(
+                "/",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        "<!doctype html><title>Finite — Service outage</title>",
+                    )
+                }),
+            )
+    }
+
+    /// Same HTML 200 parked directly on the usage-API health path.
+    fn html_health_origin_router() -> Router {
+        Router::new().route(
+            "/internal/finite-private/v1/health",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    "<!doctype html><title>Finite — Service outage</title>",
+                )
+            }),
+        )
     }
 
     async fn fake_core_health(State(state): State<FakeCoreState>) -> Response {

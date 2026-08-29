@@ -36,6 +36,13 @@ The current model/container/alias map and retired lab state are recorded in
    exact approved tag in `FINITE_PRIVATE_RELAUNCH_APPROVED` before it will run
    the mutating relaunch command. Expect about 35 minutes of downtime.
 
+Do not revert `FINITE_ADMISSION_MODE=allowlist` while `FINITE_USAGE_API_URL`
+(`https://finite.computer` in the measured config) is the public HTML outage
+origin. That origin 307s `/internal/finite-private/v1/health` onto the Vercel
+page; that is not Core. Point the usage-API hostname at Core, or split API
+paths off the outage page, before switching back to `usage-api`. The limiter
+treats only Core's JSON `{"ok": true}` as usage-API health, never an HTML 200.
+
 ## Secrets
 
 Tinfoil sealed secrets (`FINITE_USAGE_API_SERVICE_KEY`, `VLLM_INTERNAL_API_KEY`,
