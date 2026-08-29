@@ -61,10 +61,11 @@ the sources above cannot carry lands here.
   frozen-projection reconciliation; outboxes drain via normal retry.
 - `finite-agent-runtime-2026-08-29.4` promoted 22:09Z:
   `ghcr.io/finitecomputer/agent-runtime:2026-08-29.4@sha256:79d87f10ffc481c64ba8f53ad6e38574f8df0ef2757abd14c7458b6631a11ef6`
-  (sidecar fixes from `.3` plus the chat-authz stack). Core records all 21
-  lat4 Runtimes on `.4`. lat3's 30 Runtimes remain on `2026-08-29.1`.
-  Fresh-launch pin evidence per host still to be recorded; #773 covers the
-  stale kimi-k2-6 launch overrides in the live runner operator files.
+  (sidecar fixes from `.3` plus the chat-authz stack). Core records all 51
+  active Runtimes (30 lat3 + 21 lat4) on `.4`. Fresh-launch pin evidence per
+  host still to be recorded; #773 covers the stale kimi-k2-6 launch overrides
+  in the live runner operator files; #776's quarantined-room hint livelock
+  fix ships in the next runtime image.
 
 ### 2026-08-29 — Agent Runtime `2026-08-29.3` promoted; Waffle Prime canary
 
