@@ -40,6 +40,10 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
   `FINITE_BRAIN_SERVER_URL`, and `FINITE_BRAIN_PUBLIC_BASE_URL` values in
   `FC_CORE_RUNTIME_ENV_JSON` that previously lived only in Runner config.
   Runner's `FC_RUNNER_RUNTIME_ENV_JSON` is N-1 fallback only.
+  `FINITECHAT_OWNER_NPUBS` is the one spec-env key Core adds beyond that map:
+  it is per-request state (the owner's hosted-chat account id, submitted by
+  the dashboard at agent creation) injected into the RuntimeSpec environment
+  at lease time — never an operator-set value in Core or Runner env files.
 - The `Lat1 NixOS Closure` workflow can run on a Depot-managed x86_64 Linux
   runner, and the operator can download its artifact with `gh`. The deploy
   machine needs Nix only to copy an already built binary cache to lat1; it must

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
+finite-nostr.workspace = true
 finitechat-blob = { path = "../finitechat-blob" }
 finitechat-transport.workspace = true
 finitechat-http = { path = "../finitechat-http" }

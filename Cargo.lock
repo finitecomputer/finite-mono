@@ -1353,6 +1353,7 @@ name = "finitechat-client"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "finite-nostr",
  "finitechat-delivery",
  "finitechat-http",
  "finitechat-mls",
@@ -1550,6 +1551,7 @@ name = "finitechat-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "finite-nostr",
  "finitechat-blob",
  "finitechat-delivery",
  "finitechat-http",

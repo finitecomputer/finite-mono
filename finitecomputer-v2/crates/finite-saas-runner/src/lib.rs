@@ -6737,6 +6737,7 @@ mod tests {
                 target_source_host_id: None,
                 relocation: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: Some("launch_code_record_123".to_string()),
                 agent_runtime_id: None,

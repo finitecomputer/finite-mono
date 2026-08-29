@@ -3,7 +3,9 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
-use finitechat_server::{HttpServerState, http_router};
+use finitechat_server::{
+    DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState, http_router,
+};
 
 mod push;
 
@@ -60,9 +62,20 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(public_url) = public_url {
         state = state.with_public_url(public_url)?;
     }
+    if options.require_signed_requests {
+        state = state.with_require_signed_requests(true);
+    }
+    state = state.with_rate_limit(
+        options.rate_limit_per_window,
+        options.rate_limit_window_seconds,
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("finitechat-server: listening on http://{addr}");
-    axum::serve(listener, http_router(state)).await?;
+    axum::serve(
+        listener,
+        http_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -92,6 +105,9 @@ struct ServeOptions {
     addr: String,
     sqlite_path: Option<String>,
     public_url: Option<String>,
+    require_signed_requests: bool,
+    rate_limit_per_window: u32,
+    rate_limit_window_seconds: u64,
 }
 
 impl ServeOptions {
@@ -131,8 +147,36 @@ impl ServeOptions {
             addr: addr.unwrap_or_else(|| "127.0.0.1:8787".to_owned()),
             sqlite_path,
             public_url,
+            // Mixed-version gate: old deployed clients send no NIP-98
+            // Authorization header, so signed requests are opt-in until the
+            // fleet upgrades.
+            require_signed_requests: env::var("FINITECHAT_REQUIRE_SIGNED_REQUESTS")
+                .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
+                .unwrap_or(false),
+            rate_limit_per_window: env_u32(
+                "FINITECHAT_RATE_LIMIT_PER_WINDOW",
+                DEFAULT_RATE_LIMIT_PER_WINDOW,
+            ),
+            rate_limit_window_seconds: env_u64(
+                "FINITECHAT_RATE_LIMIT_WINDOW_SECONDS",
+                DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            ),
         })
     }
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

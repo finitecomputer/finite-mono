@@ -431,6 +431,8 @@ pub struct SyncResult {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
     pub activated_welcome_acks_sent: u32,
+    #[serde(default)]
+    pub denied_welcomes: u32,
     pub sync_pages: u32,
     pub messages: Vec<ChatMessage>,
 }
@@ -8233,7 +8235,11 @@ impl CoreState {
     }
 
     fn delivery_for(&self, server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-        delivery_for_with_client(server_url, shared_blocking_http_client())
+        delivery_for_with_client(
+            server_url,
+            shared_blocking_http_client(),
+            Some(*self.account_secret.as_bytes()),
+        )
     }
 
     fn generate_object_id(&mut self, prefix: &str) -> Result<String, FiniteChatCoreError> {
@@ -9388,6 +9394,10 @@ impl CoreSyncProjection {
             .result
             .activated_welcome_acks_sent
             .saturating_add(report.activated_welcome_acks_sent);
+        self.result.denied_welcomes = self
+            .result
+            .denied_welcomes
+            .saturating_add(report.denied_welcomes);
         self.result.sync_pages = self.result.sync_pages.saturating_add(report.sync_pages);
         for entry in report.applied_entries {
             match entry.entry {
@@ -12492,14 +12502,20 @@ fn shared_blocking_http_client() -> reqwest::blocking::Client {
 }
 
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    delivery_for_with_client(server_url, shared_blocking_http_client())
+    delivery_for_with_client(server_url, shared_blocking_http_client(), None)
 }
 
 fn delivery_for_with_client(
     server_url: &str,
     client: reqwest::blocking::Client,
+    signer: Option<[u8; 32]>,
 ) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::with_client(server_url, client))
+    let transport = ReqwestHttpRuntimeTransport::with_client(server_url, client);
+    let transport = match signer {
+        Some(secret) => transport.with_signer(secret),
+        None => transport,
+    };
+    HttpRuntimeDelivery::new(transport)
 }
 
 fn device_room_counts<D: RuntimeDelivery>(

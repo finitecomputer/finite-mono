@@ -266,6 +266,35 @@ pub struct PendingWelcomeAckState {
     pub commit_seq: u64,
 }
 
+/// Admission policy applied to claimed Welcomes before any of them is
+/// stored, activated, or acked. A device with no persisted policy row admits
+/// every Welcome ([`WelcomeAdmissionPolicy::AllowAll`], the pre-allowlist
+/// behavior); [`WelcomeAdmissionPolicy::Allowlist`] admits only senders in
+/// the device's allowlist, plus the device's own account (device link).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAdmissionPolicy {
+    AllowAll,
+    Allowlist,
+}
+
+impl WelcomeAdmissionPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowAll => "allow_all",
+            Self::Allowlist => "allowlist",
+        }
+    }
+
+    fn from_mode(mode: &str) -> Self {
+        match mode {
+            "allow_all" => Self::AllowAll,
+            // Fail closed: anything but an explicit allow-all admits through
+            // the allowlist (the schema CHECK keeps this unreachable).
+            _ => Self::Allowlist,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkFanoutState {
     pub fanout_id: String,
@@ -392,6 +421,10 @@ pub struct RuntimeSyncReport {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
     pub activated_welcome_acks_sent: u32,
+    /// Welcomes claimed but discarded because the sender is not admitted by
+    /// the device's Welcome admission policy (never stored, activated, or
+    /// acked).
+    pub denied_welcomes: u32,
     pub sync_pages: u32,
     pub applied_entries: Vec<RuntimeAppliedEntry>,
 }
@@ -1005,6 +1038,14 @@ impl RuntimeSyncReport {
     fn record_welcome_ack(&mut self) -> Result<(), ClientError> {
         self.activated_welcome_acks_sent = self
             .activated_welcome_acks_sent
+            .checked_add(1)
+            .ok_or(ClientError::RuntimeCounterOverflow)?;
+        Ok(())
+    }
+
+    fn record_denied_welcome(&mut self) -> Result<(), ClientError> {
+        self.denied_welcomes = self
+            .denied_welcomes
             .checked_add(1)
             .ok_or(ClientError::RuntimeCounterOverflow)?;
         Ok(())
@@ -4474,6 +4515,169 @@ impl SqliteClientStore {
         self.save_device_state(device)
     }
 
+    /// The device's Welcome admission policy. An absent row means
+    /// [`WelcomeAdmissionPolicy::AllowAll`], the backwards-compatible
+    /// default for devices which never configured an allowlist.
+    pub fn welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<WelcomeAdmissionPolicy, ClientStoreError> {
+        Ok(self
+            .configured_welcome_admission_policy(owner)?
+            .unwrap_or(WelcomeAdmissionPolicy::AllowAll))
+    }
+
+    /// The explicitly persisted policy row, if any. Distinguishing "no row"
+    /// from an explicit [`WelcomeAdmissionPolicy::AllowAll`] matters for boot
+    /// seeding: only a device with no row at all is eligible for a birth-time
+    /// seed, so an operator- or seed-written row is never overwritten.
+    pub fn configured_welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Option<WelcomeAdmissionPolicy>, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mode = self.conn.query_row(
+            r#"
+            SELECT mode
+            FROM client_welcome_admission_policy
+            WHERE account_id = ?1 AND device_id = ?2
+            "#,
+            params![&owner.account_id, &owner.device_id],
+            |row| row.get::<_, String>(0),
+        );
+        match mode {
+            Ok(mode) => Ok(Some(WelcomeAdmissionPolicy::from_mode(&mode))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn set_welcome_admission_policy(
+        &mut self,
+        owner: &DeviceRef,
+        mode: WelcomeAdmissionPolicy,
+    ) -> Result<(), ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO client_welcome_admission_policy (account_id, device_id, mode)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT (account_id, device_id) DO UPDATE SET mode = excluded.mode
+            "#,
+            params![&owner.account_id, &owner.device_id, mode.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_welcome_allowed_senders<I, S>(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_ids: I,
+    ) -> Result<(), ClientStoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        owner.validate_limits().map_err(ClientError::from)?;
+        for sender_account_id in sender_account_ids {
+            let sender_account_id = sender_account_id.as_ref();
+            validate_string_bytes(
+                "welcome_allowlist.sender_account_id",
+                sender_account_id,
+                MAX_ACCOUNT_ID_BYTES,
+            )
+            .map_err(ClientError::from)?;
+            self.conn.execute(
+                r#"
+                INSERT OR IGNORE INTO client_welcome_allowlist (
+                  account_id,
+                  device_id,
+                  sender_account_id
+                )
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn welcome_sender_allowed(
+        &self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_welcome_allowlist
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND sender_account_id = ?3
+                )
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    /// Every allowlisted sender, sorted for a stable mirror rendering.
+    pub fn welcome_allowed_senders(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Vec<String>, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT sender_account_id
+            FROM client_welcome_allowlist
+            WHERE account_id = ?1 AND device_id = ?2
+            ORDER BY sender_account_id
+            "#,
+        )?;
+        let rows = stmt.query_map(params![&owner.account_id, &owner.device_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut senders = Vec::new();
+        for row in rows {
+            senders.push(row?);
+        }
+        Ok(senders)
+    }
+
+    /// Remove one allowlisted sender. Returns whether a row was actually
+    /// removed; removing a sender which was never listed is a no-op so
+    /// duplicate revocations settle idempotently. Callers must refuse to
+    /// remove the final entry themselves — an allowlist policy with zero
+    /// entries admits no one's Welcomes, which bricks room admission.
+    pub fn remove_welcome_allowed_sender(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        validate_string_bytes(
+            "welcome_allowlist.sender_account_id",
+            sender_account_id,
+            MAX_ACCOUNT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        let removed = self.conn.execute(
+            r#"
+            DELETE FROM client_welcome_allowlist
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND sender_account_id = ?3
+            "#,
+            params![&owner.account_id, &owner.device_id, sender_account_id],
+        )?;
+        Ok(removed > 0)
+    }
+
     pub fn store_pending_welcome_and_save(
         &mut self,
         device: &mut FiniteChatDevice,
@@ -4834,10 +5038,18 @@ pub trait HttpRuntimeTransport {
         R: DeserializeOwned;
 }
 
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReqwestHttpRuntimeTransport {
     base_url: String,
     client: reqwest::blocking::Client,
+    signer: Option<[u8; 32]>,
 }
 
 /// Default bounds for every runtime-transport HTTP call. The connect bound
@@ -4898,7 +5110,16 @@ impl ReqwestHttpRuntimeTransport {
         Self {
             base_url: base_url.into(),
             client,
+            signer: None,
         }
+    }
+
+    /// Attach the raw 32-byte account secret so every request carries a
+    /// NIP-98-style `Authorization: Nostr <base64>` header binding the method,
+    /// absolute URL, and exact body bytes to the account key.
+    pub fn with_signer(mut self, secret: [u8; 32]) -> Self {
+        self.signer = Some(secret);
+        self
     }
 
     pub fn base_url(&self) -> &str {
@@ -4913,14 +5134,46 @@ impl ReqwestHttpRuntimeTransport {
         )
     }
 
+    fn auth_header(
+        &self,
+        url: &str,
+        body: &[u8],
+    ) -> Result<Option<String>, ReqwestHttpRuntimeTransportError> {
+        let Some(secret) = self.signer else {
+            return Ok(None);
+        };
+        let request = finite_nostr::HttpAuthEventRequest::new("POST", url, current_unix_seconds())
+            .with_body(body.to_vec());
+        finite_nostr::sign_http_auth_header_with_secret(&secret, &request)
+            .map(Some)
+            .map_err(ReqwestHttpRuntimeTransportError::AuthSign)
+    }
+
+    fn signed_post(
+        &self,
+        url: &str,
+        body_bytes: Vec<u8>,
+    ) -> Result<reqwest::blocking::RequestBuilder, ReqwestHttpRuntimeTransportError> {
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body_bytes.clone());
+        if let Some(header) = self.auth_header(url, &body_bytes)? {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        Ok(request)
+    }
+
     pub fn sync_stream(
         &mut self,
         request: &SyncStreamRequest,
     ) -> Result<ReqwestSyncHintStream, ReqwestHttpRuntimeTransportError> {
+        let url = self.route_url("/sync/stream");
+        let body_bytes =
+            serde_json::to_vec(request).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url("/sync/stream"))
-            .json(request)
+            .signed_post(&url, body_bytes)?
             .timeout(sync_stream_read_timeout(request))
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
@@ -4946,10 +5199,11 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
         T: Serialize,
         R: DeserializeOwned,
     {
+        let url = self.route_url(uri);
+        let body_bytes =
+            serde_json::to_vec(body).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url(uri))
-            .json(body)
+            .signed_post(&url, body_bytes)?
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
         let status = response.status();
@@ -4968,6 +5222,8 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
 #[derive(Debug)]
 pub enum ReqwestHttpRuntimeTransportError {
     Request(reqwest::Error),
+    Encode(serde_json::Error),
+    AuthSign(finite_nostr::NostrPrimitiveError),
     Server {
         status: reqwest::StatusCode,
         body: String,
@@ -4984,6 +5240,12 @@ impl fmt::Display for ReqwestHttpRuntimeTransportError {
                     error_message_with_sources(error)
                 )
             }
+            Self::Encode(error) => {
+                write!(formatter, "HTTP runtime request encode failed: {error}")
+            }
+            Self::AuthSign(error) => {
+                write!(formatter, "HTTP runtime auth signing failed: {error}")
+            }
             Self::Server { status, body } => {
                 write!(formatter, "server returned {status}: {body}")
             }
@@ -4995,6 +5257,8 @@ impl StdError for ReqwestHttpRuntimeTransportError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Request(error) => Some(error),
+            Self::Encode(error) => Some(error),
+            Self::AuthSign(error) => Some(error),
             Self::Server { .. } => None,
         }
     }
@@ -5672,7 +5936,16 @@ pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: the claim consumes the Welcome server-side
+            // (claimed-but-unacked Welcomes are not re-delivered), so dropping
+            // it here leaves no redelivery loop. It is never stored, never
+            // activated, and never acked, so the sender's projection never
+            // marks this device as an active room member.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5734,7 +6007,12 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: see run_runtime_sync_setup_tick.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5774,6 +6052,35 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
         &mut report,
     )?;
     Ok(report)
+}
+
+/// Decide whether a claimed Welcome may be stored and activated.
+///
+/// Trust anchor: `WelcomeRecord.sender` is server-asserted from the commit
+/// request's `sender` field, which `SignedJson` binds to the NIP-98 signer
+/// only when the server runs with `FINITECHAT_REQUIRE_SIGNED_REQUESTS=true`.
+/// Until that flag is enforced, a caller able to reach the server can submit
+/// a commit naming any `sender`, so this gate is a policy control that
+/// becomes a security control only after the server-side flag flip. The
+/// Welcome payload itself stays opaque to us until activation.
+fn welcome_admission_allows(
+    store: &SqliteClientStore,
+    owner: &DeviceRef,
+    welcome: &WelcomeRecord,
+) -> Result<bool, ClientStoreError> {
+    if store.welcome_admission_policy(owner)? == WelcomeAdmissionPolicy::AllowAll {
+        return Ok(true);
+    }
+    // Device-link exemption: a Welcome from the same account is the account
+    // adding one of its own linked devices to a room. Caveat: the sender is
+    // only authenticated once the server enforces signed requests; until
+    // then this exemption is the cheapest allowlist bypass available (claim
+    // sender = the victim's own npub), which is acceptable only because the
+    // flag flip is sequenced inside this same rollout.
+    if welcome.sender.account_id == owner.account_id {
+        return Ok(true);
+    }
+    store.welcome_sender_allowed(owner, &welcome.sender.account_id)
 }
 
 fn activate_pending_welcomes(
@@ -7194,6 +7501,21 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
             source_device_id,
             chunk_index
           );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_admission_policy (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          mode TEXT NOT NULL
+            CHECK (mode IN ('allow_all', 'allowlist')),
+          PRIMARY KEY (account_id, device_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_allowlist (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          sender_account_id TEXT NOT NULL,
+          PRIMARY KEY (account_id, device_id, sender_account_id)
+        );
         "#,
     )?;
     Ok(())

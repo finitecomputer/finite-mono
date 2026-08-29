@@ -118,6 +118,36 @@ test("agent creation payload cannot submit provider placement", () => {
   );
 });
 
+test("agent creation payload carries the owner chat account id only when known", () => {
+  const ownerChatAccountId = "ab".repeat(32);
+  assert.deepEqual(
+    coreAgentCreationRequestBody({
+      displayName: "Moss",
+      launchCode: "launch-fixture",
+      idempotencyKey: "request-owner-npub",
+      hostingTier: "standard",
+      ownerChatAccountId,
+    }),
+    {
+      displayName: "Moss",
+      launchCode: "launch-fixture",
+      idempotencyKey: "request-owner-npub",
+      hostingTier: "standard",
+      ownerChatAccountId,
+    }
+  );
+  // Fail-open launches (hosted device unreachable) omit the key entirely so
+  // Core leases the runtime without FINITECHAT_OWNER_NPUBS.
+  const failOpen = coreAgentCreationRequestBody({
+    displayName: "Moss",
+    launchCode: "launch-fixture",
+    idempotencyKey: "request-owner-npub-absent",
+    hostingTier: "standard",
+    ownerChatAccountId: null,
+  });
+  assert.equal("ownerChatAccountId" in failOpen, false);
+});
+
 test("coreBridgeStatus requires the Core URL but not a service token for user routes", () => {
   assert.deepEqual(coreBridgeStatus({}), {
     configured: false,

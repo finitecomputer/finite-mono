@@ -10,6 +10,7 @@ import {
   hostedDeviceConfig,
   hostedDeviceDiagnosticPath,
   hostedDeviceHeaders,
+  hostedDeviceOwnerChatAccountId,
   hostedDeviceProfileImage,
   hostedDeviceLinkStatus,
   hostedDeviceReconcileDevice,
@@ -37,6 +38,58 @@ test("hostedDeviceConfig requires both internal endpoint and token", () => {
       FINITECHAT_HOSTED_API_TOKEN: "secret",
     }),
     { baseUrl: "https://device.internal", apiToken: "secret" }
+  );
+});
+
+test("hostedDeviceOwnerChatAccountId reads the pre-minted identity account id", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  const accountId = "ab".repeat(32);
+  global.fetch = (async (input) => {
+    assert.equal(String(input), "https://device.internal/v1/app/state");
+    return Response.json({ identity: { account_id: accountId, device_id: "device-1" } });
+  }) as typeof fetch;
+
+  assert.equal(
+    await hostedDeviceOwnerChatAccountId(
+      { baseUrl: "https://device.internal", apiToken: "secret" },
+      verifiedAccount
+    ),
+    accountId
+  );
+});
+
+test("hostedDeviceOwnerChatAccountId fails open for agent creation", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  // No hosted-device config: nothing to fetch, no account id.
+  assert.equal(await hostedDeviceOwnerChatAccountId(null, verifiedAccount), null);
+
+  // Transport failure: warn and continue without the owner identity.
+  global.fetch = (async () => {
+    throw new Error("connect refused");
+  }) as typeof fetch;
+  assert.equal(
+    await hostedDeviceOwnerChatAccountId(
+      { baseUrl: "https://device.internal", apiToken: "secret" },
+      verifiedAccount
+    ),
+    null
+  );
+
+  // A state payload without a 64-hex account id is unusable, not fatal.
+  global.fetch = (async () => Response.json({ identity: { account_id: "npub1not-hex" } })) as typeof fetch;
+  assert.equal(
+    await hostedDeviceOwnerChatAccountId(
+      { baseUrl: "https://device.internal", apiToken: "secret" },
+      verifiedAccount
+    ),
+    null
   );
 });
 

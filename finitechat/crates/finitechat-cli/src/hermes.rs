@@ -11,7 +11,7 @@
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
@@ -37,7 +37,7 @@ use finitechat_blob::{
 use finitechat_client::{
     ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
     ReqwestHttpRuntimeTransport, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
-    StoredAppMessage, StoredAppRoom, StoredAppRoomState,
+    StoredAppMessage, StoredAppRoom, StoredAppRoomState, WelcomeAdmissionPolicy,
 };
 use finitechat_core::{
     AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
@@ -57,7 +57,7 @@ use finitechat_proto::{
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
     ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
     RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_encode,
+    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_decode, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -65,8 +65,9 @@ use serde_json::{Value, json};
 
 use crate::CliError;
 use crate::cli::{
-    HermesArgs, HermesCommand, HermesHomeChannelCommand, HermesHomeChannelSetArgs, HermesInitArgs,
-    HermesInstallArgs, HermesRoomStatusArgs, HermesServeArgs,
+    HermesAdmissionCommand, HermesArgs, HermesCommand, HermesHomeChannelCommand,
+    HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRoomStatusArgs,
+    HermesServeArgs,
 };
 
 const CONFIG_FILE: &str = "config.json";
@@ -116,6 +117,46 @@ const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
 /// other value) restores the strict typed error so a typo fails closed instead
 /// of silently rerouting replies.
 const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
+/// Comma-separated account ids (64-hex or `npub1…`) allowed to auto-admit
+/// this agent into rooms: a claimed Welcome from any other sender is
+/// discarded without being stored, activated, or acked, which closes
+/// stranger self-admission into agent rooms. The value is a birth-time seed
+/// only: it is consumed into the store's Welcome admission policy exactly
+/// once, when no policy row exists, and later boots never re-apply it (the
+/// store is the single source of truth; `finite.chat.admission.v1` commands
+/// manage the entries thereafter). Absent or empty seeds nothing; a
+/// present-but-malformed value is a hard boot error because an operator typo
+/// must never silently fail open. The agent's own account is always admitted
+/// (device link needs no allowlist entry).
+const WELCOME_ALLOWLIST_ENV: &str = "FINITECHAT_WELCOME_ALLOWLIST";
+/// Core-injected birth seed (the owner's hosted-chat account id list) read
+/// directly from the container environment. Same consume-once contract as
+/// [`WELCOME_ALLOWLIST_ENV`], which overrides it when both are set: the
+/// store is the single source of truth and both spellings are only seeds
+/// into it. Core normalizes the value to comma-separated 64-hex account ids.
+const OWNER_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
+/// Hosted-image marker exported by finite-agentd for the sidecar it spawns
+/// (agentd only runs inside the container). The value `locked` makes a device
+/// with no policy row default to allowlist admission, seeded from the
+/// relayed owner list and the existing rooms' counterparties, so legacy
+/// hosted agents launched before owner-npub injection still leave allow-all
+/// on their first boot of the new image. Standalone `finitechat hermes
+/// serve` never sees the marker and keeps the legacy allow-all default.
+const ADMISSION_DEFAULT_ENV: &str = "FINITECHAT_ADMISSION_DEFAULT";
+const ADMISSION_DEFAULT_LOCKED: &str = "locked";
+/// Typed command consumed by the sidecar itself (never agentd, never the
+/// Hermes inbox) to manage the Welcome allowlist at runtime. The body schema
+/// is [`CHAT_ADMISSION_SCHEMA`] with `{action: "grant"|"revoke", account_id}`
+/// and only a currently-allowlisted sender is honored.
+const CHAT_ADMISSION_COMMAND: &str = "chat.admission";
+const CHAT_ADMISSION_SCHEMA: &str = "finite.chat.admission.v1";
+/// Plain-text mirror of the Welcome allowlist (one 64-hex account id per
+/// line) maintained for `run_hermes_gateway.sh`, which turns it into
+/// FINITECHAT_ALLOWED_USERS when no birth-time FINITECHAT_OWNER_NPUBS exists.
+/// The store stays authoritative; this file is rewritten after every
+/// seed/grant/revoke and removed if admission is explicitly set back to
+/// allow-all.
+const ALLOWED_USERS_FILE: &str = "allowed-users";
 /// Bounded ring of recently-acked entry keys. It makes a post-restart
 /// duplicate ack a no-op and blocks a redelivery of an already-acked entry
 /// from durable recovery even if its seq is re-observed, so the sidecar is
@@ -161,6 +202,7 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::Install(args) => cmd_install(&home_dir, args, json_mode, output),
         HermesCommand::Serve(args) => cmd_serve(&home_dir, args, json_mode, output),
         HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
+        HermesCommand::Admission { command } => cmd_admission(&home_dir, command, output),
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
         HermesCommand::Poll => with_backup_activity(&home_dir, "poll", || {
             cmd_poll(&home_dir, read_request(request_json)?, output)
@@ -444,6 +486,7 @@ async fn prepare_hermes_service(
         .local_addr()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
+    seed_welcome_allowlist(home)?;
     let runtime = open_agent_runtime(home)?;
     // Service readiness means this Device is actually reachable for the
     // Welcome-first product flow, not merely that its local SQLite file opens.
@@ -1245,6 +1288,53 @@ fn cmd_home_channel<W: Write>(
     }
 }
 
+fn cmd_admission<W: Write>(
+    home_dir: &Path,
+    command: HermesAdmissionCommand,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match command {
+        HermesAdmissionCommand::Seed => cmd_admission_seed(home_dir, output),
+    }
+}
+
+/// Run the admission birth-seed step (`hermes admission seed`).
+///
+/// agentd invokes this after prepare and before starting the gateway or the
+/// sidecar, so the store's admission policy is settled and the gateway
+/// launcher reads a current `allowed-users` mirror on its first start.
+/// `hermes serve` runs the same step again at boot; the step is idempotent.
+fn cmd_admission_seed<W: Write>(home_dir: &Path, output: &mut W) -> Result<(), CliError> {
+    let home = load_home(home_dir)?;
+    seed_welcome_allowlist(&home)?;
+    let options = SqliteClientStoreOptions::from_nostr_secret(&home.secret, &home.config.device_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let store = SqliteClientStore::open_read_only(home_dir.join(STORE_FILE), options)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    let policy = store
+        .configured_welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let allowed_senders = store
+        .welcome_allowed_senders(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let mirror = fs::read_to_string(home_dir.join(ALLOWED_USERS_FILE)).ok();
+    crate::write_pretty_json(
+        output,
+        &json!({
+            "admission_policy": policy.map(|policy| match policy {
+                WelcomeAdmissionPolicy::AllowAll => "allow_all",
+                WelcomeAdmissionPolicy::Allowlist => "allowlist",
+            }),
+            "allowed_senders": allowed_senders,
+            "allowed_users_mirror": mirror,
+        }),
+    )
+}
+
 fn set_home_channel<W: Write>(
     home_dir: &Path,
     room_id: String,
@@ -1373,6 +1463,7 @@ fn cmd_init<W: Write>(
     } else {
         Some(publish_agent_profile(
             &config,
+            &secret,
             normalize_agent_profile_text("--agent-name", agent_name)?,
             normalize_agent_profile_text("--agent-about", agent_about)?,
             normalize_agent_profile_picture(agent_picture)?,
@@ -1404,6 +1495,7 @@ struct HermesAgentProfileSummary {
 
 fn publish_agent_profile(
     config: &AgentConfig,
+    secret: &NostrSecretKey,
     display_name: String,
     about: String,
     picture: String,
@@ -1421,8 +1513,9 @@ fn publish_agent_profile(
         fetched_at_ms: now,
         expires_at_ms: now + CREDENTIAL_VALIDITY_SECONDS * 1000,
     };
-    let mut delivery =
-        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(config.server_url.clone()));
+    let mut delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(config.server_url.clone()).with_signer(*secret.as_bytes()),
+    );
     let response = delivery
         .put_nostr_profile(&profile)
         .map_err(|error| CliError::Hermes(format!("could not publish agent profile: {error}")))?;
@@ -1864,6 +1957,17 @@ fn recover_stored_agentd_events(
         let Some(delivery) = delivery else {
             continue;
         };
+        // `chat.admission` commands are consumed by the sidecar itself: they
+        // manage the store's Welcome allowlist (the single source of truth
+        // for admission) and must never reach agentd, which would reject the
+        // unknown command, nor the Hermes inbox, which never sees typed
+        // command events.
+        if let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload
+            && request.command == CHAT_ADMISSION_COMMAND
+        {
+            handle_chat_admission_command(home, own_account, &delivery, request);
+            continue;
+        }
         let key = agentd_inbox_key(&stored.room_id, stored.seq, &stored.message_id);
         if inbox.events.iter().any(|event| event.key == key) {
             continue;
@@ -2309,8 +2413,9 @@ fn wait_for_hermes_sync_hint(
         if target_wait_ms == 0 {
             break;
         }
-        let mut room_delivery =
-            HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url));
+        let mut room_delivery = HttpRuntimeDelivery::new(
+            ReqwestHttpRuntimeTransport::new(server_url).with_signer(*home.secret.as_bytes()),
+        );
         let wait = SyncWaitRequest {
             rooms,
             wait_ms: target_wait_ms,
@@ -3730,9 +3835,10 @@ fn open_agent(
     let device = store
         .load_device(config)
         .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let delivery = HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(
-        home.config.server_url.clone(),
-    ));
+    let delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(home.config.server_url.clone())
+            .with_signer(*home.secret.as_bytes()),
+    );
     // The store mutably borrows during ticks; return all three.
     Ok((store, device, delivery))
 }
@@ -3746,6 +3852,353 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     SqliteClientStore::open(dir.join(STORE_FILE), options)
         .map_err(|error| CliError::Hermes(error.to_string()))
+}
+
+/// Parse `FINITECHAT_WELCOME_ALLOWLIST`: comma-separated account ids, each
+/// either 64 lowercase hex or a NIP-19 `npub1…`. Every entry must decode —
+/// one malformed entry fails the whole parse so a typo cannot shrink the
+/// allowlist (and silently fail open for the intended senders).
+fn parse_welcome_allowlist(raw: &str) -> Result<BTreeSet<String>, CliError> {
+    let mut senders = BTreeSet::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim().to_lowercase();
+        if entry.is_empty() {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} contains an empty entry"
+            )));
+        }
+        let account_id = if entry.len() == 64 && entry.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            entry
+        } else if entry.starts_with("npub1") {
+            npub_decode(&entry).map_err(|error| {
+                CliError::Hermes(format!("{WELCOME_ALLOWLIST_ENV} entry {entry:?}: {error}"))
+            })?
+        } else {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} entry {entry:?} is neither 64-hex nor an npub"
+            )));
+        };
+        senders.insert(account_id);
+    }
+    Ok(senders)
+}
+
+/// Read the admission birth seed from the environment and run the seed step.
+///
+/// Precedence: an explicit `FINITECHAT_WELCOME_ALLOWLIST` wins, then the
+/// Core-injected `FINITECHAT_OWNER_NPUBS`. Both are birth-time seeds: the
+/// store consumes them exactly once, when no policy row exists. Called at
+/// every entry that can be first to touch the store — agentd before it
+/// starts any child process, the launcher script when it runs without
+/// agentd, and `hermes serve` itself — so the step must stay idempotent.
+fn seed_welcome_allowlist(home: &AgentHome) -> Result<(), CliError> {
+    let welcome_allowlist = match std::env::var(WELCOME_ALLOWLIST_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
+    let owner_npubs = match std::env::var(OWNER_NPUBS_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{OWNER_NPUBS_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
+    let locked = std::env::var(ADMISSION_DEFAULT_ENV)
+        .map(|value| value.trim().eq_ignore_ascii_case(ADMISSION_DEFAULT_LOCKED))
+        .unwrap_or(false);
+    let raw = resolve_birth_seed(welcome_allowlist.as_deref(), owner_npubs.as_deref());
+    seed_welcome_allowlist_from_values(home, raw.as_deref(), locked)
+}
+
+/// Birth-seed precedence. An explicit `FINITECHAT_WELCOME_ALLOWLIST` wins —
+/// including an empty one, which is a deliberate "no env seed" that also
+/// suppresses the owner list. Otherwise the Core-injected
+/// `FINITECHAT_OWNER_NPUBS` seeds when non-empty.
+fn resolve_birth_seed(
+    welcome_allowlist: Option<&str>,
+    owner_npubs: Option<&str>,
+) -> Option<String> {
+    match welcome_allowlist {
+        Some(raw) => Some(raw.to_owned()),
+        None => owner_npubs
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// The env values are a birth-time seed, consumed into the store exactly
+/// once. Compat edges, named:
+///
+/// - No env seed and no locked marker: return before touching the store.
+///   The absent policy row keeps the byte-for-byte legacy admit-everyone
+///   behavior of standalone agents.
+/// - Any existing policy row (allowlist or explicit allow-all): seeding is a
+///   no-op apart from refreshing the gateway's `allowed-users` mirror from
+///   the store, which stays the single source of truth.
+/// - Locked with no derivable seed (a new agent whose first room does not
+///   exist yet): persist nothing. An empty persisted allowlist would brick
+///   admission before the owner ever chats, and leaving the row absent lets
+///   the next boot retry the derivation once a room exists.
+fn seed_welcome_allowlist_from_values(
+    home: &AgentHome,
+    raw_allowlist: Option<&str>,
+    locked_default: bool,
+) -> Result<(), CliError> {
+    let env_senders = match raw_allowlist {
+        Some(raw) if !raw.trim().is_empty() => Some(parse_welcome_allowlist(raw)?),
+        _ => None,
+    };
+    if env_senders.is_none() && !locked_default {
+        return Ok(());
+    }
+    let mut store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    if store
+        .configured_welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+        .is_some()
+    {
+        return refresh_allowed_users_mirror(&home.dir, &store, &owner);
+    }
+    let mut senders = env_senders.unwrap_or_default();
+    if locked_default {
+        senders.extend(legacy_admission_seed_account_ids(home, &store)?);
+    }
+    if senders.is_empty() {
+        eprintln!(
+            "finitechat hermes: {ADMISSION_DEFAULT_ENV}={ADMISSION_DEFAULT_LOCKED} but no owner \
+             seed and no existing room counterparty; leaving Welcome admission at the legacy \
+             allow-all until a room exists to derive it from"
+        );
+        return Ok(());
+    }
+    store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    store
+        .add_welcome_allowed_senders(&owner, &senders)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    refresh_allowed_users_mirror(&home.dir, &store, &owner)
+}
+
+/// Derive the locked-default seed for a device which predates owner-npub
+/// injection: the counterparties of the agent's existing home room (the
+/// profile chat the owner's Hosted Web Device opened), or of every connected
+/// room when no home-channel pointer was ever written. MLS membership is
+/// read from the local store and every member credential is verified, so a
+/// name here is proof the account already chats with this agent.
+///
+/// Known grandfathering edge: when the all-rooms fallback runs for an agent
+/// that was exploited before the upgrade (a stranger self-admitted via the
+/// pre-stack open Welcome path), that stranger is an MLS-verified member and
+/// IS seeded — lockdown then only prevents new strangers. Operators should
+/// audit the allowlist after upgrading such agents and revoke via
+/// `chat.admission`; revocation reaches gateway dispatch at the next gateway
+/// restart. A room whose members cannot be verified (e.g. expired
+/// credentials in a long-idle room) is skipped loudly rather than blocking
+/// the other rooms.
+fn legacy_admission_seed_account_ids(
+    home: &AgentHome,
+    store: &SqliteClientStore,
+) -> Result<BTreeSet<String>, CliError> {
+    let config = device_config(&home.secret, &home.config.device_id, now_secs());
+    let device = match store.load_device(config) {
+        Ok(device) => device,
+        // A device with no client state has never finished init or chatted;
+        // there is no room membership to derive a seed from. Return empty so
+        // boot continues with the wait-for-a-room path instead of failing.
+        Err(ClientStoreError::DeviceStateNotFound { .. }) => return Ok(BTreeSet::new()),
+        Err(error) => return Err(CliError::Hermes(error.to_string())),
+    };
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    let room_ids = match load_home_channel(&home.dir)? {
+        Some(channel) => vec![channel.room_id],
+        None => store
+            .load_app_rooms(&owner)
+            .map_err(|error| CliError::Hermes(error.to_string()))?
+            .into_iter()
+            .filter(|room| room.state == StoredAppRoomState::Connected)
+            .map(|room| room.room_id)
+            .collect(),
+    };
+    let mut seeds = BTreeSet::new();
+    for room_id in room_ids {
+        match device.room_members(&room_id) {
+            Ok(members) => {
+                for member in members {
+                    if member.account_id != home.config.account_id {
+                        seeds.insert(member.account_id);
+                    }
+                }
+            }
+            Err(error) => eprintln!(
+                "finitechat hermes: could not derive admission seed from room {room_id}: {error}"
+            ),
+        }
+    }
+    Ok(seeds)
+}
+
+/// Rewrite the gateway's plain-text allowlist mirror from the store. The
+/// store is authoritative; this file exists only so `run_hermes_gateway.sh`
+/// can export FINITECHAT_ALLOWED_USERS on runtimes whose birth predates
+/// FINITECHAT_OWNER_NPUBS. An explicit allow-all row removes the mirror so
+/// the gateway cannot lock to entries the sidecar no longer uses; no row at
+/// all leaves the filesystem untouched (byte-for-byte legacy).
+fn refresh_allowed_users_mirror(
+    home_dir: &Path,
+    store: &SqliteClientStore,
+    owner: &DeviceRef,
+) -> Result<(), CliError> {
+    match store
+        .configured_welcome_admission_policy(owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+    {
+        Some(WelcomeAdmissionPolicy::Allowlist) => {
+            let senders = store
+                .welcome_allowed_senders(owner)
+                .map_err(|error| CliError::Hermes(error.to_string()))?;
+            let mut contents = senders.join("\n");
+            if !contents.is_empty() {
+                contents.push('\n');
+            }
+            write_private(home_dir.join(ALLOWED_USERS_FILE), &contents)
+        }
+        Some(WelcomeAdmissionPolicy::AllowAll) => {
+            match fs::remove_file(home_dir.join(ALLOWED_USERS_FILE)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(CliError::Hermes(error.to_string())),
+            }
+        }
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatAdmissionRequestV1 {
+    action: String,
+    account_id: String,
+}
+
+/// Consume a `chat.admission` runtime command in the sidecar itself: grant
+/// or revoke one Welcome-allowlist entry, then refresh the gateway mirror.
+/// Failures are logged and the event is consumed either way — a malformed or
+/// unauthorized command must never wedge the agentd inbound scan, and agentd
+/// would only reject the unknown command if it were enqueued.
+fn handle_chat_admission_command(
+    home: &AgentHome,
+    own_account: &str,
+    delivery: &RuntimeCommandDeliveryV1,
+    request: &RuntimeCommandRequestV1,
+) {
+    if let Err(error) = apply_chat_admission_command(home, own_account, delivery, request) {
+        eprintln!(
+            "finitechat hermes: {CHAT_ADMISSION_COMMAND} request {} from {} rejected: {error}",
+            request.request_id, delivery.sender.account_id,
+        );
+    }
+}
+
+fn apply_chat_admission_command(
+    home: &AgentHome,
+    own_account: &str,
+    delivery: &RuntimeCommandDeliveryV1,
+    request: &RuntimeCommandRequestV1,
+) -> Result<(), CliError> {
+    let owner = DeviceRef::new(own_account.to_owned(), home.config.device_id.clone());
+    if !request.target.matches_device(&owner) {
+        return Err(CliError::Hermes(
+            "command target does not name this device".to_owned(),
+        ));
+    }
+    if request.body.schema != CHAT_ADMISSION_SCHEMA {
+        return Err(CliError::Hermes(format!(
+            "expected body schema {CHAT_ADMISSION_SCHEMA:?}"
+        )));
+    }
+    let body: ChatAdmissionRequestV1 = serde_json::from_slice(&request.body.json_payload)
+        .map_err(|error| CliError::Hermes(format!("invalid admission body: {error}")))?;
+    let account_id = normalize_admission_account_id(&body.account_id)?;
+    let mut store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
+    // Authz: only a currently-allowlisted sender may manage the allowlist
+    // (post-seed the owner always is). Under the legacy allow-all — no
+    // policy row — the command is inert so a stranger cannot bootstrap
+    // admission state on an unlocked device. Trust anchor: the sender
+    // account id is server-asserted from the event submission, which the
+    // server binds to a NIP-98 signer only while
+    // FINITECHAT_REQUIRE_SIGNED_REQUESTS is enforced; until that flip this
+    // check is a policy control, not a security control.
+    if store
+        .welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+        != WelcomeAdmissionPolicy::Allowlist
+    {
+        return Err(CliError::Hermes(
+            "device is not in allowlist admission mode".to_owned(),
+        ));
+    }
+    if !store
+        .welcome_sender_allowed(&owner, &delivery.sender.account_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+    {
+        return Err(CliError::Hermes(
+            "sender is not on the Welcome allowlist".to_owned(),
+        ));
+    }
+    match body.action.as_str() {
+        "grant" => store
+            .add_welcome_allowed_senders(&owner, [account_id])
+            .map_err(|error| CliError::Hermes(error.to_string()))?,
+        "revoke" => {
+            // Self-revoke is refused: the sender must be allowlisted to
+            // manage the list at all, so refusing self-revoke also keeps at
+            // least one manager on the list forever (the older last-entry
+            // guard is unreachable under this rule).
+            if account_id == delivery.sender.account_id {
+                return Err(CliError::Hermes(
+                    "refusing to revoke the requesting sender; that would cut this \
+                     management channel off from the agent"
+                        .to_owned(),
+                ));
+            }
+            store
+                .remove_welcome_allowed_sender(&owner, &account_id)
+                .map_err(|error| CliError::Hermes(error.to_string()))?;
+        }
+        action => {
+            return Err(CliError::Hermes(format!(
+                "unknown admission action {action:?}"
+            )));
+        }
+    }
+    refresh_allowed_users_mirror(&home.dir, &store, &owner)
+}
+
+fn normalize_admission_account_id(value: &str) -> Result<String, CliError> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(normalized)
+    } else {
+        Err(CliError::Hermes(
+            "admission account_id must be a 64-character hex account id".to_owned(),
+        ))
+    }
 }
 
 /// The store handle for read-only status probes (the typed read/write
@@ -5269,6 +5722,467 @@ mod tests {
         unsafe {
             std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
         }
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_accepts_hex_and_npub_entries() {
+        let hex_entry = "ab".repeat(32);
+        let npub = npub_encode(&"cd".repeat(32)).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry},{npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from(["ab".repeat(32), "cd".repeat(32)]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_trims_whitespace_and_lowercases() {
+        let parsed = parse_welcome_allowlist(
+            "  AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01 \n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            BTreeSet::from([
+                "ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_dedups_hex_and_npub_spellings() {
+        let hex_entry = "ef".repeat(32);
+        let npub = npub_encode(&hex_entry).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry}, {npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from([hex_entry]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_rejects_malformed_entries() {
+        for raw in [
+            // Too short to be an account id and not an npub.
+            "abcd",
+            // 64 chars but not hex.
+            &"zz".repeat(32),
+            // Not an npub bech32 payload.
+            "npub1notarealnpub",
+            // Empty entries (trailing/doubled commas) are operator typos.
+            &format!("{},", "ab".repeat(32)),
+            ",",
+        ] {
+            assert!(
+                parse_welcome_allowlist(raw).is_err(),
+                "malformed allowlist entry should fail closed: {raw:?}"
+            );
+        }
+    }
+
+    fn admission_test_home(dir: &tempfile::TempDir, secret_byte: u8) -> AgentHome {
+        let secret = NostrSecretKey::from_bytes([secret_byte; 32]).unwrap();
+        // Mirror init: config.json's account_id is the identity's public key
+        // hex, which is also what MLS membership reports for the agent.
+        let account_id = hex_lower(secret.public_key().as_bytes());
+        AgentHome {
+            dir: dir.path().join("agent-home"),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id,
+            },
+            secret,
+        }
+    }
+
+    fn admission_owner(home: &AgentHome) -> finitechat_proto::DeviceRef {
+        finitechat_proto::DeviceRef::new(
+            home.config.account_id.clone(),
+            home.config.device_id.clone(),
+        )
+    }
+
+    fn admission_store(home: &AgentHome) -> SqliteClientStore {
+        open_store(&home.dir, &home.secret, &home.config.device_id).unwrap()
+    }
+
+    fn admission_delivery(
+        home: &AgentHome,
+        sender_account: &str,
+        action: &str,
+        account_id: &str,
+    ) -> RuntimeCommandDeliveryV1 {
+        let request = RuntimeCommandRequestV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Request,
+            request_id: format!("admission-{action}-1"),
+            command: CHAT_ADMISSION_COMMAND.to_owned(),
+            target: finitechat_proto::RuntimeCommandTargetV1 {
+                account_id: home.config.account_id.clone(),
+                device_id: Some(home.config.device_id.clone()),
+            },
+            resource_key: None,
+            body: finitechat_proto::RuntimeCommandJsonPayloadV1 {
+                schema: CHAT_ADMISSION_SCHEMA.to_owned(),
+                json_payload: serde_json::to_vec(&json!({
+                    "action": action,
+                    "account_id": account_id,
+                }))
+                .unwrap(),
+            },
+        };
+        RuntimeCommandDeliveryV1 {
+            room_id: "room-main".to_owned(),
+            conversation_id: None,
+            seq: 9,
+            message_id: format!("admission-{action}-message-1"),
+            sender: finitechat_proto::DeviceRef::new(sender_account, "hosted-web"),
+            payload: RuntimeCommandInboundPayloadV1::Request(request),
+        }
+    }
+
+    fn apply_admission(
+        home: &AgentHome,
+        sender_account: &str,
+        action: &str,
+        account_id: &str,
+    ) -> Result<(), CliError> {
+        let delivery = admission_delivery(home, sender_account, action, account_id);
+        let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
+            unreachable!("admission_delivery always builds a request");
+        };
+        apply_chat_admission_command(home, &home.config.account_id, &delivery, request)
+    }
+
+    fn read_allowed_users_mirror(home: &AgentHome) -> Option<String> {
+        fs::read_to_string(home.dir.join(ALLOWED_USERS_FILE)).ok()
+    }
+
+    #[test]
+    fn birth_seed_precedence_explicit_wins_then_owner_npubs() {
+        let owner = "a".repeat(64);
+        let override_list = "b".repeat(64);
+        // The explicit seed wins over the Core-injected owner list.
+        assert_eq!(
+            resolve_birth_seed(Some(&override_list), Some(&owner)),
+            Some(override_list.clone())
+        );
+        // The owner list seeds when no explicit seed is set.
+        assert_eq!(resolve_birth_seed(None, Some(&owner)), Some(owner.clone()));
+        // A deliberately empty explicit seed suppresses the owner list too.
+        assert_eq!(
+            resolve_birth_seed(Some("  "), Some(&owner)),
+            Some("  ".to_owned())
+        );
+        // Neither set: no seed; a locked marker may still derive one.
+        assert_eq!(resolve_birth_seed(None, None), None);
+        assert_eq!(resolve_birth_seed(None, Some("   ")), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_from_env_writes_policy_and_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x21);
+        let owner = "cd".repeat(32);
+
+        seed_welcome_allowlist_from_values(&home, Some(&owner), false).unwrap();
+
+        let store = admission_store(&home);
+        let owner_ref = admission_owner(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            Some(WelcomeAdmissionPolicy::Allowlist)
+        );
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone()]
+        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_is_idempotent_over_existing_policy_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x22);
+        let original = "cd".repeat(32);
+        let late_env = "ef".repeat(32);
+        let owner_ref = admission_owner(&home);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [original.clone()])
+                .unwrap();
+        }
+
+        // A later boot with a different env value must not overwrite or widen
+        // the store: the store is the single source of truth.
+        seed_welcome_allowlist_from_values(&home, Some(&late_env), true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![original.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{original}\n")),
+            "the mirror is refreshed from the store, not the env"
+        );
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_preserves_explicit_allow_all_row_and_drops_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x23);
+        let owner_ref = admission_owner(&home);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::AllowAll)
+                .unwrap();
+        }
+        write_private(home.dir.join(ALLOWED_USERS_FILE), "stale\n").unwrap();
+
+        seed_welcome_allowlist_from_values(&home, Some(&"cd".repeat(32)), true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            Some(WelcomeAdmissionPolicy::AllowAll)
+        );
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            None,
+            "a stale mirror must not outlive an explicit allow-all row"
+        );
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_without_marker_keeps_legacy_allow_all_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x24);
+
+        seed_welcome_allowlist_from_values(&home, None, false).unwrap();
+
+        assert!(
+            !home.dir.join(STORE_FILE).exists(),
+            "byte-for-byte legacy: the standalone no-marker path never opens the store"
+        );
+        assert_eq!(read_allowed_users_mirror(&home), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_locked_without_derivable_seed_waits_for_a_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x25);
+
+        // Locked, but the agent has no owner seed and no room to derive one
+        // from (its first Welcome has not arrived): persist nothing so the
+        // next boot retries instead of bricking admission with an empty list.
+        seed_welcome_allowlist_from_values(&home, None, true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&admission_owner(&home))
+                .unwrap(),
+            None
+        );
+        assert_eq!(read_allowed_users_mirror(&home), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_locked_derives_the_home_room_but_never_the_agent_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x26);
+        let owner_seed = "cd".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            let mut device = FiniteChatDevice::new(device_config(
+                &home.secret,
+                &home.config.device_id,
+                now_secs(),
+            ))
+            .unwrap();
+            device
+                .create_group_state("room-home", "mls-group-home")
+                .unwrap();
+            store.save_device_state(&device).unwrap();
+        }
+        save_home_channel(
+            &home.dir,
+            &HermesHomeChannel {
+                room_id: "room-home".to_owned(),
+                conversation_id: None,
+                set_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        // The home room's only member so far is the agent itself; the env
+        // owner seed is the union and the agent's own account is excluded.
+        seed_welcome_allowlist_from_values(&home, Some(&owner_seed), true).unwrap();
+
+        let store = admission_store(&home);
+        let owner_ref = admission_owner(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner_seed.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{owner_seed}\n"))
+        );
+    }
+
+    #[test]
+    fn chat_admission_grant_and_revoke_update_store_and_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x27);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let guest = "ef".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+
+        apply_admission(&home, &owner, "grant", &guest).unwrap();
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone(), guest.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{owner}\n{guest}\n"))
+        );
+
+        apply_admission(&home, &owner, "revoke", &guest).unwrap();
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone()]
+        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
+    }
+
+    #[test]
+    fn chat_admission_revoke_refuses_the_requesting_sender() {
+        // Revoking your own entry cuts the management channel off from the
+        // agent; the last-entry guard alone does not cover multi-entry
+        // lists.
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x2b);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let guest = "ef".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone(), guest.clone()])
+                .unwrap();
+        }
+
+        let error = apply_admission(&home, &owner, "revoke", &owner).unwrap_err();
+        assert!(
+            error.to_string().contains("cut this management channel"),
+            "unexpected error: {error}"
+        );
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner, guest]
+        );
+    }
+
+    #[test]
+    fn chat_admission_rejects_strangers_and_is_inert_under_allow_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x29);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let stranger = "aa".repeat(32);
+        let guest = "ef".repeat(32);
+
+        // No policy row at all (legacy allow-all): the command is inert so a
+        // stranger cannot bootstrap admission state on an unlocked device.
+        assert!(apply_admission(&home, &stranger, "grant", &guest).is_err());
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            None
+        );
+
+        // Allowlist mode: a non-listed sender is rejected even for a grant.
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+        assert!(apply_admission(&home, &stranger, "grant", &guest).is_err());
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner]
+        );
+    }
+
+    #[test]
+    fn chat_admission_rejects_wrong_target_and_malformed_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x2a);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+
+        let mut delivery = admission_delivery(&home, &owner, "grant", &"ef".repeat(32));
+        if let RuntimeCommandInboundPayloadV1::Request(request) = &mut delivery.payload {
+            request.target.account_id = "other-agent".to_owned();
+        }
+        let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
+            unreachable!();
+        };
+        assert!(
+            apply_chat_admission_command(&home, &home.config.account_id, &delivery, request)
+                .is_err()
+        );
+
+        assert!(apply_admission(&home, &owner, "grant", "not-hex").is_err());
+        assert!(apply_admission(&home, &owner, "rename", &"ef".repeat(32)).is_err());
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner]
+        );
     }
 
     #[test]

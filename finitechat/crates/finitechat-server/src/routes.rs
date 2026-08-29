@@ -2,13 +2,15 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use finitechat_blob::BlobDescriptor;
@@ -42,6 +44,7 @@ use finitechat_proto::{
 };
 use serde::Serialize;
 
+use crate::auth::SignedJson;
 use crate::state::{
     HttpServerState, READINESS_BUDGET_MILLIS, ReadinessCheckResult, ServerReadiness,
     SyncStreamCursors, SyncStreamInboxCursor, SyncStreamLoop, SyncStreamRoomCursor,
@@ -53,32 +56,13 @@ use crate::validate::{
 use crate::{MAX_HTTP_BLOB_UPLOAD_BODY_BYTES, ServerHttpError};
 
 pub fn http_router(state: HttpServerState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/readyz", get(readyz))
-        .route("/events", post(append_application_event))
-        .route("/application-effects/get", post(get_application_effect))
-        .route(
-            "/application-effects/counts",
-            post(get_application_effect_counts),
-        )
-        .route("/activities", post(append_ephemeral_activity))
-        .route("/activities/get", post(get_ephemeral_activities))
+    // Stranger-accessible mutating routes (no account secret exists to sign
+    // them with) get a per-IP fixed-window rate limit instead of NIP-98 auth.
+    let public_mutating = Router::new()
         .route(
             "/upload",
             put(upload_blob_object).layer(DefaultBodyLimit::max(MAX_HTTP_BLOB_UPLOAD_BODY_BYTES)),
         )
-        .route("/blobs/{sha256}", get(download_blob_object))
-        .route("/commits", post(submit_commit))
-        .route("/sync/group", post(sync_group))
-        .route("/sync/inbox", post(sync_inbox))
-        .route("/sync/stream", post(sync_stream))
-        .route("/sync/wait", post(sync_wait))
-        .route("/devices/revoke", post(revoke_device))
-        .route("/devices/liveness", post(observe_device_liveness))
-        .route("/devices/liveness/get", post(get_device_liveness))
-        .route("/profiles/nostr", post(put_nostr_profile))
-        .route("/profiles/nostr/get", post(get_nostr_profiles))
         .route(
             "/key-packages/availability",
             post(get_key_package_availability),
@@ -101,20 +85,147 @@ pub fn http_router(state: HttpServerState) -> Router {
         .route("/pairing-sessions/response", post(publish_pairing_response))
         .route("/pairing-sessions/complete", post(publish_pairing_complete))
         .route("/pairing-sessions/expire", post(expire_pairing_session))
+        .route("/push-wakes/claim", post(claim_push_wakes))
+        .route("/push-wakes/ack", post(ack_push_wake))
+        .route("/push-wakes/fail", post(fail_push_wake))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_public_routes,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/readyz", get(readyz))
+        .route("/events", post(append_application_event))
+        .route("/application-effects/get", post(get_application_effect))
+        .route(
+            "/application-effects/counts",
+            post(get_application_effect_counts),
+        )
+        .route("/activities", post(append_ephemeral_activity))
+        .route("/activities/get", post(get_ephemeral_activities))
+        .route("/blobs/{sha256}", get(download_blob_object))
+        .route("/commits", post(submit_commit))
+        .route("/sync/group", post(sync_group))
+        .route("/sync/inbox", post(sync_inbox))
+        .route("/sync/stream", post(sync_stream))
+        .route("/sync/wait", post(sync_wait))
+        .route("/devices/revoke", post(revoke_device))
+        .route("/devices/liveness", post(observe_device_liveness))
+        .route("/devices/liveness/get", post(get_device_liveness))
+        .route("/profiles/nostr", post(put_nostr_profile))
+        .route("/profiles/nostr/get", post(get_nostr_profiles))
         .route("/account-rooms/bootstrap", post(bootstrap_account_room))
         .route("/account-rooms", post(save_account_room))
         .route("/account-rooms/list", post(list_account_rooms))
         .route("/push-tokens", post(register_push_token))
         .route("/push-tokens/remove", post(remove_push_token))
-        .route("/push-wakes/claim", post(claim_push_wakes))
-        .route("/push-wakes/ack", post(ack_push_wake))
-        .route("/push-wakes/fail", post(fail_push_wake))
         .route("/rooms/leave", post(leave_room))
         .route("/rooms/admins", post(update_room_admins))
         .route("/rooms/report-invalid-commit", post(report_invalid_commit))
         .route("/welcomes/claim", post(claim_welcomes))
         .route("/welcomes/ack", post(ack_welcome))
+        .merge(public_mutating)
         .with_state(state)
+}
+
+async fn rate_limit_public_routes(
+    State(state): State<HttpServerState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Direct loopback callers (host-local services, no proxy in front) share
+    // one address and one bucket; device-link export alone runs hundreds of
+    // KeyPackage publishes a minute from exactly that path. They are trusted
+    // host-local traffic and are exempt. Everything else — XFF-attributed
+    // clients behind the host-local proxy, or direct remote peers — is
+    // limited per address.
+    match client_ip(&request) {
+        Some(ip) if !state.check_public_route_rate_limit(ip) => {
+            (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response()
+        }
+        _ => next.run(request).await,
+    }
+}
+
+/// Client IP for rate limiting; `None` marks a direct loopback caller, which
+/// is exempt (host-local traffic, no per-client address to attribute). The
+/// edge proxy (Caddy) is host-local, so X-Forwarded-For is only trusted when
+/// the direct peer is loopback; the trusted value is the LAST hop, the
+/// address Caddy observed and appended — the first hop is attacker-
+/// controlled whenever the client supplies the header. A non-loopback peer
+/// is the client itself; XFF is ignored.
+fn client_ip(request: &Request) -> Option<IpAddr> {
+    client_ip_from(
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip()),
+        request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+fn client_ip_from(peer: Option<IpAddr>, x_forwarded_for: Option<&str>) -> Option<IpAddr> {
+    let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if !peer.is_loopback() {
+        return Some(peer);
+    }
+    // No proxy attribution and the peer is the host itself: exempt rather
+    // than bucket every local caller under 127.0.0.1.
+    x_forwarded_for
+        .and_then(|value| value.split(',').next_back())
+        .map(str::trim)
+        .filter(|hop| !hop.is_empty())
+        .and_then(|hop| hop.parse().ok())
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::client_ip_from;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn loopback_peer_trusts_only_the_last_forwarded_hop() {
+        // Caddy appends the observed peer to any client-supplied header, so
+        // the last hop is the real client even when the first is spoofed.
+        assert_eq!(
+            client_ip_from(
+                Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Some("198.51.100.1, 203.0.113.9"),
+            ),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)))
+        );
+    }
+
+    #[test]
+    fn non_loopback_peer_ignores_forwarded_header() {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+        assert_eq!(client_ip_from(Some(peer), Some("203.0.113.9")), Some(peer));
+        assert_eq!(client_ip_from(Some(peer), None), Some(peer));
+    }
+
+    #[test]
+    fn loopback_peer_without_header_is_exempt() {
+        // Direct host-local callers share 127.0.0.1 and cannot be attributed
+        // per client; they are exempt from the limiter entirely.
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), None),
+            None
+        );
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), None),
+            None
+        );
+        // An unparsable header cannot attribute a client either; for a
+        // loopback peer that means exemption, not a shared bucket.
+        assert_eq!(
+            client_ip_from(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some("not-an-ip")),
+            None
+        );
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -238,7 +349,7 @@ fn non_empty_build_value(value: Option<&'static str>) -> Option<String> {
 
 async fn append_application_event(
     State(state): State<HttpServerState>,
-    Json(request): Json<AppendApplicationEventRequest>,
+    SignedJson(request): SignedJson<AppendApplicationEventRequest>,
 ) -> Result<Json<EventAccepted>, ServerHttpError> {
     let response = state.append_application_event(request)?;
     state.note_op_for_snapshot();
@@ -261,7 +372,7 @@ async fn get_application_effect_counts(
 
 async fn append_ephemeral_activity(
     State(state): State<HttpServerState>,
-    Json(request): Json<AppendEphemeralActivityRequest>,
+    SignedJson(request): SignedJson<AppendEphemeralActivityRequest>,
 ) -> Result<Json<EphemeralActivityAccepted>, ServerHttpError> {
     let response = state.append_ephemeral_activity(request)?;
     state.wake.notify_waiters();
@@ -270,7 +381,7 @@ async fn append_ephemeral_activity(
 
 async fn get_ephemeral_activities(
     State(state): State<HttpServerState>,
-    Json(request): Json<GetEphemeralActivitiesRequest>,
+    SignedJson(request): SignedJson<GetEphemeralActivitiesRequest>,
 ) -> Result<Json<GetEphemeralActivitiesResponse>, ServerHttpError> {
     Ok(Json(state.get_ephemeral_activities(request)?))
 }
@@ -306,7 +417,7 @@ async fn download_blob_object(
 
 async fn submit_commit(
     State(state): State<HttpServerState>,
-    Json(request): Json<SubmitCommitRequest>,
+    SignedJson(request): SignedJson<SubmitCommitRequest>,
 ) -> Result<Json<CommitAccepted>, ServerHttpError> {
     let response = state.submit_commit(request)?;
     state.note_op_for_snapshot();
@@ -434,7 +545,7 @@ async fn sync_wait(
 
 async fn revoke_device(
     State(state): State<HttpServerState>,
-    Json(request): Json<RevokeDeviceRequest>,
+    SignedJson(request): SignedJson<RevokeDeviceRequest>,
 ) -> Result<Json<RevokeDeviceResponse>, ServerHttpError> {
     let response = state.revoke_device(request)?;
     Ok(Json(response))
@@ -442,7 +553,7 @@ async fn revoke_device(
 
 async fn observe_device_liveness(
     State(state): State<HttpServerState>,
-    Json(request): Json<ObserveDeviceLivenessRequest>,
+    SignedJson(request): SignedJson<ObserveDeviceLivenessRequest>,
 ) -> Result<Json<DeviceLivenessRecord>, ServerHttpError> {
     let response = state.observe_device_liveness(request)?;
     Ok(Json(response))
@@ -450,7 +561,7 @@ async fn observe_device_liveness(
 
 async fn get_device_liveness(
     State(state): State<HttpServerState>,
-    Json(request): Json<GetDeviceLivenessRequest>,
+    SignedJson(request): SignedJson<GetDeviceLivenessRequest>,
 ) -> Result<Json<GetDeviceLivenessResponse>, ServerHttpError> {
     let response = state.get_device_liveness(request)?;
     Ok(Json(response))
@@ -458,7 +569,7 @@ async fn get_device_liveness(
 
 async fn put_nostr_profile(
     State(state): State<HttpServerState>,
-    Json(request): Json<PutNostrProfileRequest>,
+    SignedJson(request): SignedJson<PutNostrProfileRequest>,
 ) -> Result<Json<PutNostrProfileResponse>, ServerHttpError> {
     let response = state.put_nostr_profile(request)?;
     Ok(Json(response))
@@ -579,7 +690,7 @@ async fn expire_pairing_session(
 
 async fn save_account_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<SaveAccountRoomRequest>,
+    SignedJson(request): SignedJson<SaveAccountRoomRequest>,
 ) -> Result<Json<SaveAccountRoomResponse>, ServerHttpError> {
     let response = state.save_account_room(request)?;
     Ok(Json(response))
@@ -587,7 +698,7 @@ async fn save_account_room(
 
 async fn bootstrap_account_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<BootstrapAccountRoomRequest>,
+    SignedJson(request): SignedJson<BootstrapAccountRoomRequest>,
 ) -> Result<Json<BootstrapAccountRoomResponse>, ServerHttpError> {
     let response = state.bootstrap_account_room(request)?;
     Ok(Json(response))
@@ -595,7 +706,7 @@ async fn bootstrap_account_room(
 
 async fn list_account_rooms(
     State(state): State<HttpServerState>,
-    Json(request): Json<ListAccountRoomDirectoryRequest>,
+    SignedJson(request): SignedJson<ListAccountRoomDirectoryRequest>,
 ) -> Result<Json<ListAccountRoomDirectoryResponse>, ServerHttpError> {
     let page = state.list_account_rooms(request)?;
     Ok(Json(page))
@@ -603,7 +714,7 @@ async fn list_account_rooms(
 
 async fn register_push_token(
     State(state): State<HttpServerState>,
-    Json(request): Json<RegisterPushTokenRequest>,
+    SignedJson(request): SignedJson<RegisterPushTokenRequest>,
 ) -> Result<Json<RegisterPushTokenResponse>, ServerHttpError> {
     let response = state.register_push_token(request)?;
     Ok(Json(response))
@@ -611,7 +722,7 @@ async fn register_push_token(
 
 async fn remove_push_token(
     State(state): State<HttpServerState>,
-    Json(request): Json<RemovePushTokenRequest>,
+    SignedJson(request): SignedJson<RemovePushTokenRequest>,
 ) -> Result<Json<RemovePushTokenResponse>, ServerHttpError> {
     let response = state.remove_push_token(request)?;
     Ok(Json(response))
@@ -643,7 +754,7 @@ async fn fail_push_wake(
 
 async fn leave_room(
     State(state): State<HttpServerState>,
-    Json(request): Json<LeaveRoomRequest>,
+    SignedJson(request): SignedJson<LeaveRoomRequest>,
 ) -> Result<Json<LeaveRoomResponse>, ServerHttpError> {
     let response = state.leave_room(request)?;
     Ok(Json(response))
@@ -651,7 +762,7 @@ async fn leave_room(
 
 async fn update_room_admins(
     State(state): State<HttpServerState>,
-    Json(request): Json<UpdateRoomAdminsRequest>,
+    SignedJson(request): SignedJson<UpdateRoomAdminsRequest>,
 ) -> Result<Json<UpdateRoomAdminsResponse>, ServerHttpError> {
     let response = state.update_room_admins(request)?;
     Ok(Json(response))
@@ -659,7 +770,7 @@ async fn update_room_admins(
 
 async fn report_invalid_commit(
     State(state): State<HttpServerState>,
-    Json(request): Json<ReportInvalidCommitRequest>,
+    SignedJson(request): SignedJson<ReportInvalidCommitRequest>,
 ) -> Result<Json<ReportInvalidCommitResponse>, ServerHttpError> {
     let response = state.report_invalid_commit(request)?;
     Ok(Json(response))

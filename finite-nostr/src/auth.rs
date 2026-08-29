@@ -6,7 +6,7 @@ use nostr::event::{FinalizeEvent, SignEvent};
 use nostr::hashes::Hash;
 use nostr::hashes::sha256::Hash as Sha256Hash;
 use nostr::key::GetPublicKey;
-use nostr::{Event, EventBuilder, Kind, Tag, Timestamp, Url};
+use nostr::{Event, EventBuilder, Keys, Kind, SecretKey, Tag, Timestamp, Url};
 
 use crate::{NostrPrimitiveError, NostrPublicKey, verify_event_integrity};
 
@@ -136,6 +136,24 @@ pub fn encode_http_auth_header(event: &Event) -> String {
         "{HTTP_AUTH_SCHEME} {}",
         BASE64_STANDARD.encode(event.as_json())
     )
+}
+
+/// Sign a NIP-98-style HTTP auth request from a raw 32-byte secret key and
+/// return the full `Nostr <base64>` authorization header value.
+///
+/// Shared entry point for clients that hold the account secret as raw bytes
+/// so every signer produces the same event shape.
+pub fn sign_http_auth_header_with_secret(
+    secret_key_bytes: &[u8; 32],
+    request: &HttpAuthEventRequest,
+) -> Result<String, NostrPrimitiveError> {
+    let secret_key = SecretKey::from_slice(secret_key_bytes).map_err(|_| {
+        NostrPrimitiveError::MalformedInput {
+            field: "http_auth_secret_key",
+        }
+    })?;
+    let event = sign_http_auth_event(&Keys::new(secret_key), request)?;
+    Ok(encode_http_auth_header(&event))
 }
 
 /// Decode a NIP-98-style HTTP authorization header into a signed event.

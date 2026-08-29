@@ -27,9 +27,9 @@ use crate::{
     FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
     LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
-    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OffboardingPhase, Project, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OWNER_CHAT_NPUBS_ENV, OffboardingPhase, Project,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
     RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordProviderOperationTransitionInput,
     RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
@@ -53,8 +53,8 @@ use crate::{
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
     new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    normalize_idempotency_key, normalize_owner_chat_account_id, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
     parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
     parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
@@ -1075,6 +1075,8 @@ where
         .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
     let profile_picture_url =
         normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
+    let owner_chat_account_id =
+        normalize_owner_chat_account_id(configuration.owner_chat_account_id.as_deref())?;
     let launch_code = trim_to_option(Some(&input.launch_code));
     let billing_class = if launch_code.is_some() {
         BillingClass::Sponsored
@@ -1252,6 +1254,7 @@ where
         target_source_host_id: None,
         relocation: None,
         profile_picture_url,
+        owner_chat_account_id,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: locked_launch_code.map(|locked| locked.record.id),
         agent_runtime_id: None,
@@ -1527,6 +1530,7 @@ where
                        request.placement_runner_class, request.runtime_resource_class,
                        request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                        request.profile_picture_url,
+                       request.owner_chat_account_id,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
                        request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                        request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at",
@@ -1596,6 +1600,17 @@ where
             }
             None => select_latest_launchable_runtime_artifact(client).await?,
         };
+        // The owner chat identity is per-request state, so it joins the
+        // Core-global environment only here, at spec-build time. A request
+        // without it keeps the exact legacy environment (allow-all chat
+        // admission owned by the runtime image).
+        let mut environment = runtime_environment.clone();
+        if let Some(owner_chat_account_id) = request.owner_chat_account_id.as_deref() {
+            environment.insert(
+                OWNER_CHAT_NPUBS_ENV.to_string(),
+                owner_chat_account_id.to_string(),
+            );
+        }
         let runtime_spec = build_runtime_spec_v1(
             RuntimeSpecIdentity {
                 operation_id: &request.id,
@@ -1605,7 +1620,7 @@ where
             },
             &artifact,
             &runtime_id,
-            runtime_environment.clone(),
+            environment,
             runtime_secret_references,
             RuntimeBootIntent::Normal,
         )?;
@@ -2124,6 +2139,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -2201,6 +2217,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -2557,6 +2574,7 @@ where
                     request.placement_runner_class, request.runtime_resource_class,
                     request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                     request.profile_picture_url,
+                    request.owner_chat_account_id,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
                     request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                     request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at
@@ -2695,6 +2713,7 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
             .transpose()
             .map_err(json_error)?,
         profile_picture_url: row.get("profile_picture_url"),
+        owner_chat_account_id: row.get("owner_chat_account_id"),
         status: parse_agent_creation_request_status(&status).ok_or_else(|| {
             CoreError::Store(format!("invalid agent creation request status {status}"))
         })?,
@@ -2896,6 +2915,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
@@ -2922,6 +2942,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
@@ -3419,14 +3440,14 @@ where
                runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
                desired_runtime_artifact_id, runtime_spec, target_source_host_id,
                relocation_spec,
-               profile_picture_url, status, requested_launch_code,
+               profile_picture_url, owner_chat_account_id, status, requested_launch_code,
                agent_runtime_id, runner_id, lease_token,
                lease_expires_at, failure_message, created_at, updated_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20,
-                     $21::text::timestamptz, $22, $23::text::timestamptz,
-                     $24::text::timestamptz)
+                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20, $21,
+                     $22::text::timestamptz, $23, $24::text::timestamptz,
+                     $25::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                status = EXCLUDED.status,
                display_name = EXCLUDED.display_name,
@@ -3439,6 +3460,7 @@ where
                target_source_host_id = EXCLUDED.target_source_host_id,
                relocation_spec = EXCLUDED.relocation_spec,
                profile_picture_url = EXCLUDED.profile_picture_url,
+               owner_chat_account_id = EXCLUDED.owner_chat_account_id,
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                runner_id = EXCLUDED.runner_id,
                lease_token = EXCLUDED.lease_token,
@@ -3461,6 +3483,7 @@ where
                 &request.target_source_host_id,
                 &relocation,
                 &request.profile_picture_url,
+                &request.owner_chat_account_id,
                 &request.status.as_str(),
                 &request.requested_launch_code,
                 &request.agent_runtime_id,
@@ -4096,6 +4119,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -4129,6 +4153,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -5108,6 +5133,7 @@ where
                display_name, runner_class, hosting_tier, placement_runner_class,
                runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                target_source_host_id, relocation_spec, profile_picture_url,
+               owner_chat_account_id,
                status, requested_launch_code, agent_runtime_id,
                runner_id, lease_token, lease_expires_at::text, failure_message,
                created_at::text, updated_at::text
@@ -5137,6 +5163,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                     target_source_host_id, relocation_spec, profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
@@ -5196,6 +5223,7 @@ where
         target_source_host_id: Some(target_source_host_id),
         relocation: Some(relocation),
         profile_picture_url: current_creation.profile_picture_url,
+        owner_chat_account_id: current_creation.owner_chat_account_id,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: None,
         agent_runtime_id: Some(runtime.id.clone()),
@@ -8453,7 +8481,7 @@ impl CoreStore {
                         display_name, runner_class, hosting_tier, placement_runner_class,
                         runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                         target_source_host_id, relocation_spec,
-                        profile_picture_url, status, requested_launch_code, agent_runtime_id,
+                        profile_picture_url, owner_chat_account_id, status, requested_launch_code, agent_runtime_id,
                         runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                         core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
                  FROM agent_creation_requests WHERE id = $1",
@@ -9045,6 +9073,7 @@ mod tests {
                         }),
                         requested_hosting_tier: Some(HostingTier::Standard),
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -9117,6 +9146,148 @@ mod tests {
 
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_owner_chat_account_id_persists_and_lease_injects_spec_environment() {
+        with_isolated_postgres(|store| async move {
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-owner-npub-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:owner-npub-v1@sha256:{}",
+                        "5".repeat(64)
+                    ),
+                    version_label: "owner-npub-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            // Malformed owner chat identities are rejected before any durable
+            // state is minted; an npub is not accepted because the Hermes
+            // adapter allowlist and this column both speak 64-hex account ids.
+            let malformed = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub-bad@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub_bad".to_string(),
+                        display_name: "Owner Npub Bad".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:00Z").await,
+                        idempotency_key: "owner-npub-bad-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some(format!("npub1{}", "q".repeat(58))),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(malformed, CoreError::InvalidOwnerChatAccountId));
+
+            let owner_account_id = "a".repeat(64);
+            let created = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub".to_string(),
+                        display_name: "Owner Npub Agent".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:01Z").await,
+                        idempotency_key: "owner-npub-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some(owner_account_id.clone()),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                created.request.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+            let persisted = store
+                .agent_creation_request(&created.request.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                persisted.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "owner-npub-runner".to_string(),
+                    lease_token: "owner-npub-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let RuntimeSpecEnvelope::V1(spec) = lease.request.runtime_spec.as_ref().unwrap();
+            assert_eq!(
+                spec.environment.get("FINITECHAT_OWNER_NPUBS"),
+                Some(&owner_account_id)
+            );
+
+            // A request without the owner identity leases with the exact
+            // legacy environment: no FINITECHAT_OWNER_NPUBS key.
+            let legacy = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub-absent@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub_absent".to_string(),
+                        display_name: "Owner Npub Absent".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:02Z").await,
+                        idempotency_key: "owner-npub-absent-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(legacy.request.owner_chat_account_id, None);
+            let legacy_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "owner-npub-runner".to_string(),
+                    lease_token: "owner-npub-legacy-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let RuntimeSpecEnvelope::V1(legacy_spec) =
+                legacy_lease.request.runtime_spec.as_ref().unwrap();
+            assert!(
+                !legacy_spec
+                    .environment
+                    .contains_key("FINITECHAT_OWNER_NPUBS")
+            );
         })
         .await;
     }
@@ -10191,6 +10362,7 @@ mod tests {
                         )),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -10551,6 +10723,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -13788,6 +13961,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await

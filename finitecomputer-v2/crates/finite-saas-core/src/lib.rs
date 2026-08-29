@@ -65,7 +65,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0021_runtime_lifecycle.sql"),
     "\n",
-    include_str!("../migrations/0022_runtime_health_reports.sql")
+    include_str!("../migrations/0022_runtime_health_reports.sql"),
+    "\n",
+    include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -673,6 +675,8 @@ pub enum CoreError {
     MissingAgentCreationIdempotencyKey,
     #[error("agent profile picture URL is invalid")]
     InvalidAgentProfilePictureUrl,
+    #[error("owner chat account id must be 64 lowercase hex characters")]
+    InvalidOwnerChatAccountId,
     #[error("runtime contact endpoint is invalid")]
     InvalidRuntimeContactEndpoint,
     #[error("agent runtime id is required")]
@@ -1252,6 +1256,12 @@ pub struct AgentCreationRequest {
     #[serde(default)]
     pub relocation: Option<RuntimeRelocationEnvelope>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 lowercase hex), submitted by the
+    /// dashboard at creation time. Injected into the lease-time runtime spec
+    /// environment as `FINITECHAT_OWNER_NPUBS`; absent keeps the legacy
+    /// allow-all chat admission for pre-existing requests.
+    #[serde(default)]
+    pub owner_chat_account_id: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
     pub agent_runtime_id: Option<String>,
@@ -1731,6 +1741,10 @@ pub struct AgentCreationConfiguration {
     /// agent state; provider placement remains Core-owned.
     pub requested_hosting_tier: Option<HostingTier>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 hex), pre-minted and submitted by the
+    /// dashboard so the lease-time runtime spec can carry
+    /// `FINITECHAT_OWNER_NPUBS`. Absent keeps legacy allow-all chat admission.
+    pub owner_chat_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2954,9 +2968,14 @@ pub(crate) fn runtime_operation_spec_v1(
     } else {
         current.secret_references.clone()
     };
-    let environment = refreshed_environment
-        .cloned()
-        .unwrap_or_else(|| current.environment.clone());
+    // No carry-forward of `OWNER_CHAT_NPUBS_ENV` here: the value is only a
+    // birth-time seed. The sidecar's SQLite store consumes it once into the
+    // Welcome admission policy on first boot, so an upgrade-time environment
+    // refresh that drops it cannot reopen admission after that first boot.
+    let environment = match refreshed_environment {
+        Some(configured) => configured.clone(),
+        None => current.environment.clone(),
+    };
     build_runtime_spec_v1(
         identity,
         desired_artifact,
@@ -3111,6 +3130,32 @@ pub(crate) fn normalize_profile_picture_url(value: Option<&str>) -> CoreResult<O
         return Err(CoreError::InvalidAgentProfilePictureUrl);
     }
     Ok(Some(value))
+}
+
+/// Lease-time spec-environment key carrying the owner chat account id list
+/// (comma-separated 64-hex account ids). The runtime image derives the Hermes
+/// adapter allowlist and the sidecar Welcome allowlist from it. Deliberately
+/// not a reserved key: it is Core-managed per-request spec state, not
+/// Core-global operator configuration.
+pub(crate) const OWNER_CHAT_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
+
+/// The dashboard submits the hosted-device `identity.account_id`, which is the
+/// account's 64-hex public key; the Hermes adapter's `user_id` and the chat
+/// sidecar Welcome allowlist both consume that same hex form, so Core stores
+/// the canonical lowercase hex and accepts nothing else.
+pub(crate) fn normalize_owner_chat_account_id(value: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    if normalized.len() != 64
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CoreError::InvalidOwnerChatAccountId);
+    }
+    Ok(Some(normalized))
 }
 
 pub(crate) fn normalize_runtime_contact_endpoint(
@@ -4978,6 +5023,7 @@ mod tests {
                         profile_picture_url: Some(
                             "https://chat.finite.computer/v1/blobs/profile".to_string(),
                         ),
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -10358,6 +10404,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 ).await
                 .unwrap();

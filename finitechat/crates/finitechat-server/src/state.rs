@@ -2,6 +2,7 @@
 //! server-side record types they operate on.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
@@ -155,6 +156,75 @@ struct CachedReadiness {
     result: ServerReadiness,
 }
 
+/// Default allowance for the public mutating routes: generous headroom over
+/// what a healthy device can produce, tight enough to blunt naive abuse.
+/// Device-link export legitimately publishes and claims hundreds of
+/// KeyPackages per minute from one address, so the floor sits well above that.
+pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 1_200;
+pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
+
+/// Cap on tracked client buckets; past it, each check sweeps expired
+/// windows so a spray of spoofed/one-shot IPs cannot grow the map without
+/// bound.
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
+
+/// Hand-rolled fixed-window per-IP rate limiter for the public mutating
+/// routes (KeyPackages, pairing sessions, uploads, push-wake drains). A
+/// `Mutex<HashMap<IpAddr, (window_start, count)>>` is enough at the current
+/// fleet size and adds no dependency.
+#[derive(Debug)]
+pub(crate) struct PublicRouteRateLimiter {
+    max_requests: u32,
+    window: Duration,
+    max_entries: usize,
+    windows: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+}
+
+impl PublicRouteRateLimiter {
+    pub(crate) fn new(max_requests: u32, window_seconds: u64) -> Self {
+        Self {
+            max_requests,
+            window: Duration::from_secs(window_seconds),
+            max_entries: MAX_RATE_LIMIT_ENTRIES,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one request from `ip`; false once the window allowance is spent.
+    pub(crate) fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if windows.len() >= self.max_entries {
+            windows.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        }
+        match windows.get_mut(&ip) {
+            Some((started, count)) if now.duration_since(*started) < self.window => {
+                if *count >= self.max_requests {
+                    return false;
+                }
+                *count += 1;
+                true
+            }
+            _ => {
+                windows.insert(ip, (now, 1));
+                true
+            }
+        }
+    }
+}
+
+impl Default for PublicRouteRateLimiter {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_RATE_LIMIT_PER_WINDOW,
+            DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HttpServerState {
     service: Arc<Mutex<HttpDeliveryService>>,
@@ -182,6 +252,15 @@ pub struct HttpServerState {
     /// Canonical externally reachable origin used in durable blob references.
     /// Request-derived hosts remain the local-development fallback only.
     public_url: Option<String>,
+    /// Mixed-version rollout gate for NIP-98 request auth on account-scoped
+    /// routes. When false, requests without an `Authorization` header are
+    /// still accepted (old clients) and a present-but-invalid header is
+    /// logged and ignored (upgraded clients may sign a dial URL that differs
+    /// from this server's public URL). When true, a missing or invalid
+    /// header is rejected. A signature that validates binds the signer to
+    /// the body account in both modes.
+    require_signed_requests: bool,
+    rate_limiter: Arc<PublicRouteRateLimiter>,
     ops_since_snapshot: Arc<Mutex<u64>>,
     /// True while a snapshot persist runs on its background thread; op
     /// triggers that land in the meantime skip instead of stacking threads.
@@ -277,6 +356,8 @@ impl HttpServerState {
             blob_meta: Arc::new(Mutex::new(BTreeMap::new())),
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
@@ -291,6 +372,30 @@ impl HttpServerState {
     ) -> Result<Self, HttpServerConfigurationError> {
         self.public_url = Some(normalize_public_url(public_url.as_ref())?);
         Ok(self)
+    }
+
+    pub fn with_require_signed_requests(mut self, require_signed_requests: bool) -> Self {
+        self.require_signed_requests = require_signed_requests;
+        self
+    }
+
+    pub fn with_rate_limit(mut self, max_requests: u32, window_seconds: u64) -> Self {
+        self.rate_limiter = Arc::new(PublicRouteRateLimiter::new(max_requests, window_seconds));
+        self
+    }
+
+    /// Record one request to a public mutating route from `ip`; false once
+    /// the per-IP window allowance is spent.
+    pub(crate) fn check_public_route_rate_limit(&self, ip: IpAddr) -> bool {
+        self.rate_limiter.check(ip)
+    }
+
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
+    }
+
+    pub(crate) fn require_signed_requests(&self) -> bool {
+        self.require_signed_requests
     }
 
     pub fn from_sqlite_path(path: impl AsRef<Path>) -> Result<Self, DurableStoreError> {
@@ -377,6 +482,8 @@ impl HttpServerState {
             blob_meta: Arc::new(Mutex::new(blob_meta)),
             blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
@@ -4446,6 +4553,47 @@ fn key_package_claim_inventory_records(
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::PublicRouteRateLimiter;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    fn len(limiter: &PublicRouteRateLimiter) -> usize {
+        limiter.windows.lock().expect("windows").len()
+    }
+
+    #[test]
+    fn expired_windows_are_evicted_once_the_map_hits_the_cap() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 0);
+        limiter.max_entries = 2;
+
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        assert_eq!(len(&limiter), 2);
+        // The third distinct IP triggers the sweep; with a zero-length window
+        // every entry is stale, so the map shrinks instead of growing.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 1);
+    }
+
+    #[test]
+    fn live_windows_survive_the_sweep() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 60);
+        limiter.max_entries = 2;
+
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        // All entries are live, so the sweep evicts nothing and the cap is a
+        // soft bound for genuinely concurrent clients.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 3);
+    }
 }
 
 #[cfg(test)]
