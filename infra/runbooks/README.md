@@ -48,6 +48,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [lat4-nixos-runner-install.md](lat4-nixos-runner-install.md) | **ADR 0007 model, third Runner host** — pre-wipe verification, CI-artifact bare-metal install, drained bring-up, and the admission decision for finite-lat-4 |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
+| [runner-finite-private-route.md](runner-finite-private-route.md) | Guarded removal of stale host-local Finite Private route/model overrides on the active Kata Runners |
 | [finite-private-deepseek-production-update.md](finite-private-deepseek-production-update.md) | Guarded promotion of the measured DeepSeek 128/2048 scheduler and canonical model label, with exact current DeepSeek rollback |
 | [finite-private-routing-migration.md](finite-private-routing-migration.md) | Staged migration from the historical Kimi container/hostname to the stable `finite-private` identity without breaking issued Runtime readers |
 | [runtime-cold-relocation.md](runtime-cold-relocation.md) | Operator-only stopped Kata Runtime move between exact hosts, with state-manifest and Agent Principal fencing |

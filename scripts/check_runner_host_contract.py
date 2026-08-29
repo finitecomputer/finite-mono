@@ -31,6 +31,10 @@ EXPECTED_MAX_SANDBOXES = {
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
 OPERATOR_ENV_PATH = "/etc/finite/runner.env"
+OPERATOR_ENV_TEMPLATES = (
+    ROOT / "infra/nixos/hosts/finite-lat-3/runner.env.example",
+    ROOT / "infra/nixos/hosts/finite-lat-4/runner.env.example",
+)
 
 # Keys the host configs set through finite.kataRunnerHost.*. Everything else
 # in the rendered shared env must be identical across hosts.
@@ -55,6 +59,10 @@ CANONICAL_FINITE_PRIVATE_MODEL = "glm-5-3-flash"
 # (infra/runbooks/runtime-image.md). A rendered default was only ever a stale
 # shadow of it, so the shared env must not carry one.
 OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
+NIX_OWNED_FINITE_PRIVATE_KEYS = {
+    "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+    "FC_RUNNER_FINITE_PRIVATE_MODEL",
+}
 
 # systemd.services.finite-saas-runner.environment key that is legitimately
 # per-host (loopback Authority on the Core host, overlay proxy on a remote
@@ -159,6 +167,18 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             )
 
 
+def check_operator_env_templates() -> None:
+    for template in OPERATOR_ENV_TEMPLATES:
+        keys = set(parse_env(template.read_text(encoding="utf-8")))
+        shadowed = sorted(keys & NIX_OWNED_FINITE_PRIVATE_KEYS)
+        if shadowed:
+            raise SystemExit(
+                f"{template.relative_to(ROOT)} shadows Nix-owned Runner keys "
+                f"{shadowed}; keep the Finite Private route/model only in "
+                "infra/nixos/modules/kata-runner-host.nix"
+            )
+
+
 def check_unit_fragments() -> None:
     # Evaluated leaf attributes; whole-service eval touches options with no
     # defined value. requires/after/wants and unitConfig legitimately differ:
@@ -240,6 +260,7 @@ def check_unit_fragments() -> None:
 
 
 def main() -> None:
+    check_operator_env_templates()
     envs = {
         host: parse_env(
             nix_eval(host, 'environment.etc."finite/runner-shared.env".text', raw=True)
