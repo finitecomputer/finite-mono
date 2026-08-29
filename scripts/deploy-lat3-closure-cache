@@ -227,7 +227,32 @@ done
 
 echo "==> mutation boundary: switching finite-lat-3 to $system"
 nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
+set +e
 "$system/bin/switch-to-configuration" switch
+stc_rc=$?
+set -e
+if [[ "$stc_rc" != 0 ]]; then
+  # A cold-start runner failure is recoverable by design: the unit is a
+  # 5s-retry oneshot, and its first attempt can race networkd's interface
+  # configuration while the switch restarts networkd (hub flip). If the
+  # runner is the ONLY failed unit, wait for the overlay address and
+  # start it once more before treating the switch as failed.
+  if systemctl is-failed --quiet finite-saas-runner.service \
+    && ! systemctl --failed --no-legend | grep -qv finite-saas-runner.service; then
+    echo "==> runner failed its cold-start attempt; waiting for the overlay and retrying once" >&2
+    overlay_wait=0
+    until ip -4 addr show dev wg-finite 2>/dev/null | grep -q "inet 10.254.3." || (( overlay_wait >= 60 )); do
+      sleep 1
+      overlay_wait=$((overlay_wait + 1))
+    done
+    systemctl reset-failed finite-saas-runner.service
+    systemctl start finite-saas-runner.service
+    echo "==> runner retry succeeded after overlay came up" >&2
+  else
+    echo "switch-to-configuration failed (rc=$stc_rc) with non-runner failures" >&2
+    exit 1
+  fi
+fi
 test "$(readlink -f /run/current-system)" = "$system"
 test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
 
