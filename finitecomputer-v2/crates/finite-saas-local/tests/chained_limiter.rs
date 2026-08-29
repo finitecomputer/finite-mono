@@ -48,11 +48,11 @@ async fn deployed_limiter_double(
             .into_response();
     }
     let request = serde_json::from_slice::<Value>(&body).unwrap();
-    assert_eq!(request["model"], "deepseek-v4-flash-0731");
+    assert_eq!(request["model"], "glm-5-3-flash");
     state.calls.fetch_add(1, Ordering::SeqCst);
     axum::Json(json!({
         "id": "chatcmpl_chained",
-        "model": "deepseek-v4-flash-0731",
+        "model": "glm-5-3-flash",
         "choices": [{ "message": { "role": "assistant", "content": "ok" }}],
         "usage": {
             "prompt_tokens": 100,
@@ -181,7 +181,7 @@ async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key(
         .bearer_auth(LOCAL_RUNTIME_KEY)
         .header("x-request-id", "req-chained-ok")
         .json(&json!({
-            "model": "deepseek-v4-flash-0731",
+            "model": "glm-5-3-flash",
             "messages": [{ "role": "user", "content": "hello" }],
             "max_tokens": 64
         }))
@@ -191,7 +191,7 @@ async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key(
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "ok");
-    assert_eq!(body["model"], "deepseek-v4-flash-0731");
+    assert_eq!(body["model"], "glm-5-3-flash");
     assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
 
     // A key unknown to local Core is denied locally, before the upstream hop.
@@ -200,7 +200,7 @@ async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key(
         .bearer_auth("fpk_not_provisioned_here")
         .header("x-request-id", "req-chained-denied")
         .json(&json!({
-            "model": "deepseek-v4-flash-0731",
+            "model": "glm-5-3-flash",
             "messages": [{ "role": "user", "content": "hello" }],
             "max_tokens": 64
         }))

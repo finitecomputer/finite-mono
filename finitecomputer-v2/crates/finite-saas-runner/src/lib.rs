@@ -57,12 +57,16 @@ const IDENTITY_BINDING_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
-// The deployed limiter domain keeps the historical kimi-k2-6 name but now
-// serves DeepSeek V4 Flash 0731 (see docs/service-dependencies.md, Finite
-// Private Routing Debt). Do not rename the URL as a cosmetic change.
+// Live Finite Private route after the 2026-08-28 GLM cutover. The historical
+// kimi-k2-6 hostname is retired; issued Runtime env still needs the Hermes
+// rewrite in finitechat/containers/agent until those agents upgrade.
 pub const DEFAULT_FINITE_PRIVATE_BASE_URL: &str =
+    "https://finite-private.finite.containers.tinfoil.dev/v1";
+pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "glm-5-3-flash";
+pub const HISTORICAL_FINITE_PRIVATE_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "deepseek-v4-flash-0731";
+pub const FINITE_PRIVATE_MODEL_ALIASES: &[&str] =
+    &["deepseek-v4-flash-0731", "glm-5-2", "glm-5.3-flash"];
 pub const DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH: usize = 393_216;
 pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
@@ -1558,11 +1562,17 @@ impl Default for FinitePrivateRuntimeDefaults {
     }
 }
 
+fn is_canonical_finite_private_profile(model: &str) -> bool {
+    model == DEFAULT_FINITE_PRIVATE_MODEL || FINITE_PRIVATE_MODEL_ALIASES.contains(&model)
+}
+
 fn specialization_bundle_for_finite_private_profile(
     defaults: &FinitePrivateRuntimeDefaults,
 ) -> Result<Option<SpecializationBundleRuntimeDefaults>, RunnerError> {
     // This is a profile decision, never a host, customer, or agent-name decision.
-    if defaults.model != DEFAULT_FINITE_PRIVATE_MODEL {
+    // Mixed-version aliases still hit the same GLM replica, so they keep the
+    // Finite Private specialization bundle.
+    if !is_canonical_finite_private_profile(&defaults.model) {
         return Ok(None);
     }
     defaults
@@ -3911,6 +3921,24 @@ mod tests {
     }
 
     #[test]
+    fn specialization_bundle_stays_on_for_mixed_version_finite_private_aliases() {
+        for alias in FINITE_PRIVATE_MODEL_ALIASES {
+            let profile = FinitePrivateRuntimeDefaults {
+                model: (*alias).to_owned(),
+                specialization_bundle: Some(specialization_bundle_defaults()),
+                ..FinitePrivateRuntimeDefaults::default()
+            };
+            let bundle = specialization_bundle_for_finite_private_profile(&profile)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{alias} should keep the Finite Private bundle"));
+            assert_eq!(
+                bundle.bundle_id,
+                DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
+            );
+        }
+    }
+
+    #[test]
     fn captured_provider_output_is_drained_before_the_child_exits() {
         let child = Command::new("sh")
             .arg("-c")
@@ -5173,7 +5201,7 @@ mod tests {
         assert_eq!(finite_private.raw_api_key, "fpk_live_test");
         assert_eq!(finite_private.base_url, DEFAULT_FINITE_PRIVATE_BASE_URL);
         assert_eq!(finite_private.model, DEFAULT_FINITE_PRIVATE_MODEL);
-        assert_eq!(finite_private.model, "deepseek-v4-flash-0731");
+        assert_eq!(finite_private.model, "glm-5-3-flash");
         let specialization_bundle = finite_private
             .specialization_bundle
             .as_ref()
@@ -5605,15 +5633,17 @@ mod tests {
         assert_env(&env, "FINITECHAT_WORKSPACE", "/data/workspace");
         assert_env(&env, "FINITECHAT_HERMES_AGENT_DEVICE_ID", "agent");
         assert_env(&env, "FINITECHAT_HERMES_PROVIDER", "custom");
-        assert_env(&env, "FINITECHAT_HERMES_MODEL", "deepseek-v4-flash-0731");
-        assert_env(&env, "FINITE_PRIVATE_MODEL", "deepseek-v4-flash-0731");
+        assert_env(&env, "FINITECHAT_HERMES_MODEL", "glm-5-3-flash");
+        assert_env(&env, "FINITE_PRIVATE_MODEL", "glm-5-3-flash");
         assert_env(&env, "FINITE_PRIVATE_CONTEXT_LENGTH", "393216");
-        // The endpoint domain keeps the historical kimi name; the served model
-        // is DeepSeek V4 Flash 0731.
         assert_env(
             &env,
             "FINITECHAT_HERMES_BASE_URL",
-            "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        );
+        assert_ne!(
+            DEFAULT_FINITE_PRIVATE_BASE_URL,
+            HISTORICAL_FINITE_PRIVATE_BASE_URL
         );
         assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
         assert_env(&env, "OPENAI_API_KEY", "fpk_live_test");

@@ -212,7 +212,7 @@ Direct-provider modes:
 
 - `SKILL_AB_PROVIDER=finite-private`: default; uses the local Finite Private
   key and the deployed Finite Private streaming chat-completions endpoint.
-  The current shim disables DeepSeek thinking for artifact generation because
+  The current shim disables GLM thinking for artifact generation because
   the active rollout otherwise spends the response budget on reasoning.
 - `SKILL_AB_PROVIDER=openai`: explicit toggle for OpenAI's Responses API.
 - There is no automatic fallback between providers; choose the provider you
@@ -226,8 +226,8 @@ Finite Private settings:
 - Devfinity state override: `DEVFINITY_STATE_DIR`
 - Base URL: `SKILL_AB_FINITE_PRIVATE_BASE_URL`, `FINITE_PRIVATE_BASE_URL`, or
   `FC_RUNNER_FINITE_PRIVATE_BASE_URL`
-- Default base URL: `https://kimi-k2-6.finite.containers.tinfoil.dev/v1`
-- Default model: `deepseek-v4-flash-0731`. This tracks the currently deployed
+- Default base URL: `https://finite-private.finite.containers.tinfoil.dev/v1`
+- Default model: `glm-5-3-flash`. This tracks the currently deployed
   Finite Private rollout and may need to change with the next model rollout.
 - `SKILL_AB_FINITE_PRIVATE_TIMEOUT_MS=1200000`: wait up to 20 minutes for the
   current streaming model path before failing a provider call.
@@ -249,7 +249,7 @@ Common settings:
 Override them as environment variables:
 
 ```sh
-SKILL_AB_MODEL=deepseek-v4-flash-0731 SKILL_AB_MAX_CONCURRENCY=2 pnpm run ab
+SKILL_AB_MODEL=glm-5-3-flash SKILL_AB_MAX_CONCURRENCY=2 pnpm run ab
 ```
 
 OpenAI is available as an explicit mode:

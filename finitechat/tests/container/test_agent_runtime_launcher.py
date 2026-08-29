@@ -34,9 +34,9 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
     @staticmethod
     def _reconciler_settings() -> dict[str, str]:
         return {
-            "FINITE_CONFIG_MODEL": "deepseek-v4-flash-0731",
+            "FINITE_CONFIG_MODEL": "glm-5-3-flash",
             "FINITE_CONFIG_PROVIDER": "custom",
-            "FINITE_CONFIG_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            "FINITE_CONFIG_BASE_URL": "https://finite-private.finite.containers.tinfoil.dev/v1",
             "FINITE_CONFIG_CONTEXT_LENGTH": "393216",
             "FINITE_CONFIG_API_MODE": "chat_completions",
             "FINITE_CONFIG_API_KEY_REFERENCE": "${FINITE_PRIVATE_API_KEY}",
@@ -51,7 +51,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _gateway_model(*, model: str, base_url: str) -> str:
+    def _gateway_model(*, model: str, base_url: str) -> tuple[str, str]:
         launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -64,7 +64,8 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             capture.write_text(
                 "import os, pathlib\n"
                 "pathlib.Path(os.environ['MODEL_CAPTURE']).write_text("
-                "os.environ['FINITE_CONFIG_MODEL'])\n",
+                "os.environ['FINITE_CONFIG_MODEL'] + '\\n' + "
+                "os.environ['FINITE_CONFIG_BASE_URL'])\n",
                 encoding="utf-8",
             )
             model_capture = tmp / "model.txt"
@@ -97,25 +98,48 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
             if result.returncode != 0:
                 raise AssertionError(result.stderr)
-            return model_capture.read_text(encoding="utf-8")
+            captured = model_capture.read_text(encoding="utf-8").splitlines()
+            return captured[0], captured[1]
 
-    def test_gateway_maps_finite_private_legacy_alias_to_deepseek(self) -> None:
-        self.assertEqual(
-            self._gateway_model(
-                model="glm-5-2",
-                base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-            ),
-            "deepseek-v4-flash-0731",
+    def test_gateway_rewrites_historical_route_and_legacy_model(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5-2",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
         )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_deepseek_label_on_the_historical_route(self) -> None:
+        model, base_url = self._gateway_model(
+            model="deepseek-v4-flash-0731",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_dotted_glm_name_on_the_live_route(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5.3-flash",
+            base_url="https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_historical_url_when_model_is_already_canonical(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5-3-flash",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
 
     def test_gateway_preserves_legacy_name_for_a_custom_endpoint(self) -> None:
-        self.assertEqual(
-            self._gateway_model(
-                model="glm-5-2",
-                base_url="https://inference.example.com/v1",
-            ),
-            "glm-5-2",
+        model, base_url = self._gateway_model(
+            model="glm-5-2",
+            base_url="https://inference.example.com/v1",
         )
+        self.assertEqual(model, "glm-5-2")
+        self.assertEqual(base_url, "https://inference.example.com/v1")
 
     def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
         reconciled = self._reconcile_config(None, self._reconciler_settings())
@@ -123,9 +147,9 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         self.assertEqual(
             reconciled["model"],
             {
-                "default": "deepseek-v4-flash-0731",
+                "default": "glm-5-3-flash",
                 "provider": "custom",
-                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
                 "context_length": 393216,
                 "api_mode": "chat_completions",
                 "api_key": "${FINITE_PRIVATE_API_KEY}",
@@ -146,9 +170,32 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
         reconciled = self._reconcile_config(existing, self._reconciler_settings())
 
-        self.assertEqual(reconciled["model"]["default"], "deepseek-v4-flash-0731")
+        self.assertEqual(reconciled["model"]["default"], "glm-5-3-flash")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
         self.assertEqual(reconciled["model"]["context_length"], 393216)
         self.assertEqual(reconciled["model"]["temperature"], 0.4)
+
+    def test_reconciler_migrates_deepseek_image_owned_default(self) -> None:
+        existing = {
+            "model": {
+                "default": "deepseek-v4-flash-0731",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(reconciled["model"]["default"], "glm-5-3-flash")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
 
     def test_reconciler_preserves_user_selected_model(self) -> None:
         model = {
@@ -160,6 +207,25 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         reconciled = self._reconcile_config({"model": model.copy()}, self._reconciler_settings())
 
         self.assertEqual(reconciled["model"], model)
+
+    def test_reconciler_rewrites_retired_url_but_keeps_a_non_alias_model(self) -> None:
+        existing = {
+            "model": {
+                "default": "user-chosen-model",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(reconciled["model"]["default"], "user-chosen-model")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
 
     def test_reconciler_preserves_near_match_with_custom_route(self) -> None:
         model = {

@@ -66,9 +66,9 @@ CONTRACT: dict[str, Any] = {
         "artifact_variable": "FC_RUNNER_RUNTIME_ARTIFACT_ID",
         "base_url_variable": "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
         "model_variable": "FC_RUNNER_FINITE_PRIVATE_MODEL",
-        "expected_base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-        "expected_model": "deepseek-v4-flash-0731",
-        "mixed_version_models": ["glm-5-2"],
+        "expected_base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+        "expected_model": "glm-5-3-flash",
+        "mixed_version_models": ["glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash"],
     },
     "recovery": {
         "snapshot_root": "/data/recovery-snapshots/hosted-web-chat",

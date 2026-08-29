@@ -46,8 +46,10 @@ PER_HOST_KEYS = {
 # The shared default whose hand-set drift halted a rollout; pinned by the
 # shared module and asserted here.
 SHARED_STOP_TIMEOUT = "180"
-CANONICAL_FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
-CANONICAL_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731"
+CANONICAL_FINITE_PRIVATE_BASE_URL = (
+    "https://finite-private.finite.containers.tinfoil.dev/v1"
+)
+CANONICAL_FINITE_PRIVATE_MODEL = "glm-5-3-flash"
 
 # The promoted Runtime artifact is an operator-managed pin in runner.env
 # (infra/runbooks/runtime-image.md). A rendered default was only ever a stale
@@ -117,14 +119,13 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             != CANONICAL_FINITE_PRIVATE_BASE_URL
         ):
             raise SystemExit(
-                f"{host}: Finite Private base URL is not the historical "
-                "compatibility route"
+                f"{host}: Finite Private base URL is not the live finite-private route"
             )
         if (
             envs[host].get("FC_RUNNER_FINITE_PRIVATE_MODEL")
             != CANONICAL_FINITE_PRIVATE_MODEL
         ):
-            raise SystemExit(f"{host}: Finite Private model is not canonical DeepSeek")
+            raise SystemExit(f"{host}: Finite Private model is not canonical GLM-5.3-Flash")
 
     for host in others:
         keys_a, keys_b = set(envs[reference]), set(envs[host])
