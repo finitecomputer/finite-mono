@@ -5009,11 +5009,18 @@ where
     }
     let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
     // `offline` is the cleanly-stopped precondition. Under the operator's
-    // compute-absent attestation, `stale` is also frozen: a failed control
-    // marks a runtime stale, and absent compute can never reach `offline`
-    // because the stop that would record it fails by definition.
+    // compute-absent attestation, `stale` AND `online` are also frozen: a
+    // failed control marks a runtime stale, and absent compute can never
+    // reach `offline` because the stop that would record it fails by
+    // definition. `online` is the last runner report before the source
+    // host died — under the attestation nothing could have updated it
+    // since (the dead host's runner is gone, so no control can lease and
+    // no report can arrive), making it exactly as frozen as `stale`.
+    // Without the attestation `online` stays movable-only-by-nothing: an
+    // operator must not relocate a runtime that may still be running.
     let source_status_frozen = match runtime.host_facts.runtime_status {
         RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Online => input.operator_observed_compute_absent,
         RuntimeSummaryStatus::Stale => input.operator_observed_compute_absent,
         _ => false,
     };
@@ -10494,6 +10501,146 @@ mod tests {
 
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cold_relocation_accepts_online_source_only_under_absence_attestation() {
+        with_isolated_postgres(|store| async move {
+            let run = "cold-relocate-online";
+            let source_host = "relocate-online-source";
+            let target_host = "relocate-online-target";
+            let machine = "finite-kata-relocate-online";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "relocate-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Online Relocation Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    source_host_id: Some(source_host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: source_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4203/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Online Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(source_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+
+            // Without the operator's compute-absent attestation an online
+            // source is NOT frozen: it may still be running, so the exact
+            // relocation must refuse.
+            let unattested = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
+                    now: None,
+                })
+                .await;
+            assert!(matches!(
+                unattested,
+                Err(CoreError::RuntimeControlUnsupported)
+            ));
+
+            // Under the attestation the pre-death `online` report is exactly
+            // as frozen as `stale`: the dead host's runner can neither lease
+            // a control nor file a fresh report, so nothing could have moved
+            // the runtime since the host died.
+            let relocation = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
         })
         .await;
     }

@@ -2736,13 +2736,16 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Ok(());
     };
     let existing_runtime = existing_runtime.ok_or(CoreError::RuntimeSpecMismatch)?;
-    // `offline` is the cleanly-stopped case; `stale` is acceptable only when
-    // the envelope itself was minted under the operator's compute-absent
-    // attestation (a failed control marks a runtime stale, and absent
-    // compute can never produce the stop receipt that would make it
-    // offline).
+    // `offline` is the cleanly-stopped case; `stale` and `online` are
+    // acceptable only when the envelope itself was minted under the
+    // operator's compute-absent attestation (a failed control marks a
+    // runtime stale, and absent compute can never produce the stop
+    // receipt that would make it offline; `online` is the pre-death last
+    // report, equally frozen once the operator attests the compute is
+    // absent — keep in sync with the enqueue gate in store.rs).
     let source_status_frozen = match existing_runtime.host_facts.runtime_status {
         RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Online => relocation.source_compute_absent,
         RuntimeSummaryStatus::Stale => relocation.source_compute_absent,
         _ => false,
     };
