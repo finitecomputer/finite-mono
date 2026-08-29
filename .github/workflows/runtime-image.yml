@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
@@ -137,8 +138,8 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Publish and verify the non-production canary
         id: canary
@@ -176,8 +177,8 @@ jobs:
           BUILD_ID: ${{ steps.build.outputs.build_id }}
           SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project_id }}
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
