@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1116,6 +1116,9 @@ struct AppRuntimeState {
     downloading_attachments: BTreeSet<(String, String, String)>,
     bridge_seen_joined_account_ids: BTreeSet<String>,
     room_sync_failures: BTreeSet<String>,
+    /// Hint-path backoff for quarantined rooms; entries exist exactly for
+    /// the room ids in `room_sync_failures`.
+    room_sync_hint_backoffs: RoomSyncHintBackoffs,
     inbox_hint_after_seq: u64,
     profile_chat_bootstrap_preparations: BTreeMap<String, AppProfileChatBootstrapPreparedCommit>,
     /// False only while a fresh Device is using the provisional first-room
@@ -1155,11 +1158,153 @@ struct AppRuntimeWaitPlan {
 struct CoreSyncProjection {
     result: SyncResult,
     events: Vec<StoredAppEvent>,
-    room_sync_failures: Vec<String>,
+    room_sync_failures: Vec<RoomSyncFailure>,
     /// Blob references captured while projecting `result.messages`, keyed
     /// `(room_id, message_id)`. Carried alongside the FFI record so the app
     /// projection and the attachment cache never re-decode payloads.
     attachment_blobs: AttachmentBlobMap,
+}
+
+/// One quarantined room sync: the room tick fetched a page the device could
+/// not apply (class `Client`), so the durable cursor stays frozen at
+/// `after_seq` while the room's server-side `last_seq` remains ahead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RoomSyncFailure {
+    room_id: String,
+    /// Durable cursor the rejected page starts after. Frozen until repair.
+    after_seq: u64,
+    /// Bounded, single-line rendering of the rejected apply error.
+    error: String,
+}
+
+/// Initial hint-path retry delay for a freshly quarantined room sync.
+const ROOM_SYNC_HINT_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+/// Ceiling for the hint-path retry delay of a quarantined room sync, and the
+/// maximum rate at which a persistently quarantined room is re-reported on
+/// stderr (the sidecar's stderr reaches `nerdctl logs` via agentd's
+/// supervisor).
+const ROOM_SYNC_HINT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// Hint-path backoff state for one quarantined room.
+#[derive(Debug)]
+struct RoomSyncHintBackoff {
+    consecutive_failures: u32,
+    last_failure: Instant,
+    last_report: Option<Instant>,
+}
+
+impl RoomSyncHintBackoff {
+    fn new(now: Instant) -> Self {
+        Self {
+            consecutive_failures: 1,
+            last_failure: now,
+            last_report: None,
+        }
+    }
+
+    fn bump(&mut self, now: Instant) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.last_failure = now;
+    }
+
+    /// Exponential retry delay: 1s, 2s, 4s, ... capped at
+    /// `ROOM_SYNC_HINT_BACKOFF_MAX`.
+    fn retry_delay(&self) -> Duration {
+        let shifts = self.consecutive_failures.saturating_sub(1).min(16);
+        ROOM_SYNC_HINT_BACKOFF_INITIAL
+            .saturating_mul(1u32 << shifts)
+            .min(ROOM_SYNC_HINT_BACKOFF_MAX)
+    }
+
+    fn retry_ready(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_failure) >= self.retry_delay()
+    }
+
+    /// A quarantine report is due on entry and then at most once per
+    /// backoff-cap interval while the room stays quarantined.
+    fn report_due(&self, now: Instant) -> bool {
+        self.last_report.is_none_or(|reported| {
+            now.saturating_duration_since(reported) >= ROOM_SYNC_HINT_BACKOFF_MAX
+        })
+    }
+}
+
+/// Per-room hint-path backoff for quarantined room syncs.
+///
+/// A quarantined room's server `last_seq` is permanently ahead of its frozen
+/// durable cursor, so every freshly opened sync stream re-emits
+/// `RoomAdvanced` for the same rejected page. Acting on every hint re-fetches
+/// that page forever — the production sidecar livelock (one agent at 25
+/// fetches/s, ~50 GB egress, invisible: every request succeeds). The hint
+/// path therefore backs off exponentially per quarantined room while the
+/// periodic full reconciliation keeps retrying the room at its own cadence.
+/// Rooms without an entry (healthy, or never quarantined) never defer.
+#[derive(Debug, Default)]
+struct RoomSyncHintBackoffs {
+    entries: BTreeMap<String, RoomSyncHintBackoff>,
+}
+
+impl RoomSyncHintBackoffs {
+    fn record_failure(&mut self, room_id: &str, now: Instant) -> &mut RoomSyncHintBackoff {
+        use std::collections::btree_map::Entry;
+        match self.entries.entry(room_id.to_owned()) {
+            Entry::Vacant(vacant) => vacant.insert(RoomSyncHintBackoff::new(now)),
+            Entry::Occupied(mut occupied) => {
+                occupied.get_mut().bump(now);
+                occupied.into_mut()
+            }
+        }
+    }
+
+    fn clear(&mut self, room_id: &str) {
+        self.entries.remove(room_id);
+    }
+
+    /// True when a `RoomAdvanced` hint for this quarantined room must be
+    /// cheaply ignored rather than re-fetched: the room is quarantined and
+    /// its retry delay has not yet elapsed.
+    fn defers_hint(&self, room_id: &str, now: Instant) -> bool {
+        self.entries
+            .get(room_id)
+            .is_some_and(|entry| !entry.retry_ready(now))
+    }
+}
+
+/// Single-line, length-bounded rendering of a quarantined apply error for
+/// stderr and status surfaces. `RuntimeWorkerError` Display strings are
+/// operator diagnostics, never secrets.
+fn compact_failure_reason(reason: &str) -> String {
+    const MAX_REASON_CHARS: usize = 240;
+    let flattened = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if flattened.chars().count() <= MAX_REASON_CHARS {
+        return flattened;
+    }
+    let mut bounded = flattened.chars().take(MAX_REASON_CHARS).collect::<String>();
+    bounded.push_str("...");
+    bounded
+}
+
+/// The bounded stderr line emitted when a room enters (or remains in) sync
+/// quarantine. Names the room, the frozen cursor the rejected page starts
+/// after, the failure class, and the current hint-path backoff so an
+/// operator can move straight to `finitechat diagnose rejected-entry`.
+fn room_sync_quarantine_report(failure: &RoomSyncFailure, hint_retry_delay: Duration) -> String {
+    format!(
+        "finitechat room sync quarantined: room={} rejected_after_seq={} error=\"{}\" hint_retry_delay_ms={} (periodic full sync keeps retrying; repair with `finitechat repair skip-entry`)",
+        failure.room_id,
+        failure.after_seq,
+        failure.error,
+        hint_retry_delay.as_millis()
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2533,6 +2678,7 @@ impl AppRuntimeState {
             downloading_attachments: BTreeSet::new(),
             bridge_seen_joined_account_ids: BTreeSet::new(),
             room_sync_failures: BTreeSet::new(),
+            room_sync_hint_backoffs: RoomSyncHintBackoffs::default(),
             inbox_hint_after_seq: 0,
             profile_chat_bootstrap_preparations: BTreeMap::new(),
             selection_is_explicit_or_bootstrapped,
@@ -2915,12 +3061,24 @@ impl AppRuntimeState {
 
     fn wait_plan(&self, timeout_millis: u64) -> AppRuntimeWaitPlan {
         let server_url = self.core.server_url.clone();
+        // A quarantined room's cursor is permanently behind the server head,
+        // so watching it makes every freshly opened stream re-emit
+        // RoomAdvanced instantly — the fan that drove the hint livelock.
+        // Backed-off rooms are excluded from the watch; they rejoin (and get
+        // instant hints again) as soon as a full reconciliation recovers
+        // them or their backoff window expires.
+        let now = Instant::now();
         let rooms = self
             .core
             .device
             .room_sync_cursors()
             .into_iter()
             .filter(|cursor| cursor.server_url.as_deref().unwrap_or(&server_url) == server_url)
+            .filter(|cursor| {
+                !self
+                    .room_sync_hint_backoffs
+                    .defers_hint(&cursor.room_id, now)
+            })
             .map(|cursor| SyncWaitRoom {
                 room_id: cursor.room_id,
                 after_seq: cursor.after_seq,
@@ -2967,6 +3125,14 @@ impl AppRuntimeState {
         // Room/activity hints name an exact, already-watched scope. Unknown
         // scopes and inbox work retain the full reconciliation path.
         match event {
+            // Quarantined room inside its backoff window: cheaply ignore the
+            // hint (see `agent_bridge_apply_sync_hint`); the periodic
+            // runtime tick retries the room.
+            SyncHintEvent::RoomAdvanced { room_id, .. }
+                if self.core.has_room(room_id)
+                    && self
+                        .room_sync_hint_backoffs
+                        .defers_hint(room_id, Instant::now()) => {}
             SyncHintEvent::RoomAdvanced { room_id, .. } if self.core.has_room(room_id) => {
                 self.expire_ephemeral_activity()?;
                 let synced = self.core.sync_room_with_projection(room_id)?;
@@ -2991,7 +3157,7 @@ impl AppRuntimeState {
     fn runtime_tick(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
-        self.room_sync_failures = synced.room_sync_failures.iter().cloned().collect();
+        self.absorb_full_room_sync_failures(&synced.room_sync_failures);
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
@@ -3000,20 +3166,74 @@ impl AppRuntimeState {
         Ok(())
     }
 
+    /// Fold one targeted room-sync outcome into the quarantine set, the
+    /// hint-path backoff, and the bounded stderr report. A fresh successful
+    /// apply clears both the quarantine and the backoff, so a repaired room
+    /// syncs immediately on its next hint again.
+    fn absorb_targeted_room_sync_outcome(
+        &mut self,
+        room_id: &str,
+        failure: Option<&RoomSyncFailure>,
+    ) {
+        match failure {
+            Some(failure) => self.note_room_sync_failure(failure),
+            None => self.note_room_sync_recovered(room_id),
+        }
+    }
+
+    /// Fold a full-reconciliation failure list: every still-failing room
+    /// bumps its backoff (and re-reports at the bounded rate); every room
+    /// that used to be quarantined but now applies cleanly is recovered.
+    fn absorb_full_room_sync_failures(&mut self, failures: &[RoomSyncFailure]) {
+        for failure in failures {
+            self.note_room_sync_failure(failure);
+        }
+        let failed_room_ids = failures
+            .iter()
+            .map(|failure| failure.room_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let recovered = self
+            .room_sync_failures
+            .iter()
+            .filter(|room_id| !failed_room_ids.contains(room_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for room_id in recovered {
+            self.note_room_sync_recovered(&room_id);
+        }
+    }
+
+    fn note_room_sync_failure(&mut self, failure: &RoomSyncFailure) {
+        let now = Instant::now();
+        self.room_sync_failures.insert(failure.room_id.clone());
+        let entry = self
+            .room_sync_hint_backoffs
+            .record_failure(&failure.room_id, now);
+        if entry.report_due(now) {
+            entry.last_report = Some(now);
+            eprintln!(
+                "{}",
+                room_sync_quarantine_report(failure, entry.retry_delay())
+            );
+        }
+    }
+
+    fn note_room_sync_recovered(&mut self, room_id: &str) {
+        if self.room_sync_failures.remove(room_id) {
+            self.room_sync_hint_backoffs.clear(room_id);
+        }
+    }
+
     fn apply_targeted_sync_projection(
         &mut self,
         room_id: &str,
         synced: CoreSyncProjection,
     ) -> Result<(), FiniteChatCoreError> {
-        if synced
+        let failure = synced
             .room_sync_failures
             .iter()
-            .any(|failed_room_id| failed_room_id == room_id)
-        {
-            self.room_sync_failures.insert(room_id.to_owned());
-        } else {
-            self.room_sync_failures.remove(room_id);
-        }
+            .find(|failure| failure.room_id == room_id);
+        self.absorb_targeted_room_sync_outcome(room_id, failure);
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
@@ -3050,6 +3270,19 @@ impl AppRuntimeState {
         // The resident bridge deliberately keeps heartbeat reconciliation
         // full so a missed or dropped hint cannot strand durable Chat data.
         let bridge = match &event {
+            // Quarantined room inside its hint-path backoff window: the
+            // room's server last_seq is permanently ahead of the frozen
+            // cursor, so this hint names the same rejected page every
+            // stream open produces. Cheaply ignore it; the periodic full
+            // reconciliation retries the room at its own cadence.
+            SyncHintEvent::RoomAdvanced { room_id, .. }
+                if self.core.has_room(room_id)
+                    && self
+                        .room_sync_hint_backoffs
+                        .defers_hint(room_id, Instant::now()) =>
+            {
+                AppBridgeSync::default()
+            }
             SyncHintEvent::RoomAdvanced { room_id, .. } if self.core.has_room(room_id) => {
                 self.agent_bridge_sync_room_after_change(room_id)?
             }
@@ -3074,7 +3307,7 @@ impl AppRuntimeState {
     fn agent_bridge_sync_after_change(&mut self) -> Result<AppBridgeSync, FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
-        self.room_sync_failures = synced.room_sync_failures.iter().cloned().collect();
+        self.absorb_full_room_sync_failures(&synced.room_sync_failures);
         let events = synced
             .events
             .iter()
@@ -3100,15 +3333,11 @@ impl AppRuntimeState {
     ) -> Result<AppBridgeSync, FiniteChatCoreError> {
         self.expire_ephemeral_activity()?;
         let synced = self.core.sync_room_with_projection(room_id)?;
-        if synced
+        let failure = synced
             .room_sync_failures
             .iter()
-            .any(|failed_room_id| failed_room_id == room_id)
-        {
-            self.room_sync_failures.insert(room_id.to_owned());
-        } else {
-            self.room_sync_failures.remove(room_id);
-        }
+            .find(|failure| failure.room_id == room_id);
+        self.absorb_targeted_room_sync_outcome(room_id, failure);
         let events = synced
             .events
             .iter()
@@ -9236,7 +9465,11 @@ impl CoreState {
                         | RuntimeWorkerError::ClientStore(ClientStoreError::Client(_))
                 );
                 if quarantined_room_failure {
-                    projection.room_sync_failures.push(room_id.to_owned());
+                    projection.room_sync_failures.push(RoomSyncFailure {
+                        room_id: room_id.to_owned(),
+                        after_seq: cursor.after_seq,
+                        error: compact_failure_reason(&error.to_string()),
+                    });
                 } else {
                     return Err(runtime_error(error));
                 }
@@ -9313,7 +9546,11 @@ impl CoreState {
                             | RuntimeWorkerError::ClientStore(ClientStoreError::Client(_))
                     );
                     if quarantined_room_failure {
-                        projection.room_sync_failures.push(cursor.room_id);
+                        projection.room_sync_failures.push(RoomSyncFailure {
+                            room_id: cursor.room_id.clone(),
+                            after_seq: cursor.after_seq,
+                            error: compact_failure_reason(&error.to_string()),
+                        });
                     } else {
                         first_error.get_or_insert_with(|| runtime_error(error));
                     }
@@ -22680,5 +22917,550 @@ mod tests {
             2,
             "only the chat message and the single home topic entry exist"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Quarantined room-sync hint backoff (the agent-sidecar livelock).
+
+    /// Live HTTP server that records every request path, so tests can count
+    /// room-page fetches (`/sync/group`) exactly instead of inferring them.
+    fn spawn_counting_http_server(path: impl AsRef<Path>) -> (String, Arc<Mutex<Vec<String>>>) {
+        use axum::extract::Request;
+        use axum::middleware::Next;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let counter = requests.clone();
+        let app = http_router(HttpServerState::from_sqlite_path(path).unwrap()).layer(
+            axum::middleware::from_fn(move |request: Request, next: Next| {
+                let counter = counter.clone();
+                async move {
+                    if let Ok(mut log) = counter.lock() {
+                        log.push(request.uri().path().to_owned());
+                    }
+                    next.run(request).await
+                }
+            }),
+        );
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        let server_url = format!("http://{addr}");
+        wait_for_live_http_server(&server_url);
+        (server_url, requests)
+    }
+
+    fn counting_sync_group_fetches(requests: &Arc<Mutex<Vec<String>>>) -> usize {
+        requests
+            .lock()
+            .map(|log| {
+                log.iter()
+                    .filter(|path| path.as_str() == "/sync/group")
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn quarantine_device_config(seed: &str, device_id: &str) -> FiniteChatDeviceConfig {
+        let secret_bytes = test_account_secret_bytes(seed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        FiniteChatDeviceConfig {
+            account_secret_key: NostrSecretKey::from_bytes(secret_bytes).unwrap(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: now,
+            credential_not_before_unix_seconds: now - 60,
+            // Generous so a test-runtime open at the system clock (not the
+            // fixed test NOW) still sees the credential as valid.
+            credential_not_after_unix_seconds: now + 600,
+        }
+    }
+
+    fn test_account_secret_bytes(seed: &str) -> [u8; NOSTR_SECRET_KEY_BYTES] {
+        let hex = test_account_secret_hex(seed);
+        hex::decode(&hex).unwrap().as_slice().try_into().unwrap()
+    }
+
+    /// Open an app runtime at the system clock (the fixture's credentials are
+    /// minted at the system clock, so the fixed test NOW would read them as
+    /// expired).
+    fn open_app_runtime_state_with_account_at_system_now(
+        dir: impl AsRef<Path>,
+        server_url: &str,
+        device_id: &str,
+        account_seed: &str,
+    ) -> AppRuntimeState {
+        AppRuntimeState::new(
+            CoreState::open(OpenOptions {
+                data_dir: dir.as_ref().to_string_lossy().into_owned(),
+                server_url: server_url.to_owned(),
+                device_id: device_id.to_owned(),
+                account_secret_hex: Some(test_account_secret_hex(account_seed)),
+                now_unix_seconds: None,
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Everything the quarantine-livelock tests need: a room whose tail holds
+    /// an application entry no member can decrypt (poison), a fully healthy
+    /// room (control), and a victim device whose durable cursor sits at the
+    /// join commit of both rooms.
+    struct QuarantineFixture {
+        victim_data_dir: PathBuf,
+        victim_device_id: String,
+        victim_seed: String,
+        poison_room_id: String,
+        poison_join_seq: u64,
+        poison_head_seq: u64,
+        healthy_room_id: String,
+        healthy_head_seq: u64,
+    }
+
+    /// Per-room identifiers for the MLS welcome-join fixture flow.
+    struct QuarantineRoomSpec {
+        room_id: &'static str,
+        mls_group_id: &'static str,
+        key_package_id: &'static str,
+        welcome_id: &'static str,
+    }
+
+    fn quarantine_join_room(
+        delivery: &mut TestQuarantineDelivery,
+        victim: &mut FiniteChatDevice,
+        victim_store: &mut SqliteClientStore,
+        alice: &mut FiniteChatDevice,
+        room: &QuarantineRoomSpec,
+    ) -> u64 {
+        let room_id = room.room_id;
+        alice
+            .create_group_state(room_id, room.mls_group_id)
+            .unwrap();
+        delivery
+            .bootstrap_account_room(&CreateRoomRequest {
+                room_id: room_id.to_owned(),
+                mls_group_id: room.mls_group_id.to_owned(),
+                creator: alice.device_ref().clone(),
+                protocol: RoomProtocol::default(),
+            })
+            .unwrap();
+        delivery
+            .upload_key_package(
+                victim
+                    .upload_key_package_request(room.key_package_id)
+                    .unwrap(),
+            )
+            .unwrap();
+        let claimed_key_package = delivery
+            .claim_key_package_for_device(victim.device_ref())
+            .unwrap()
+            .expect("victim key package");
+        let prepared = alice
+            .prepare_add_member_commit(room_id, &claimed_key_package, room.welcome_id, "add-victim")
+            .unwrap();
+        let accepted = delivery.submit_commit(prepared.request).unwrap();
+        let alice_page = delivery
+            .sync_events(room_id, alice.device_ref(), 0)
+            .unwrap();
+        alice
+            .merge_pending_commit_from_log(room_id, &alice_page.entries, &prepared.message_id)
+            .unwrap();
+        let claimed_welcomes = delivery.claim_welcomes(victim.device_ref()).unwrap();
+        let welcome = claimed_welcomes
+            .into_iter()
+            .find(|welcome| welcome.welcome_id == room.welcome_id)
+            .unwrap();
+        victim_store
+            .activate_welcome_and_save(
+                victim,
+                room.welcome_id,
+                room_id,
+                &welcome.welcome_payload,
+                &welcome.ratchet_tree_payload,
+                accepted.seq,
+            )
+            .unwrap();
+        delivery.ack_welcome(room.welcome_id).unwrap();
+        accepted.seq
+    }
+
+    fn quarantine_append_message(
+        delivery: &mut TestQuarantineDelivery,
+        alice: &mut FiniteChatDevice,
+        room_id: &str,
+        plaintext: &[u8],
+        idempotency_key: &str,
+    ) -> u64 {
+        let request = alice
+            .create_application_request(room_id, plaintext, idempotency_key)
+            .unwrap();
+        delivery
+            .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+            .unwrap()
+            .seq
+    }
+
+    fn build_quarantine_fixture(dir: &Path, server_url: &str) -> QuarantineFixture {
+        let poison_room = QuarantineRoomSpec {
+            room_id: "room_hint_quarantine_poison",
+            mls_group_id: "mls_hint_quarantine_poison",
+            key_package_id: "kp_quarantine_poison",
+            welcome_id: "welcome_quarantine_poison",
+        };
+        let healthy_room = QuarantineRoomSpec {
+            room_id: "room_hint_quarantine_healthy",
+            mls_group_id: "mls_hint_quarantine_healthy",
+            key_package_id: "kp_quarantine_healthy",
+            welcome_id: "welcome_quarantine_healthy",
+        };
+        let poison_room_id = poison_room.room_id.to_owned();
+        let healthy_room_id = healthy_room.room_id.to_owned();
+        let mut alice = FiniteChatDevice::new(quarantine_device_config(
+            "quarantine-livelock-alice",
+            "quarantine-alice",
+        ))
+        .unwrap();
+        let victim_device_id = "quarantine-victim".to_owned();
+        let victim_seed = "quarantine-livelock-victim".to_owned();
+        let victim_config = quarantine_device_config(&victim_seed, &victim_device_id);
+        let mut victim = FiniteChatDevice::new(victim_config.clone()).unwrap();
+        let victim_data_dir = dir.join("victim");
+        fs::create_dir_all(&victim_data_dir).unwrap();
+        let mut victim_store = SqliteClientStore::open(
+            victim_data_dir.join(CLIENT_STORE_FILE),
+            SqliteClientStoreOptions::from_nostr_secret(
+                &victim_config.account_secret_key,
+                &victim_config.device_id,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut delivery = test_quarantine_delivery(server_url);
+
+        let poison_join_seq = quarantine_join_room(
+            &mut delivery,
+            &mut victim,
+            &mut victim_store,
+            &mut alice,
+            &poison_room,
+        );
+        let healthy_join_seq = quarantine_join_room(
+            &mut delivery,
+            &mut victim,
+            &mut victim_store,
+            &mut alice,
+            &healthy_room,
+        );
+
+        // Poison room: one valid message, then an application entry whose
+        // ciphertext bytes no member can decrypt. The server admits it
+        // (`/events` never inspects ciphertext), the victim's apply fails
+        // with a client error, and the room's server-side last_seq is
+        // permanently ahead of the victim's frozen cursor.
+        let valid_seq = quarantine_append_message(
+            &mut delivery,
+            &mut alice,
+            &poison_room_id,
+            b"valid message before the poison entry",
+            "quarantine-valid-before-poison",
+        );
+        assert_eq!(valid_seq, poison_join_seq + 1);
+        let mut poison_request = alice
+            .create_application_request(
+                &poison_room_id,
+                b"ciphertext never decryptable",
+                "quarantine-poison",
+            )
+            .unwrap();
+        poison_request.envelope.payload = vec![0xff; 32];
+        let poison_seq = delivery
+            .append_event(
+                &poison_request,
+                DurableAppEventKind::ChatMessage.delivery_policy(),
+            )
+            .unwrap()
+            .seq;
+        assert_eq!(poison_seq, poison_join_seq + 2);
+
+        // Healthy control room: one valid message past the victim's cursor.
+        let healthy_head_seq = quarantine_append_message(
+            &mut delivery,
+            &mut alice,
+            &healthy_room_id,
+            b"healthy tail message",
+            "quarantine-healthy-tail",
+        );
+        assert_eq!(healthy_head_seq, healthy_join_seq + 1);
+
+        drop(victim_store);
+        QuarantineFixture {
+            victim_data_dir,
+            victim_device_id,
+            victim_seed,
+            poison_room_id,
+            poison_join_seq,
+            poison_head_seq: poison_seq,
+            healthy_room_id,
+            healthy_head_seq,
+        }
+    }
+
+    type TestQuarantineDelivery = HttpRuntimeDelivery<ReqwestHttpRuntimeTransport>;
+
+    fn test_quarantine_delivery(server_url: &str) -> TestQuarantineDelivery {
+        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url.to_owned()))
+    }
+
+    #[test]
+    fn quarantined_room_hints_back_off_instead_of_livelocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server_url, requests) = spawn_counting_http_server(dir.path().join("server.sqlite3"));
+        let fixture = build_quarantine_fixture(dir.path(), &server_url);
+        let mut victim = open_app_runtime_state_with_account_at_system_now(
+            &fixture.victim_data_dir,
+            &server_url,
+            &fixture.victim_device_id,
+            &fixture.victim_seed,
+        );
+        let room_hint = |room_id: &str, seq: u64| SyncHintEvent::RoomAdvanced {
+            room_id: room_id.to_owned(),
+            seq,
+        };
+
+        // Healthy room: a fresh hint still triggers the targeted fetch
+        // immediately and applies through the head. That immediacy is how the
+        // plane recovers and must not change under quarantine backoff.
+        let before_healthy = counting_sync_group_fetches(&requests);
+        victim
+            .agent_bridge_apply_sync_hint(room_hint(
+                &fixture.healthy_room_id,
+                fixture.healthy_head_seq,
+            ))
+            .unwrap();
+        assert!(
+            counting_sync_group_fetches(&requests) > before_healthy,
+            "healthy room hint fetches immediately"
+        );
+        assert_eq!(
+            victim
+                .core
+                .device
+                .last_applied_seq(&fixture.healthy_room_id)
+                .unwrap(),
+            fixture.healthy_head_seq,
+            "healthy room hint applies through the server head"
+        );
+
+        // Poison room: the first hint fetches the page once, the apply fails,
+        // and the failure is quarantined — Ok, room marked, cursor frozen at
+        // the join commit.
+        let before_poison = counting_sync_group_fetches(&requests);
+        victim
+            .agent_bridge_apply_sync_hint(room_hint(
+                &fixture.poison_room_id,
+                fixture.poison_head_seq,
+            ))
+            .unwrap();
+        assert!(
+            counting_sync_group_fetches(&requests) > before_poison,
+            "first poison hint fetches the page once"
+        );
+        assert!(
+            victim.room_sync_failures.contains(&fixture.poison_room_id),
+            "the failed apply is quarantined, not surfaced"
+        );
+        assert_eq!(
+            victim
+                .core
+                .device
+                .last_applied_seq(&fixture.poison_room_id)
+                .unwrap(),
+            fixture.poison_join_seq,
+            "the durable cursor stays frozen at the rejected page boundary"
+        );
+
+        // The livelock shape: the server head is permanently ahead of the
+        // frozen cursor, so every freshly opened sync stream re-emits
+        // RoomAdvanced for the same rejected page. Bounded behavior: hints
+        // inside the backoff window are cheaply ignored — no page fetch per
+        // hint.
+        let bounded_before = counting_sync_group_fetches(&requests);
+        let hints = 12;
+        for _ in 0..hints {
+            victim
+                .agent_bridge_apply_sync_hint(room_hint(
+                    &fixture.poison_room_id,
+                    fixture.poison_head_seq,
+                ))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let refetches = counting_sync_group_fetches(&requests) - bounded_before;
+        assert!(
+            refetches <= 2,
+            "a backed-off room must not re-fetch per hint: {refetches} page fetches for {hints} RoomAdvanced hints"
+        );
+
+        // A healthy-room hint in the same window still fetches immediately:
+        // quarantine backoff never delays healthy rooms.
+        let healthy_again_before = counting_sync_group_fetches(&requests);
+        victim
+            .agent_bridge_apply_sync_hint(room_hint(
+                &fixture.healthy_room_id,
+                fixture.healthy_head_seq,
+            ))
+            .unwrap();
+        assert!(
+            counting_sync_group_fetches(&requests) > healthy_again_before,
+            "healthy-room hints keep fetching immediately while another room is backed off"
+        );
+    }
+
+    #[test]
+    fn room_sync_hint_backoff_is_per_room_exponential_capped_and_resets() {
+        let mut backoffs = RoomSyncHintBackoffs::default();
+        let t0 = Instant::now();
+
+        // A room that never failed never defers: healthy rooms keep their
+        // immediate hint sync.
+        assert!(!backoffs.defers_hint("room_a", t0));
+
+        let entry = backoffs.record_failure("room_a", t0);
+        assert_eq!(entry.consecutive_failures, 1);
+        assert_eq!(entry.retry_delay(), ROOM_SYNC_HINT_BACKOFF_INITIAL);
+        assert!(
+            backoffs.defers_hint("room_a", t0 + Duration::from_millis(999)),
+            "inside the initial 1s window the hint is deferred"
+        );
+        assert!(
+            !backoffs.defers_hint("room_a", t0 + ROOM_SYNC_HINT_BACKOFF_INITIAL),
+            "once the delay elapses a targeted retry is allowed again"
+        );
+
+        // Exponential growth capped at ROOM_SYNC_HINT_BACKOFF_MAX, driven on
+        // a fresh map failure by failure.
+        let expected_delays = [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(16),
+            Duration::from_secs(32),
+            ROOM_SYNC_HINT_BACKOFF_MAX, // 64s clamps to the 60s cap
+            ROOM_SYNC_HINT_BACKOFF_MAX,
+        ];
+        let mut curve_backoffs = RoomSyncHintBackoffs::default();
+        let mut observed_delays = Vec::new();
+        let mut now = t0;
+        for _ in 0..expected_delays.len() {
+            let entry = curve_backoffs.record_failure("room_curve", now);
+            observed_delays.push(entry.retry_delay());
+            now += Duration::from_secs(30);
+        }
+        assert_eq!(observed_delays, expected_delays);
+
+        // Per-room isolation: another room's failures never defer room_b.
+        backoffs.record_failure("room_b", t0);
+        assert!(backoffs.defers_hint("room_a", t0));
+        assert!(!backoffs.defers_hint("room_b", t0 + ROOM_SYNC_HINT_BACKOFF_MAX * 10));
+
+        // A fresh success clears the entry: the next hint is immediate.
+        backoffs.clear("room_a");
+        assert!(!backoffs.defers_hint("room_a", t0));
+    }
+
+    #[test]
+    fn room_sync_hint_backoff_reports_on_entry_then_at_most_once_per_cap() {
+        let mut backoffs = RoomSyncHintBackoffs::default();
+        let t0 = Instant::now();
+
+        let entry = backoffs.record_failure("room_reported", t0);
+        assert!(entry.report_due(t0), "entry into quarantine always reports");
+        entry.last_report = Some(t0);
+        assert!(
+            !entry.report_due(t0 + ROOM_SYNC_HINT_BACKOFF_MAX - Duration::from_millis(1)),
+            "no second report inside the cap interval"
+        );
+        assert!(
+            entry.report_due(t0 + ROOM_SYNC_HINT_BACKOFF_MAX),
+            "a persistently quarantined room re-reports once per cap interval"
+        );
+
+        // Recovery clears the report history with the entry itself.
+        backoffs.clear("room_reported");
+        let entry = backoffs.record_failure("room_reported", t0);
+        assert!(entry.report_due(t0), "a re-quarantined room reports again");
+    }
+
+    #[test]
+    fn quarantine_report_names_room_seq_range_and_failure_class() {
+        let failure = RoomSyncFailure {
+            room_id: "room_report_shape".to_owned(),
+            after_seq: 42,
+            error: "mls application ciphertext rejected".to_owned(),
+        };
+        let line = room_sync_quarantine_report(&failure, Duration::from_secs(4));
+        assert!(line.contains("room=room_report_shape"));
+        assert!(line.contains("rejected_after_seq=42"));
+        assert!(line.contains("error=\"mls application ciphertext rejected\""));
+        assert!(line.contains("hint_retry_delay_ms=4000"));
+        assert!(
+            !line.contains('\n'),
+            "the report stays a single stderr line"
+        );
+    }
+
+    #[test]
+    fn wait_plan_excludes_backed_off_rooms_and_reincludes_on_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server_url, _requests) = spawn_counting_http_server(dir.path().join("server.sqlite3"));
+        let fixture = build_quarantine_fixture(dir.path(), &server_url);
+        let mut victim = open_app_runtime_state_with_account_at_system_now(
+            &fixture.victim_data_dir,
+            &server_url,
+            &fixture.victim_device_id,
+            &fixture.victim_seed,
+        );
+
+        let watched_rooms = |victim: &AppRuntimeState| {
+            victim
+                .wait_plan(1_000)
+                .request
+                .rooms
+                .iter()
+                .map(|room| room.room_id.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        let both = watched_rooms(&victim);
+        assert!(both.contains(&fixture.poison_room_id));
+        assert!(both.contains(&fixture.healthy_room_id));
+
+        // Quarantine the poison room through the real hint path.
+        victim
+            .agent_bridge_apply_sync_hint(SyncHintEvent::RoomAdvanced {
+                room_id: fixture.poison_room_id.clone(),
+                seq: fixture.poison_head_seq,
+            })
+            .unwrap();
+        let watched = watched_rooms(&victim);
+        assert!(
+            !watched.contains(&fixture.poison_room_id),
+            "a backed-off room must not be watched: watching it makes every stream open emit RoomAdvanced instantly"
+        );
+        assert!(watched.contains(&fixture.healthy_room_id));
+
+        // The same transition a successful full reconciliation produces —
+        // e.g. after `finitechat repair skip-entry` advances the cursor —
+        // restores the room to the watch (immediate hints again).
+        victim.note_room_sync_recovered(&fixture.poison_room_id);
+        assert!(watched_rooms(&victim).contains(&fixture.poison_room_id));
     }
 }
