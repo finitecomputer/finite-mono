@@ -81,7 +81,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.5@sha256:67eca4b21d5c0dc731eb008af6ad4dfd76ad2a27ead72809ce40297dafed426a"
+    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
     restart: always
     env:
       # DEGRADED ADMISSION (temporary, revert when the usage API recovers):

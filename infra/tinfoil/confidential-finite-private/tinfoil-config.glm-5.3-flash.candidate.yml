@@ -69,7 +69,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.3@sha256:95e8d90cbb1de783e24ade348a30c44a802c3e5038b7c7045608ad0b41aa05b4"
+    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"
