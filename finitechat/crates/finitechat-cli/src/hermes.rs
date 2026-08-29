@@ -667,6 +667,11 @@ async fn hermes_service_readyz(
         let app = state.runtime.state().map_err(map_core_hermes_error)?;
         Ok(json!({
             "status": "ready",
+            // The runtime's own status line names quarantined rooms (e.g.
+            // "ready; 1 room needs repair"); mirrored verbatim so a
+            // quarantined room is visible in the readiness probe without a
+            // new file or route.
+            "runtime_status": app.status,
             "service": "finitechat-hermes",
             "version": env!("CARGO_PKG_VERSION"),
             "agent_home": state.agent_home.display().to_string(),
