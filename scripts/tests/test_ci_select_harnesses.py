@@ -71,6 +71,24 @@ class CiHarnessSelectionTests(unittest.TestCase):
                 self.assertIn("name: ${{ env.CACHIX_CACHE_NAME }}", block)
                 self.assertIn("skipPush: true", block)
 
+    def test_closure_workflows_configure_cachix_read_only(self) -> None:
+        # The latN closure workflows build first-party service packages
+        # that regular CI already pushes to Cachix at the same rev; without
+        # the read-only step every dispatch rebuilds the Rust services from
+        # source (~30-45 min instead of minutes).
+        for host in ("lat1", "lat2", "lat3", "lat4"):
+            with self.subTest(workflow=host):
+                text = (
+                    ROOT / f".github/workflows/{host}-nixos-closure.yml"
+                ).read_text(encoding="utf-8")
+                self.assertIn(
+                    "uses: DeterminateSystems/nix-installer-action@v16", text
+                )
+                self.assertIn("Configure Cachix read-only cache", text)
+                self.assertIn("name: ${{ env.CACHIX_CACHE_NAME }}", text)
+                self.assertIn("skipPush: true", text)
+                self.assertIn("CACHIX_CACHE_NAME: finite", text)
+
     def test_monitoring_readme_runs_only_monitoring_contract(self) -> None:
         self.assertEqual(
             selected("infra/monitoring/README.md"),
