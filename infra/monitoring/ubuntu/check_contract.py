@@ -73,11 +73,20 @@ def check_versions() -> None:
         require(key in versions, f"versions.env missing {key}")
         value = versions[key]
         if expected.startswith("["):
-            require(re.fullmatch(expected, value) is not None, f"{key} has invalid hash shape")
+            require(
+                re.fullmatch(expected, value) is not None,
+                f"{key} has invalid hash shape",
+            )
         else:
             require(value == expected, f"{key} drifted: {value!r}")
 
-    for key in ["GRAFANA_URL", "PROMETHEUS_URL", "BLACKBOX_EXPORTER_URL", "CADDY_URL", "LOKI_URL"]:
+    for key in [
+        "GRAFANA_URL",
+        "PROMETHEUS_URL",
+        "BLACKBOX_EXPORTER_URL",
+        "CADDY_URL",
+        "LOKI_URL",
+    ]:
         require(key in versions, f"versions.env missing {key}")
         require(versions[key].startswith("https://"), f"{key} must use https")
 
@@ -86,6 +95,9 @@ def check_caddy() -> None:
     caddy = read(UBUNTU / "Caddyfile")
     require_contains(caddy, "monitoring.finite.computer", "Caddyfile")
     require_contains(caddy, "metrics-ingest.finite.computer", "Caddyfile")
+    require_contains(
+        caddy, "admin unix//run/finite-monitoring-caddy/admin.sock", "Caddyfile"
+    )
     require_contains(caddy, "reverse_proxy 127.0.0.1:3000", "Grafana route")
     require_contains(caddy, "path /api/v1/write", "Prometheus remote-write route")
     require_contains(caddy, "path /loki/api/v1/push", "Loki push route")
@@ -96,12 +108,18 @@ def check_caddy() -> None:
     require_contains(caddy, "reverse_proxy 127.0.0.1:9090", "Prometheus route")
     require_contains(caddy, "reverse_proxy 127.0.0.1:3100", "Loki route")
     require_contains(caddy, 'respond "Not found" 404', "default ingest response")
-    require("reverse_proxy prometheus:" not in caddy, "Caddyfile must not use Compose service DNS")
-    require("reverse_proxy loki:" not in caddy, "Caddyfile must not use Compose service DNS")
+    require(
+        "reverse_proxy prometheus:" not in caddy,
+        "Caddyfile must not use Compose service DNS",
+    )
+    require(
+        "reverse_proxy loki:" not in caddy, "Caddyfile must not use Compose service DNS"
+    )
 
 
 def check_prometheus() -> None:
     prometheus = read(UBUNTU / "prometheus.yml")
+    blackbox = read(UBUNTU / "blackbox.yml")
     for job in [
         "finite.computer",
         "chat.finite.computer",
@@ -110,8 +128,22 @@ def check_prometheus() -> None:
         "uptime-probe.docs.finite.chat",
     ]:
         require_contains(prometheus, f"job_name: {job}", "Prometheus public probes")
-    require_contains(prometheus, "replacement: 127.0.0.1:9115", "Prometheus blackbox target")
-    require("blackbox-exporter:9115" not in prometheus, "Prometheus must not use Compose service DNS")
+    require_contains(
+        prometheus, "replacement: 127.0.0.1:9115", "Prometheus blackbox target"
+    )
+    require_contains(
+        prometheus,
+        "targets: [https://chat.finite.computer/readyz]",
+        "Chat semantic readiness target",
+    )
+    require_contains(prometheus, "module: [chat_ready]", "Chat readiness probe module")
+    require_contains(prometheus, "scrape_interval: 1m", "Chat readiness cadence")
+    require_contains(blackbox, "chat_ready:", "Chat readiness probe module")
+    require_contains(blackbox, "timeout: 1500ms", "Chat readiness latency budget")
+    require(
+        "blackbox-exporter:9115" not in prometheus,
+        "Prometheus must not use Compose service DNS",
+    )
 
 
 def check_loki() -> None:
@@ -127,19 +159,38 @@ def check_loki() -> None:
 def check_grafana() -> None:
     grafana = read(UBUNTU / "grafana/grafana.ini")
     require_contains(grafana, "http_addr = 127.0.0.1", "Grafana config")
-    require_contains(grafana, "admin_password = $__file{/etc/finite/monitoring/grafana-admin-password}", "Grafana config")
-    require_contains(grafana, "secret_key = $__file{/etc/finite/monitoring/grafana-secret-key}", "Grafana config")
+    require_contains(
+        grafana,
+        "admin_password = $__file{/etc/finite/monitoring/grafana-admin-password}",
+        "Grafana config",
+    )
+    require_contains(
+        grafana,
+        "secret_key = $__file{/etc/finite/monitoring/grafana-secret-key}",
+        "Grafana config",
+    )
     require_contains(grafana, "allow_sign_up = false", "Grafana config")
 
     datasources = read(UBUNTU / "grafana/provisioning/datasources/finite.yml")
     require_contains(datasources, "uid: finite-prometheus", "Grafana datasource")
     require_contains(datasources, "uid: finite-loki", "Grafana datasource")
-    require_contains(datasources, "url: http://127.0.0.1:9090", "Grafana Prometheus datasource")
-    require_contains(datasources, "url: http://127.0.0.1:3100", "Grafana Loki datasource")
-    require("url: http://prometheus:9090" not in datasources, "Grafana must not use Compose service DNS")
+    require_contains(
+        datasources, "url: http://127.0.0.1:9090", "Grafana Prometheus datasource"
+    )
+    require_contains(
+        datasources, "url: http://127.0.0.1:3100", "Grafana Loki datasource"
+    )
+    require(
+        "url: http://prometheus:9090" not in datasources,
+        "Grafana must not use Compose service DNS",
+    )
 
     dashboards = read(UBUNTU / "grafana/provisioning/dashboards/finite.yml")
-    require_contains(dashboards, "path: /var/lib/finite-monitoring/grafana/dashboards", "Grafana dashboard provider")
+    require_contains(
+        dashboards,
+        "path: /var/lib/finite-monitoring/grafana/dashboards",
+        "Grafana dashboard provider",
+    )
 
 
 def check_systemd() -> None:
@@ -166,14 +217,22 @@ def check_systemd() -> None:
         ],
         "finite-monitoring-caddy.service": [
             "User=finite-monitoring",
+            "EnvironmentFile=/etc/finite/monitoring/caddy.env",
+            "RuntimeDirectory=finite-monitoring-caddy",
+            "ExecStart=/opt/finite-monitoring/bin/caddy run --config /etc/finite/monitoring/Caddyfile --adapter caddyfile",
+            "ExecReload=/opt/finite-monitoring/bin/caddy reload --config /etc/finite/monitoring/Caddyfile --adapter caddyfile --address unix//run/finite-monitoring-caddy/admin.sock --force",
             "CAP_NET_BIND_SERVICE",
-            "--envfile /etc/finite/monitoring/caddy.env",
         ],
     }
     for unit_name, needles in expected_units.items():
         unit = read(UBUNTU / "systemd" / unit_name)
         require_contains(unit, "Restart=on-failure", unit_name)
         require_contains(unit, "NoNewPrivileges=true", unit_name)
+        if unit_name == "finite-monitoring-caddy.service":
+            require(
+                "--envfile" not in unit,
+                "Caddy reload must use systemd EnvironmentFile, not unsupported --envfile",
+            )
         for needle in needles:
             require_contains(unit, needle, unit_name)
 
@@ -189,7 +248,9 @@ def check_deploy_script() -> None:
     require_contains(deploy, "METRICS_PASSWORD_HASH", "deploy script")
     require_contains(deploy, "LOGS_PASSWORD_HASH", "deploy script")
     require_contains(deploy, '"${algorithm}sum" -c', "deploy script")
-    require_contains(deploy, '"${GRAFANA_URL}" sha256 "${GRAFANA_SHA256}"', "deploy script")
+    require_contains(
+        deploy, '"${GRAFANA_URL}" sha256 "${GRAFANA_SHA256}"', "deploy script"
+    )
     require_contains(deploy, '"${CADDY_URL}" sha512 "${CADDY_SHA512}"', "deploy script")
 
 
@@ -197,14 +258,19 @@ def check_docs() -> None:
     readme = read(README)
     require_contains(readme, "Ubuntu/systemd", "monitoring README")
     require_contains(readme, "No Docker Compose", "monitoring README")
-    require_contains(readme, "infra/monitoring/ubuntu/deploy --replace-compose", "monitoring README")
+    require_contains(
+        readme, "infra/monitoring/ubuntu/deploy --replace-compose", "monitoring README"
+    )
     require_contains(readme, "/etc/finite/monitoring/caddy.env", "monitoring README")
 
 
 def main() -> int:
     for relative in EXPECTED_FILES:
         require((UBUNTU / relative).is_file(), f"missing {relative}")
-    require(not (UBUNTU / "compose.yaml").exists(), "Ubuntu monitoring path must not include Compose")
+    require(
+        not (UBUNTU / "compose.yaml").exists(),
+        "Ubuntu monitoring path must not include Compose",
+    )
 
     check_versions()
     check_caddy()

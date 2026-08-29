@@ -124,6 +124,81 @@
         ];
       };
 
+      # finite-lat-2 is the emergency replacement app-plane host (ADR 0007):
+      # lat1's service stack on the lat3 storage chassis, no Agent Runner.
+      lat2Modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        revisionModule
+        ./infra/nixos/modules/secrets.nix
+        ./infra/nixos/hosts/finite-lat-2
+      ];
+
+      lat2Unguarded = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs;
+        modules = lat2Modules;
+      };
+
+      lat2 = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs // {
+          unguardedInstallBootLoader = lat2Unguarded.config.system.build.installBootLoader;
+        };
+        modules = lat2Modules ++ [ ./infra/nixos/hosts/finite-lat-2/esp-guard.nix ];
+      };
+
+      lat2Kexec = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nixos-images.nixosModules.kexec-installer
+          nixos-images.nixosModules.noninteractive
+          {
+            networking.hostName = "finite-lat-2-installer";
+            system.kexec-installer.name = "finite-lat-2-nixos-26.05-kexec";
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
+
+      # finite-lat-4 is the third storage-qualified Runner host (ADR 0007
+      # model, following the lat2 rejoin in PR #715). It mirrors the lat3
+      # module stack, including the ESP-guard double eval.
+      lat4Modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        revisionModule
+        ./infra/nixos/modules/secrets.nix
+        ./infra/nixos/hosts/finite-lat-4
+      ];
+
+      lat4Unguarded = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs;
+        modules = lat4Modules;
+      };
+
+      lat4 = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs // {
+          unguardedInstallBootLoader = lat4Unguarded.config.system.build.installBootLoader;
+        };
+        modules = lat4Modules ++ [ ./infra/nixos/hosts/finite-lat-4/esp-guard.nix ];
+      };
+
+      lat4Kexec = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nixos-images.nixosModules.kexec-installer
+          nixos-images.nixosModules.noninteractive
+          {
+            networking.hostName = "finite-lat-4-installer";
+            system.kexec-installer.name = "finite-lat-4-nixos-26.05-kexec";
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
+
       monitoring = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
@@ -148,9 +223,12 @@
             hermes-agent-minimal = hermesAgentMinimal;
             hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
             hermes-agent-python = hermesAgentMinimal.hermesVenv;
-            agent-runtime-toolchains = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix {
-              hermesAgent = hermesAgentPackage;
-            };
+            agent-runtime-toolchains =
+              hermesPkgs.callPackage
+                ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
+                {
+                  hermesAgent = hermesAgentPackage;
+                };
           }
         else
           { };
@@ -163,6 +241,13 @@
             overlays = [ (import rust-overlay) ];
           };
           finitePackagePkgs = import nixpkgs { inherit system; };
+          # The repo-wide Python formatter/linter pin. Deliberately from the
+          # hermes-nixpkgs pin (ruff 0.15.x, the version the tree is
+          # formatted with and hermes-bridge-ci checks with) so local, CI,
+          # and editor invocations can never disagree. Invoke only via
+          # `just fmt-py` / `just lint-py`; format output differs between
+          # ruff versions and ad-hoc copies are how formatting gates go red.
+          pyToolPkgs = import hermes-nixpkgs { inherit system; };
           finitePackages = import ./infra/nixos/packages.nix {
             pkgs = finitePackagePkgs;
             craneLib = crane.mkLib finitePackagePkgs;
@@ -173,22 +258,19 @@
           # 0.3.x and marked insecure, and the restore drill must use the same
           # 0.5 config format the host runs (modules/finite-litestream.nix).
           litestreamCli = (import nixpkgs-lat3 { inherit system; }).litestream;
-          rustVersion = "1.93.1";
-          # Keep this in sync with the CI Rust workspace pin so cached Cargo
-          # artifacts are reusable between clippy and Nix-shell test commands.
-          rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
-            extensions = [
-              "clippy"
-              "rust-analyzer"
-              "rust-src"
-              "rustfmt"
-            ];
+          # The Rust pin lives in ./rust-toolchain.toml (single source for
+          # rustup on dev hosts, the CI workflows, and these Nix shells).
+          # Cached Cargo artifacts stay reusable between clippy, Nix-shell
+          # test commands, and image builds because they all read the same
+          # file. The iOS std targets below are local-Darwin extras layered
+          # on top; the file itself stays platform-neutral.
+          rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
             targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
               "aarch64-apple-ios"
               "aarch64-apple-ios-sim"
             ];
           };
-          rustCiToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
+          rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
             curl
             git
@@ -216,58 +298,59 @@
         {
           packages = (hermesPackagesFor system) // finitePackages;
 
-          devShells = {
-            default = pkgs.mkShell {
-              packages =
-                rustBasePackages
-                ++ [
-                  pkgs.age
-                  gcxCli
-                  litestreamCli
-                  pkgs.sops
-                ]
-                ++ (with pkgs; [
-                  nodejs_24
-                  pnpm
-                  rsync
-                  sqlite
-                  xxd
-                  rustToolchain
-                ])
-                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
-                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
-
-              RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-            };
-
-            rust-ci = pkgs.mkShell {
-              packages = rustCiPackages;
-            };
-
-            devfinity-ci = pkgs.mkShell {
-              packages = devfinityCiPackages;
-            };
-          }
-          // pkgs.lib.optionalAttrs hermesSupported (
-            let
-              hermesAgentRuntime = hermes-agent.packages.${system}.default;
-              hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
-              hermesBridgePkgs = import hermes-nixpkgs { inherit system; };
-            in
+          devShells =
             {
-              hermes-bridge-ci = pkgs.mkShell {
-                packages = [
-                  hermesAgentRuntime
-                  hermesAgentRuntimePython
-                  hermesBridgePkgs.basedpyright
-                  hermesBridgePkgs.ruff
-                ];
+              default = pkgs.mkShell {
+                packages =
+                  rustBasePackages
+                  ++ [
+                    pkgs.age
+                    gcxCli
+                    litestreamCli
+                    pyToolPkgs.ruff
+                    pkgs.sops
+                  ]
+                  ++ (with pkgs; [
+                    nodejs_24
+                    pnpm
+                    rsync
+                    sqlite
+                    xxd
+                    rustToolchain
+                  ])
+                  ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
+                  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
-                HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
-                HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+              };
+
+              rust-ci = pkgs.mkShell {
+                packages = rustCiPackages;
+              };
+
+              devfinity-ci = pkgs.mkShell {
+                packages = devfinityCiPackages;
               };
             }
-          );
+            // pkgs.lib.optionalAttrs hermesSupported (
+              let
+                hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
+              in
+              {
+                hermes-bridge-ci = pkgs.mkShell {
+                  packages = [
+                    hermesAgentRuntime
+                    hermesAgentRuntimePython
+                    pyToolPkgs.basedpyright
+                    pyToolPkgs.ruff
+                  ];
+
+                  HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                  HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
+                };
+              }
+            );
 
           formatter = pkgs.nixfmt-rfc-style;
         }
@@ -286,6 +369,19 @@
             finite-lat-3-disko = lat3.config.system.build.diskoScript;
             finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-3-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-lat-2-system = lat2.config.system.build.toplevel;
+            # Partitioning uses the plain (unguarded) disko script: the ESP
+            # guard lives in the guarded system closure's bootloader
+            # installer and runs at switch time, not at partition time.
+            # Requesting the guarded eval's disko here pulls both disko
+            # derivations into the build and breaks out-link determinism.
+            finite-lat-2-disko = lat2Unguarded.config.system.build.diskoScript;
+            finite-lat-2-kexec = lat2Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-2-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-lat-4-system = lat4.config.system.build.toplevel;
+            finite-lat-4-disko = lat4.config.system.build.diskoScript;
+            finite-lat-4-kexec = lat4Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-4-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
       };
@@ -309,6 +405,16 @@
       # The qualified blank-slate host carries the Standard Runner accepting
       # new creation with its host-configured hard sandbox limit.
       nixosConfigurations.finite-lat-3 = lat3;
+
+      # The replacement app server. Installed and brought up only through
+      # infra/runbooks/lat2-replacement-cutover.md (ADR 0007); it boots in
+      # import mode and goes live at Gate E.
+      nixosConfigurations.finite-lat-2 = lat2;
+
+      # The third storage-qualified Runner host (ADR 0007 model). Installed
+      # and admitted only through
+      # infra/runbooks/lat4-nixos-runner-install.md; it starts drained.
+      nixosConfigurations.finite-lat-4 = lat4;
 
       # Dedicated NixOS Grafana/Prometheus/Loki receiver. This is the hard-cut
       # replacement for the historical monitoring Docker Compose stack.

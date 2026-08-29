@@ -59,10 +59,18 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0018_finite_private_5x_profile.sql"),
     "\n",
-    include_str!("../migrations/0019_brain_agent_departure_facts.sql")
+    include_str!("../migrations/0019_brain_agent_departure_facts.sql"),
+    "\n",
+    include_str!("../migrations/0020_runtime_offboarding_phases.sql"),
+    "\n",
+    include_str!("../migrations/0021_runtime_lifecycle.sql"),
+    "\n",
+    include_str!("../migrations/0022_runtime_health_reports.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
+pub const RUNTIME_LIFECYCLE_REVERSE_REMAP_SQL: &str =
+    include_str!("../migrations/runtime_lifecycle_reverse_remap.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
@@ -149,6 +157,84 @@ wire_enum! {
     Unknown => "unknown",
     }
     parse: parse_runtime_summary_status
+}
+
+wire_enum! {
+/// The single forward-only offboarding state of a Runtime. Each phase is
+/// written in the same transaction as the side effect it records and never
+/// moves backward: a destroy request (`RetirementRequested`), a stored
+/// verified retirement receipt (`ReceiptVerified`), recorded compute removal
+/// (`ComputeRemoved`), the offboarding boundary (`LinkDeactivated`), and the
+/// terminal departure record (`Archived`). No phase means the Runtime is
+/// live. Purge User Data stays the separate retention-gated path (ADR 0001).
+    OffboardingPhase {
+    RetirementRequested => "retirement_requested",
+    ReceiptVerified => "receipt_verified",
+    ComputeRemoved => "compute_removed",
+    LinkDeactivated => "link_deactivated",
+    Archived => "archived",
+    }
+    parse: parse_offboarding_phase
+}
+
+impl OffboardingPhase {
+    fn rank(self) -> u8 {
+        match self {
+            Self::RetirementRequested => 1,
+            Self::ReceiptVerified => 2,
+            Self::ComputeRemoved => 3,
+            Self::LinkDeactivated => 4,
+            Self::Archived => 5,
+        }
+    }
+
+    /// True when `next` keeps the phase moving strictly forward. Restating
+    /// the current phase is allowed so an idempotent replay never regresses.
+    pub fn transition_allowed(current: Option<Self>, next: Self) -> bool {
+        current.is_none_or(|current| current.rank() <= next.rank())
+    }
+
+    /// True when this phase has reached or passed `phase`.
+    pub fn reached(self, phase: Self) -> bool {
+        self.rank() >= phase.rank()
+    }
+
+    /// Derive the phase from the durable facts a pre-phase-machine Core
+    /// recorded. Mirrors the 0020 backfill exactly; the pre-deploy census
+    /// enumerates these flag combinations. A stored verified receipt proves
+    /// the runner removed compute before completing the destroy, so receipt
+    /// plus an active link is the half-retired ghost (`ComputeRemoved`) and
+    /// receipt plus an inactive link is a completed retirement (`Archived`).
+    /// An inactive link with the project's active link on another Runtime is
+    /// a relocation leftover, not an offboarding (`None`).
+    pub fn from_legacy_facts(
+        has_verified_receipt: bool,
+        destroy_request_active: bool,
+        link_active: bool,
+        any_link_exists: bool,
+        project_has_active_link: bool,
+    ) -> Option<Self> {
+        if has_verified_receipt {
+            return Some(if link_active {
+                Self::ComputeRemoved
+            } else {
+                Self::Archived
+            });
+        }
+        if destroy_request_active && link_active {
+            return Some(Self::RetirementRequested);
+        }
+        if link_active || !any_link_exists || project_has_active_link {
+            return None;
+        }
+        Some(Self::Archived)
+    }
+}
+
+impl std::fmt::Display for OffboardingPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 wire_enum! {
@@ -433,14 +519,108 @@ wire_enum! {
     parse: parse_runtime_control_kind
 }
 
-wire_enum! {
-    RuntimeControlRequestStatus {
-    Requested => "requested",
-    Running => "running",
-    Succeeded => "succeeded",
-    Failed => "failed",
+/// Canonical runtime-control lifecycle state (2026-08 audit item H1).
+///
+/// One state machine owns every Runtime control operation:
+/// `Requested → Launching → ComputeUp → Ready → Succeeded` for operations
+/// that bring compute up (Restart, RecoverKnownGoodChatRuntime, Upgrade),
+/// `Requested → Launching → Stopped` for operations that take compute down
+/// (Stop, Destroy), and `Failed` (always carrying a named
+/// [`RuntimeLifecycleStage`]) from any non-terminal state. `Succeeded`,
+/// `Stopped`, and `Failed` are terminal. `succeeded` is only reachable by
+/// passing through `Ready`, so it can never again mean "compute exists" —
+/// see the 2026-08-18 rollout postmortem (Agent M).
+///
+/// This enum is hand-written rather than `wire_enum!` because the parse side
+/// deliberately accepts the legacy `"running"` wire value as an alias for
+/// [`RuntimeControlRequestStatus::Launching`]: N-1 Runner binaries still
+/// receive `"running"` inside lease responses from an N-1 Core during the
+/// deploy window. Serialization always emits the canonical `"launching"`.
+/// Delete condition for the alias: every Runner in the fleet runs a post-H1
+/// binary (the same coordination window the `upgrade` kind addition used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeControlRequestStatus {
+    Requested,
+    Launching,
+    ComputeUp,
+    Ready,
+    Succeeded,
+    Stopped,
+    Failed,
+}
+
+impl RuntimeControlRequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Launching => "launching",
+            Self::ComputeUp => "compute_up",
+            Self::Ready => "ready",
+            Self::Succeeded => "succeeded",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
     }
-    parse: parse_runtime_control_request_status
+
+    /// A terminal state has no outgoing transitions; the unique
+    /// one-active-per-runtime index and every in-flight scan key off this.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Stopped | Self::Failed)
+    }
+
+    pub fn is_active(self) -> bool {
+        !self.is_terminal()
+    }
+}
+
+impl Serialize for RuntimeControlRequestStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeControlRequestStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_runtime_control_request_status(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid runtime control request status {value}"))
+        })
+    }
+}
+
+pub fn parse_runtime_control_request_status(value: &str) -> Option<RuntimeControlRequestStatus> {
+    match value {
+        "requested" => Some(RuntimeControlRequestStatus::Requested),
+        // N-1 deploy bridge (see the enum's doc comment): a legacy Runner or
+        // Core still says "running" for the leased-and-launching phase.
+        "launching" | "running" => Some(RuntimeControlRequestStatus::Launching),
+        "compute_up" => Some(RuntimeControlRequestStatus::ComputeUp),
+        "ready" => Some(RuntimeControlRequestStatus::Ready),
+        "succeeded" => Some(RuntimeControlRequestStatus::Succeeded),
+        "stopped" => Some(RuntimeControlRequestStatus::Stopped),
+        "failed" => Some(RuntimeControlRequestStatus::Failed),
+        _ => None,
+    }
+}
+
+wire_enum! {
+/// The named stage a runtime-control operation failed in. Every `failed`
+/// request carries one; `Unknown` is reserved for legacy rows and N-1
+/// writers that predate named stages.
+    RuntimeLifecycleStage {
+    Launch => "launch",
+    Compute => "compute",
+    Readiness => "readiness",
+    Retirement => "retirement",
+    Unknown => "unknown",
+    }
+    parse: parse_runtime_lifecycle_stage
 }
 
 wire_enum! {
@@ -495,6 +675,10 @@ pub enum CoreError {
     InvalidAgentProfilePictureUrl,
     #[error("runtime contact endpoint is invalid")]
     InvalidRuntimeContactEndpoint,
+    #[error("agent runtime id is required")]
+    MissingAgentRuntimeId,
+    #[error("runtime health report is invalid or out of bounds")]
+    InvalidRuntimeHealthReport,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
     #[error("provider operation correlation id is required or invalid")]
@@ -611,10 +795,19 @@ pub enum CoreError {
     RetiredRuntimeOffboardOwnerMismatch,
     #[error("a verified runtime retirement receipt is required for retired runtime offboarding")]
     RetiredRuntimeOffboardReceiptMissing,
+    #[error("runtime offboarding phase cannot regress from {current} to {attempted}")]
+    OffboardingPhaseRegression {
+        current: OffboardingPhase,
+        attempted: OffboardingPhase,
+    },
+    #[error(
+        "runtime offboarding is already at {phase}; resume it with runtime-offboard-retired-exact instead of enqueueing a new destroy"
+    )]
+    RuntimeOffboardingResumeRequired { phase: OffboardingPhase },
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
-    #[error("runtime control request is not running")]
-    RuntimeControlRequestNotRunning,
+    #[error("runtime control request is not in the launching phase")]
+    RuntimeControlRequestNotLaunching,
     #[error("runtime control request lease does not match")]
     RuntimeControlRequestLeaseConflict,
     #[error("runtime control request failure message is required")]
@@ -882,6 +1075,96 @@ impl AgentRuntime {
     }
 }
 
+/// Standing runtime readiness, ferried by the Runner (2026-08 audit synthesis,
+/// H1 slice 3): the Runner polls each live Runtime's `/contact` on a bounded
+/// cadence and posts one report per Runtime to Core. Core stores only the
+/// latest report on the runtime row (migration 0022) and projects readiness
+/// at read time — there is no history table and no background sweeper.
+pub const RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS: i64 = 60;
+pub const RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS: i64 = 5;
+pub const RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS: i64 = 3600;
+/// A report older than this many poll intervals is stale: the projection then
+/// reads `unknown` ("the runner stopped reporting"), never a frozen `ready`.
+pub const RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER: i64 = 3;
+pub const MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS: usize = 512;
+
+wire_enum! {
+/// Read-time projection of one runtime's standing readiness. `ready` requires
+/// a fresh report saying ready; `not_ready` is a fresh report saying not
+/// ready (with the reported reason); `unknown` is no report, a stale report,
+/// or a runtime Core does not consider online.
+    RuntimeHealthStatus {
+    Ready => "ready",
+    NotReady => "not_ready",
+    Unknown => "unknown",
+    }
+    parse: parse_runtime_health_status
+}
+
+/// The latest stored runner-ferried health report, as read back from the
+/// runtime row. Every field is `None` until the runner's standing poller
+/// first reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredRuntimeHealth {
+    pub reported_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub ready: Option<bool>,
+    pub reason: Option<String>,
+    pub report_interval_seconds: Option<i64>,
+    pub reporting_npub: Option<String>,
+}
+
+/// One runtime's standing readiness as projected at read time. The raw report
+/// fields always ride along as evidence; `status` is the only derived fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeHealthProjection {
+    pub status: RuntimeHealthStatus,
+    pub reason: Option<String>,
+    pub reported_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub agent_npub: Option<String>,
+}
+
+/// Project standing readiness from the latest stored report. Reports only
+/// speak for runtimes Core considers `online`; an intentionally offline
+/// runtime carries no standing readiness claim and projects `unknown`.
+/// Freshness is measured from `reported_at` (Core's receive clock), never the
+/// runner's `observed_at`, so runner clock skew cannot extend freshness.
+pub fn project_runtime_health(
+    runtime_status: RuntimeSummaryStatus,
+    health: &StoredRuntimeHealth,
+    now: &str,
+) -> CoreResult<RuntimeHealthProjection> {
+    let status = if runtime_status != RuntimeSummaryStatus::Online {
+        RuntimeHealthStatus::Unknown
+    } else if let (Some(ready), Some(reported_at)) = (health.ready, health.reported_at.as_deref()) {
+        let interval_seconds = health
+            .report_interval_seconds
+            .unwrap_or(RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS)
+            .clamp(
+                RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
+                RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+            );
+        let age = parse_time(now)? - parse_time(reported_at)?;
+        if age > Duration::seconds(interval_seconds * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER) {
+            RuntimeHealthStatus::Unknown
+        } else if ready {
+            RuntimeHealthStatus::Ready
+        } else {
+            RuntimeHealthStatus::NotReady
+        }
+    } else {
+        RuntimeHealthStatus::Unknown
+    };
+    Ok(RuntimeHealthProjection {
+        status,
+        reason: health.reason.clone(),
+        reported_at: health.reported_at.clone(),
+        observed_at: health.observed_at.clone(),
+        agent_npub: health.reporting_npub.clone(),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeArtifact {
     pub id: String,
@@ -1029,6 +1312,10 @@ pub struct RuntimeControlRequest {
     #[serde(default)]
     pub target_runtime_artifact_id: Option<String>,
     pub status: RuntimeControlRequestStatus,
+    /// The named failure stage; present exactly when `status` is `Failed`.
+    /// `RuntimeLifecycleStage::Unknown` marks legacy rows and N-1 writers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<RuntimeLifecycleStage>,
     pub runner_id: Option<String>,
     pub lease_token: Option<String>,
     pub lease_expires_at: Option<String>,
@@ -1631,6 +1918,12 @@ pub struct AdminRuntimeOverview {
     pub active_finite_private_key_count: i64,
     pub runtime_link_active: bool,
     pub runtime_capabilities: Option<RuntimeCapabilitiesV1>,
+    #[serde(default)]
+    pub offboarding_phase: Option<OffboardingPhase>,
+    /// Runner-ferried standing readiness, projected at read time. `unknown`
+    /// until the runner's standing poller first reports (and whenever reports
+    /// go stale), so this never displays a frozen last-known `ready`.
+    pub runtime_health: RuntimeHealthProjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1737,7 +2030,269 @@ pub struct FailRuntimeControlRequestInput {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    /// Named failure stage. Optional on the wire so N-1 Runners keep working;
+    /// Core records `RuntimeLifecycleStage::Unknown` when it is absent.
+    #[serde(default)]
+    pub failure_stage: Option<RuntimeLifecycleStage>,
     pub now: Option<String>,
+}
+
+/// The completion shape of a runtime-control request, parsed once at the
+/// store boundary from the flat wire input. The three shapes cannot be
+/// confused: Upgrade facts only exist on an Upgrade completion, and the
+/// retirement receipt only on a Destroy completion. The flat
+/// [`CompleteRuntimeControlRequestInput`] stays the runner wire format
+/// unchanged; this enum is what Core's state machine consumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeControlCompletion {
+    /// Restart, RecoverKnownGoodChatRuntime, and Stop carry no facts.
+    Plain,
+    /// Upgrade reports the artifact facts it swapped to.
+    Upgrade(Box<RuntimeUpgradeCompletionFacts>),
+    /// Destroy carries the verified retirement receipt.
+    Destroy(Box<RuntimeRetirementSnapshotReceipt>),
+}
+
+/// The runner-reported facts of a completed Upgrade. Core validates them
+/// against the Core-bound target before they become durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUpgradeCompletionFacts {
+    pub runtime_artifact_id: String,
+    pub state_schema_version: String,
+    pub runtime_host: String,
+    pub published_app_urls: Vec<String>,
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
+}
+
+impl RuntimeControlCompletion {
+    /// Parse the flat wire input into the one completion shape the request's
+    /// kind allows. Shape/kind confusion is rejected here, once, with the
+    /// same errors the previous inline checks produced.
+    pub fn parse(
+        kind: RuntimeControlKind,
+        input: &CompleteRuntimeControlRequestInput,
+    ) -> CoreResult<Self> {
+        let has_upgrade_facts = input.runtime_artifact_id.is_some()
+            || input.state_schema_version.is_some()
+            || input.runtime_capabilities.is_some()
+            || input.runtime_host.is_some()
+            || input.published_app_urls.is_some();
+        match kind {
+            RuntimeControlKind::Destroy => {
+                if has_upgrade_facts {
+                    return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+                }
+                let receipt = input
+                    .retirement_snapshot
+                    .clone()
+                    .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+                Ok(Self::Destroy(Box::new(receipt)))
+            }
+            RuntimeControlKind::Upgrade => {
+                if input.retirement_snapshot.is_some() {
+                    return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+                }
+                Ok(Self::Upgrade(Box::new(RuntimeUpgradeCompletionFacts {
+                    runtime_artifact_id: trim_to_option(input.runtime_artifact_id.as_deref())
+                        .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?,
+                    state_schema_version: trim_to_option(input.state_schema_version.as_deref())
+                        .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?,
+                    runtime_host: trim_to_option(input.runtime_host.as_deref())
+                        .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?,
+                    published_app_urls: input
+                        .published_app_urls
+                        .clone()
+                        .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?,
+                    runtime_capabilities: input.runtime_capabilities.clone(),
+                })))
+            }
+            RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Stop => {
+                if input.retirement_snapshot.is_some() {
+                    return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+                }
+                if has_upgrade_facts {
+                    return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+                }
+                Ok(Self::Plain)
+            }
+        }
+    }
+}
+
+/// The canonical runtime-control lifecycle state machine (2026-08 audit H1).
+///
+/// Every transition the store can write is a typed, consuming method here:
+/// legal orderings are the only expressible programs, so an illegal
+/// transition is unrepresentable rather than guarded against at runtime.
+/// `Succeeded` exists only as the successor of `Ready`, which exists only as
+/// the successor of `ComputeUp`: `succeeded` can never again be written for
+/// "compute exists". Rehydrating from a persisted row goes through each
+/// phase's `from_status`, the one honest runtime boundary.
+///
+/// Kind-consistency of completions (Stop confirms with `Plain`, Destroy with
+/// a receipt, Upgrade with artifact facts) is enforced upstream by
+/// [`RuntimeControlCompletion::parse`], which is keyed on the request kind.
+pub mod runtime_lifecycle {
+    use super::{RuntimeControlCompletion, RuntimeControlRequestStatus, RuntimeLifecycleStage};
+
+    /// Phase markers. `Failed` carries its named stage; every other marker
+    /// is a zero-sized proof of position in the machine.
+    pub mod phase {
+        use super::RuntimeLifecycleStage;
+
+        #[derive(Debug, Clone, Copy)]
+        pub struct Requested;
+        #[derive(Debug, Clone, Copy)]
+        pub struct Launching;
+        #[derive(Debug, Clone, Copy)]
+        pub struct ComputeUp;
+        #[derive(Debug, Clone, Copy)]
+        pub struct Ready;
+        #[derive(Debug, Clone, Copy)]
+        pub struct Succeeded;
+        #[derive(Debug, Clone, Copy)]
+        pub struct Stopped;
+        #[derive(Debug, Clone, Copy)]
+        pub struct Failed {
+            pub stage: RuntimeLifecycleStage,
+        }
+    }
+
+    /// The persisted status a phase marker stands for.
+    pub trait LifecyclePhase {
+        const STATUS: RuntimeControlRequestStatus;
+    }
+
+    macro_rules! lifecycle_phase {
+        ($($phase:ty => $status:expr),+ $(,)?) => {$(
+            impl LifecyclePhase for $phase {
+                const STATUS: RuntimeControlRequestStatus = $status;
+            }
+        )+};
+    }
+
+    lifecycle_phase! {
+        phase::Requested => RuntimeControlRequestStatus::Requested,
+        phase::Launching => RuntimeControlRequestStatus::Launching,
+        phase::ComputeUp => RuntimeControlRequestStatus::ComputeUp,
+        phase::Ready => RuntimeControlRequestStatus::Ready,
+        phase::Succeeded => RuntimeControlRequestStatus::Succeeded,
+        phase::Stopped => RuntimeControlRequestStatus::Stopped,
+        phase::Failed => RuntimeControlRequestStatus::Failed,
+    }
+
+    /// A runtime-control request at lifecycle phase `S`. Constructing one
+    /// requires either starting at [`phase::Requested`] or proving the
+    /// persisted status matches the phase via `from_status`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct RuntimeLifecycle<S: LifecyclePhase> {
+        phase: S,
+    }
+
+    impl<S: LifecyclePhase> RuntimeLifecycle<S> {
+        fn next<T: LifecyclePhase>(phase: T) -> RuntimeLifecycle<T> {
+            RuntimeLifecycle { phase }
+        }
+
+        pub fn status(&self) -> RuntimeControlRequestStatus {
+            S::STATUS
+        }
+    }
+
+    impl RuntimeLifecycle<phase::Requested> {
+        pub fn enqueue() -> Self {
+            Self::next(phase::Requested)
+        }
+
+        pub fn from_status(status: RuntimeControlRequestStatus) -> Option<Self> {
+            (status == RuntimeControlRequestStatus::Requested).then(Self::enqueue)
+        }
+
+        /// The Runner leased the request and owns the launch.
+        pub fn lease(self) -> RuntimeLifecycle<phase::Launching> {
+            Self::next(phase::Launching)
+        }
+
+        pub fn fail(self, stage: RuntimeLifecycleStage) -> RuntimeLifecycle<phase::Failed> {
+            Self::next(phase::Failed { stage })
+        }
+    }
+
+    impl RuntimeLifecycle<phase::Launching> {
+        pub fn from_status(status: RuntimeControlRequestStatus) -> Option<Self> {
+            (status == RuntimeControlRequestStatus::Launching).then(|| Self::next(phase::Launching))
+        }
+
+        /// The Runner reports compute exists, carrying the kind-checked
+        /// completion. This proves the runtime is up; it never proves the
+        /// runtime is ready.
+        pub fn compute_up(
+            self,
+            completion: &RuntimeControlCompletion,
+        ) -> RuntimeLifecycle<phase::ComputeUp> {
+            let _ = completion;
+            Self::next(phase::ComputeUp)
+        }
+
+        /// Stop and Destroy confirm directly into their own terminal; a
+        /// stopped runtime has no readiness phase.
+        pub fn confirm_stopped(
+            self,
+            completion: &RuntimeControlCompletion,
+        ) -> RuntimeLifecycle<phase::Stopped> {
+            let _ = completion;
+            Self::next(phase::Stopped)
+        }
+
+        /// Retirement requeues itself (Destroy only; the kind gate stays in
+        /// the store, which owns the request row).
+        pub fn retry(self) -> RuntimeLifecycle<phase::Requested> {
+            Self::next(phase::Requested)
+        }
+
+        pub fn fail(self, stage: RuntimeLifecycleStage) -> RuntimeLifecycle<phase::Failed> {
+            Self::next(phase::Failed { stage })
+        }
+    }
+
+    impl RuntimeLifecycle<phase::ComputeUp> {
+        pub fn from_status(status: RuntimeControlRequestStatus) -> Option<Self> {
+            (status == RuntimeControlRequestStatus::ComputeUp).then(|| Self::next(phase::ComputeUp))
+        }
+
+        /// The runtime's readiness probe fired. This is the only edge into
+        /// `Ready`.
+        pub fn ready(self) -> RuntimeLifecycle<phase::Ready> {
+            Self::next(phase::Ready)
+        }
+
+        pub fn fail(self, stage: RuntimeLifecycleStage) -> RuntimeLifecycle<phase::Failed> {
+            Self::next(phase::Failed { stage })
+        }
+    }
+
+    impl RuntimeLifecycle<phase::Ready> {
+        pub fn from_status(status: RuntimeControlRequestStatus) -> Option<Self> {
+            (status == RuntimeControlRequestStatus::Ready).then(|| Self::next(phase::Ready))
+        }
+
+        /// Terminal success. Only reachable from `Ready`.
+        pub fn succeed(self) -> RuntimeLifecycle<phase::Succeeded> {
+            Self::next(phase::Succeeded)
+        }
+
+        pub fn fail(self, stage: RuntimeLifecycleStage) -> RuntimeLifecycle<phase::Failed> {
+            Self::next(phase::Failed { stage })
+        }
+    }
+
+    impl RuntimeLifecycle<phase::Failed> {
+        pub fn stage(&self) -> RuntimeLifecycleStage {
+            self.phase.stage
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2042,6 +2597,53 @@ pub struct CancelAgentCreationRequestInput {
     pub now: Option<String>,
 }
 
+/// The runner's wire request for `POST /api/core/v1/runtime-health-reports`.
+/// The source host comes from the runner credential, never from the body, so
+/// a runner can only report for runtimes on its own host; a body naming a
+/// runtime outside the credential's scope is rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthReportRequest {
+    pub agent_runtime_id: String,
+    pub ready: bool,
+    /// Bounded not-ready reason: the guest's `/contact` error or the runner's
+    /// `unreachable` marker for a transport failure.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the runner read `/contact` (runner clock; evidence only).
+    pub observed_at: String,
+    /// The Agent Principal npub the runner pinned and observed; the
+    /// anti-port-squat cross-check evidence.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
+    /// The runner's poll cadence; the read-time projection declares staleness
+    /// after `RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER` intervals.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
+    #[serde(default)]
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordRuntimeHealthReportInput {
+    pub source_host_id: String,
+    pub agent_runtime_id: String,
+    pub ready: bool,
+    pub reason: Option<String>,
+    pub observed_at: String,
+    pub agent_npub: Option<String>,
+    pub report_interval_seconds: Option<i64>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthReportAck {
+    pub agent_runtime_id: String,
+    pub recorded_at: String,
+}
+
 impl std::str::FromStr for RuntimeArtifactKind {
     type Err = String;
 
@@ -2254,16 +2856,6 @@ pub(crate) fn runtime_spec_v1(spec: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
 
 pub fn runtime_retirement_archive_locator(request_id: &str) -> String {
     format!("retirement-{request_id}")
-}
-
-pub(crate) fn runtime_control_completion_has_no_upgrade_facts(
-    input: &CompleteRuntimeControlRequestInput,
-) -> bool {
-    input.runtime_artifact_id.is_none()
-        && input.state_schema_version.is_none()
-        && input.runtime_capabilities.is_none()
-        && input.runtime_host.is_none()
-        && input.published_app_urls.is_none()
 }
 
 pub(crate) fn validate_runtime_retirement_snapshot_receipt(
@@ -3306,6 +3898,82 @@ mod tests {
         }
     }
 
+    fn stored_health(ready: bool, reported_at: &str, interval_seconds: i64) -> StoredRuntimeHealth {
+        StoredRuntimeHealth {
+            reported_at: Some(reported_at.to_string()),
+            observed_at: Some(reported_at.to_string()),
+            ready: Some(ready),
+            reason: None,
+            report_interval_seconds: Some(interval_seconds),
+            reporting_npub: None,
+        }
+    }
+
+    #[test]
+    fn runtime_health_projection_is_ready_only_for_a_fresh_ready_report() {
+        let now = "2026-08-24T12:00:00Z";
+        let fresh = stored_health(true, "2026-08-24T11:59:00Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &fresh, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // A not-ready report stays not_ready inside the freshness window, and
+        // its reason rides along.
+        let mut not_ready = stored_health(false, "2026-08-24T11:59:00Z", 60);
+        not_ready.reason = Some("unreachable".to_string());
+        let projected =
+            project_runtime_health(RuntimeSummaryStatus::Online, &not_ready, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::NotReady);
+        assert_eq!(projected.reason.as_deref(), Some("unreachable"));
+    }
+
+    #[test]
+    fn runtime_health_projection_names_stale_and_missing_reports_unknown() {
+        let now = "2026-08-24T12:00:00Z";
+        // 181s old at a 60s cadence is past the 3x staleness deadline: the
+        // "died at 3am, shows ready forever" gap closes as `unknown`.
+        let stale = stored_health(true, "2026-08-24T11:56:59Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &stale, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+
+        // Just inside the deadline still projects the report.
+        let edge = stored_health(true, "2026-08-24T11:57:00Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &edge, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // A slower reporter gets its own deadline: 10m cadence, 20m old is
+        // fresh for it but would be stale at the default cadence.
+        let slow = stored_health(true, "2026-08-24T11:40:00Z", 600);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Online, &slow, now).unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+
+        // No report at all is unknown.
+        let projected = project_runtime_health(
+            RuntimeSummaryStatus::Online,
+            &StoredRuntimeHealth::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+    }
+
+    #[test]
+    fn runtime_health_projection_only_answers_for_online_runtimes() {
+        let now = "2026-08-24T12:00:00Z";
+        let fresh = stored_health(true, "2026-08-24T11:59:30Z", 60);
+        for status in [
+            RuntimeSummaryStatus::Offline,
+            RuntimeSummaryStatus::Stale,
+            RuntimeSummaryStatus::Unknown,
+        ] {
+            let projected = project_runtime_health(status, &fresh, now).unwrap();
+            assert_eq!(
+                projected.status,
+                RuntimeHealthStatus::Unknown,
+                "an intentionally not-online runtime carries no standing readiness claim"
+            );
+        }
+    }
+
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
     /// variant list, so the three cannot drift by construction. This keeps
     /// checking them because the guarantee depends on serde's `rename`
@@ -3350,6 +4018,22 @@ mod tests {
             RuntimeSummaryStatus::Unknown,
         );
 
+        assert_wire_encodings_agree!(
+            parse_offboarding_phase,
+            OffboardingPhase::RetirementRequested,
+            OffboardingPhase::ReceiptVerified,
+            OffboardingPhase::ComputeRemoved,
+            OffboardingPhase::LinkDeactivated,
+            OffboardingPhase::Archived,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_health_status,
+            RuntimeHealthStatus::Ready,
+            RuntimeHealthStatus::NotReady,
+            RuntimeHealthStatus::Unknown,
+        );
+
         assert_wire_encodings_agree!(parse_runtime_artifact_kind, RuntimeArtifactKind::OciImage);
 
         assert_wire_encodings_agree!(
@@ -3385,9 +4069,21 @@ mod tests {
         assert_wire_encodings_agree!(
             parse_runtime_control_request_status,
             RuntimeControlRequestStatus::Requested,
-            RuntimeControlRequestStatus::Running,
+            RuntimeControlRequestStatus::Launching,
+            RuntimeControlRequestStatus::ComputeUp,
+            RuntimeControlRequestStatus::Ready,
             RuntimeControlRequestStatus::Succeeded,
+            RuntimeControlRequestStatus::Stopped,
             RuntimeControlRequestStatus::Failed,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_lifecycle_stage,
+            RuntimeLifecycleStage::Launch,
+            RuntimeLifecycleStage::Compute,
+            RuntimeLifecycleStage::Readiness,
+            RuntimeLifecycleStage::Retirement,
+            RuntimeLifecycleStage::Unknown,
         );
 
         assert_wire_encodings_agree!(
@@ -3422,6 +4118,355 @@ mod tests {
             parse_finite_private_settlement_kind,
             FinitePrivateSettlementKind::Actual,
             FinitePrivateSettlementKind::Estimate,
+        );
+    }
+
+    /// Every phase pair is classified exactly by rank: forward moves and
+    /// same-phase restatements are allowed, any backward move is refused.
+    #[test]
+    fn offboarding_phase_transitions_are_forward_only() {
+        let ordered = [
+            OffboardingPhase::RetirementRequested,
+            OffboardingPhase::ReceiptVerified,
+            OffboardingPhase::ComputeRemoved,
+            OffboardingPhase::LinkDeactivated,
+            OffboardingPhase::Archived,
+        ];
+        assert!(OffboardingPhase::transition_allowed(None, ordered[0]));
+        assert!(OffboardingPhase::transition_allowed(
+            None,
+            *ordered.last().unwrap()
+        ));
+        for (from_index, current) in ordered.iter().enumerate() {
+            for (to_index, attempted) in ordered.iter().enumerate() {
+                assert_eq!(
+                    OffboardingPhase::transition_allowed(Some(*current), *attempted),
+                    from_index <= to_index,
+                    "{current} -> {attempted}",
+                );
+                assert_eq!(current.reached(*attempted), from_index >= to_index);
+            }
+        }
+    }
+
+    /// The 0020 backfill mapping, mirrored by `from_legacy_facts`, over every
+    /// legacy flag combination. A verified receipt dominates (the destroy
+    /// completed, so compute is gone); an inactive link with no receipt and no
+    /// surviving project link is the archived-unrecoverable shape; an inactive
+    /// link superseded by another active link of the same project is a
+    /// relocation leftover, not an offboarding.
+    #[test]
+    fn offboarding_phase_maps_every_legacy_flag_combination() {
+        use OffboardingPhase::*;
+        let expected = |has_verified_receipt,
+                        destroy_request_active,
+                        link_active,
+                        any_link_exists,
+                        project_has_active_link| {
+            OffboardingPhase::from_legacy_facts(
+                has_verified_receipt,
+                destroy_request_active,
+                link_active,
+                any_link_exists,
+                project_has_active_link,
+            )
+        };
+        for destroy_request_active in [false, true] {
+            for any_link_exists in [false, true] {
+                for project_has_active_link in [false, true] {
+                    // The half-retired ghost: receipt stored, link still active.
+                    assert_eq!(
+                        expected(
+                            true,
+                            destroy_request_active,
+                            true,
+                            any_link_exists,
+                            project_has_active_link
+                        ),
+                        Some(ComputeRemoved),
+                    );
+                    // Completed retirement: receipt stored, link deactivated.
+                    assert_eq!(
+                        expected(
+                            true,
+                            destroy_request_active,
+                            false,
+                            any_link_exists,
+                            project_has_active_link
+                        ),
+                        Some(Archived),
+                    );
+                    // Live runtime, with or without an in-flight destroy.
+                    assert_eq!(
+                        expected(false, false, true, any_link_exists, project_has_active_link),
+                        None,
+                    );
+                    assert_eq!(
+                        expected(false, true, true, any_link_exists, project_has_active_link),
+                        Some(RetirementRequested),
+                    );
+                    // Never linked: no offboarding evidence at all.
+                    assert_eq!(
+                        expected(
+                            false,
+                            destroy_request_active,
+                            false,
+                            false,
+                            project_has_active_link
+                        ),
+                        None,
+                    );
+                    // Inactive link but the project has another active
+                    // runtime: superseded by relocation, not offboarded.
+                    assert_eq!(
+                        expected(false, destroy_request_active, false, true, true),
+                        None,
+                    );
+                    // Inactive link, no receipt, no surviving project link:
+                    // unrecoverable archive or legacy offboard.
+                    assert_eq!(
+                        expected(false, destroy_request_active, false, true, false),
+                        Some(Archived),
+                    );
+                }
+            }
+        }
+    }
+
+    fn completion_input(
+        artifact: Option<&str>,
+        receipt: Option<RuntimeRetirementSnapshotReceipt>,
+    ) -> CompleteRuntimeControlRequestInput {
+        CompleteRuntimeControlRequestInput {
+            request_id: "request_1".to_string(),
+            runner_id: "runner-1".to_string(),
+            lease_token: "lease-1".to_string(),
+            runtime_artifact_id: artifact.map(str::to_string),
+            state_schema_version: artifact.map(|_| "state-v1".to_string()),
+            runtime_capabilities: None,
+            runtime_host: artifact.map(|_| "https://runtime.example".to_string()),
+            published_app_urls: artifact.map(|_| vec!["https://app.example".to_string()]),
+            retirement_snapshot: receipt,
+            now: None,
+        }
+    }
+
+    fn retirement_receipt() -> RuntimeRetirementSnapshotReceipt {
+        RuntimeRetirementSnapshotReceipt {
+            schema: RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+            request_id: "request_1".to_string(),
+            project_id: "project_1".to_string(),
+            agent_runtime_id: "runtime_1".to_string(),
+            durable_state_id: "runtime_1".to_string(),
+            runtime_artifact_id: "artifact_1".to_string(),
+            backend: RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+            locator: "retirement-request_1".to_string(),
+            zip_bytes: 1,
+            zip_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+            created_at: NOW.to_string(),
+            verified_at: NOW.to_string(),
+            recovery_authority_id: "finite-assisted-test".to_string(),
+            retention_policy: RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+        }
+    }
+
+    #[test]
+    fn runtime_control_completion_parse_pins_the_three_shapes() {
+        // Restart/Recover/Stop complete plainly; any facts are a mismatch.
+        for kind in [
+            RuntimeControlKind::Restart,
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+            RuntimeControlKind::Stop,
+        ] {
+            assert_eq!(
+                RuntimeControlCompletion::parse(kind, &completion_input(None, None)).unwrap(),
+                RuntimeControlCompletion::Plain
+            );
+            assert!(matches!(
+                RuntimeControlCompletion::parse(kind, &completion_input(Some("artifact_1"), None)),
+                Err(CoreError::RuntimeUpgradeCompletionMismatch)
+            ));
+            assert!(matches!(
+                RuntimeControlCompletion::parse(
+                    kind,
+                    &completion_input(None, Some(retirement_receipt()))
+                ),
+                Err(CoreError::RuntimeRetirementSnapshotMismatch)
+            ));
+        }
+
+        // Upgrade requires the full fact set and rejects the receipt.
+        assert!(matches!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Upgrade,
+                &completion_input(None, None)
+            ),
+            Err(CoreError::RuntimeUpgradeCompletionMismatch)
+        ));
+        assert!(matches!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Upgrade,
+                &completion_input(Some("artifact_1"), Some(retirement_receipt()))
+            ),
+            Err(CoreError::RuntimeRetirementSnapshotMismatch)
+        ));
+        assert!(matches!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Upgrade,
+                &completion_input(Some("artifact_1"), None)
+            ),
+            Ok(RuntimeControlCompletion::Upgrade(_))
+        ));
+
+        // Destroy requires the receipt and rejects upgrade facts.
+        assert!(matches!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Destroy,
+                &completion_input(None, None)
+            ),
+            Err(CoreError::RuntimeRetirementSnapshotMismatch)
+        ));
+        assert!(matches!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Destroy,
+                &completion_input(Some("artifact_1"), Some(retirement_receipt()))
+            ),
+            Err(CoreError::RuntimeUpgradeCompletionMismatch)
+        ));
+        assert_eq!(
+            RuntimeControlCompletion::parse(
+                RuntimeControlKind::Destroy,
+                &completion_input(None, Some(retirement_receipt()))
+            )
+            .unwrap(),
+            RuntimeControlCompletion::Destroy(Box::new(retirement_receipt()))
+        );
+    }
+
+    #[test]
+    fn lifecycle_machine_legal_chains_reach_their_terminals() {
+        use crate::runtime_lifecycle::{RuntimeLifecycle, phase};
+
+        // The up-bound chain: every up-bound operation passes through Ready
+        // before it may be recorded Succeeded.
+        let lifecycle = RuntimeLifecycle::<phase::Requested>::enqueue();
+        assert_eq!(lifecycle.status(), RuntimeControlRequestStatus::Requested);
+        let lifecycle = lifecycle.lease();
+        assert_eq!(lifecycle.status(), RuntimeControlRequestStatus::Launching);
+        let lifecycle = lifecycle.compute_up(&RuntimeControlCompletion::Plain);
+        assert_eq!(lifecycle.status(), RuntimeControlRequestStatus::ComputeUp);
+        let lifecycle = lifecycle.ready();
+        assert_eq!(lifecycle.status(), RuntimeControlRequestStatus::Ready);
+        let terminal = lifecycle.succeed();
+        assert_eq!(terminal.status(), RuntimeControlRequestStatus::Succeeded);
+
+        // The down-bound chain: Stop/Destroy confirm straight into Stopped.
+        let terminal = RuntimeLifecycle::<phase::Requested>::enqueue()
+            .lease()
+            .confirm_stopped(&RuntimeControlCompletion::Plain);
+        assert_eq!(terminal.status(), RuntimeControlRequestStatus::Stopped);
+
+        // Retirement requeues from Launching back to Requested.
+        let retried = RuntimeLifecycle::<phase::Requested>::enqueue()
+            .lease()
+            .retry();
+        assert_eq!(retried.status(), RuntimeControlRequestStatus::Requested);
+    }
+
+    #[test]
+    fn lifecycle_machine_failure_is_named_from_every_non_terminal_state() {
+        use crate::runtime_lifecycle::{RuntimeLifecycle, phase};
+
+        let stages = [
+            RuntimeLifecycleStage::Launch,
+            RuntimeLifecycleStage::Compute,
+            RuntimeLifecycleStage::Readiness,
+            RuntimeLifecycleStage::Retirement,
+            RuntimeLifecycleStage::Unknown,
+        ];
+        for stage in stages {
+            let failed = RuntimeLifecycle::<phase::Requested>::enqueue().fail(stage);
+            assert_eq!(failed.status(), RuntimeControlRequestStatus::Failed);
+            assert_eq!(failed.stage(), stage);
+
+            let failed = RuntimeLifecycle::<phase::Requested>::enqueue()
+                .lease()
+                .fail(stage);
+            assert_eq!(failed.stage(), stage);
+
+            let failed = RuntimeLifecycle::<phase::Requested>::enqueue()
+                .lease()
+                .compute_up(&RuntimeControlCompletion::Plain)
+                .fail(stage);
+            assert_eq!(failed.stage(), stage);
+
+            let failed = RuntimeLifecycle::<phase::Requested>::enqueue()
+                .lease()
+                .compute_up(&RuntimeControlCompletion::Plain)
+                .ready()
+                .fail(stage);
+            assert_eq!(failed.stage(), stage);
+        }
+    }
+
+    #[test]
+    fn lifecycle_machine_rehydration_only_accepts_the_exact_phase() {
+        use crate::runtime_lifecycle::{RuntimeLifecycle, phase};
+
+        for status in [
+            RuntimeControlRequestStatus::Requested,
+            RuntimeControlRequestStatus::Launching,
+            RuntimeControlRequestStatus::ComputeUp,
+            RuntimeControlRequestStatus::Ready,
+            RuntimeControlRequestStatus::Succeeded,
+            RuntimeControlRequestStatus::Stopped,
+            RuntimeControlRequestStatus::Failed,
+        ] {
+            assert_eq!(
+                RuntimeLifecycle::<phase::Requested>::from_status(status).is_some(),
+                status == RuntimeControlRequestStatus::Requested
+            );
+            assert_eq!(
+                RuntimeLifecycle::<phase::Launching>::from_status(status).is_some(),
+                status == RuntimeControlRequestStatus::Launching
+            );
+            assert_eq!(
+                RuntimeLifecycle::<phase::ComputeUp>::from_status(status).is_some(),
+                status == RuntimeControlRequestStatus::ComputeUp
+            );
+            assert_eq!(
+                RuntimeLifecycle::<phase::Ready>::from_status(status).is_some(),
+                status == RuntimeControlRequestStatus::Ready
+            );
+        }
+        // Terminal states have no outgoing transitions, so they expose no
+        // `from_status` rehydration into a continuing machine at all.
+    }
+
+    #[test]
+    fn lifecycle_status_terminal_and_active_sets_are_partitioned() {
+        for (status, terminal) in [
+            (RuntimeControlRequestStatus::Requested, false),
+            (RuntimeControlRequestStatus::Launching, false),
+            (RuntimeControlRequestStatus::ComputeUp, false),
+            (RuntimeControlRequestStatus::Ready, false),
+            (RuntimeControlRequestStatus::Succeeded, true),
+            (RuntimeControlRequestStatus::Stopped, true),
+            (RuntimeControlRequestStatus::Failed, true),
+        ] {
+            assert_eq!(status.is_terminal(), terminal, "{status:?}");
+            assert_eq!(status.is_active(), !terminal, "{status:?}");
+        }
+        // The N-1 deploy bridge: legacy "running" parses as Launching, and
+        // serialization only ever emits the canonical value.
+        assert_eq!(
+            parse_runtime_control_request_status("running"),
+            Some(RuntimeControlRequestStatus::Launching)
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeControlRequestStatus::Launching).unwrap(),
+            serde_json::Value::String("launching".to_string())
         );
     }
 
@@ -5275,7 +6320,7 @@ mod tests {
                 .expect("restart request should lease");
 
             assert_eq!(lease.request.id, restart.id);
-            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
+            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Launching);
             assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
 
             let stale_complete = db
@@ -5366,6 +6411,222 @@ mod tests {
                 .unwrap()
                 .is_none()
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn restart_readiness_failure_is_named_and_never_reads_succeeded() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+
+            // The 2026-08-18 postmortem shape: a restart whose readiness wait
+            // expires must end in a named failed state, never in succeeded.
+            let restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "restart-lease-1".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .await
+            .unwrap()
+            .expect("restart request should lease");
+            let failed = db
+                .fail_runtime_control_request(FailRuntimeControlRequestInput {
+                    request_id: restart.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease-1".to_string(),
+                    failure_message: "runtime /healthz did not become ready within 180s"
+                        .to_string(),
+                    failure_stage: Some(RuntimeLifecycleStage::Readiness),
+                    now: Some("2026-05-25T13:07:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(failed.status, RuntimeControlRequestStatus::Failed);
+            assert_eq!(failed.failure_stage, Some(RuntimeLifecycleStage::Readiness));
+            assert!(failed.completed_at.is_some());
+            assert_eq!(
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Stale
+            );
+            // The terminal row leaves the one-active index: a fresh request
+            // is a new row, and the failed one cannot be leased again.
+            let retry_restart = db
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:08:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_ne!(retry_restart.id, failed.id);
+
+            // An N-1 Runner names no stage; the failure still lands, marked
+            // unknown rather than silently laundered into a real stage.
+            db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "restart-lease-2".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:08:30Z".to_string()),
+            })
+            .await
+            .unwrap()
+            .expect("the fresh restart should lease");
+            let legacy_failed = db
+                .fail_runtime_control_request(FailRuntimeControlRequestInput {
+                    request_id: retry_restart.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "restart-lease-2".to_string(),
+                    failure_message: "n-1 runner failure".to_string(),
+                    failure_stage: None,
+                    now: Some("2026-05-25T13:09:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(legacy_failed.status, RuntimeControlRequestStatus::Failed);
+            assert_eq!(
+                legacy_failed.failure_stage,
+                Some(RuntimeLifecycleStage::Unknown)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stop_confirms_into_the_stopped_terminal() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "new@finite.vip",
+                "user_workos_new",
+                "first-submit",
+                "oslo-agent-001",
+                "artifact-v1",
+                "2026-05-25T13:02:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+
+            let stop = db
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: "new@finite.vip".to_string(),
+                    workos_user_id: "user_workos_new".to_string(),
+                    project_id,
+                    now: Some("2026-05-25T13:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "stop-lease-1".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .await
+            .unwrap()
+            .expect("stop request should lease");
+            let stopped = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: stop.id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "stop-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            // A stopped runtime never displays as ready/succeeded: its
+            // terminal is Stopped and its host facts read offline.
+            assert_eq!(stopped.status, RuntimeControlRequestStatus::Stopped);
+            assert_eq!(stopped.failure_stage, None);
+            assert_eq!(
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            // A replayed completion against the terminal row is refused.
+            let replay = db
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: stop.id,
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "stop-lease-1".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                replay,
+                CoreError::RuntimeRetirementSnapshotConflict
+            ));
         })
         .await;
     }
@@ -5819,7 +7080,9 @@ mod tests {
                 .complete_runtime_control_request(completion.clone())
                 .await
                 .unwrap();
-            assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
+            // Retirement confirms into the Stopped terminal, never Succeeded:
+            // a stopped runtime must not read as a ready one.
+            assert_eq!(completed.status, RuntimeControlRequestStatus::Stopped);
             let snapshot = db
                 .row("runtime_retirement_snapshots", &request.id)
                 .await
@@ -7650,6 +8913,9 @@ mod tests {
             "project_runtime_links",
             "chat_identities",
             "project_room_memberships",
+            // Writer removed; the table stays because production may hold rows
+            // and dropping schema is a rollback boundary (separate gated
+            // migration).
             "runtime_status_snapshots",
             "inference_profiles",
             "agent_creation_entitlements",
@@ -7675,6 +8941,13 @@ mod tests {
         assert!(CORE_SCHEMA_SQL.contains("500000000"));
         assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
+        // Operator-rescue scripts stay out of CORE_SCHEMA_SQL by construction:
+        // CORE_SCHEMA_SQL is an explicit concat! allowlist and each rescue
+        // lives in its own const, so Core startup can never mutate user state
+        // outside the migration ladder. Keyed on each rescue's audit action,
+        // which appears nowhere else in the schema.
+        assert!(!CORE_SCHEMA_SQL.contains("runtime.upgrade.rollback_rescue"));
+        assert!(!CORE_SCHEMA_SQL.contains("runtime.lifecycle.reverse_remap"));
     }
 
     #[test]
@@ -7897,7 +9170,7 @@ mod tests {
                 .unwrap()
                 .expect("admin restart request should lease");
             assert_eq!(lease.request.id, restart.id);
-            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Running);
+            assert_eq!(lease.request.status, RuntimeControlRequestStatus::Launching);
             assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
             let completed = db
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
@@ -8306,6 +9579,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "restart-lease".to_string(),
                 failure_message: "no such object finite-kata-absent".to_string(),
+                failure_stage: Some(RuntimeLifecycleStage::Compute),
                 now: Some("2026-08-12T13:04:00Z".to_string()),
             })
             .await
@@ -8317,6 +9591,21 @@ mod tests {
                     .host_facts
                     .runtime_status,
                 RuntimeSummaryStatus::Stale
+            );
+            let stale_overview = db
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(
+                stale_overview.runtime_status,
+                db.agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status
             );
 
             // Without the attestation, `stale` (and the missing stop
@@ -9180,7 +10469,7 @@ mod tests {
             ));
             assert_eq!(
                 db.runtime_control_request(&upgrade.id).await.unwrap().status,
-                RuntimeControlRequestStatus::Running
+                RuntimeControlRequestStatus::Launching
             );
             assert_eq!(
                 db.agent_runtime(&runtime_id).await.unwrap()
@@ -9526,7 +10815,7 @@ mod tests {
         let spec = runtime_spec_v1(lease.runtime_spec.as_ref().unwrap());
         db.exec(&format!(
             "UPDATE runtime_control_requests \
-             SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+             SET status = 'stopped', lease_token = NULL, lease_expires_at = NULL, \
                  completed_at = CURRENT_TIMESTAMP \
              WHERE id = '{}'",
             destroy.id

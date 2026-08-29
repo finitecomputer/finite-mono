@@ -21,6 +21,7 @@ DEFAULT_MANIFEST = ROOT / "infra" / "deployments" / "production.toml"
 PLAN_SCHEMA = "finite.production-deploy-plan.v1"
 RECORD_SCHEMA = "finite.production-deploy-record.v1"
 RISKY_PATH_POLICY = "lat1-v1"
+ZERO_SHA = "0" * 40
 ALLOWED_CLASSIFICATIONS = {"ordinary", "schema-change", "forward-only"}
 ALLOWED_MANIFEST_KEYS = {
     "environment",
@@ -29,6 +30,11 @@ ALLOWED_MANIFEST_KEYS = {
     "risky_path_policy",
     "mutation_enabled",
     "rollback_policy",
+    "closure_transport",
+    "cachix_cache_name",
+    "cachix_substituter",
+    "cachix_trusted_public_key",
+    "legacy_file_cache_fallback",
     "required_gates",
 }
 
@@ -123,6 +129,44 @@ def resolve_rev(rev: str) -> str:
     return resolved
 
 
+def commit_parents(rev: str) -> list[str]:
+    raw = run_git(["rev-list", "--parents", "-n", "1", rev])
+    parts = raw.split()
+    if not parts or parts[0] != rev:
+        raise DeployConfigError(f"could not inspect commit parents for {rev}")
+    return parts[1:]
+
+
+def tree_sha(rev: str) -> str:
+    return run_git(["rev-parse", f"{rev}^{{tree}}"])
+
+
+def resolve_ci_source(source: str, push_before: str | None) -> dict[str, str]:
+    source_sha = resolve_rev(source)
+    before_sha = (
+        resolve_rev(push_before) if push_before and push_before != ZERO_SHA else None
+    )
+    parents = commit_parents(source_sha)
+
+    if before_sha and len(parents) == 2 and parents[0] == before_sha:
+        ci_source_sha = parents[1]
+        if tree_sha(source_sha) != tree_sha(ci_source_sha):
+            raise DeployConfigError(
+                "production merge commit tree does not match its promoted source parent"
+            )
+        return {
+            "source_sha": source_sha,
+            "ci_source_sha": ci_source_sha,
+            "ci_source_reason": "production-merge-second-parent",
+        }
+
+    return {
+        "source_sha": source_sha,
+        "ci_source_sha": source_sha,
+        "ci_source_reason": "source-sha",
+    }
+
+
 def changed_paths(base: str, head: str) -> list[str]:
     raw = run_git(["diff", "--name-only", f"{base}...{head}"])
     return [line for line in raw.splitlines() if line]
@@ -150,6 +194,11 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "risky_path_policy",
         "mutation_enabled",
         "rollback_policy",
+        "closure_transport",
+        "cachix_cache_name",
+        "cachix_substituter",
+        "cachix_trusted_public_key",
+        "legacy_file_cache_fallback",
     ]
     missing = [key for key in required if key not in manifest]
     if missing:
@@ -169,6 +218,19 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         raise DeployConfigError("mutation_enabled must be a boolean")
     if manifest["rollback_policy"] != "previous-lat1-closure":
         raise DeployConfigError("rollback_policy must be previous-lat1-closure")
+    if manifest["closure_transport"] != "cachix":
+        raise DeployConfigError("closure_transport must be cachix")
+    if manifest["cachix_cache_name"] != "finite":
+        raise DeployConfigError("cachix_cache_name must be finite")
+    if manifest["cachix_substituter"] != "https://finite.cachix.org":
+        raise DeployConfigError("cachix_substituter must be https://finite.cachix.org")
+    if (
+        manifest["cachix_trusted_public_key"]
+        != "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk="
+    ):
+        raise DeployConfigError("cachix_trusted_public_key must match the finite cache")
+    if manifest["legacy_file_cache_fallback"] != "explicit-only":
+        raise DeployConfigError("legacy_file_cache_fallback must be explicit-only")
 
     gates = manifest.get("required_gates", [])
     if not isinstance(gates, list) or not all(
@@ -189,7 +251,9 @@ def classify_paths(paths: list[str]) -> list[dict[str, str]]:
     return risky
 
 
-def validate_classification(manifest: dict[str, Any], risky: list[dict[str, str]]) -> None:
+def validate_classification(
+    manifest: dict[str, Any], risky: list[dict[str, str]]
+) -> None:
     if risky and manifest["classification"] == "ordinary":
         risky_list = ", ".join(entry["path"] for entry in risky)
         raise DeployConfigError(
@@ -218,6 +282,10 @@ def build_plan(manifest_path: Path, base: str, head: str) -> dict[str, Any]:
         "risky_path_policy": manifest["risky_path_policy"],
         "mutation_enabled": manifest["mutation_enabled"],
         "rollback_policy": manifest["rollback_policy"],
+        "closure_transport": manifest["closure_transport"],
+        "cachix_cache_name": manifest["cachix_cache_name"],
+        "cachix_substituter": manifest["cachix_substituter"],
+        "legacy_file_cache_fallback": manifest["legacy_file_cache_fallback"],
         "required_gates": manifest.get("required_gates", []),
         "changed_paths": paths,
         "risky_paths": risky,
@@ -245,6 +313,9 @@ def render_plan_summary(plan: dict[str, Any]) -> str:
             f"- Scope: `{plan['scope']}`",
             f"- Classification: `{plan['classification']}`",
             f"- Risky path policy: `{plan['risky_path_policy']}`",
+            f"- Closure transport: `{plan['closure_transport']}`",
+            f"- Cachix cache: `{plan['cachix_cache_name']}` ({plan['cachix_substituter']})",
+            f"- Legacy file-cache fallback: `{plan['legacy_file_cache_fallback']}`",
             f"- Mutation enabled: `{str(plan['mutation_enabled']).lower()}`",
             f"- Post-merge behavior: {merge_behavior}.",
             "",
@@ -264,9 +335,16 @@ def build_record(
     outcome: str,
     mutation_boundary_crossed: bool,
     system_path: str | None,
+    closure_transport: str | None,
+    cachix_cache_name: str | None,
+    closure_store_path_count: int | None,
+    closure_size_bytes: int | None,
+    closure_size_report: str | None,
     override_reason: str | None,
 ) -> dict[str, Any]:
     now = utc_now()
+    recorded_transport = closure_transport or plan.get("closure_transport")
+    recorded_cache = cachix_cache_name or plan.get("cachix_cache_name")
     return {
         "schema": RECORD_SCHEMA,
         "environment": plan["environment"],
@@ -278,6 +356,12 @@ def build_record(
         "mutation_enabled": plan["mutation_enabled"],
         "mutation_boundary_crossed": mutation_boundary_crossed,
         "system_path": system_path,
+        "closure_transport": recorded_transport,
+        "cachix_cache_name": recorded_cache,
+        "cachix_substituter": plan.get("cachix_substituter"),
+        "closure_store_path_count": closure_store_path_count,
+        "closure_size_bytes": closure_size_bytes,
+        "closure_size_report": closure_size_report,
         "finite_status_before_artifact": "finite-status-before",
         "finite_status_after_artifact": "finite-status-after",
         "outcome": outcome,
@@ -289,7 +373,9 @@ def build_record(
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def command_validate_manifest(args: argparse.Namespace) -> int:
@@ -306,6 +392,19 @@ def command_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_ci_source(args: argparse.Namespace) -> int:
+    resolution = resolve_ci_source(args.source, args.push_before)
+    if args.output:
+        write_json(args.output, resolution)
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as output:
+            output.write(f"ci_source_sha={resolution['ci_source_sha']}\n")
+            output.write(f"ci_source_reason={resolution['ci_source_reason']}\n")
+    if not args.output and not args.github_output:
+        print(resolution["ci_source_sha"])
+    return 0
+
+
 def command_record(args: argparse.Namespace) -> int:
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     if plan.get("schema") != PLAN_SCHEMA:
@@ -315,6 +414,11 @@ def command_record(args: argparse.Namespace) -> int:
         outcome=args.outcome,
         mutation_boundary_crossed=args.mutation_boundary_crossed,
         system_path=args.system_path,
+        closure_transport=args.closure_transport,
+        cachix_cache_name=args.cachix_cache_name,
+        closure_store_path_count=args.closure_store_path_count,
+        closure_size_bytes=args.closure_size_bytes,
+        closure_size_report=args.closure_size_report,
         override_reason=args.override_reason,
     )
     write_json(args.output, record)
@@ -337,12 +441,24 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--summary", type=Path)
     plan.set_defaults(func=command_plan)
 
+    ci_source = subcommands.add_parser("ci-source")
+    ci_source.add_argument("--source", required=True)
+    ci_source.add_argument("--push-before")
+    ci_source.add_argument("--output", type=Path)
+    ci_source.add_argument("--github-output", type=Path)
+    ci_source.set_defaults(func=command_ci_source)
+
     record = subcommands.add_parser("record")
     record.add_argument("--plan", type=Path, required=True)
     record.add_argument("--output", type=Path, required=True)
     record.add_argument("--outcome", required=True)
     record.add_argument("--mutation-boundary-crossed", action="store_true")
     record.add_argument("--system-path")
+    record.add_argument("--closure-transport")
+    record.add_argument("--cachix-cache-name")
+    record.add_argument("--closure-store-path-count", type=int)
+    record.add_argument("--closure-size-bytes", type=int)
+    record.add_argument("--closure-size-report")
     record.add_argument("--override-reason")
     record.set_defaults(func=command_record)
     return parser

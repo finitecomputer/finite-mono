@@ -637,7 +637,7 @@ Work top-down. Every retained item is required.
   fake these with placeholders that appear production-ready.
 - Before acceptance, extract durable terminology to `CONTEXT.md`, any truly
   cross-cutting decision to an ADR, API operations and recovery/cost objectives
-  to retained runbooks, deployed artifact facts to `compat/matrix.toml` or the
+  to retained runbooks, deployed artifact facts to `infra/deployment-changelog.md` or the
   Product Release manifest, and completed migration facts to the migration
   log. The closing commit deletes this run per run-document governance.
 

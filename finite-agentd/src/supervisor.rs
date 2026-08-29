@@ -324,6 +324,12 @@ fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
+        // Each child leads its own process group so termination can signal
+        // the whole tree: gateway scripts fork background loops, and a
+        // straggler grandchild would otherwise survive a restart holding a
+        // loopback port (PR 440 observed an orphaned finitechat bridge
+        // keeping :37633, so the next bridge exited at bind).
+        .process_group(0)
         .kill_on_drop(true);
     let child = command.spawn().map_err(AgentdError::from)?;
     let pid = child
@@ -332,19 +338,37 @@ fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
     Ok((child, pid))
 }
 
+fn signal_group(pid: u32, signal: rustix::process::Signal) {
+    // Signal the child's whole process group (it is spawned as group leader).
+    // In-process syscall: the runtime image ships no `kill` binary (only the
+    // sh builtin), so the old `Command::new("kill")` shell-out silently
+    // signalled nothing — the child never saw SIGTERM and every "graceful"
+    // drain was really a 10s stall followed by SIGKILL (PR 440, 83ef3024).
+    if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process_group(pid, signal);
+    }
+}
+
 async fn terminate_child(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .await;
+    let pid = child.id();
+    if let Some(pid) = pid {
+        signal_group(pid, rustix::process::Signal::TERM);
     }
     if tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
         .is_err()
     {
+        if let Some(pid) = pid {
+            signal_group(pid, rustix::process::Signal::KILL);
+        }
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+    // The direct child is gone; sweep the group once more so no orphaned
+    // grandchild survives into this slot's next incarnation (the post-exit
+    // sweep from PR 440's ec46243e, at agentd's own supervision boundary).
+    if let Some(pid) = pid {
+        signal_group(pid, rustix::process::Signal::KILL);
     }
 }
 
@@ -383,6 +407,121 @@ mod tests {
         assert_eq!(restarted.restart_count, 1);
         assert_ne!(restarted.pid(), Some(original_pid));
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_delivers_a_real_sigterm_that_children_can_trap_and_drain_on() {
+        // The graceful path agentd's own SIGTERM handler routes through:
+        // supervisor.shutdown() must deliver SIGTERM in-process (the runtime
+        // image has no `kill` binary) and give the child its bounded window
+        // to finish work before any SIGKILL (PR 440, 83ef3024).
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("drained");
+        let armed = dir.path().join("armed");
+        let script = dir.path().join("trapper.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap 'echo drained > {}; exit 0' TERM\necho armed > {}\nsleep 30 & wait\n",
+                marker.display(),
+                armed.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: script.clone(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+        );
+        wait_for_running(&handle, "finitechat").await;
+        // Let the script arm its trap before signalling.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !armed.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stub must arm its trap");
+
+        handle.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the child must observe SIGTERM and drain, not be SIGKILLed");
+    }
+
+    #[tokio::test]
+    async fn the_post_exit_sweep_kills_orphaned_grandchildren() {
+        // A gateway-forked straggler must not survive its supervisor slot:
+        // the grandchild here ignores SIGTERM, so only the post-exit group
+        // KILL sweep can remove it (the leaked bridge from PR 440's
+        // ec46243e held :37633 exactly this way).
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let script = dir.path().join("forker.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsh -c 'trap \"\" TERM; while :; do sleep 1; done' &\necho $! > {}\nwait\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let handle = start_supervisor(
+            sleeping_process("finitechat"),
+            sleeping_process("health"),
+            ProcessSpec {
+                name: "hermes",
+                program: script.clone(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+        );
+        wait_for_running(&handle, "hermes").await;
+        let grandchild = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(raw) = std::fs::read_to_string(&pidfile)
+                    && let Ok(pid) = raw.trim().parse::<i32>()
+                {
+                    break rustix::process::Pid::from_raw(pid).expect("nonzero pid");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stub must record its grandchild");
+
+        handle.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // A just-killed grandchild can linger as a zombie until init
+                // reaps it; ESRCH is the only accepted terminal state.
+                if rustix::process::test_kill_process(grandchild).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the post-exit sweep must remove the orphaned grandchild");
     }
 
     fn sleeping_process(name: &'static str) -> ProcessSpec {

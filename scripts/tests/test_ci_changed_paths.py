@@ -15,7 +15,7 @@ AFFECTED_RUST_PACKAGES = CI_DIR / "affected-rust-packages"
 # directly puts scripts/ci on sys.path, so do the same here.
 sys.path.insert(0, str(CI_DIR))
 
-import changed_paths
+import changed_paths  # noqa: E402  (must follow the sys.path shim above)
 
 loader = SourceFileLoader("affected_rust_packages", str(AFFECTED_RUST_PACKAGES))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -42,7 +42,9 @@ class NormalizePathTests(unittest.TestCase):
         self.assertEqual(changed_paths.normalize_path(""), "")
 
     def test_absolute_path_becomes_relative(self) -> None:
-        self.assertEqual(changed_paths.normalize_path(os.path.abspath("justfile")), "justfile")
+        self.assertEqual(
+            changed_paths.normalize_path(os.path.abspath("justfile")), "justfile"
+        )
 
     def test_normalized_paths_drops_empty_entries(self) -> None:
         self.assertEqual(

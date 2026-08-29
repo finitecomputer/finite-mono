@@ -40,9 +40,11 @@ use finitechat_proto::{
     AppendApplicationEventRequest, AppendEphemeralActivityRequest, CommitAccepted,
     EphemeralActivityAccepted, EventAccepted, SubmitCommitRequest,
 };
+use serde::Serialize;
 
 use crate::state::{
-    HttpServerState, SyncStreamCursors, SyncStreamInboxCursor, SyncStreamLoop, SyncStreamRoomCursor,
+    HttpServerState, READINESS_BUDGET_MILLIS, ReadinessCheckResult, ServerReadiness,
+    SyncStreamCursors, SyncStreamInboxCursor, SyncStreamLoop, SyncStreamRoomCursor,
 };
 use crate::validate::{
     DEFAULT_SYNC_STREAM_HEARTBEAT_MILLIS, MAX_SYNC_STREAM_HEARTBEAT_MILLIS, MAX_SYNC_WAIT_MILLIS,
@@ -53,6 +55,7 @@ use crate::{MAX_HTTP_BLOB_UPLOAD_BODY_BYTES, ServerHttpError};
 pub fn http_router(state: HttpServerState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/readyz", get(readyz))
         .route("/events", post(append_application_event))
         .route("/application-effects/get", post(get_application_effect))
         .route(
@@ -124,6 +127,106 @@ async fn health() -> Json<HealthResponse> {
         source_branch: non_empty_build_value(option_env!("FINITECHAT_BUILD_BRANCH")),
         source_dirty: option_env!("FINITECHAT_BUILD_DIRTY").map(|value| value == "true"),
     })
+}
+
+#[derive(Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    budget_ms: u64,
+    latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    checks: ReadinessChecksResponse,
+}
+
+#[derive(Serialize)]
+struct ReadinessChecksResponse {
+    delivery_core: ReadinessCheckResponse,
+    durable_store: ReadinessCheckResponse,
+}
+
+#[derive(Serialize)]
+struct ReadinessCheckResponse {
+    status: &'static str,
+    latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+async fn readyz(State(state): State<HttpServerState>) -> impl IntoResponse {
+    let probe = tokio::task::spawn_blocking(move || state.probe_readiness()).await;
+    let (status, body) = match probe {
+        Ok(probe) => readiness_response(probe),
+        Err(error) => {
+            eprintln!("finitechat-server: readiness task failed: {error}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ReadinessResponse {
+                    status: "unavailable",
+                    budget_ms: READINESS_BUDGET_MILLIS,
+                    latency_ms: 0,
+                    reason: Some("probe_task_failed"),
+                    checks: ReadinessChecksResponse {
+                        delivery_core: failed_readiness_check("probe_task_failed"),
+                        durable_store: failed_readiness_check("probe_task_failed"),
+                    },
+                },
+            )
+        }
+    };
+    (status, Json(body))
+}
+
+fn readiness_response(probe: ServerReadiness) -> (StatusCode, ReadinessResponse) {
+    let ready = probe.is_ready();
+    let reason = if probe.budget_exceeded {
+        Some("readiness_budget_exceeded")
+    } else if !ready {
+        Some("component_failed")
+    } else {
+        None
+    };
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        ReadinessResponse {
+            status: if ready { "ready" } else { "unavailable" },
+            budget_ms: READINESS_BUDGET_MILLIS,
+            latency_ms: duration_millis(probe.elapsed),
+            reason,
+            checks: ReadinessChecksResponse {
+                delivery_core: readiness_check_response(probe.delivery_core),
+                durable_store: readiness_check_response(probe.durable_store),
+            },
+        },
+    )
+}
+
+fn readiness_check_response(check: ReadinessCheckResult) -> ReadinessCheckResponse {
+    ReadinessCheckResponse {
+        status: if check.failure.is_none() {
+            "ok"
+        } else {
+            "failed"
+        },
+        latency_ms: duration_millis(check.elapsed),
+        reason: check.failure,
+    }
+}
+
+fn failed_readiness_check(reason: &'static str) -> ReadinessCheckResponse {
+    ReadinessCheckResponse {
+        status: "failed",
+        latency_ms: 0,
+        reason: Some(reason),
+    }
+}
+
+fn duration_millis(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn non_empty_build_value(value: Option<&'static str>) -> Option<String> {

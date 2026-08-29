@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -45,8 +46,7 @@ class FiniteStatusTests(unittest.TestCase):
         }
         self.assertEqual(distribution[("finite-lat-1", "2026-07-22.1")], 13)
         self.assertEqual(
-            distribution[("finite-lat-1", "2026-07-22.1")]
-            - lat1["straggler_count"],
+            distribution[("finite-lat-1", "2026-07-22.1")] - lat1["straggler_count"],
             6,
         )
         self.assertTrue(fleet["distribution_consistent_with_detail_snapshot"])
@@ -59,14 +59,21 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,restart,launching,online,2026-08-01T13:59:00Z,t,,60",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
-        with mock.patch.object(finite_status, "run_read_only", return_value=completed) as run:
+        with mock.patch.object(
+            finite_status, "run_read_only", return_value=completed
+        ) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(len(result["runtimes"]), 1)
         self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
+        # The canonical lifecycle state arrives with the row, unmodified.
+        self.assertEqual(result["runtimes"][0]["control_status"], "launching")
+        # So do the standing-health columns.
+        self.assertEqual(result["runtimes"][0]["health_ready"], "t")
+        self.assertEqual(result["runtimes"][0]["runtime_status"], "online")
         call = run.call_args
         sql = call.kwargs["input_text"]
         self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
@@ -74,6 +81,32 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIn(finite_status.DISTRIBUTION_QUERY, sql)
         self.assertIn(finite_status.RUNTIME_DETAILS_QUERY, sql)
         self.assertEqual(call.args[0].count("psql"), 1)
+
+    def test_human_output_projects_active_control_state(self) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for group in raw["core"]["runtime_groups"]:
+            group["count"] = 0
+        raw["core"]["runtime_groups"].append(
+            {
+                "source_host_id": "finite-lat-1",
+                "id_prefix": "ctl-agent",
+                "project_prefix": "ctl-project",
+                "name_prefix": "Control Agent",
+                "version_label": "2026-07-22.1",
+                "link_state": "active",
+                "count": 1,
+                "control_kind": "restart",
+                "control_status": "compute_up",
+            }
+        )
+        expanded = finite_status.expand_fixture(raw)
+        now = finite_status.parse_time(expanded["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(expanded, now)
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "CONTROL Control Agent 01 [ctl-agent-01]: restart compute_up", output
+        )
 
     def test_human_output_names_every_straggler(self) -> None:
         output = finite_status.render_human(self.fixture_report())
@@ -95,9 +128,9 @@ class FiniteStatusTests(unittest.TestCase):
         raw["host_health"]["runner_operator_environment"] = {
             "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
         }
-        raw["host_health"]["runner_environment"][
-            "FC_RUNNER_FINITE_PRIVATE_MODEL"
-        ] = "glm-5-2"
+        raw["host_health"]["runner_environment"]["FC_RUNNER_FINITE_PRIVATE_MODEL"] = (
+            "glm-5-2"
+        )
         now = finite_status.parse_time(raw["now"])
         self.assertIsNotNone(now)
         report = finite_status.build_report(raw, now)
@@ -109,7 +142,9 @@ class FiniteStatusTests(unittest.TestCase):
         )
         self.assertEqual(report["sections"]["host_health"]["status"], "red")
 
-    def test_runner_mixed_version_alias_is_green_before_canonical_role_deploy(self) -> None:
+    def test_runner_mixed_version_alias_is_green_before_canonical_role_deploy(
+        self,
+    ) -> None:
         raw = finite_status.load_fixture(FIXTURE)
         raw["host_health"]["runner_shared_environment"] = {
             "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
@@ -117,9 +152,9 @@ class FiniteStatusTests(unittest.TestCase):
         raw["host_health"]["runner_operator_environment"] = {
             "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
         }
-        raw["host_health"]["runner_environment"][
-            "FC_RUNNER_FINITE_PRIVATE_MODEL"
-        ] = "glm-5-2"
+        raw["host_health"]["runner_environment"]["FC_RUNNER_FINITE_PRIVATE_MODEL"] = (
+            "glm-5-2"
+        )
         now = finite_status.parse_time(raw["now"])
         self.assertIsNotNone(now)
         report = finite_status.build_report(raw, now)
@@ -135,17 +170,137 @@ class FiniteStatusTests(unittest.TestCase):
         raw["host_health"]["runner_operator_environment"] = {
             "FC_RUNNER_FINITE_PRIVATE_MODEL": "glm-5-2"
         }
-        raw["host_health"]["runner_environment"][
-            "FC_RUNNER_FINITE_PRIVATE_MODEL"
-        ] = "glm-5-2"
+        raw["host_health"]["runner_environment"]["FC_RUNNER_FINITE_PRIVATE_MODEL"] = (
+            "glm-5-2"
+        )
         now = finite_status.parse_time(raw["now"])
         self.assertIsNotNone(now)
         report = finite_status.build_report(raw, now)
         runner = report["sections"]["host_health"]["runner"]
         self.assertEqual(runner["finite_private_model_status"], "unknown")
-        self.assertEqual(
-            runner["finite_private_model_state"], "unresolved-shared-role"
+        self.assertEqual(runner["finite_private_model_state"], "unresolved-shared-role")
+
+    def write_fixture_variant(self, mutate) -> Path:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mutate(raw)
+        descriptor, name = tempfile.mkstemp(suffix=".json")
+        os.close(descriptor)
+        path = Path(name)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        self.addCleanup(path.unlink)
+        return path
+
+    def fixture_runner(self) -> dict[str, object]:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        return report["sections"]["host_health"]["runner"]
+
+    def test_runner_pin_on_target_is_green_matched(self) -> None:
+        runner = self.fixture_runner()
+        self.assertEqual(runner["artifact_pin"], "finite-agent-runtime-2026-08-01.1")
+        self.assertEqual(runner["target_artifact_id"], runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "green")
+        self.assertEqual(runner["pin_state"], "matched")
+        output = finite_status.render_human(self.fixture_report())
+        self.assertIn("pin=finite-agent-runtime-2026-08-01.1 [GREEN] (matched)", output)
+
+    def test_runner_pin_mismatch_stays_red_and_names_mismatched(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_environment"]["FC_RUNNER_RUNTIME_ARTIFACT_ID"] = (
+            "finite-agent-runtime-2026-07-22.1"
         )
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["pin_status"], "red")
+        self.assertEqual(runner["pin_state"], "mismatched")
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
+
+    def test_absent_pin_with_readable_environment_is_red_not_unknown(self) -> None:
+        # kata-runner-host.nix dropped its implicit pin default: an operator
+        # runner.env without FC_RUNNER_RUNTIME_ARTIFACT_ID halts new agent
+        # creation, so it must not read as probe noise.
+        fixture = self.write_fixture_variant(
+            lambda raw: raw["host_health"]["runner_environment"].pop(
+                "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+            )
+        )
+        result = subprocess.run(
+            [str(COMMAND), "--json", "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        runner = payload["sections"]["host_health"]["runner"]
+        self.assertIsNone(runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "red")
+        self.assertEqual(runner["pin_state"], "absent")
+        self.assertEqual(payload["sections"]["host_health"]["status"], "red")
+        self.assertEqual(payload["overall_status"], "red")
+        # Same entry point as the contract job renders it loudly, too.
+        human = subprocess.run(
+            [str(COMMAND), "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("pin=unset [RED] (absent)", human.stdout)
+
+    def test_unprobeable_runner_environment_keeps_plain_unknown(self) -> None:
+        # No environment evidence at all (both files unreadable): pin absence
+        # cannot be distinguished from an unprobeable host, so stay unknown.
+        def no_environment_evidence(raw: dict[str, object]) -> None:
+            raw["host_health"]["runner_environment"].pop(
+                "FC_RUNNER_RUNTIME_ARTIFACT_ID"
+            )
+            raw["host_health"]["runner_environment_files_read"] = []
+
+        fixture = self.write_fixture_variant(no_environment_evidence)
+        result = subprocess.run(
+            [str(COMMAND), "--json", "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        runner = payload["sections"]["host_health"]["runner"]
+        self.assertIsNone(runner["artifact_pin"])
+        self.assertEqual(runner["pin_status"], "unknown")
+        self.assertEqual(runner["pin_state"], "unresolved")
+        # Contrast with the absent case: without environment evidence an
+        # otherwise-green host is plain unknown, never red by pin.
+        self.assertEqual(payload["sections"]["host_health"]["status"], "unknown")
+        human = subprocess.run(
+            [str(COMMAND), "--fixture", str(fixture)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("pin=unknown [UNKNOWN] (unresolved)", human.stdout)
+        self.assertNotIn("(absent)", human.stdout)
+
+    def test_legacy_reports_without_collection_marker_stay_conservative(self) -> None:
+        # Inputs predating runner_environment_files_read (persisted snapshots,
+        # external harnesses) keep the old conservative unknown semantics.
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_environment"]["FC_RUNNER_RUNTIME_ARTIFACT_ID"] = ""
+        del raw["host_health"]["runner_environment_files_read"]
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["pin_status"], "unknown")
+        self.assertEqual(runner["pin_state"], "unresolved")
 
     def test_json_has_four_sections_and_red_exit(self) -> None:
         result = subprocess.run(
@@ -191,7 +346,9 @@ class FiniteStatusTests(unittest.TestCase):
         raw["core"]["runtimes"][0]["link_state"] = "unlinked"
         now = finite_status.parse_time(raw["now"])
         fleet = finite_status.build_fleet(raw["core"], now)
-        lat1 = next(host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-1")
+        lat1 = next(
+            host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-1"
+        )
         self.assertEqual(lat1["intentionally_inactive_count"], 6)
         self.assertEqual(lat1["unlinked_count"], 1)
 
@@ -208,12 +365,16 @@ class FiniteStatusTests(unittest.TestCase):
             )
             (root / "latest").symlink_to(snapshot.name)
 
-            self.assertEqual(finite_status.safe_snapshot_directory(root), snapshot.resolve())
+            self.assertEqual(
+                finite_status.safe_snapshot_directory(root), snapshot.resolve()
+            )
             checked, failures = finite_status.verify_manifest(snapshot)
             self.assertEqual(checked, 1)
             self.assertEqual(failures, [])
 
-    def test_litestream_recovery_evidence_is_scored_in_the_recovery_boundary(self) -> None:
+    def test_litestream_recovery_evidence_is_scored_in_the_recovery_boundary(
+        self,
+    ) -> None:
         raw = finite_status.load_fixture(FIXTURE)
         now = finite_status.parse_time(raw["now"])
 
@@ -227,9 +388,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "finite-litestream-finite-chat-server.service",
             ],
         )
-        self.assertEqual(
-            set(fresh["litestream"]["service_units"].values()), {"green"}
-        )
+        self.assertEqual(set(fresh["litestream"]["service_units"].values()), {"green"})
 
         one_down = dict(raw["recovery"])
         one_down["litestream_service_units"] = dict(
@@ -283,7 +442,11 @@ class FiniteStatusTests(unittest.TestCase):
             "plan_hash": "b" * 64,
             "plan": {"planned": [{}, {}]},
             "events": [
-                {"event": "start", "phase": "execute", "timestamp": "2026-08-01T00:00:00Z"},
+                {
+                    "event": "start",
+                    "phase": "execute",
+                    "timestamp": "2026-08-01T00:00:00Z",
+                },
                 {
                     "event": "entry_postflight",
                     "phase": "execute",
@@ -333,7 +496,12 @@ class FiniteStatusTests(unittest.TestCase):
             "plan": {"planned": []},
             "events": [
                 {"event": "start", "phase": "execute", "run_id": "run-1"},
-                {"event": "final", "phase": "execute", "status": "noop", "run_id": "run-1"},
+                {
+                    "event": "final",
+                    "phase": "execute",
+                    "status": "noop",
+                    "run_id": "run-1",
+                },
             ],
         }
         rollout = finite_status.build_rollout(raw)
@@ -394,7 +562,9 @@ class FiniteStatusTests(unittest.TestCase):
                 finite_status.os.environ,
                 {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"},
             ),
-            mock.patch.object(finite_status, "run_read_only", side_effect=fake_run) as run,
+            mock.patch.object(
+                finite_status, "run_read_only", side_effect=fake_run
+            ) as run,
             mock.patch.object(
                 finite_status, "read_environment_values", return_value={}
             ),
@@ -499,6 +669,130 @@ class FiniteStatusTests(unittest.TestCase):
         )
         self.assertIn("lifecycle 1/3 operable", output)
 
+    def report_with_health_group(self, group: dict[str, object]) -> dict[str, object]:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for existing in raw["core"]["runtime_groups"]:
+            existing["count"] = 0
+        raw["core"]["runtime_groups"].append(
+            {
+                "source_host_id": "finite-lat-9",
+                "id_prefix": "health-agent",
+                "project_prefix": "health-project",
+                "name_prefix": "Health Agent",
+                "version_label": "2026-08-01.1",
+                "link_state": "active",
+                "count": 1,
+                **group,
+            }
+        )
+        expanded = finite_status.expand_fixture(raw)
+        now = finite_status.parse_time(expanded["now"])
+        self.assertIsNotNone(now)
+        return finite_status.build_report(expanded, now)
+
+    def lat9(self, report: dict[str, object]) -> dict[str, object]:
+        fleet = report["sections"]["fleet_convergence"]
+        return next(
+            host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-9"
+        )
+
+    def test_fresh_ready_health_report_keeps_the_host_green(self) -> None:
+        # 30s old at the default 60s cadence is fresh.
+        report = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:59:30Z", "health_ready": True}
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "green")
+        self.assertEqual(
+            (host["health_ready_count"], host["health_tracked_count"]), (1, 1)
+        )
+        output = finite_status.render_human(report)
+        self.assertIn("health 1/1 ready (0 unknown)", output)
+
+    def test_fresh_not_ready_health_report_is_red_and_names_the_reason(self) -> None:
+        report = self.report_with_health_group(
+            {
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": False,
+                "health_reason": "unreachable",
+            }
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "red")
+        self.assertEqual(report["sections"]["fleet_convergence"]["status"], "red")
+        entry = host["health_not_ready"][0]
+        self.assertEqual(entry["health"]["reason"], "unreachable")
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "HEALTH Health Agent 01 [health-agent-01]: not_ready (unreachable)", output
+        )
+
+    def test_stale_health_report_reads_unknown_past_three_cadences(self) -> None:
+        # 600s old at a 60s cadence is past the 3x deadline: the "died at 3am"
+        # runtime stops displaying its frozen last-known ready.
+        report = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:50:00Z", "health_ready": True}
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "unknown")
+        entry = host["health_unknown"][0]
+        self.assertEqual(entry["health"]["status"], "unknown")
+        self.assertEqual(entry["health"]["age_seconds"], 600)
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "HEALTH-UNKNOWN Health Agent 01 [health-agent-01]: no fresh report (last report 10m ago)",
+            output,
+        )
+        # At exactly 3x cadence the report is still fresh.
+        fresh_edge = self.report_with_health_group(
+            {"health_reported_at": "2026-08-01T13:57:00Z", "health_ready": True}
+        )
+        self.assertEqual(self.lat9(fresh_edge)["health_ready_count"], 1)
+        self.assertEqual(self.lat9(fresh_edge)["status"], "green")
+        # A slower reporter gets its own deadline (10m cadence, 600s old).
+        slow = self.report_with_health_group(
+            {
+                "health_reported_at": "2026-08-01T13:50:00Z",
+                "health_ready": True,
+                "health_report_interval_seconds": 600,
+            }
+        )
+        self.assertEqual(self.lat9(slow)["status"], "green")
+
+    def test_online_runtime_that_never_reported_is_unknown(self) -> None:
+        report = self.report_with_health_group({"runtime_status": "online"})
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "unknown")
+        entry = host["health_unknown"][0]
+        self.assertEqual(entry["health"]["status"], "unknown")
+        self.assertIsNone(entry["health"]["age_seconds"])
+        output = finite_status.render_human(report)
+        self.assertIn("no fresh report (never reported)", output)
+
+    def test_offline_runtime_health_is_displayed_but_not_tracked(self) -> None:
+        # An intentionally stopped runtime carries no standing readiness claim:
+        # even a fresh-looking last report projects unknown and is not counted
+        # against the host.
+        report = self.report_with_health_group(
+            {
+                "runtime_status": "offline",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            }
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "green")
+        self.assertEqual(host["health_tracked_count"], 0)
+        projected = finite_status.project_runtime_health(
+            {
+                "runtime_status": "offline",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            },
+            finite_status.parse_time("2026-08-01T14:00:00Z"),
+        )
+        self.assertEqual(projected["status"], "unknown")
+
     def test_single_disk_profile_does_not_imply_raid(self) -> None:
         profile = finite_status.CONTRACT["hosts"]["finite-lat-1"]
         self.assertEqual(profile["storage"], "single-disk")
@@ -527,7 +821,9 @@ class FiniteStatusTests(unittest.TestCase):
         storage = report["sections"]["host_health"]["storage"]
         self.assertEqual(storage["status"], "green")
         output = finite_status.render_human(report)
-        self.assertIn("storage: single-disk; expected devices 2/2 present [GREEN]", output)
+        self.assertIn(
+            "storage: single-disk; expected devices 2/2 present [GREEN]", output
+        )
         self.assertNotIn("MD arrays=", output)
 
     def test_single_disk_storage_is_red_when_listed_disk_missing(self) -> None:
@@ -555,7 +851,9 @@ class FiniteStatusTests(unittest.TestCase):
         now = finite_status.parse_time(raw["now"])
         self.assertIsNotNone(now)
         report = finite_status.build_report(raw, now)
-        self.assertEqual(report["sections"]["host_health"]["storage"]["status"], "green")
+        self.assertEqual(
+            report["sections"]["host_health"]["storage"]["status"], "green"
+        )
 
         raw["host_health"]["units"][unit] = {
             "LoadState": "loaded",
@@ -572,9 +870,13 @@ class FiniteStatusTests(unittest.TestCase):
         stats = mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)
         with (
             mock.patch.object(
-                finite_status, "systemd_properties", return_value={"LoadState": "loaded"}
+                finite_status,
+                "systemd_properties",
+                return_value={"LoadState": "loaded"},
             ),
-            mock.patch.object(finite_status, "collect_healthcheck_journal", return_value={}),
+            mock.patch.object(
+                finite_status, "collect_healthcheck_journal", return_value={}
+            ),
             mock.patch.object(finite_status.os, "statvfs", return_value=stats),
             mock.patch.object(finite_status.Path, "exists", return_value=True),
             mock.patch.object(
@@ -583,7 +885,9 @@ class FiniteStatusTests(unittest.TestCase):
                 side_effect=AssertionError("single-disk collect must not read mdstat"),
             ),
             mock.patch.object(finite_status, "line_count", return_value=0),
-            mock.patch.object(finite_status, "read_environment_values", return_value={}),
+            mock.patch.object(
+                finite_status, "read_environment_values", return_value={}
+            ),
         ):
             collected = finite_status.collect_host_health("finite-lat-1")
         self.assertEqual(collected["storage"]["mode"], "single-disk")

@@ -18,6 +18,7 @@ CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
 PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
+    "COPY finite-mail ./finite-mail",
     "COPY .finite-hermes-nix-store/nix/store /nix/store",
     "ARG HERMES_AGENT_STORE_PATH",
     "ARG HERMES_AGENT_PYTHON_PATH",
@@ -29,6 +30,7 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
     "COPY finite-skills/skills /runtime/finite-skills",
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
+    "COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py",
     "ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain",
     "ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain",
     "ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer",
@@ -116,7 +118,8 @@ def is_test_or_prose(path: Path) -> bool:
         or "/test/" in f"/{lowered}"
         or "/fixtures/" in f"/{lowered}"
         or lowered.startswith("scripts/tests/")
-        or lowered == "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+        or lowered
+        == "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
     )
 
 

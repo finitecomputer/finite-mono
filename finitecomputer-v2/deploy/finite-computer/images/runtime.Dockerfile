@@ -12,6 +12,7 @@ COPY devfinity ./devfinity
 COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity
+COPY finite-mail ./finite-mail
 COPY finite-nostr ./finite-nostr
 COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat

@@ -46,18 +46,19 @@ are recorded in
    (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
    `finite-private-limiter`). One repo, many independently versioned
    artifacts. Release asset names are product contracts — never rename them.
-4. **finite-mono is the only release host (hard cut, 2026-07-08).** With no
-   live users, legacy release URLs were cut over rather than mirrored: every
-   installer, README, and manifest points at finite-mono. Because one repo
+4. **finite-releases is the public release host.** Source authority remains in
+   finite-mono through component-scoped tags, while public binary downloads are
+   published to `finitecomputer/finite-releases` so releases stay
+   unauthenticated if finite-mono is private. Because one release repository
    hosts many components, `releases/latest` is meaningless — installers use
    per-component rolling alias releases (`finitechat-latest`, `fsite-latest`,
    `fbrain-latest`) that the release workflows refresh on every versioned
-   release. Legacy repos are archived once their first mono-built release is
-   verified installed (see infra/runbooks/release-cli.md).
+   release. The release repository carries release metadata and artifacts, not
+   product source.
 5. **`infra/` is the single deploy root.** Nothing is built on a prod box;
    images are CI-built and digest-pinned; deploys are scripts/runbooks in this
    tree. See `infra/README.md`.
-6. **This repo is public.** No secret values, ever — names and locations only.
+6. **No secrets in source.** No secret values, ever — names and locations only.
    Rotate first, then delete, if one slips in.
 
 ## What stays outside, and why

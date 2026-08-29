@@ -18,7 +18,7 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finite-mono"
+repo="finitecomputer/finite-releases"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"

@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -52,6 +52,10 @@ SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 ADMISSION_RECHECK_SECS = 0.05
+# Upper bound on remembered unresolvable-route failures; entries live only
+# until their event's completion hook settles, so this only bounds leakage if
+# a hook never fires.
+MAX_ROUTE_RESOLUTION_FAILURES = 256
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
@@ -66,6 +70,13 @@ _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvar
 )
 _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
     contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
+)
+# Key of the inbox entry whose background turn is currently running (ContextVars
+# propagate into the turn's tool threads, like the requester marker above). Lets
+# a failing sidecar send attribute an unresolvable-reply-route error back to the
+# exact event, so its completion hook can release instead of ack it.
+_TURN_EVENT_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "finitechat_turn_event_key", default=None
 )
 APPROVAL_CONTROL_TEXT = frozenset(
     {
@@ -545,6 +556,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # event was consumed inline by a busy session (no background turn fires
         # the hook), so the inline path acks it exactly once.
         self._inflight_admissions: set[str] = set()
+        # Bounded set of event keys whose background turn hit the sidecar's
+        # typed unresolvable-reply-route error. The completion hook releases
+        # these instead of acking them, so a user message is never ack-consumed
+        # because its topic went missing or archived mid-session.
+        self._route_resolution_failures: set[str] = set()
 
     async def _process_message_background(
         self,
@@ -562,9 +578,19 @@ class FiniteChatAdapter(BasePlatformAdapter):
         token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
         requester_context = _authenticated_requester_context_for_event(event)
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        turn_room_id = str(raw_message.get("room_id") or self.room_id)
+        key_token = _TURN_EVENT_KEY.set(
+            _adapter_event_key(
+                turn_room_id,
+                raw_message.get("seq"),
+                str(raw_message.get("message_id") or ""),
+            )
+        )
         try:
             await super()._process_message_background(event, session_key)
         finally:
+            _TURN_EVENT_KEY.reset(key_token)
             _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
@@ -663,6 +689,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         drained = self._attach_brain_approval_metadata(payload)
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
+            if self._is_unresolvable_route_error(result):
+                self._record_route_resolution_failure()
             return SendResult(success=False, error=result.error, retryable=result.retryable)
         self._finish_brain_approval_drain(drained)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
@@ -671,6 +699,33 @@ class FiniteChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             raw_response=result.data,
         )
+
+    @staticmethod
+    def _is_unresolvable_route_error(result: _FiniteChatResult) -> bool:
+        """The sidecar's typed unknown-`thread_id` failure, verbatim.
+
+        The sidecar classifies it as ``error_kind: "hermes"`` with
+        ``retryable: false``; Python never infers classification from text (see
+        `_ServiceError`), so both fields are required and the phrase is only a
+        tie-breaker against other non-retryable hermes errors.
+        """
+        return (
+            not result.ok
+            and not result.retryable
+            and result.error_kind == "hermes"
+            and bool(result.error)
+            and "unknown thread_id" in result.error
+        )
+
+    def _record_route_resolution_failure(self) -> None:
+        event_key = _TURN_EVENT_KEY.get()
+        if not event_key:
+            # No background turn owns this send (cron deliver, inline command);
+            # there is no completion hook that could act on the marker.
+            return
+        while len(self._route_resolution_failures) >= MAX_ROUTE_RESOLUTION_FAILURES:
+            self._route_resolution_failures.pop()
+        self._route_resolution_failures.add(event_key)
 
     async def send_clarify(
         self,
@@ -696,8 +751,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # Hermes owns the pending request and the prompt format. Finite only
         # pins its delivery route and keeps the prompt on the ordinary message
         # rail, bypassing the legacy emoji/prose presentation inference. The
-        # sidecar resolves a bare thread id and fails closed (a typed error,
-        # never a Home fallback) on an unknown route.
+        # sidecar resolves a bare thread id; under the strict policy it fails
+        # closed with a typed error, and by default it logs an explicit, warned
+        # Home fallback so the clarification still reaches a visible surface.
         meta["_finitechat_kind"] = "message"
         meta["_finitechat_status"] = "complete"
         if conversation_id is not None:
@@ -1352,7 +1408,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         turn (shutdown, interrupt) releases the lease so the sidecar redelivers
         the entry whole; success or failure acks it (a failed turn still ran to
         completion and answered the user, so re-running it on redelivery would
-        be wrong). Ack and release are both idempotent on the sidecar.
+        be wrong). The exception is a turn whose reply could not be routed at
+        all (the sidecar's typed unknown-thread error): nothing was delivered,
+        so acking here would silently consume the user's message — release it
+        like a cancelled turn instead. Redelivery then retries later; the loop
+        is bounded by the sidecar lease sweep and every release is logged.
+        Ack and release are both idempotent on the sidecar.
         """
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         room_id = str(raw_message.get("room_id") or self.room_id)
@@ -1366,6 +1427,17 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if event_key:
             self._inflight_admissions.discard(event_key)
         if outcome_name == "cancelled":
+            await self._release_finitechat_event(room_id, seq, message_id)
+            return
+        if event_key and event_key in self._route_resolution_failures:
+            self._route_resolution_failures.discard(event_key)
+            logger.warning(
+                "[finitechat] turn for %s/%s could not resolve a reply route "
+                "(outcome=%s); releasing the inbox entry for redelivery instead of acking",
+                room_id,
+                seq,
+                outcome_name,
+            )
             await self._release_finitechat_event(room_id, seq, message_id)
             return
         await self._ack_finitechat_event(room_id, seq, message_id)
@@ -1604,11 +1676,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
+            error = _service_error(stderr_text or stdout_text)
             return _FiniteChatResult(
                 False,
                 {},
-                stderr_text or stdout_text or f"finitechat exited {proc.returncode}",
-                _is_retryable_cli_error(stderr_text or stdout_text),
+                error.message or f"finitechat exited {proc.returncode}",
+                error.retryable,
+                error_kind=error.kind,
             )
         if not stdout_text:
             return _FiniteChatResult(True, {}, None, False)
@@ -1743,12 +1817,15 @@ class _FiniteChatResult:
         error: str | None,
         retryable: bool,
         transport_error: bool = False,
+        *,
+        error_kind: str | None = None,
     ):
         self.ok = ok
         self.data = data
         self.error = error
         self.retryable = retryable
         self.transport_error = transport_error
+        self.error_kind = error_kind
 
 
 def _resolve_finitechat_command(configured: str) -> list[str]:
@@ -1781,13 +1858,14 @@ def _finitechat_service_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace").strip()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
+        error = _service_error(exc.read().decode("utf-8", errors="replace").strip())
         return _FiniteChatResult(
             False,
             {},
-            _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
-            _is_retryable_cli_error(body),
+            error.message or f"finitechat service returned HTTP {exc.code}",
+            error.retryable,
             False,
+            error_kind=error.kind,
         )
     except TimeoutError as exc:
         return _FiniteChatResult(False, {}, str(exc), True, False)
@@ -1881,16 +1959,17 @@ def _finitechat_service_stream_worker(
                     _FiniteChatResult(True, {"records": [record]}, None, False, False),
                 )
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
+        error = _service_error(exc.read().decode("utf-8", errors="replace").strip())
         _put_stream_result(
             loop,
             queue,
             _FiniteChatResult(
                 False,
                 {},
-                _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
-                _is_retryable_cli_error(body),
+                error.message or f"finitechat service returned HTTP {exc.code}",
+                error.retryable,
                 False,
+                error_kind=error.kind,
             ),
         )
     except TimeoutError as exc:
@@ -1908,16 +1987,47 @@ def _put_stream_result(
         loop.call_soon_threadsafe(queue.put_nowait, result)
 
 
-def _service_error_body(body: str) -> str | None:
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return body or None
-    if isinstance(data, dict):
-        error = data.get("error")
-        if error:
-            return str(error)
-    return body or None
+class _ServiceError(NamedTuple):
+    """The sidecar's structured error, as read from an HTTP error body or
+    the ``--json`` CLI stderr line: ``{"error", "error_kind", "retryable"}``.
+
+    ``retryable`` is taken from the sidecar verbatim; Python never infers it
+    from the message text. A body that is not that shape (a crash, a signal,
+    an HTML or empty response) did not come from the sidecar's error path,
+    so it is reported verbatim with ``retryable=False``: the transport-level
+    failures that are genuinely transient (timeouts, refused connections) are
+    classified by exception type before any body is parsed, and retrying a
+    request whose outcome is unknown risks duplicating a delivery.
+    """
+
+    message: str | None
+    kind: str | None
+    retryable: bool
+
+
+def _service_error(body: str) -> _ServiceError:
+    data = _parse_service_error_json(body)
+    if data is None:
+        return _ServiceError(body or None, None, False)
+    error = data.get("error")
+    kind = data.get("error_kind")
+    return _ServiceError(
+        str(error) if error else (body or None),
+        str(kind) if isinstance(kind, str) and kind else None,
+        data.get("retryable") is True,
+    )
+
+
+def _parse_service_error_json(body: str) -> dict[str, Any] | None:
+    """The whole body, else its last line (the CLI may log above the JSON line)."""
+    for candidate in (body, body.rsplit("\n", 1)[-1].strip()):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _finitechat_service_health(service_url: str, timeout: int) -> bool:
@@ -2230,11 +2340,6 @@ def _stream_reconnect_delay(attempt: int) -> float:
         STREAM_RECONNECT_BACKOFF_SECS * (2**exponent),
         STREAM_RECONNECT_MAX_BACKOFF_SECS,
     )
-
-
-def _is_retryable_cli_error(message: str) -> bool:
-    lowered = message.lower()
-    return any(token in lowered for token in ("timed out", "connection", "temporarily", "busy"))
 
 
 def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | None:

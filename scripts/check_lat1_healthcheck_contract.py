@@ -175,7 +175,11 @@ def main() -> None:
         "finite_runtime_artifact_active_agents",
         "finite_runtime_artifact_info",
         "finite_service_health_status",
+        "node_cpu_scaling_frequency_hertz",
+        "node_cpu_scaling_frequency_max_hertz",
         "node_cpu_seconds_total",
+        "node_hwmon_sensor_label",
+        "node_hwmon_temp_celsius",
         "node_load1",
         "node_memory_MemAvailable_bytes",
         "node_filesystem_avail_bytes",
@@ -185,6 +189,7 @@ def main() -> None:
         "node_textfile_scrape_error",
         METRICS_REMOTE_WRITE_URL,
         'prometheus.remote_write "finite_monitoring"',
+        'scrape_interval = "15s"',
         'sys.env("FINITE_METRICS_REMOTE_WRITE_USERNAME")',
         'sys.env("FINITE_METRICS_REMOTE_WRITE_PASSWORD")',
         'loki.relabel "finite_journal"',
@@ -192,8 +197,19 @@ def main() -> None:
         'matches       = "_SYSTEMD_UNIT=finite-saas-core.service"',
         'matches       = "_SYSTEMD_UNIT=finitechat-server.service"',
         'matches       = "_SYSTEMD_UNIT=caddy.service"',
+        'loki.source.journal "finite_host_incident_0"',
+        'matches       = "_TRANSPORT=kernel PRIORITY=4"',
+        'matches       = "SYSLOG_IDENTIFIER=systemd"',
+        'matches       = "SYSLOG_IDENTIFIER=nixos"',
+        'matches       = "SYSLOG_IDENTIFIER=sshd"',
+        'matches       = "SYSLOG_IDENTIFIER=sudo"',
         'host = "finite-lat-1"',
         'role = "app"',
+        'source = "service"',
+        'source = "kernel"',
+        'source = "systemd"',
+        'source = "nixos-activation"',
+        'source = "auth"',
         LOGS_WRITE_URL,
         'sys.env("FINITE_LOGS_WRITE_USERNAME")',
         'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
@@ -207,6 +223,12 @@ def main() -> None:
             "Alloy credentials should be declared on the systemd service so "
             "metrics and logs can use separate environment files"
         )
+    activation_preflight = nix_eval(
+        "system.activationScripts.finite-lat-monitoring-secrets.text",
+        raw=True,
+    )
+    if "check-lat-monitoring-secrets" not in activation_preflight:
+        raise SystemExit("LAT monitoring secrets must be checked during activation")
 
     recovery, recovery_metrics, recovery_leftovers, recovery_curl_count = run_synthetic(
         script, recover_after_first_pass=True

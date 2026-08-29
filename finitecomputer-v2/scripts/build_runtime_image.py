@@ -19,7 +19,11 @@ from typing import Any
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import (  # noqa: E402  (needs the sys.path shim above)
+    image_build_args,
+    nix_system_for_platform,
+    stage_runtime_closure,
+)
 
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
 DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
@@ -100,7 +104,9 @@ def stage_repo(source: Path, dest: Path) -> None:
 
 
 def docker_image_metadata(image: str) -> dict[str, Any]:
-    inspected = json.loads(run(["docker", "image", "inspect", image], timeout=60).stdout)[0]
+    inspected = json.loads(
+        run(["docker", "image", "inspect", image], timeout=60).stdout
+    )[0]
     repo_digests = inspected.get("RepoDigests") or []
     digest = inspected["Id"]
     if repo_digests and "@" in repo_digests[0]:
@@ -126,7 +132,9 @@ def docker_image_metadata(image: str) -> dict[str, Any]:
 
 
 def apple_image_metadata(image: str) -> dict[str, Any]:
-    payload = json.loads(run(["container", "image", "inspect", image], timeout=60).stdout)
+    payload = json.loads(
+        run(["container", "image", "inspect", image], timeout=60).stdout
+    )
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         raise SystemExit(f"unexpected Apple Container image inspect output for {image}")
 
@@ -187,7 +195,9 @@ def native_linux_platform() -> str:
         "x86_64": "amd64",
     }.get(machine)
     if architecture is None:
-        raise SystemExit(f"unsupported native architecture for container image build: {machine}")
+        raise SystemExit(
+            f"unsupported native architecture for container image build: {machine}"
+        )
     return f"linux/{architecture}"
 
 
@@ -223,7 +233,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hermes-agent-version",
-        default=os.environ.get("FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION),
+        default=os.environ.get(
+            "FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION
+        ),
         help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
     )
     parser.add_argument(
@@ -231,9 +243,25 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="optional persistent staged image build context",
     )
-    parser.add_argument("--platform", help="optional image build platform, e.g. linux/amd64")
-    parser.add_argument("--no-cache", action="store_true", help="disable the engine build cache")
-    parser.add_argument("--push", action="store_true", help="push image after a successful build")
+    parser.add_argument(
+        "--platform", help="optional image build platform, e.g. linux/amd64"
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="disable the engine build cache"
+    )
+    parser.add_argument(
+        "--push", action="store_true", help="push image after a successful build"
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="save a Depot build before loading it for exact-byte promotion",
+    )
+    parser.add_argument(
+        "--metadata-file",
+        type=Path,
+        help="Depot build metadata path; required with --save",
+    )
     parser.add_argument("--report", type=Path, help="optional build report JSON path")
     return parser.parse_args()
 
@@ -263,7 +291,12 @@ def build_image(
         flush=True,
     )
 
+    # The runtime-image contract greps this exact one-liner
+    # (check_runtime_image_contract.py), so keep it out of the formatter's
+    # reach.
+    # fmt: off
     dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+    # fmt: on
     if args.engine == "docker":
         build = ["docker", "build"]
     elif args.engine == "depot":
@@ -291,12 +324,41 @@ def build_image(
     build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
     if args.no_cache:
         build.append("--no-cache")
-    if args.engine == "depot":
-        # The release workflow must run local Docker smokes against the exact
-        # image that will be tagged and pushed after the proof passes.
+    if args.engine == "depot" and args.save:
+        args.metadata_file.parent.mkdir(parents=True, exist_ok=True)
+        build.extend(
+            [
+                "--save",
+                "--provenance=true",
+                "--metadata-file",
+                str(args.metadata_file),
+            ]
+        )
+    elif args.engine == "depot":
         build.append("--load")
     build.append(str(context))
     run(build, timeout=7200, capture=False)
+
+    depot_build: dict[str, Any] | None = None
+    if args.engine == "depot" and args.save:
+        try:
+            build_metadata = json.loads(args.metadata_file.read_text(encoding="utf-8"))
+            depot_build = build_metadata["depot.build"]
+            build_id = depot_build["buildID"]
+            project_id = depot_build["projectID"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise SystemExit(f"invalid Depot saved-build metadata: {error}") from error
+        if not isinstance(build_id, str) or not build_id:
+            raise SystemExit("Depot saved-build metadata has no build ID")
+        if not isinstance(project_id, str) or not project_id:
+            raise SystemExit("Depot saved-build metadata has no project ID")
+        # Pulling from the saved build makes the local smoke and later
+        # `depot push` operate on one persisted OCI result.
+        run(
+            ["depot", "pull", "--project", project_id, build_id],
+            timeout=3600,
+            capture=False,
+        )
 
     if args.push:
         if args.engine in {"docker", "depot"}:
@@ -309,6 +371,8 @@ def build_image(
         image_metadata = docker_image_metadata(args.image_ref)
     else:
         image_metadata = apple_image_metadata(args.image_ref)
+    if depot_build is not None:
+        image_metadata["depot_build"] = depot_build
     image_metadata["hermes_nix_runtime"] = {
         "attr": hermes_runtime.attr,
         "python_attr": hermes_runtime.python_attr,
@@ -349,6 +413,10 @@ def main() -> int:
             "--hermes-agent-version is release-pinned to "
             f"{DEFAULT_HERMES_AGENT_VERSION}, got {args.hermes_agent_version}"
         )
+    if args.save and args.engine != "depot":
+        raise SystemExit("--save is supported only with --engine depot")
+    if args.save != bool(args.metadata_file):
+        raise SystemExit("--save and --metadata-file must be provided together")
 
     source_facts = repo_metadata("finite-mono", MONOREPO_ROOT)
     mono_sha = source_facts.pop("head", None)
@@ -361,14 +429,18 @@ def main() -> int:
         if args.context_dir:
             context = args.context_dir.expanduser().resolve()
             context.mkdir(parents=True, exist_ok=True)
-            image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+            image_metadata = build_image(
+                args, context, mono_sha=mono_sha, platform=platform
+            )
         else:
             temp_parent = MONOREPO_ROOT / "target/runtime-image"
             temp_parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=temp_parent) as tmp_value:
                 context = Path(tmp_value) / "ctx"
                 context.mkdir()
-                image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+                image_metadata = build_image(
+                    args, context, mono_sha=mono_sha, platform=platform
+                )
 
     report = {
         "status": "built",

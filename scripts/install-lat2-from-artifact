@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Bare-metal install driver for finite-lat-2 (Gate C of
+# infra/runbooks/lat2-replacement-cutover.md). Consumes a downloaded
+# `lat2-nixos-closure-REV` artifact:
+#
+#   1. validates the artifact manifest (schema finite.lat2.nixos-closure.v2;
+#      system + disko + kexec store paths) and its file binary cache;
+#   2. proves the rev is on origin/main;
+#   3. realizes the SYSTEM, DISKO, and KEXEC store paths from the file cache
+#      into the local store (pure substitution — nothing is built);
+#   4. invokes the flake-pinned nixos-anywhere with those exact store paths
+#      against the rescue-mode host.
+#
+# The driver must run on a machine that can realize x86_64-linux store paths
+# (a Linux driver machine or CI job). On any other machine `nix copy` fails
+# honestly; do not work around it by building. Override the pinned
+# nixos-anywhere invocation with NIXOS_ANYWHERE_CMD only to point at the
+# same pin from another checkout.
+#
+# usage: install-lat2-from-artifact <artifact-dir> <target-host> [extra nixos-anywhere args...]
+# example: install-lat2-from-artifact target/lat2-nixos-closure-REV root@64.34.80.19
+set -euo pipefail
+
+mode_driver="run"
+artifact_dir=""
+target_host=""
+extra_args=()
+
+usage() {
+  echo "usage: $0 <artifact-dir> <target-host> [extra nixos-anywhere args...]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --validate-only)
+      mode_driver="validate"
+      ;;
+    -*) usage; exit 64 ;;
+    *)
+      if [[ -z "$artifact_dir" ]]; then
+        artifact_dir="$1"
+      elif [[ -z "$target_host" ]]; then
+        target_host="$1"
+      else
+        extra_args+=("$1")
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$artifact_dir" || -z "$target_host" ]]; then
+  usage
+  exit 64
+fi
+
+if [[ ! -d "$artifact_dir" ]]; then
+  echo "artifact directory does not exist: $artifact_dir" >&2
+  exit 66
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+manifest="$artifact_dir/manifest.json"
+if [[ ! -f "$manifest" ]]; then
+  echo "artifact manifest is missing: $manifest" >&2
+  exit 66
+fi
+
+manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat2-install-manifest.XXXXXX")"
+trap 'rm -f "$manifest_values_file"' EXIT
+python3 - "$manifest" > "$manifest_values_file" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if data.get("schema") != "finite.lat2.nixos-closure.v2":
+    raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
+if data.get("host") != "finite-lat-2":
+    raise SystemExit(f"unexpected manifest host: {data.get('host')!r}")
+if data.get("repository") != "finitecomputer/finite-mono":
+    raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
+
+for key, pattern in (
+    ("rev", r"[0-9a-f]{40}"),
+    ("system", r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/\s]+"),
+    ("disko", r"/nix/store/[0-9a-z]{32}-disko"),
+    ("kexec", r"/nix/store/[0-9a-z]{32}-kexec-tarball"),
+):
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        raise SystemExit(f"invalid {key}: {value!r}")
+if data.get("cache") != "nix-cache":
+    raise SystemExit(f"invalid cache directory: {data.get('cache')!r}")
+
+for key in ("rev", "system", "disko", "kexec", "cache"):
+    print(data[key])
+PY
+
+REV="$(sed -n '1p' "$manifest_values_file")"
+SYSTEM="$(sed -n '2p' "$manifest_values_file")"
+DISKO="$(sed -n '3p' "$manifest_values_file")"
+KEXEC="$(sed -n '4p' "$manifest_values_file")"
+CACHE_REL="$(sed -n '5p' "$manifest_values_file")"
+CACHE_DIR="$artifact_dir/$CACHE_REL"
+
+if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
+  echo "artifact cache is missing or incomplete: $CACHE_DIR" >&2
+  exit 66
+fi
+
+git fetch origin --prune
+git merge-base --is-ancestor "$REV" origin/main || {
+  echo "refusing: $REV is not on origin/main" >&2
+  exit 65
+}
+
+echo "==> validated finite-lat-2 install artifact"
+echo "    rev=$REV"
+echo "    system=$SYSTEM"
+echo "    disko=$DISKO"
+echo "    kexec=$KEXEC"
+if [[ "$mode_driver" == "validate" ]]; then
+  exit 0
+fi
+
+# Realize the three install inputs from the artifact's file cache. This is
+# substitution from the CI-published cache, not a build.
+echo "==> realizing SYSTEM/DISKO/KEXEC from the artifact cache"
+# The artifact cache is unsigned (plain `nix copy --to file://` at build
+# time); read it with the same explicit --no-check-sigs path as every
+# deploy-cache consumer.
+nix copy --no-check-sigs --option builders '' \
+  --from "file://$CACHE_DIR" \
+  "$SYSTEM" "$DISKO" "$KEXEC"
+for path in "$SYSTEM" "$DISKO" "$KEXEC"; do
+  [[ -e "$path" ]] || {
+    echo "store path did not realize from the artifact cache: $path" >&2
+    exit 67
+  }
+done
+test -x "$SYSTEM/bin/switch-to-configuration"
+
+# The pinned nixos-anywhere from the same flake; override only with the same
+# pin from another checkout (e.g. a Linux driver machine).
+if [[ -n "${NIXOS_ANYWHERE_CMD:-}" ]]; then
+  read -ra nixos_anywhere_cmd <<< "$NIXOS_ANYWHERE_CMD"
+else
+  nixos_anywhere_cmd=(nix run .#packages.x86_64-linux.finite-lat-2-nixos-anywhere --)
+fi
+
+echo "==> driving the bare-metal install on $target_host"
+# TODO(prove) at Gate C first execution: exact nixos-anywhere flag
+# spellings. The invariants are: kexec from the artifact, store paths from
+# the artifact, no build fallback.
+"${nixos_anywhere_cmd[@]}" \
+  --kexec "$KEXEC" \
+  --store-paths "$SYSTEM" "$DISKO" \
+  --build-on local \
+  "$target_host" \
+  "${extra_args[@]+"${extra_args[@]}"}"
+
+echo "==> install driven; reboot the host and verify per the runbook"

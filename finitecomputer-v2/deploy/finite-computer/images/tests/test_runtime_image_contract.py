@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
-CHECKER = ROOT / "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+CHECKER = (
+    ROOT
+    / "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+)
 spec = importlib.util.spec_from_file_location("check_runtime_image_contract", CHECKER)
 assert spec is not None and spec.loader is not None
 check_runtime_image_contract = importlib.util.module_from_spec(spec)
@@ -60,6 +63,12 @@ class RuntimeImageContractTests(unittest.TestCase):
 
     def test_canonical_contract_passes(self) -> None:
         self.assertEqual(self.violations(), [])
+
+    def test_one_shot_migration_tool_is_not_baked_into_runtime_image(self) -> None:
+        dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
+
+        self.assertNotIn("legacy_hermes_migration.py", dockerfile)
+        self.assertNotIn("/opt/legacy-hermes-migration", dockerfile)
 
     def test_second_phala_dockerfile_fails(self) -> None:
         self.write("deploy/phala/Dockerfile", "FROM canonical-but-forked")
@@ -153,7 +162,9 @@ class RuntimeImageContractTests(unittest.TestCase):
 
 
 BUILDER_SCRIPT = ROOT / "finitecomputer-v2/scripts/build_runtime_image.py"
-builder_spec = importlib.util.spec_from_file_location("build_runtime_image", BUILDER_SCRIPT)
+builder_spec = importlib.util.spec_from_file_location(
+    "build_runtime_image", BUILDER_SCRIPT
+)
 assert builder_spec is not None and builder_spec.loader is not None
 build_runtime_image = importlib.util.module_from_spec(builder_spec)
 sys.modules[builder_spec.name] = build_runtime_image
@@ -180,7 +191,9 @@ class RuntimeImageBuildContextTests(unittest.TestCase):
             source.mkdir()
             (source / ".dockerignore").write_text("**/node_modules\n", encoding="utf-8")
             (source / "apps/web/node_modules/leftpad").mkdir(parents=True)
-            (source / "apps/web/node_modules/leftpad/index.js").write_text("//\n", encoding="utf-8")
+            (source / "apps/web/node_modules/leftpad/index.js").write_text(
+                "//\n", encoding="utf-8"
+            )
             (source / "package.json").write_text("{}\n", encoding="utf-8")
 
             build_runtime_image.stage_repo(source, context)

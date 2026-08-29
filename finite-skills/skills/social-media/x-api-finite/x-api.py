@@ -114,11 +114,17 @@ def parse_status_id(value: str) -> str:
     raise SystemExit(1)
 
 
-def build_include_maps(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def build_include_maps(
+    payload: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     includes = payload.get("includes") or {}
-    users_by_id = {entry["id"]: entry for entry in includes.get("users") or [] if entry.get("id")}
+    users_by_id = {
+        entry["id"]: entry for entry in includes.get("users") or [] if entry.get("id")
+    }
     media_by_key = {
-        entry["media_key"]: entry for entry in includes.get("media") or [] if entry.get("media_key")
+        entry["media_key"]: entry
+        for entry in includes.get("media") or []
+        if entry.get("media_key")
     }
     return users_by_id, media_by_key
 
@@ -148,7 +154,9 @@ def format_metrics(metrics: dict[str, Any] | None) -> str:
     return ", ".join(parts) if parts else "No public metrics"
 
 
-def format_media(tweet: dict[str, Any], media_by_key: dict[str, dict[str, Any]]) -> list[str]:
+def format_media(
+    tweet: dict[str, Any], media_by_key: dict[str, dict[str, Any]]
+) -> list[str]:
     attachments = tweet.get("attachments") or {}
     keys = attachments.get("media_keys") or []
     lines: list[str] = []
@@ -203,7 +211,9 @@ def print_tweets(payload: dict[str, Any], heading: str) -> None:
         if references:
             print("Referenced posts:")
             for reference in references:
-                print(f"- {reference.get('type', 'unknown')}: {reference.get('id', '')}")
+                print(
+                    f"- {reference.get('type', 'unknown')}: {reference.get('id', '')}"
+                )
             print()
         media_lines = format_media(tweet, media_by_key)
         if media_lines:
@@ -318,23 +328,34 @@ def cmd_user(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Direct X API v2 helper for exact post and profile data.")
+    parser = argparse.ArgumentParser(
+        description="Direct X API v2 helper for exact post and profile data."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    lookup = subparsers.add_parser("lookup", help="Look up one or more posts by URL or status ID.")
-    lookup.add_argument("items", nargs="+", help="X/Twitter status URLs or numeric status IDs.")
+    lookup = subparsers.add_parser(
+        "lookup", help="Look up one or more posts by URL or status ID."
+    )
+    lookup.add_argument(
+        "items", nargs="+", help="X/Twitter status URLs or numeric status IDs."
+    )
     lookup.set_defaults(func=cmd_lookup)
 
     search = subparsers.add_parser("search", help="Run a recent search query.")
     search.add_argument("query", help="X recent-search query string.")
-    search.add_argument("--limit", type=int, default=10, help="Number of posts to print.")
+    search.add_argument(
+        "--limit", type=int, default=10, help="Number of posts to print."
+    )
     search.set_defaults(func=cmd_search)
 
     conversation = subparsers.add_parser(
-        "conversation", help="Fetch recent posts in the same conversation as a source post."
+        "conversation",
+        help="Fetch recent posts in the same conversation as a source post.",
     )
     conversation.add_argument("item", help="X/Twitter status URL or numeric status ID.")
-    conversation.add_argument("--limit", type=int, default=10, help="Number of posts to print.")
+    conversation.add_argument(
+        "--limit", type=int, default=10, help="Number of posts to print."
+    )
     conversation.set_defaults(func=cmd_conversation)
 
     user = subparsers.add_parser("user", help="Fetch a user profile by handle.")

@@ -8,6 +8,19 @@ modules:
       follow_redirects: true
       preferred_ip_protocol: ip4
 
+  # Chat readiness performs a real durable commit with a 1s server budget.
+  # Keep the edge-to-store allowance tight enough that slow-but-200 service is
+  # an availability failure in Grafana, while leaving room for TLS/network
+  # overhead around the server's own budget.
+  chat_ready:
+    prober: http
+    timeout: 1500ms
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: true
+      preferred_ip_protocol: ip4
+
   http_404:
     prober: http
     timeout: 3s

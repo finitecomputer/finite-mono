@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -553,8 +554,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         # With no route signal at all (no Topic/Chat and no Hermes thread id)
         # the adapter refuses without a send. A present-but-unknown thread id is
-        # the sidecar's fail-closed responsibility (a typed error), covered by
-        # the Rust resolver tests.
+        # the sidecar's responsibility: it logs a Home fallback by default, and
+        # strict mode (`FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`) fails
+        # closed with a typed error — covered by the Rust resolver tests.
         result = asyncio.run(
             adapter.send_clarify(
                 chat_id="room-agent-1",
@@ -1970,6 +1972,157 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(result.data["recovered"], 0)
         self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
         self.assertEqual(calls[0][-2:], ("recover", "--json"))
+
+    # --- structured `retryable` / `error_kind` (ownership audit O8) ---------
+    #
+    # The sidecar decides retryability; Python reads the field and never
+    # infers it from the message text. Each case pairs a text that the old
+    # regex would have classified the other way.
+
+    def _service_adapter(self):
+        return self.module.FiniteChatAdapter(
+            PlatformConfig(
+                extra={
+                    "home": self.state_home,
+                    "service_url": "http://127.0.0.1:9999",
+                    "finitechat_bin": "/bin/finitechat",
+                }
+            )
+        )
+
+    def _send_with_service_http_error(self, code: int, body: bytes):
+        adapter = self._service_adapter()
+        original_urlopen = self.module.urllib.request.urlopen
+
+        def fake_urlopen(request, timeout):
+            raise self.module.urllib.error.HTTPError(
+                request.full_url, code, "error", {}, io.BytesIO(body)
+            )
+
+        try:
+            self.module.urllib.request.urlopen = fake_urlopen
+            return asyncio.run(adapter.send("room-agent-1", "hello"))
+        finally:
+            self.module.urllib.request.urlopen = original_urlopen
+
+    def test_service_error_retryable_false_is_not_retried_despite_timeout_text(self):
+        result = self._send_with_service_http_error(
+            409,
+            b'{"ok":false,"status":"error","http_status":409,"error_kind":"hermes",'
+            b'"retryable":false,"error":"hermes: turn timed out; connection busy"}',
+        )
+        self.assertFalse(result.success)
+        self.assertFalse(result.retryable)
+        self.assertEqual(result.error, "hermes: turn timed out; connection busy")
+
+    def test_service_error_retryable_true_with_novel_text_is_retried(self):
+        result = self._send_with_service_http_error(
+            500,
+            b'{"ok":false,"status":"error","http_status":500,"error_kind":"internal",'
+            b'"retryable":true,"error":"store lease handoff in progress"}',
+        )
+        self.assertFalse(result.success)
+        self.assertTrue(result.retryable)
+        self.assertEqual(result.error, "store lease handoff in progress")
+
+    def test_service_error_without_structured_body_defaults_to_not_retryable(self):
+        result = self._send_with_service_http_error(502, b"<html>connection reset</html>")
+        self.assertFalse(result.success)
+        self.assertFalse(result.retryable)
+        self.assertEqual(result.error, "<html>connection reset</html>")
+
+        empty = self._send_with_service_http_error(503, b"")
+        self.assertFalse(empty.retryable)
+        self.assertEqual(empty.error, "finitechat service returned HTTP 503")
+
+    def test_service_error_parser_reads_kind_and_ignores_non_boolean_retryable(self):
+        module = cast(Any, self.module)
+        error = module._service_error(
+            '{"error":"identity: no device","error_kind":"identity","retryable":false}'
+        )
+        self.assertEqual(
+            (error.message, error.kind, error.retryable),
+            (
+                "identity: no device",
+                "identity",
+                False,
+            ),
+        )
+        # A non-boolean `retryable` is not a sidecar contract value.
+        truthy = module._service_error('{"error":"x","retryable":"yes"}')
+        self.assertFalse(truthy.retryable)
+        self.assertIsNone(truthy.kind)
+        # JSON that is not an object is unstructured.
+        self.assertEqual(module._service_error("[1, 2]").message, "[1, 2]")
+        self.assertIsNone(module._service_error("").message)
+
+    def _cli_fallback_failure(self, returncode: int, stderr: bytes):
+        adapter = self._service_adapter()
+        original_urlopen = self.module.urllib.request.urlopen
+        original_create_subprocess_exec = self.module.asyncio.create_subprocess_exec
+        original_sleep = self.module.asyncio.sleep
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = returncode
+
+            async def communicate(self, stdin):
+                return b"", stderr
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return FakeProcess()
+
+        async def fake_sleep(delay):
+            return None
+
+        def fake_urlopen(request, timeout):
+            raise self.module.urllib.error.URLError("service down")
+
+        try:
+            self.module.urllib.request.urlopen = fake_urlopen
+            self.module.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            self.module.asyncio.sleep = fake_sleep
+            return asyncio.run(adapter._finitechat_json("send", {"text": "hello"}, timeout=7))
+        finally:
+            self.module.urllib.request.urlopen = original_urlopen
+            self.module.asyncio.create_subprocess_exec = original_create_subprocess_exec
+            self.module.asyncio.sleep = original_sleep
+
+    def test_cli_fallback_reads_structured_json_stderr(self):
+        not_retryable = self._cli_fallback_failure(
+            1,
+            b'{"ok":false,"status":"error","error_kind":"hermes","retryable":false,'
+            b'"error":"hermes: send timed out waiting for the connection"}\n',
+        )
+        self.assertFalse(not_retryable.ok)
+        self.assertFalse(not_retryable.retryable)
+        self.assertEqual(not_retryable.error_kind, "hermes")
+        self.assertEqual(not_retryable.error, "hermes: send timed out waiting for the connection")
+
+        # Log lines above the JSON line do not hide it.
+        retryable = self._cli_fallback_failure(
+            1,
+            b"2026-08-21T00:00:00Z WARN something unrelated\n"
+            b'{"ok":false,"status":"error","error_kind":"http","retryable":true,'
+            b'"error":"HTTP request failed: relay rotated"}\n',
+        )
+        self.assertFalse(retryable.ok)
+        self.assertTrue(retryable.retryable)
+        self.assertEqual(retryable.error_kind, "http")
+        self.assertEqual(retryable.error, "HTTP request failed: relay rotated")
+
+    def test_cli_fallback_crash_without_json_stderr_is_not_retryable(self):
+        crash = self._cli_fallback_failure(
+            101, b"thread 'main' panicked at src/x.rs:1:1:\nconnection temporarily busy\n"
+        )
+        self.assertFalse(crash.ok)
+        self.assertFalse(crash.retryable)
+        self.assertIsNone(crash.error_kind)
+        self.assertIn("panicked", crash.error or "")
+
+        silent = self._cli_fallback_failure(-9, b"")
+        self.assertFalse(silent.retryable)
+        self.assertEqual(silent.error, "finitechat exited -9")
 
     def test_strict_stream_service_failure_never_falls_back_to_cli(self):
         adapter = self.module.FiniteChatAdapter(

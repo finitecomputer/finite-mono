@@ -27,6 +27,22 @@ check:
 fmt:
     cargo fmt --all
 
+# Formats all Python code with the repo-pinned ruff (flake.nix `pyToolPkgs.ruff`
+# — the exact attr CI's hermes-bridge-ci shell checks with). Never invoke
+# `nix run nixpkgs#ruff` or a host ruff: format output differs between
+# versions and that is how CI formatting gates go red.
+fmt-py:
+    nix develop .#default -c ruff format .
+
+# Lints all Python code with the repo-pinned ruff.
+lint-py:
+    nix develop .#default -c ruff check .
+
+# Prints the pinned toolchain versions (rust-toolchain.toml + flake ruff).
+toolchain-versions:
+    @echo "rust: $$(cargo --version)"
+    @echo "ruff: $$(nix develop .#default -c ruff --version)"
+
 # Runs all Rust tests with isolated devfinity-managed test infrastructure
 test:
     cargo run --quiet --locked -p devfinity -- run -- cargo test --workspace --locked
@@ -60,11 +76,29 @@ chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/repor
 deploy-lat1-closure artifact_dir *args:
     just nixos deploy-lat1-closure "$@"
 
+[positional-arguments]
+deploy-lat3-closure artifact_dir *args:
+    just nixos deploy-lat3-closure "$@"
+
+[positional-arguments]
+deploy-lat4-closure artifact_dir *args:
+    just nixos deploy-lat4-closure "$@"
+
+[positional-arguments]
+install-lat4-from-artifact artifact_dir target_host *args:
+    just nixos install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 
 finite-private-deepseek-release-contract:
     just computer finite-private-deepseek-release-contract
+
+finite-private-glm53-contract:
+    just computer finite-private-glm53-contract
+
+finite-private-glm53-release-contract:
+    just computer finite-private-glm53-release-contract
 
 finite-status-contract:
     just infra finite-status-contract
@@ -93,6 +127,12 @@ lat1-secret-bootstrap-contract:
 lat2-runner-guardrails-contract:
     just nixos lat2-runner-guardrails-contract
 
+lat3-runner-rollout-contract:
+    just nixos lat3-runner-rollout-contract
+
+lat4-runner-rollout-contract:
+    just nixos lat4-runner-rollout-contract
+
 litestream-recovery-contract:
     just infra litestream-recovery-contract
 
@@ -101,6 +141,12 @@ monitoring-nixos-contract:
 
 nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     just nixos nixos-build-lat1-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+nixos-build-lat3-closure rev out_dir="target/lat3-nixos-closure":
+    just nixos nixos-build-lat3-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+nixos-build-lat4-closure rev out_dir="target/lat4-nixos-closure":
+    just nixos nixos-build-lat4-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
 runbook-facts-contract:
     just infra runbook-facts-contract

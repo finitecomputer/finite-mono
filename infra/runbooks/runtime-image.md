@@ -46,15 +46,17 @@ build it is not the promotion proof for the final digest.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
-   baseline, captures and cross-checks the immutable local image ID, and runs
-   the durable Add/Welcome chat plus `/home/node` restart smoke against that
-   image ID before any
-   push. Only after that smoke passes does it push `:$VERSION` +
-   `:sha-<sha>`, uploads `runtime-image-report.json`, and prints the pinned
-   `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
-   summary. The uploaded durable-smoke report is evidence for the exact image
-   that was tagged and pushed; copy the pinned ref — it is the only thing you
-   promote.
+   baseline, saves the OCI result, pulls that saved result back locally, and
+   runs the durable Add/Welcome chat plus `/home/node` restart smoke against
+   that exact image ID before any push. Only after that smoke passes does it
+   publish a non-production `canary-<run>-<attempt>` tag, verify the registry
+   digest against the saved-build digest, prove anonymous GHCR pull, upload
+   `runtime-image-report.json`, and print the pinned canary ref in the
+   summary. Production `:$VERSION` and `:sha-<sha>` tags are promoted from the
+   same saved build only when `publish_production=true` and
+   `FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED=true`. The uploaded durable-smoke
+   report is evidence for the exact image that was tagged; copy the pinned ref
+   — it is the only thing you promote.
 
 **Recovery boundary:** the canonical image now has the narrow, one-shot
 `recover_known_good` boot receiver and the snapshot-root contract covers all of
@@ -75,7 +77,7 @@ template: `infra/hosts/lat1/systemd/runner.env.example`). The pin is:
   the promoted artifact **kind, reference, and state schema from Core**
   using this ID.
 
-So promotion is two steps:
+So promotion is two steps — **in this order**:
 
 1. Register the new pinned image as an artifact in Core.
    Use Core's service-authenticated runtime-artifact registration endpoint;
@@ -85,9 +87,19 @@ So promotion is two steps:
    image whose exact digest passed the one-shot recovery receiver tests. The
    additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
    not inherit a control their image cannot execute.
-2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on lat1.
-   No restart needed: the timer re-invokes the runner with the new env (set
-   `FC_RUNNER_DRAIN=true` first if you want in-flight launches to settle).
+2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on every
+   Kata host (lat1 and lat3). That operator file is the only place the pin
+   exists: the Nix-rendered shared env deliberately carries no default, and
+   the unit fails closed at start (`FC_RUNNER_RUNTIME_ARTIFACT_ID is
+   required`) if it is missing. No restart needed: the timer re-invokes the
+   runner with the new env (set `FC_RUNNER_DRAIN=true` first if you want
+   in-flight launches to settle).
+
+> **Order matters (learned 2026-08-27):** finish step 1 before touching any
+> host pin. A pin referencing an id Core does not know makes every runner
+> cycle fail closed with `HTTP 404 {"error":"runtime artifact is not
+> configured"}` — reverting the pin to the previous registered id restores
+> capacity immediately.
 
 When introducing the artifact-capability column, drain new Kata creation before
 the Core/Runner generation switch, register the new recovery-capable digest
@@ -97,10 +109,12 @@ drained.
 
 ### 4. Record
 
-Update `compat/matrix.toml` `[field.agent-runtime-image]` `deployed` list
-with the new version — hosted agents pin at launch and do NOT auto-update;
-existing Runtimes keep their image until replaced, so the list grows until old
-compute is retired.
+Core's promoted runtime-artifact record is the deployment record. Hosted
+agents pin at launch and do NOT auto-update, and existing Runtimes keep their
+image until replaced, so Core's per-Runtime rows (read with
+`scripts/finite-status`) are the only truthful list of images in the field.
+Add an entry to `infra/deployment-changelog.md` only for what Core cannot
+carry: why the image shipped and when a fleet roll completed.
 
 Record the bundled Finite Skills source revision beside the image. New agents
 seed that baseline once. Existing agents do not auto-update; users and agents
@@ -126,9 +140,11 @@ rows; the migration deliberately fails closed instead of guessing which
 already-running provider operation to cancel:
 
 ```sql
+-- Post-H1 lifecycle vocabulary: the active (non-terminal) states are
+-- 'requested', 'launching', 'compute_up', 'ready'.
 SELECT agent_runtime_id, count(*)
 FROM runtime_control_requests
-WHERE status IN ('requested', 'running')
+WHERE status IN ('requested', 'launching', 'compute_up', 'ready')
 GROUP BY agent_runtime_id
 HAVING count(*) > 1;
 ```
@@ -315,7 +331,8 @@ in `infra/tinfoil/README.md`.
    `nerdctl --namespace finite inspect`, and the Runtime `/healthz` response.
 3. Runtime status and the Product Release manifest agree on the image and
    component versions; no mutable branch or second runtime package is used.
-4. `compat/matrix.toml` updated.
+4. `scripts/finite-status` shows the new pin on every Kata host, and
+   `infra/deployment-changelog.md` says why the image shipped.
 
 ## ROLLBACK
 
@@ -325,7 +342,7 @@ in `infra/tinfoil/README.md`.
    Runtime that adopted the bad image, explicitly request an upgrade to the
    previous promoted, same-schema artifact. Never use destroy as the first leg.
 3. Leave the bad tag in GHCR (immutability > tidiness) but note it in
-   `compat/matrix.toml` so nobody promotes it again.
+   `infra/deployment-changelog.md` so nobody promotes it again.
 
 ### Rolling Core back across Runtime Upgrade first use
 
@@ -339,7 +356,8 @@ unavoidable:
    `finite-saas-runner.timer` and `finite-saas-runner.service` so no lease can
    move while inspecting provider topology.
 2. Query `runtime_control_requests` for `kind = 'upgrade' AND status IN
-   ('requested','running')`. For every result, use the compatible runner
+   ('requested','launching','compute_up','ready')`. For every result, use the
+   compatible runner
    generation to reconcile the operation-scoped Kata candidate/rollback
    handles to one healthy canonical handle, verify `/healthz`, `/contact`, the
    expected image digest, and the single `/data` writer, then let Core record a

@@ -143,9 +143,12 @@ its own.
   resolves it against its own agent store into the concrete route. An `edit`
   with no route fields is resolved by looking the original message up by
   `(room_id, message_id)`. An explicit Topic/Chat route still wins as an
-  override; an unknown thread id is a typed adapter failure by default (opt into
-  an explicit, logged Home default with
-  `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=home`), never a silent Home fallback.
+  override; an unknown thread id falls back to the Home default with a loud
+  warning by default (an archived topic must never silently consume a message),
+  and the adapter releases the inbox entry instead of acking when that turn
+  could not deliver anything. Strict operators can restore the typed failure
+  with `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`; `home`/`default` spell
+  the fallback explicitly, never a *silent* Home fallback.
 
 None of this changes the Rust inbox on-disk format, the CLI/service protocol
 (the `release` command and the optional `thread_id` request field are additive),
@@ -288,53 +291,18 @@ workflow inputs or release path. Do not use them as a product canary or publish
 gate until they are rewritten for Agent Principal + Welcome-first admission
 and the Recovery Snapshot design is explicitly resumed.
 
-For the remote Docker human-handoff canary on `finite-lat-2`:
-
-```bash
-scripts/hermes-remote-docker-canary.py --keep-running
-```
-
-That script is the remote-Docker equivalent of
-`scripts/hermes-phone-canary.py`: it requires a passed local phone report by
-default, builds the real image on the remote Docker daemon, runs against
-`https://chat.finite.computer`, proves invite/PIN admission and real Hermes
-model replies before and after entrypoint backup/restore, then prints the
-stable invite URL plus current rotating PIN only after the restored container
-is alive. The report lands under
-`target/hermes-phone-canary/remote-docker/<run-id>/report.json`.
-
-By default the restic repo is a local bind mount under
-`target/hermes-docker-smoke/restic-repo`. To run the same smoke against
-S3-compatible storage such as Latitude, provide an isolated repository prefix
-and AWS-style credentials:
-
-```bash
-FINITE_DOCKER_RESTIC_BACKEND=s3 \
-FINITE_DOCKER_RESTIC_REPOSITORY=s3:https://objects.nyc.storage.sh/YOUR_BUCKET/agents/finite-agent-tinfoil-user-canary/state \
-FINITE_DOCKER_RESTIC_PASSWORD='temporary-canary-backup-secret' \
-AWS_ACCESS_KEY_ID='...' \
-AWS_SECRET_ACCESS_KEY='...' \
-scripts/hermes-sidecar-docker-smoke.sh
-```
-To exercise the same restic S3 code path before Latitude credentials are wired,
-run `scripts/hermes-sidecar-docker-s3-emulator-smoke.sh`. It starts a local
-MinIO service, writes `target/hermes-docker-s3-emulator-smoke/report.json`, and
-marks the report as `s3_endpoint_kind=local_emulator`. The hardening audit
-accepts that as local S3-compatible rehearsal evidence but rejects it as the
-real Latitude/GitHub S3 gate.
-`FINITE_DOCKER_RESTIC_PASSWORD` must be explicitly set for the S3 backend and
-must not be the disposable local smoke default. For this canary it is a
-temporary backup encryption secret. The product path should derive or unwrap a
-per-agent backup key from user-controlled key material so object storage and
-operators cannot decrypt agent state without user-mediated key release.
-For local runs, copy `.env.example` to `.env`; the smoke wrapper sources it
-before preflight and promotes `FINITE_DOCKER_RESTIC_AWS_*` values to the
-`AWS_*` names restic expects. If those values are still unset, it reads the
-standard AWS shared credentials/config files using `AWS_PROFILE` or the
-`default` profile. Set `FINITE_DOCKER_RESTIC_USE_AWS_SHARED_CONFIG=0` to
-disable that fallback. If `FINITE_DOCKER_RESTIC_REPOSITORY` is empty, the
-wrapper can derive it from `FINITE_LATITUDE_STORAGE_BUCKET`,
-`FINITE_LATITUDE_OBJECT_ENDPOINT`, and `FINITE_DOCKER_RESTIC_PREFIX`.
+The remote Docker canary (`scripts/hermes-remote-docker-canary.py`) and the
+sidecar Docker smoke wrappers (`scripts/hermes-sidecar-docker-smoke.sh`,
+`scripts/hermes-sidecar-docker-s3-emulator-smoke.sh`,
+`scripts/hermes-build-runtime-image.py`) were deleted in ownership audit O12.
+They built a drifting `containers/agent/Dockerfile` test fixture that was
+never shipped and drove the removed `finitechat hermes invite`/`join`
+admission commands, so they could not pass against any image. The restic
+entrypoint contract they exercised is still unit-tested in
+`tests/container/test_agent_entrypoint.py`; a Docker-level restic proof, if
+resumed, must run against the canonical image built by
+`finitecomputer-v2/scripts/build_runtime_image.py` with Welcome-first
+admission.
 
 To publish the exact local image proven by a passing Docker smoke report:
 

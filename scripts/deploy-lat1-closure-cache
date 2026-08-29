@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Deploy a lat1 NixOS closure that was already built on x86_64 Linux and
-# packaged as a file binary cache by scripts/build-lat1-nixos-closure-artifact.
+# Deploy a lat1 NixOS closure that was already built on x86_64 Linux. The
+# normal transport is a CI-published Cachix closure; old file-cache artifacts
+# remain supported for explicit bootstrap/recovery use.
 set -euo pipefail
 
 LAT1="${FINITE_LAT1_TARGET:-root@64.34.82.77}"
+TRANSPORT_OVERRIDE="${FINITE_LAT1_DEPLOY_TRANSPORT:-}"
+DEPLOY_MODE="${FINITE_LAT1_DEPLOY_MODE:-activate}"
 
 usage() {
   echo "usage: $0 <lat1-closure-artifact-dir> [runtime rollout options]" >&2
+  echo "       FINITE_LAT1_DEPLOY_TRANSPORT=(cachix|file-cache) may override the manifest" >&2
+  echo "       FINITE_LAT1_DEPLOY_MODE=(activate|realise-only) controls whether activation runs" >&2
 }
 
 if [[ $# -lt 1 ]]; then
@@ -17,6 +22,15 @@ fi
 artifact_dir="$1"
 shift
 ROLLOUT_ARGS=("$@")
+
+case "$DEPLOY_MODE" in
+  activate|realise-only) ;;
+  *) echo "invalid FINITE_LAT1_DEPLOY_MODE: $DEPLOY_MODE" >&2; exit 64 ;;
+esac
+if [[ "$DEPLOY_MODE" == "realise-only" && ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
+  echo "runtime rollout options are only valid in activate mode" >&2
+  exit 64
+fi
 
 if [[ ! -d "$artifact_dir" ]]; then
   echo "artifact directory does not exist: $artifact_dir" >&2
@@ -49,34 +63,117 @@ if data.get("repository") != "finitecomputer/finite-mono":
 rev = data.get("rev")
 system = data.get("system")
 disko = data.get("disko")
-cache = data.get("cache")
+host = data.get("host", "finite-lat-1")
+transport = data.get("transport", "file-cache")
+cache = data.get("cache") or data.get("file_cache")
 if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
     raise SystemExit(f"invalid rev: {rev!r}")
+if host != "finite-lat-1":
+    raise SystemExit(f"unexpected manifest host: {host!r}")
 if not isinstance(system, str) or not re.fullmatch(
     r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/\s]+", system
 ):
     raise SystemExit(f"invalid system path: {system!r}")
 if not isinstance(disko, str) or not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", disko):
     raise SystemExit(f"invalid disko path: {disko!r}")
+if transport not in {"cachix", "file-cache"}:
+    raise SystemExit(f"invalid transport: {transport!r}")
 if cache != "nix-cache":
     raise SystemExit(f"invalid cache directory: {cache!r}")
+
+cachix_cache = ""
+cachix_substituter = ""
+cachix_trusted_public_key = ""
+cachix_published = "false"
+if transport == "cachix":
+    cachix = data.get("cachix")
+    if not isinstance(cachix, dict):
+        raise SystemExit("cachix transport requires cachix metadata")
+    cachix_cache = cachix.get("cache")
+    cachix_substituter = cachix.get("substituter")
+    cachix_trusted_public_key = cachix.get("trusted_public_key")
+    if not isinstance(cachix_cache, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", cachix_cache):
+        raise SystemExit(f"invalid cachix cache: {cachix_cache!r}")
+    if not isinstance(cachix_substituter, str) or not re.fullmatch(
+        r"https://[A-Za-z0-9.-]+\.cachix\.org/?", cachix_substituter
+    ):
+        raise SystemExit(f"invalid cachix substituter: {cachix_substituter!r}")
+    if not isinstance(cachix_trusted_public_key, str) or not cachix_trusted_public_key.startswith(
+        f"{cachix_substituter.removeprefix('https://').removesuffix('/')}-1:"
+    ):
+        raise SystemExit("invalid cachix trusted public key")
+    if (
+        cachix_cache != "finite"
+        or cachix_substituter.rstrip("/") != "https://finite.cachix.org"
+        or cachix_trusted_public_key
+        != "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk="
+    ):
+        raise SystemExit("lat1 deploys must use the finite Cachix cache")
+    if cachix.get("published") is not True:
+        raise SystemExit("cachix transport requires published=true")
+    cachix_published = "true"
 
 print(rev)
 print(system)
 print(disko)
 print(cache)
+print(transport)
+print(cachix_cache)
+print(cachix_substituter.rstrip("/"))
+print(cachix_trusted_public_key)
+print(cachix_published)
 PY
 
 REV="$(sed -n '1p' "$manifest_values_file")"
 SYSTEM="$(sed -n '2p' "$manifest_values_file")"
 DISKO="$(sed -n '3p' "$manifest_values_file")"
 CACHE_REL="$(sed -n '4p' "$manifest_values_file")"
+MANIFEST_TRANSPORT="$(sed -n '5p' "$manifest_values_file")"
+CACHIX_CACHE="$(sed -n '6p' "$manifest_values_file")"
+CACHIX_SUBSTITUTER="$(sed -n '7p' "$manifest_values_file")"
+CACHIX_TRUSTED_PUBLIC_KEY="$(sed -n '8p' "$manifest_values_file")"
+CACHIX_PUBLISHED="$(sed -n '9p' "$manifest_values_file")"
 CACHE_DIR="$artifact_dir/$CACHE_REL"
 
-if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
+DEPLOY_TRANSPORT="${TRANSPORT_OVERRIDE:-$MANIFEST_TRANSPORT}"
+case "$DEPLOY_TRANSPORT" in
+  cachix|file-cache) ;;
+  *) echo "invalid FINITE_LAT1_DEPLOY_TRANSPORT: $DEPLOY_TRANSPORT" >&2; exit 64 ;;
+esac
+
+if [[ "$DEPLOY_TRANSPORT" == "cachix" && "$CACHIX_PUBLISHED" != "true" ]]; then
+  echo "cachix transport requires a manifest published by scripts/publish-lat1-nixos-cachix-closure" >&2
+  exit 66
+fi
+
+if [[ "$DEPLOY_TRANSPORT" == "file-cache" && (! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info") ]]; then
   echo "artifact cache is missing or incomplete: $CACHE_DIR" >&2
   exit 66
 fi
+if [[ "$DEPLOY_MODE" == "realise-only" && "$DEPLOY_TRANSPORT" != "cachix" ]]; then
+  echo "realise-only mode is supported only for Cachix-backed manifests" >&2
+  exit 64
+fi
+
+python3 - "$artifact_dir/deployment-transport.json" <<PY
+import json
+import os
+import sys
+
+record = {
+    "schema": "finite.lat1.deployment-transport.v1",
+    "rev": "$REV",
+    "system": "$SYSTEM",
+    "manifest_transport": "$MANIFEST_TRANSPORT",
+    "selected_transport": "$DEPLOY_TRANSPORT",
+    "cachix_cache": "$CACHIX_CACHE",
+    "cachix_substituter": "$CACHIX_SUBSTITUTER",
+    "file_cache_available": os.path.isdir("$CACHE_DIR"),
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+    fh.write("\\n")
+PY
 
 if [[ ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
   scripts/rollout-lat1-runtime-artifact --validate-only "${ROLLOUT_ARGS[@]}"
@@ -92,12 +189,49 @@ echo "==> using prebuilt lat1 closure artifact"
 echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
+echo "    transport=$DEPLOY_TRANSPORT"
+
+if [[ "$DEPLOY_TRANSPORT" == "cachix" ]]; then
+  echo "    cachix=$CACHIX_CACHE ($CACHIX_SUBSTITUTER)"
+fi
 
 if git cat-file -e "$REV:infra/nixos/modules/metrics.nix" 2>/dev/null \
   && git grep -q 'FINITE_LOGS_WRITE_PASSWORD' "$REV" -- infra/nixos/modules/metrics.nix; then
   echo "==> verifying lat1 host-local monitoring secrets"
   ssh -o BatchMode=yes "$LAT1" \
     'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+fi
+
+if [[ "$DEPLOY_TRANSPORT" == "cachix" ]]; then
+  echo "==> substituting prebuilt closure on lat1 from Cachix"
+  ssh -o BatchMode=yes "$LAT1" \
+    bash -s -- "$SYSTEM" "$DISKO" "$CACHIX_CACHE" "$CACHIX_SUBSTITUTER" "$CACHIX_TRUSTED_PUBLIC_KEY" <<'LAT1'
+set -euo pipefail
+system="$1"
+disko="$2"
+cachix_cache="$3"
+cachix_substituter="$4"
+cachix_trusted_public_key="$5"
+[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
+[[ "$disko" =~ ^/nix/store/[0-9a-z]{32}-[^/[:space:]]+$ ]] || exit 64
+[[ "$cachix_cache" =~ ^[A-Za-z0-9._-]+$ ]] || exit 64
+[[ "$cachix_substituter" =~ ^https://[A-Za-z0-9.-]+\.cachix\.org/?$ ]] || exit 64
+[[ "$cachix_trusted_public_key" == "${cachix_substituter#https://}"-1:* ]] || exit 64
+
+nix-store --realise \
+  --option builders '' \
+  --option max-jobs 0 \
+  --option fallback false \
+  --option substituters "$cachix_substituter" \
+  --option trusted-public-keys "$cachix_trusted_public_key" \
+  "$system" "$disko" >/dev/null
+nix-store --check-validity "$system" "$disko" >/dev/null
+LAT1
+fi
+
+if [[ "$DEPLOY_MODE" == "realise-only" ]]; then
+  echo "==> closure realised on lat1; activation not requested"
+  exit 0
 fi
 
 # Deploys are when the Hosted Web Chat + Identity recovery snapshot happens
@@ -107,11 +241,13 @@ echo "==> taking pre-deploy recovery snapshot on lat1"
 ssh -n -o BatchMode=yes "$LAT1" \
   'systemctl start finite-hosted-web-chat-snapshot.service && readlink /data/recovery-snapshots/hosted-web-chat/latest'
 
-echo "==> copying prebuilt closure to lat1"
-nix copy --no-check-sigs --option builders '' \
-  --from "file://$CACHE_DIR" \
-  --to "ssh-ng://$LAT1" \
-  "$SYSTEM" "$DISKO"
+if [[ "$DEPLOY_TRANSPORT" == "file-cache" ]]; then
+  echo "==> copying prebuilt closure to lat1 from file binary cache"
+  nix copy --no-check-sigs --option builders '' \
+    --from "file://$CACHE_DIR" \
+    --to "ssh-ng://$LAT1" \
+    "$SYSTEM" "$DISKO"
+fi
 
 UNIT="finite-nixos-activate-${REV}.service"
 echo "==> activating $SYSTEM on lat1"
@@ -165,6 +301,36 @@ PROFILE="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /nix/var/nix/profiles/sys
 ACTUAL="$(ssh -n -o BatchMode=yes "$LAT1" readlink -f /run/current-system)"
 test "$PROFILE" = "$SYSTEM"
 test "$ACTUAL" = "$SYSTEM"
+
+if [[ "$DEPLOY_TRANSPORT" == "cachix" ]]; then
+  echo "==> verifying activated Cachix trust config"
+  ssh -o BatchMode=yes "$LAT1" \
+    bash -s -- "$CACHIX_SUBSTITUTER" "$CACHIX_TRUSTED_PUBLIC_KEY" <<'LAT1'
+set -euo pipefail
+cachix_substituter="$1"
+cachix_trusted_public_key="$2"
+[[ "$cachix_substituter" =~ ^https://[A-Za-z0-9.-]+\.cachix\.org/?$ ]] || exit 64
+[[ "$cachix_trusted_public_key" == "${cachix_substituter#https://}"-1:* ]] || exit 64
+
+config="$(nix show-config)"
+substituters_line="$(printf '%s\n' "$config" | sed -n 's/^substituters = //p')"
+trusted_keys_line="$(printf '%s\n' "$config" | sed -n 's/^trusted-public-keys = //p')"
+case " $substituters_line " in
+  *" $cachix_substituter "*|*" ${cachix_substituter%/} "*|*" ${cachix_substituter}/ "*) ;;
+  *)
+    echo "finite Cachix substituter is not configured on the activated host: $cachix_substituter" >&2
+    exit 74
+    ;;
+esac
+case " $trusted_keys_line " in
+  *" $cachix_trusted_public_key "*) ;;
+  *)
+    echo "finite Cachix trusted public key is not configured on the activated host" >&2
+    exit 74
+    ;;
+esac
+LAT1
+fi
 
 # Twice in production (2026-08-18 and 2026-08-20) the switch left long-running
 # services on their OLD store-path binaries: the switch stops a unit, an

@@ -92,17 +92,29 @@ const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 /// How long a leased inbox entry stays owned by its consumer before the
-/// sidecar returns it to `Pending` and re-delivers it. Generous on purpose:
-/// a lease only expires when a consumer took an entry and neither acked nor
-/// released it (a crash mid-turn), so the ceiling need only be larger than a
-/// normal turn. Override with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
-const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 15 * 60 * 1000;
+/// sidecar returns it to `Pending` and re-delivers it. Generous on purpose,
+/// because this is a two-sided trade-off:
+///
+/// - **Too short** re-delivers an entry *mid-turn* whenever a consumer's turn
+///   runs longer than the TTL (deep agent tasks regularly exceed 15 minutes),
+///   producing duplicate replies; ack settles by key, not lease_id, so nothing
+///   fences the stale delivery.
+/// - **Too long** extends how long a crashed consumer's entry stays silent:
+///   after a crash mid-turn, redelivery waits out the whole TTL.
+///
+/// 45 minutes keeps the duplicate window closed for realistic turns while
+/// bounding worst-case crash-stranded silence at 45 minutes. Operators can
+/// override per host with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
+const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 45 * 60 * 1000;
 const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
 /// Policy for a `thread_id` that resolves to no conversation or segment in the
-/// agent store. Default is a typed error (the safe choice per HARDENING.md,
-/// which requires a visible adapter failure rather than a silent Home
-/// fallback). Set to `home`/`default` to instead route unknown threads to
-/// Core's Home default, logged as an explicit routing decision.
+/// agent store. Unset (the default) routes unknown threads to Core's Home
+/// default with a loud warning — the pre-d6a8b424 product semantics: a topic
+/// archived mid-session must never silently consume the user's message, so the
+/// reply stays deliverable and the routing decision is visible in the log.
+/// Values: `home`/`default` spell the fallback explicitly; `error` (and any
+/// other value) restores the strict typed error so a typo fails closed instead
+/// of silently rerouting replies.
 const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
 /// Bounded ring of recently-acked entry keys. It makes a post-restart
 /// duplicate ack a no-op and blocks a redelivery of an already-acked entry
@@ -1172,12 +1184,7 @@ fn status_for_cli_error(error: &CliError) -> StatusCode {
 
 fn service_cli_error(error: CliError) -> (StatusCode, Json<Value>) {
     let status = status_for_cli_error(&error);
-    service_error(
-        status,
-        cli_error_kind(&error),
-        cli_error_retryable(&error),
-        error.to_string(),
-    )
+    service_error(status, error.kind(), error.retryable(), error.to_string())
 }
 
 fn service_internal_error(error: String) -> (StatusCode, Json<Value>) {
@@ -1203,38 +1210,6 @@ fn service_error(
             "error": error,
         })),
     )
-}
-
-fn cli_error_kind(error: &CliError) -> &'static str {
-    match error {
-        CliError::Usage(_) => "usage",
-        CliError::Serialize(_) => "serialize",
-        CliError::Json(_) => "json",
-        CliError::Http(_) => "http",
-        CliError::Server { .. } => "server",
-        CliError::Output(_) => "output",
-        CliError::Hermes(_) => "hermes",
-        CliError::Identity(_) => "identity",
-        CliError::Runtime(_) => "runtime",
-    }
-}
-
-fn cli_error_retryable(error: &CliError) -> bool {
-    match error {
-        CliError::Http(_) => true,
-        CliError::Server { status, .. } => {
-            status.is_server_error()
-                || *status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        }
-        CliError::Usage(_)
-        | CliError::Serialize(_)
-        | CliError::Json(_)
-        | CliError::Output(_)
-        | CliError::Hermes(_)
-        | CliError::Identity(_)
-        | CliError::Runtime(_) => false,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2864,8 +2839,14 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
 }
 
+/// What a send/edit/activity does when its `thread_id` matches nothing in the
+/// agent store; selected by [`HERMES_UNKNOWN_THREAD_ROUTE_ENV`].
 enum UnknownThreadRoutePolicy {
+    /// Fail closed: a typed non-retryable error (HTTP 409 from the resident
+    /// service, `error_kind: "hermes"`, `retryable: false`).
     Error,
+    /// Deliver anyway: clear the route fields so Core applies its Home
+    /// default, after logging a loud routing warning.
     HomeDefault,
 }
 
@@ -2875,8 +2856,12 @@ fn unknown_thread_route_policy() -> UnknownThreadRoutePolicy {
         .as_deref()
         .map(str::trim)
     {
+        // Unset is the deliverable-by-default product behavior; only an
+        // explicitly set value selects strict (so `=error` opts in and any
+        // unrecognized value fails closed rather than rerouting silently).
+        None => UnknownThreadRoutePolicy::HomeDefault,
         Some("home") | Some("default") => UnknownThreadRoutePolicy::HomeDefault,
-        _ => UnknownThreadRoutePolicy::Error,
+        Some(_) => UnknownThreadRoutePolicy::Error,
     }
 }
 
@@ -2910,8 +2895,10 @@ fn resolve_thread_id_route(
 /// Turn the request's optional `thread_id` into concrete route fields. An
 /// explicit `conversation_id`/`segment_id` always wins (thread_id is only a
 /// resolver); with neither route nor thread_id the send is an intentional Home
-/// message (Core applies its default). An unknown thread_id is a typed error
-/// unless the Home-default policy is opted into.
+/// message (Core applies its default). An unknown thread_id falls back to the
+/// Home default with a loud warning by default so replies stay deliverable;
+/// setting `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE` to `error` restores the
+/// strict typed failure.
 fn resolve_route_fields(
     runtime: &FiniteChatRuntime,
     room_id: &str,
@@ -2940,7 +2927,8 @@ fn resolve_route_fields(
         UnknownThreadRoutePolicy::HomeDefault => {
             eprintln!(
                 "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room \
-                 {room_id}; routing to the Home default ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=home)"
+                 {room_id}; falling back to the Home default so this reply stays deliverable \
+                 ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=error restores the strict typed error)"
             );
             Ok((None, None))
         }
@@ -5254,7 +5242,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_thread_route_policy_defaults_to_typed_error() {
+    fn unknown_thread_route_policy_defaults_to_home_fallback() {
         // The env var is process-global; this test owns it and restores it.
         // SAFETY: single-threaded mutation of a test-only environment variable.
         unsafe {
@@ -5262,7 +5250,7 @@ mod tests {
         }
         assert!(matches!(
             unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::Error
+            UnknownThreadRoutePolicy::HomeDefault
         ));
         unsafe {
             std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home");
@@ -5270,6 +5258,13 @@ mod tests {
         assert!(matches!(
             unknown_thread_route_policy(),
             UnknownThreadRoutePolicy::HomeDefault
+        ));
+        unsafe {
+            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "error");
+        }
+        assert!(matches!(
+            unknown_thread_route_policy(),
+            UnknownThreadRoutePolicy::Error
         ));
         unsafe {
             std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);

@@ -20,13 +20,14 @@ use crate::{
     LinkStripeCustomerInput, LinkStripeCustomerRequest, LinkVerifiedUserInput, Project,
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
-    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthReportAck,
+    RuntimeHealthReportRequest, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest, UpsertRuntimeArtifactInput,
     normalize_owner_email, normalize_runtime_contact_endpoint, normalize_source_host_id,
@@ -212,6 +213,10 @@ pub struct FailRuntimeControlRequest {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    /// Named lifecycle failure stage; absent from N-1 Runners, which Core
+    /// records as `unknown`.
+    #[serde(default)]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub now: Option<String>,
 }
 
@@ -244,6 +249,9 @@ pub struct RuntimeControlRequestView {
     pub kind: crate::RuntimeControlKind,
     pub target_runtime_artifact_id: Option<String>,
     pub status: crate::RuntimeControlRequestStatus,
+    /// The named failure stage; present exactly when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub failure_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -262,6 +270,7 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
             kind: request.kind,
             target_runtime_artifact_id: request.target_runtime_artifact_id,
             status: request.status,
+            failure_stage: request.failure_stage,
             failure_message: request.failure_message,
             created_at: request.created_at,
             updated_at: request.updated_at,
@@ -528,6 +537,9 @@ pub struct PublicRuntimeControl {
     pub id: String,
     pub kind: crate::RuntimeControlKind,
     pub status: crate::RuntimeControlRequestStatus,
+    /// The named failure stage; present exactly when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<crate::RuntimeLifecycleStage>,
     pub retrying: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -542,6 +554,7 @@ impl From<VisibleProject> for PublicVisibleProject {
                     id: request.id,
                     kind: request.kind,
                     status: request.status,
+                    failure_stage: request.failure_stage,
                     retrying: request.failure_message.is_some(),
                     created_at: request.created_at,
                     updated_at: request.updated_at,
@@ -717,6 +730,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",
             get(runtime_artifact).put(upsert_runtime_artifact),
+        )
+        .route(
+            "/api/core/v1/runtime-health-reports",
+            post(report_runtime_health),
         )
         .route(
             "/api/core/v1/finite-private/grants",
@@ -990,6 +1007,34 @@ async fn runtime_artifact(
         return Err(ApiError::not_found("runtime artifact is not configured"));
     };
     Ok(Json(artifact))
+}
+
+/// The runner's standing-readiness ferry (2026-08 audit synthesis, H1 slice
+/// 3): one report per live runtime per poll interval, read from the guest's
+/// `/contact`. The source host comes from the runner credential, never from
+/// the body, so a runner can only report for runtimes on its own host. This
+/// is outbound-only telemetry; it carries no command or desired state.
+async fn report_runtime_health(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<RuntimeHealthReportRequest>,
+) -> Result<Json<RuntimeHealthReportAck>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                source_host_id: credential.source_host_id,
+                agent_runtime_id: input.agent_runtime_id,
+                ready: input.ready,
+                reason: input.reason,
+                observed_at: input.observed_at,
+                agent_npub: input.agent_npub,
+                report_interval_seconds: input.report_interval_seconds,
+                now: input.now,
+            })
+            .await?,
+    ))
 }
 
 async fn upsert_runtime_artifact(
@@ -1920,6 +1965,7 @@ async fn fail_runtime_control_request(
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 failure_message: input.failure_message,
+                failure_stage: input.failure_stage,
                 now: input.now,
             })
             .await?,
@@ -2512,6 +2558,8 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingRuntimeControlFailureMessage
             | CoreError::InvalidProviderOperationCorrelation
             | CoreError::InvalidProviderOperationFacts
+            | CoreError::MissingAgentRuntimeId
+            | CoreError::InvalidRuntimeHealthReport
             | CoreError::InvalidTimestamp => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: error.to_string(),
@@ -2554,7 +2602,7 @@ impl From<CoreError> for ApiError {
             | CoreError::RuntimeRetirementSnapshotMismatch
             | CoreError::RuntimeRetirementSnapshotConflict
             | CoreError::RuntimeRetirementNotEnabled
-            | CoreError::RuntimeControlRequestNotRunning
+            | CoreError::RuntimeControlRequestNotLaunching
             | CoreError::RuntimeControlRequestLeaseConflict
             | CoreError::FinitePrivateGrantNotActive
             | CoreError::FinitePrivateReservationAlreadySettled
@@ -2976,6 +3024,237 @@ mod tests {
             .code
     }
 
+    /// The runner-ferried standing-readiness endpoint is runner-authed, scopes
+    /// every write to the credential's source host, and feeds the admin
+    /// runtime overview's read-time health projection (H1 slice 3).
+    #[tokio::test]
+    async fn core_api_runtime_health_reports_are_runner_authed_and_host_scoped() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let auth = core_auth_with_runner_credentials(
+                "core-token",
+                vec![
+                    runner_credential_config(
+                        "runner-health-a-current",
+                        "runner-health-a-token",
+                        "runner-health-a",
+                        &[RunnerClass::Kata],
+                        "health-host-a",
+                        false,
+                    ),
+                    runner_credential_config(
+                        "runner-health-b-current",
+                        "runner-health-b-token",
+                        "runner-health-b",
+                        &[RunnerClass::Kata],
+                        "health-host-b",
+                        false,
+                    ),
+                ],
+                "usage-token",
+            );
+            let app = router(store.clone(), auth);
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-health-api-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:health-api@sha256:{}",
+                        "9".repeat(64)
+                    ),
+                    version_label: "health-api-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let launch_code = issue_test_launch_code(&store).await;
+            store
+                .request_agent_creation(crate::RequestAgentCreationInput {
+                    verified_email: "health-api-owner@finite.vip".to_string(),
+                    workos_user_id: "workos_health_api_owner".to_string(),
+                    display_name: "Health Api Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "health-api-1".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-health-b".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-health-b".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("creation request should lease");
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-health-b".to_string(),
+                    lease_token: "lease-health-b".to_string(),
+                    source_host_id: "health-host-b".to_string(),
+                    source_machine_id: "health-api-agent-001".to_string(),
+                    runtime_artifact_id: Some("artifact-health-api-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41002/contact".to_string()),
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            restart: true,
+                            recover_known_good_chat: false,
+                            runtime_upgrade: true,
+                            stop: true,
+                            runtime_retirement: false,
+                        },
+                    )),
+                    display_name: Some("Health Api Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let runner_b = || {
+                vec![(
+                    "authorization".to_string(),
+                    "Bearer runner-health-b-token".to_string(),
+                )]
+            };
+            let report_body = |ready: bool, reason: Option<&str>| {
+                serde_json::json!({
+                    "agentRuntimeId": runtime_id,
+                    "ready": ready,
+                    "reason": reason,
+                    "observedAt": "2026-08-24T12:00:00Z",
+                    "agentNpub": format!("npub1{}", "q".repeat(58)),
+                    "reportIntervalSeconds": 60
+                })
+            };
+
+            // Unauthenticated and out-of-scope reports are rejected; the
+            // in-scope runner records and is answered with the ack.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &[],
+                Some(report_body(true, None)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &[(
+                    "authorization".to_string(),
+                    "Bearer runner-health-a-token".to_string(),
+                )],
+                Some(report_body(true, None)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "a runner must not report for another host's runtime"
+            );
+            let (status, ack) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &runner_b(),
+                Some(report_body(true, None)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(ack["agentRuntimeId"], runtime_id);
+
+            // Out-of-shape bodies fail closed.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &runner_b(),
+                Some(serde_json::json!({
+                    "agentRuntimeId": runtime_id,
+                    "ready": true,
+                    "observedAt": "not-a-time"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            // The admin overview projects the fresh report at read time.
+            let (status, overviews) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/admin/runtimes",
+                &operator_identity_headers("health-api-admin@finite.vip"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let overview = overviews
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["agent_runtime_id"] == runtime_id)
+                .expect("the seeded runtime should appear in the admin overview");
+            assert_eq!(overview["runtime_health"]["status"], "ready");
+            assert_eq!(
+                overview["runtime_health"]["agent_npub"],
+                format!("npub1{}", "q".repeat(58))
+            );
+
+            // A fresh not-ready report surfaces its reason in the projection.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &runner_b(),
+                Some(report_body(false, Some("unreachable"))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, overviews) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/admin/runtimes",
+                &operator_identity_headers("health-api-admin@finite.vip"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let overview = overviews
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["agent_runtime_id"] == runtime_id)
+                .unwrap();
+            assert_eq!(overview["runtime_health"]["status"], "not_ready");
+            assert_eq!(overview["runtime_health"]["reason"], "unreachable");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn core_api_brain_roster_and_departure_facts_are_service_authenticated() {
         with_isolated_postgres(|db| async move {
@@ -3244,7 +3523,8 @@ mod tests {
             requested_by_user_id: "user_123".to_string(),
             kind: crate::RuntimeControlKind::Destroy,
             target_runtime_artifact_id: None,
-            status: crate::RuntimeControlRequestStatus::Running,
+            status: crate::RuntimeControlRequestStatus::Launching,
+            failure_stage: None,
             runner_id: Some("runner-1".to_string()),
             lease_token: Some("secret-lease-token".to_string()),
             lease_expires_at: Some("2026-05-25T13:10:00Z".to_string()),
@@ -5978,7 +6258,7 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(lease["request"]["id"], restart_id.as_str());
-            assert_eq!(lease["request"]["status"], "running");
+            assert_eq!(lease["request"]["status"], "launching");
             assert_eq!(lease["runtime"]["source_machine_id"], "oslo-agent-001");
 
             let (status, completed) = send_json(

@@ -26,45 +26,50 @@ use crate::{
     FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
     FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
-    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
+    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OffboardingPhase, Project, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+    RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
+    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
+    RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
-    agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope,
+    RuntimeRelocationV1, RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult, StoreErrorDetail,
+    StoredRuntimeHealth, SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt,
+    UpsertRuntimeArtifactInput, agent_creation_entitlement_id_for,
+    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
+    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
     parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
-    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
-    parse_runtime_control_request_status, parse_runtime_resource_class,
-    parse_runtime_summary_status, parse_time, parse_user_link_status,
-    project_room_membership_id_for, project_runtime_link_id_for,
-    provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
-    runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
-    runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
+    parse_runtime_control_kind, parse_runtime_control_request_status,
+    parse_runtime_lifecycle_stage, parse_runtime_resource_class, parse_time,
+    parse_user_link_status, project_room_membership_id_for, project_runtime_health,
+    project_runtime_link_id_for, provider_operation_allows_generic_failure,
+    provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
+    runtime_artifact_reference_is_immutable_oci, runtime_lifecycle, runtime_operation_spec_v1,
+    runtime_spec_secret_references, runtime_spec_v1, runtime_upgrade_contact_endpoint,
+    runtime_upgrade_prelease_rejection_is_terminal, source_import_key, trim_to_option,
+    valid_agent_npub, valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
@@ -775,6 +780,14 @@ impl CoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await
+    }
+
+    pub async fn record_runtime_health_report(
+        &self,
+        input: RecordRuntimeHealthReportInput,
+    ) -> CoreResult<RuntimeHealthReportAck> {
+        let client = self.connection().await?;
+        postgres_record_runtime_health_report(&**client, input).await
     }
 
     pub async fn admin_archive_unrecoverable_runtime(
@@ -2381,7 +2394,9 @@ where
                     control.requested_by_user_id AS control_requested_by_user_id,
                     control.kind AS control_kind,
                     control.target_runtime_artifact_id AS control_target_runtime_artifact_id,
-                    control.status AS control_status, control.runner_id AS control_runner_id,
+                    control.status AS control_status,
+                    control.failure_stage AS control_failure_stage,
+                    control.runner_id AS control_runner_id,
                     control.lease_token AS control_lease_token,
                     core_rfc3339(control.lease_expires_at) AS control_lease_expires_at,
                     control.failure_message AS control_failure_message,
@@ -2398,7 +2413,7 @@ where
                SELECT request.*
                FROM runtime_control_requests AS request
                WHERE request.agent_runtime_id = runtime.id
-                 AND request.status IN ('requested', 'running')
+                 AND request.status IN ('requested', 'launching', 'compute_up', 'ready')
                ORDER BY request.created_at, request.id
                LIMIT 1
              ) AS control ON TRUE
@@ -2478,6 +2493,22 @@ where
             let active_runtime_control = row
                 .get::<_, Option<String>>("control_id")
                 .map(|id| {
+                    let status = parse_runtime_control_request_status(
+                        &row.get::<_, String>("control_status"),
+                    )
+                    .ok_or_else(|| CoreError::Store("invalid runtime control status".into()))?;
+                    let failure_stage = if status == RuntimeControlRequestStatus::Failed {
+                        Some(
+                            parse_runtime_lifecycle_stage(
+                                &row.get::<_, String>("control_failure_stage"),
+                            )
+                            .ok_or_else(|| {
+                                CoreError::Store("invalid runtime control failure stage".into())
+                            })?,
+                        )
+                    } else {
+                        None
+                    };
                     Ok::<RuntimeControlRequest, CoreError>(RuntimeControlRequest {
                         id,
                         project_id: row.get("control_project_id"),
@@ -2490,10 +2521,8 @@ where
                                 CoreError::Store("invalid runtime control kind".into())
                             })?,
                         target_runtime_artifact_id: row.get("control_target_runtime_artifact_id"),
-                        status: parse_runtime_control_request_status(
-                            &row.get::<_, String>("control_status"),
-                        )
-                        .ok_or_else(|| CoreError::Store("invalid runtime control status".into()))?,
+                        status,
+                        failure_stage,
                         runner_id: row.get("control_runner_id"),
                         lease_token: row.get("control_lease_token"),
                         lease_expires_at: row.get("control_lease_expires_at"),
@@ -4121,6 +4150,10 @@ where
         )
         .await
         .map_err(store_error)?;
+    // runtime_status_snapshots has no writer anymore, but production still
+    // holds rows written before the writer was removed and the table's FK to
+    // agent_runtimes has no ON DELETE CASCADE. This DELETE must stay until the
+    // table itself is dropped, or deleting such a runtime fails the FK check.
     client
         .execute(
             "DELETE FROM runtime_status_snapshots WHERE agent_runtime_id = $1",
@@ -4145,6 +4178,23 @@ where
 fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlRequest> {
     let kind: String = row.get("kind");
     let status: String = row.get("status");
+    let failure_stage: String = row.get("failure_stage");
+    let status = parse_runtime_control_request_status(&status).ok_or_else(|| {
+        CoreError::Store(format!("invalid runtime control request status {status}"))
+    })?;
+    // The lifecycle invariant: a failed request always names its stage, and
+    // only a failed request carries one.
+    let failure_stage = if status == RuntimeControlRequestStatus::Failed {
+        Some(
+            parse_runtime_lifecycle_stage(&failure_stage).ok_or_else(|| {
+                CoreError::Store(format!(
+                    "invalid runtime control failure stage {failure_stage}"
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
     Ok(RuntimeControlRequest {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -4155,9 +4205,8 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
         kind: parse_runtime_control_kind(&kind)
             .ok_or_else(|| CoreError::Store(format!("invalid runtime control kind {kind}")))?,
         target_runtime_artifact_id: row.get("target_runtime_artifact_id"),
-        status: parse_runtime_control_request_status(&status).ok_or_else(|| {
-            CoreError::Store(format!("invalid runtime control request status {status}"))
-        })?,
+        status,
+        failure_stage,
         runner_id: row.get("runner_id"),
         lease_token: row.get("lease_token"),
         lease_expires_at: row.get("lease_expires_at"),
@@ -4170,7 +4219,7 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
 
 const RUNTIME_CONTROL_REQUEST_COLUMNS: &str = "id, project_id, agent_runtime_id, source_host_id,
     source_machine_id, requested_by_user_id, kind, target_runtime_artifact_id,
-    status, runner_id, lease_token,
+    status, failure_stage, runner_id, lease_token,
     core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at";
 
 async fn postgres_runtime_control_request<C>(
@@ -4289,6 +4338,17 @@ where
     }) {
         return Err(CoreError::RuntimeSpecMismatch);
     }
+    if kind == RuntimeControlKind::Destroy
+        && let Some(phase) = postgres_offboarding_phase(client, &runtime.id).await?
+        && phase.reached(OffboardingPhase::ReceiptVerified)
+    {
+        // A verified retirement receipt is already stored, so the destroy
+        // boundary is behind this Runtime. Enqueueing a fresh destroy mints a
+        // new request id whose retirement archive can never exist — the
+        // uncapped retry wedge. The recorded phase is the resume point
+        // instead: finish offboarding through runtime-offboard-retired-exact.
+        return Err(CoreError::RuntimeOffboardingResumeRequired { phase });
+    }
     if !runtime.supports_runtime_control(kind) {
         return Err(CoreError::RuntimeControlUnsupported);
     }
@@ -4318,7 +4378,8 @@ where
     // partial unique index is a database-level backstop.
     let existing_sql = format!(
         "SELECT {RUNTIME_CONTROL_REQUEST_COLUMNS} FROM runtime_control_requests
-         WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+         WHERE agent_runtime_id = $1
+           AND status IN ('requested', 'launching', 'compute_up', 'ready')
          ORDER BY created_at, id
          LIMIT 1
          FOR UPDATE"
@@ -4337,6 +4398,15 @@ where
         {
             return Err(CoreError::RuntimeUpgradeTargetConflict);
         }
+        if kind == RuntimeControlKind::Destroy {
+            set_offboarding_phase(
+                client,
+                &existing.agent_runtime_id,
+                OffboardingPhase::RetirementRequested,
+                now,
+            )
+            .await?;
+        }
         return Ok(existing);
     }
 
@@ -4350,6 +4420,7 @@ where
         kind,
         target_runtime_artifact_id,
         status: RuntimeControlRequestStatus::Requested,
+        failure_stage: None,
         runner_id: None,
         lease_token: None,
         lease_expires_at: None,
@@ -4370,7 +4441,7 @@ where
                      $9::text::timestamptz, $9::text::timestamptz, NULL)
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[
@@ -4387,7 +4458,19 @@ where
         )
         .await
         .map_err(store_error)?;
-    runtime_control_request_from_row(&row)
+    let request = runtime_control_request_from_row(&row)?;
+    if kind == RuntimeControlKind::Destroy {
+        // The destroy request is durably enqueued; record the first
+        // offboarding phase in the same transaction.
+        set_offboarding_phase(
+            client,
+            &request.agent_runtime_id,
+            OffboardingPhase::RetirementRequested,
+            now,
+        )
+        .await?;
+    }
+    Ok(request)
 }
 
 async fn postgres_request_runtime_control<C>(
@@ -4498,7 +4581,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&agent_runtime_id],
         )
@@ -4539,6 +4623,7 @@ where
         BrainDepartureReason::Deleted,
     )
     .await?;
+    set_offboarding_phase(client, &agent_runtime_id, OffboardingPhase::Archived, &now).await?;
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     insert_finite_private_admin_audit_event(
         client,
@@ -4636,7 +4721,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&agent_runtime_id],
         )
@@ -4690,6 +4776,15 @@ where
     )?;
 
     ensure_grandfathered_linked_user(client, &admin_email, &admin_workos_user_id, &now).await?;
+    // The operator's compute-absent attestation (required above) plus the
+    // re-verified receipt resume the recorded phase forward.
+    set_offboarding_phase(
+        client,
+        &agent_runtime_id,
+        OffboardingPhase::ComputeRemoved,
+        &now,
+    )
+    .await?;
     let revoked_api_key_ids = postgres_offboard_runtime(
         client,
         &input.project_id,
@@ -4712,6 +4807,7 @@ where
         )
         .await?;
     }
+    set_offboarding_phase(client, &agent_runtime_id, OffboardingPhase::Archived, &now).await?;
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     let retirement_locator = snapshot.receipt.locator.clone();
     insert_finite_private_admin_audit_event(
@@ -4940,7 +5036,8 @@ where
         .query_opt(
             "SELECT 1
              FROM runtime_control_requests
-             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             WHERE agent_runtime_id = $1
+               AND status IN ('requested', 'launching', 'compute_up', 'ready')
              LIMIT 1",
             &[&runtime.id],
         )
@@ -4950,7 +5047,7 @@ where
     {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
-    // The succeeded stop receipt proves no writer survives on the source.
+    // The stopped stop receipt proves no writer survives on the source.
     // Under the compute-absent attestation there is nothing to stop and the
     // receipt is unobtainable; absence itself (verified by the operator's
     // bounded probe per the relocation runbook) is the stronger guarantee.
@@ -4963,7 +5060,7 @@ where
                AND source_host_id = $2
                AND source_machine_id = $3
                AND kind = 'stop'
-               AND status = 'succeeded'
+               AND status = 'stopped'
              LIMIT 1",
                 &[
                     &runtime.id,
@@ -5193,7 +5290,7 @@ where
                 WHERE (
                         request.status = 'requested'
                         OR (
-                          request.status = 'running'
+                          request.status = 'launching'
                           AND (request.lease_expires_at IS NULL OR request.lease_expires_at <= $4::text::timestamptz)
                         )
                       )
@@ -5219,7 +5316,7 @@ where
                 LIMIT 1
              )
              UPDATE runtime_control_requests AS request
-             SET status = 'running',
+             SET status = 'launching',
                  runner_id = $1,
                  lease_token = $2,
                  lease_expires_at = $3::text::timestamptz,
@@ -5231,6 +5328,7 @@ where
                        request.source_host_id, request.source_machine_id,
                        request.requested_by_user_id, request.kind,
                        request.target_runtime_artifact_id, request.status,
+                       request.failure_stage,
                        request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                        request.failure_message, core_rfc3339(request.created_at) AS created_at,
                        core_rfc3339(request.updated_at) AS updated_at, core_rfc3339(request.completed_at) AS completed_at",
@@ -5274,7 +5372,8 @@ where
                 client
                     .execute(
                         "UPDATE runtime_control_requests
-                         SET status = 'failed', runner_id = NULL, lease_token = NULL,
+                         SET status = 'failed', failure_stage = 'launch',
+                             runner_id = NULL, lease_token = NULL,
                              lease_expires_at = NULL, failure_message = $2,
                              updated_at = $3::text::timestamptz,
                              completed_at = $3::text::timestamptz
@@ -5407,8 +5506,8 @@ fn verify_runtime_control_lease(
         trim_to_option(Some(runner_id)).ok_or(CoreError::MissingAgentCreationRunnerId)?;
     let lease_token =
         trim_to_option(Some(lease_token)).ok_or(CoreError::MissingAgentCreationLeaseToken)?;
-    if request.status != RuntimeControlRequestStatus::Running {
-        return Err(CoreError::RuntimeControlRequestNotRunning);
+    if request.status != RuntimeControlRequestStatus::Launching {
+        return Err(CoreError::RuntimeControlRequestNotLaunching);
     }
     if request.runner_id.as_deref() != Some(runner_id.as_str())
         || request.lease_token.as_deref() != Some(lease_token.as_str())
@@ -5536,43 +5635,6 @@ where
         runtime.updated_at = now.to_string();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    if let Some(upgrade) = upgrade {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, runtime_host = $3, hermes_available = TRUE,
-                     updated_at = $4::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[
-                    &agent_runtime_id,
-                    &status.as_str(),
-                    &upgrade.runtime_host,
-                    &now,
-                ],
-            )
-            .await
-            .map_err(store_error)?;
-    } else if destroy {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, hermes_available = FALSE, updated_at = $3::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[&agent_runtime_id, &status.as_str(), &now],
-            )
-            .await
-            .map_err(store_error)?;
-    } else {
-        client
-            .execute(
-                "UPDATE runtime_status_snapshots
-                 SET status = $2, updated_at = $3::text::timestamptz
-                 WHERE agent_runtime_id = $1",
-                &[&agent_runtime_id, &status.as_str(), &now],
-            )
-            .await
-            .map_err(store_error)?;
-    }
     Ok(())
 }
 
@@ -5589,13 +5651,19 @@ where
     runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.clone().unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
-    if locked.status == RuntimeControlRequestStatus::Succeeded {
+    // Terminal requests accept no completion. The single exception is the
+    // idempotent Destroy replay: the same receipt re-presented against the
+    // stopped request returns the stored row unchanged.
+    if locked.status.is_terminal() {
         let stored = postgres_runtime_retirement_snapshot(client, &input.request_id).await?;
-        if locked.kind == RuntimeControlKind::Destroy
-            && stored.as_ref().map(|snapshot| &snapshot.receipt)
-                == input.retirement_snapshot.as_ref()
-            && crate::runtime_control_completion_has_no_upgrade_facts(&input)
-        {
+        let idempotent_destroy_replay = locked.status == RuntimeControlRequestStatus::Stopped
+            && locked.kind == RuntimeControlKind::Destroy
+            && matches!(
+                RuntimeControlCompletion::parse(locked.kind, &input),
+                Ok(RuntimeControlCompletion::Destroy(ref receipt))
+                    if stored.as_ref().map(|snapshot| &snapshot.receipt) == Some(&**receipt)
+            );
+        if idempotent_destroy_replay {
             return Ok(locked);
         }
         return Err(CoreError::RuntimeRetirementSnapshotConflict);
@@ -5608,139 +5676,124 @@ where
         &now,
     )
     .await?;
-    let retirement_snapshot = if locked.kind == RuntimeControlKind::Destroy {
-        let receipt = input
-            .retirement_snapshot
-            .clone()
-            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
-            .await?
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        let row = client
-            .query_opt(
-                "SELECT runtime_spec
+    // The completion shape is parsed once and keyed on the request kind, so
+    // the upgrade-with-facts / destroy / plain shapes cannot be confused
+    // anywhere below this line.
+    let completion = RuntimeControlCompletion::parse(locked.kind, &input)?;
+    let retirement_snapshot = match &completion {
+        RuntimeControlCompletion::Destroy(receipt) => {
+            let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+                .await?
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            let row = client
+                .query_opt(
+                    "SELECT runtime_spec
                  FROM agent_creation_requests
                  WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
                  ORDER BY created_at DESC, id DESC
                  LIMIT 1",
-                &[&runtime.id],
-            )
-            .await
-            .map_err(store_error)?
-            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
-        let value: Value = row.get("runtime_spec");
-        let runtime_spec: RuntimeSpecEnvelope =
-            serde_json::from_value(value).map_err(json_error)?;
-        validate_runtime_retirement_snapshot_receipt(
-            &receipt,
-            &locked,
-            &runtime,
-            &runtime_spec,
-            &now,
-        )?;
-        Some(RuntimeRetirementSnapshot {
-            receipt,
-            stored_at: now.clone(),
-        })
-    } else {
-        if input.retirement_snapshot.is_some() {
-            return Err(CoreError::RuntimeRetirementSnapshotMismatch);
-        }
-        None
-    };
-    let upgrade = if locked.kind == RuntimeControlKind::Upgrade {
-        let target_id = locked
-            .target_runtime_artifact_id
-            .as_deref()
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let reported_id = trim_to_option(input.runtime_artifact_id.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let target = select_runtime_artifact(client, target_id)
-            .await?
-            .ok_or(CoreError::RuntimeArtifactNotFound)?;
-        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
-            .await?
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        validate_runtime_capabilities_artifact_policy(
-            input.runtime_capabilities.as_ref(),
-            runtime.placement,
-            &target,
-        )?;
-        // A target may be retired after the runner leased and swapped it.
-        // Immutable material remains authoritative for committing the actual
-        // compute state; lifecycle policy is enforced at request and lease.
-        ensure_runtime_upgrade_target_material(&runtime, &target)?;
-        let state_schema_version = trim_to_option(input.state_schema_version.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let runtime_host = trim_to_option(input.runtime_host.as_deref())
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let published_app_urls = input
-            .published_app_urls
-            .clone()
-            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
-        let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
-        if reported_id != target.id || state_schema_version != target.state_schema_version {
-            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
-        }
-        let runtime_spec = if let Some(row) = client
-            .query_opt(
-                "SELECT runtime_spec
-                 FROM agent_creation_requests
-                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT 1",
-                &[&runtime.id],
-            )
-            .await
-            .map_err(store_error)?
-        {
+                    &[&runtime.id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
             let value: Value = row.get("runtime_spec");
-            let current_spec: RuntimeSpecEnvelope =
+            let runtime_spec: RuntimeSpecEnvelope =
                 serde_json::from_value(value).map_err(json_error)?;
-            let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
-            let current_artifact_id = runtime
-                .runtime_artifact_id
+            validate_runtime_retirement_snapshot_receipt(
+                receipt,
+                &locked,
+                &runtime,
+                &runtime_spec,
+                &now,
+            )?;
+            Some(RuntimeRetirementSnapshot {
+                receipt: (**receipt).clone(),
+                stored_at: now.clone(),
+            })
+        }
+        _ => None,
+    };
+    let upgrade = match &completion {
+        RuntimeControlCompletion::Upgrade(facts) => {
+            let target_id = locked
+                .target_runtime_artifact_id
                 .as_deref()
-                .ok_or(CoreError::RuntimeSpecMismatch)?;
-            let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let reported_id = facts.runtime_artifact_id.clone();
+            let target = select_runtime_artifact(client, target_id)
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
-            Some(runtime_operation_spec_v1(
-                &current_spec,
-                RuntimeSpecIdentity {
-                    operation_id: &locked.id,
-                    project_id: &runtime.project_id,
-                    agent_runtime_id: &runtime.id,
-                    placement,
-                },
-                &current_artifact,
+            let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+                .await?
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            validate_runtime_capabilities_artifact_policy(
+                facts.runtime_capabilities.as_ref(),
+                runtime.placement,
                 &target,
-                RuntimeBootIntent::Normal,
-                Some(runtime_environment),
-                Some(runtime_secret_references),
-            )?)
-        } else {
-            None
-        };
-        Some(RuntimeUpgradeCompletion {
-            runtime_artifact_id: reported_id,
-            state_schema_version,
-            runtime_host,
-            published_app_urls,
-            contact_endpoint,
-            runtime_spec,
-            runtime_capabilities: input.runtime_capabilities.clone(),
-        })
-    } else {
-        if input.runtime_artifact_id.is_some()
-            || input.state_schema_version.is_some()
-            || input.runtime_host.is_some()
-            || input.published_app_urls.is_some()
-            || input.runtime_capabilities.is_some()
-        {
-            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            )?;
+            // A target may be retired after the runner leased and swapped it.
+            // Immutable material remains authoritative for committing the actual
+            // compute state; lifecycle policy is enforced at request and lease.
+            ensure_runtime_upgrade_target_material(&runtime, &target)?;
+            let state_schema_version = facts.state_schema_version.clone();
+            let runtime_host = facts.runtime_host.clone();
+            let published_app_urls = facts.published_app_urls.clone();
+            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
+            if reported_id != target.id || state_schema_version != target.state_schema_version {
+                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            }
+            let runtime_spec = if let Some(row) = client
+                .query_opt(
+                    "SELECT runtime_spec
+                 FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                    &[&runtime.id],
+                )
+                .await
+                .map_err(store_error)?
+            {
+                let value: Value = row.get("runtime_spec");
+                let current_spec: RuntimeSpecEnvelope =
+                    serde_json::from_value(value).map_err(json_error)?;
+                let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+                let current_artifact_id = runtime
+                    .runtime_artifact_id
+                    .as_deref()
+                    .ok_or(CoreError::RuntimeSpecMismatch)?;
+                let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                    .await?
+                    .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                Some(runtime_operation_spec_v1(
+                    &current_spec,
+                    RuntimeSpecIdentity {
+                        operation_id: &locked.id,
+                        project_id: &runtime.project_id,
+                        agent_runtime_id: &runtime.id,
+                        placement,
+                    },
+                    &current_artifact,
+                    &target,
+                    RuntimeBootIntent::Normal,
+                    Some(runtime_environment),
+                    Some(runtime_secret_references),
+                )?)
+            } else {
+                None
+            };
+            Some(RuntimeUpgradeCompletion {
+                runtime_artifact_id: reported_id,
+                state_schema_version,
+                runtime_host,
+                published_app_urls,
+                contact_endpoint,
+                runtime_spec,
+                runtime_capabilities: facts.runtime_capabilities.clone(),
+            })
         }
-        None
+        _ => None,
     };
     if let Some(snapshot) = retirement_snapshot.as_ref() {
         let receipt = &snapshot.receipt;
@@ -5781,11 +5834,42 @@ where
         if inserted != 1 {
             return Err(CoreError::RuntimeRetirementSnapshotConflict);
         }
+        // The verified receipt is now durably stored; record the phase in the
+        // same transaction as the insert.
+        set_offboarding_phase(
+            client,
+            &locked.agent_runtime_id,
+            OffboardingPhase::ReceiptVerified,
+            &now,
+        )
+        .await?;
     }
+    // Drive the canonical lifecycle machine to its terminal. Up-bound
+    // operations pass through ComputeUp and Ready before Succeeded: the
+    // Runner only calls complete after its bounded readiness wait returned
+    // ready, so the chain is recorded atomically here. (Persisting ComputeUp
+    // and Ready as separately observable writes lands with the readiness
+    // transport follow-up; the ordering invariant is already enforced by the
+    // machine.) Down-bound operations confirm straight into Stopped.
+    let launching =
+        runtime_lifecycle::RuntimeLifecycle::<runtime_lifecycle::phase::Launching>::from_status(
+            locked.status,
+        )
+        .ok_or(CoreError::RuntimeControlRequestNotLaunching)?;
+    let terminal_status = match locked.kind {
+        RuntimeControlKind::Restart
+        | RuntimeControlKind::RecoverKnownGoodChatRuntime
+        | RuntimeControlKind::Upgrade => {
+            launching.compute_up(&completion).ready().succeed().status()
+        }
+        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
+            launching.confirm_stopped(&completion).status()
+        }
+    };
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
-             SET status = 'succeeded',
+             SET status = $3,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = NULL,
@@ -5794,10 +5878,10 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
-            &[&input.request_id, &now],
+            &[&input.request_id, &now, &terminal_status.as_str()],
         )
         .await
         .map_err(store_error)?;
@@ -5839,6 +5923,16 @@ where
             .map_err(store_error)?;
     }
     if destroy {
+        // A runner only completes a destroy after its verified readback,
+        // canonical container removal, and staging cleanup, so the committed
+        // completion is the compute-removed record.
+        set_offboarding_phase(
+            client,
+            &request.agent_runtime_id,
+            OffboardingPhase::ComputeRemoved,
+            &now,
+        )
+        .await?;
         postgres_offboard_destroyed_runtime(client, &request, &now).await?;
     }
     Ok(request)
@@ -5854,12 +5948,18 @@ where
     let now = input.now.unwrap_or(current_time_iso()?);
     let failure_message = trim_to_option(Some(&input.failure_message))
         .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
+    // N-1 Runners do not name a stage; their failures record `unknown`
+    // rather than blocking the failure write.
+    let failure_stage = input
+        .failure_stage
+        .unwrap_or(RuntimeLifecycleStage::Unknown);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
     verify_runtime_control_lease(&locked, &input.runner_id, &input.lease_token)?;
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
              SET status = 'failed',
+                 failure_stage = $4,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = $2,
@@ -5868,10 +5968,10 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token,
+                       failure_stage, runner_id, lease_token,
                        core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message, core_rfc3339(created_at) AS created_at,
                        core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
-            &[&input.request_id, &failure_message, &now],
+            &[&input.request_id, &failure_message, &now, &failure_stage.as_str()],
         )
         .await
         .map_err(store_error)?;
@@ -5882,15 +5982,6 @@ where
         runtime.updated_at = now.clone();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    client
-        .execute(
-            "UPDATE runtime_status_snapshots
-             SET status = 'stale', updated_at = $2::text::timestamptz
-             WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
     Ok(request)
 }
 
@@ -5927,7 +6018,7 @@ where
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       failure_stage, runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &lease_expires_at, &now],
         )
@@ -5961,13 +6052,14 @@ where
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
-             SET status = 'requested', runner_id = NULL, lease_token = NULL,
+             SET status = 'requested', failure_stage = 'unknown',
+                 runner_id = NULL, lease_token = NULL,
                  lease_expires_at = NULL, failure_message = $2,
                  updated_at = $3::text::timestamptz, completed_at = NULL
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
                        requested_by_user_id, kind, target_runtime_artifact_id, status,
-                       runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
+                       failure_stage, runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at, core_rfc3339(completed_at) AS completed_at",
             &[&input.request_id, &failure_message, &now],
         )
@@ -5979,15 +6071,6 @@ where
         runtime.updated_at = now.clone();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    client
-        .execute(
-            "UPDATE runtime_status_snapshots
-             SET status = 'stale', updated_at = $2::text::timestamptz
-             WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
     Ok(request)
 }
 
@@ -6296,6 +6379,84 @@ where
     })
 }
 
+/// Read the runtime's recorded offboarding phase. The callers that mutate
+/// phases already hold the runtime row locked inside their transaction.
+async fn postgres_offboarding_phase<C>(
+    client: &C,
+    agent_runtime_id: &str,
+) -> CoreResult<Option<OffboardingPhase>>
+where
+    C: GenericClient + Sync,
+{
+    let phase: Option<String> = client
+        .query_opt(
+            "SELECT offboarding_phase FROM agent_runtimes WHERE id = $1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?
+        .get("offboarding_phase");
+    phase
+        .as_deref()
+        .map(|value| {
+            parse_offboarding_phase(value)
+                .ok_or_else(|| CoreError::Store(format!("invalid offboarding phase {value}")))
+        })
+        .transpose()
+}
+
+/// Advance the runtime's offboarding phase strictly forward, in the same
+/// transaction as the side effect the phase records. Restating the current
+/// phase is an idempotent no-op (replayed completions); any backward move
+/// fails closed and names both phases.
+async fn set_offboarding_phase<C>(
+    client: &C,
+    agent_runtime_id: &str,
+    phase: OffboardingPhase,
+    now: &str,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    let updated = client
+        .execute(
+            "UPDATE agent_runtimes
+             SET offboarding_phase = $2, updated_at = $3::text::timestamptz
+             WHERE id = $1
+               AND (
+                 offboarding_phase IS NULL
+                 OR offboarding_phase = $2
+                 OR array_position(
+                      ARRAY['retirement_requested', 'receipt_verified', 'compute_removed',
+                            'link_deactivated', 'archived']::text[],
+                      offboarding_phase
+                    ) < array_position(
+                      ARRAY['retirement_requested', 'receipt_verified', 'compute_removed',
+                            'link_deactivated', 'archived']::text[],
+                      $2
+                    )
+               )",
+            &[&agent_runtime_id, &phase.as_str(), &now],
+        )
+        .await
+        .map_err(store_error)?;
+    if updated == 1 {
+        return Ok(());
+    }
+    let current = postgres_offboarding_phase(client, agent_runtime_id)
+        .await?
+        .ok_or_else(|| {
+            CoreError::Store(format!(
+                "runtime {agent_runtime_id} rejected the forward-only offboarding phase update with no recorded phase"
+            ))
+        })?;
+    Err(CoreError::OffboardingPhaseRegression {
+        current,
+        attempted: phase,
+    })
+}
+
 /// Row-scoped `offboard_destroyed_runtime`: hide the normal project from its
 /// room members, deactivate the runtime's links, drop its relay credential,
 /// revoke every active Finite Private key bound to the runtime or its project,
@@ -6325,6 +6486,13 @@ where
         &request.project_id,
         now,
         BrainDepartureReason::Retired,
+    )
+    .await?;
+    set_offboarding_phase(
+        client,
+        &request.agent_runtime_id,
+        OffboardingPhase::Archived,
+        now,
     )
     .await?;
     Ok(())
@@ -6364,6 +6532,15 @@ where
         )
         .await
         .map_err(store_error)?;
+    // The link deactivation above is the offboarding boundary; record it in
+    // the same transaction.
+    set_offboarding_phase(
+        client,
+        agent_runtime_id,
+        OffboardingPhase::LinkDeactivated,
+        now,
+    )
+    .await?;
     client
         .execute(
             "DELETE FROM runtime_relay_credentials WHERE agent_runtime_id = $1",
@@ -6587,19 +6764,23 @@ async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<Admin
 where
     C: GenericClient + Sync,
 {
+    let now = current_time_iso()?;
     let rows = client
         .query(
             "SELECT runtime.id AS agent_runtime_id, runtime.project_id, runtime.source_host_id,
                     runtime.source_machine_id, runtime.runtime_artifact_id, runtime.host_facts,
+                    runtime.offboarding_phase,
                     core_rfc3339(runtime.updated_at) AS runtime_updated_at,
                     project.display_name AS project_display_name,
                     owner.normalized_email AS owner_email,
-                    snapshot.status AS snapshot_status,
-                    core_rfc3339(snapshot.last_heartbeat_at) AS last_heartbeat_at,
-                    core_rfc3339(snapshot.updated_at) AS status_updated_at,
-                    snapshot.hermes_available AS snapshot_hermes_available,
                     artifact.version_label AS runtime_artifact_version_label,
                     runtime.runtime_capabilities,
+                    core_rfc3339(runtime.health_reported_at) AS health_reported_at,
+                    core_rfc3339(runtime.health_observed_at) AS health_observed_at,
+                    runtime.health_ready,
+                    runtime.health_reason,
+                    runtime.health_report_interval_seconds,
+                    runtime.health_reporting_npub,
                     EXISTS (
                       SELECT 1 FROM project_runtime_links link
                       WHERE link.agent_runtime_id = runtime.id AND link.active
@@ -6612,7 +6793,6 @@ where
              FROM agent_runtimes AS runtime
              LEFT JOIN projects AS project ON project.id = runtime.project_id
              LEFT JOIN users AS owner ON owner.id = project.owner_user_id
-             LEFT JOIN runtime_status_snapshots AS snapshot ON snapshot.agent_runtime_id = runtime.id
              LEFT JOIN runtime_artifacts AS artifact ON artifact.id = runtime.runtime_artifact_id
              ORDER BY runtime.source_host_id, runtime.source_machine_id, runtime.id",
             &[],
@@ -6622,21 +6802,35 @@ where
     rows.iter()
         .map(|row| {
             let host_facts: HostOwnedRuntimeFacts = json_column(row, "host_facts")?;
-            let snapshot_status: Option<String> = row.get("snapshot_status");
-            let snapshot_status = snapshot_status
-                .as_deref()
-                .map(|value| {
-                    parse_runtime_summary_status(value)
-                        .ok_or_else(|| CoreError::Store(format!("invalid runtime status {value}")))
-                })
-                .transpose()?;
             let runtime_capabilities: Option<RuntimeCapabilitiesEnvelope> =
                 optional_json_column(row, "runtime_capabilities")?
                     .map(serde_json::from_value)
                     .transpose()
                     .map_err(json_error)?;
+            let offboarding_phase: Option<String> = row.get("offboarding_phase");
+            let offboarding_phase = offboarding_phase
+                .as_deref()
+                .map(|value| {
+                    parse_offboarding_phase(value).ok_or_else(|| {
+                        CoreError::Store(format!("invalid offboarding phase {value}"))
+                    })
+                })
+                .transpose()?;
             let project_display_name: Option<String> = row.get("project_display_name");
-            let snapshot_hermes: Option<bool> = row.get("snapshot_hermes_available");
+            let runtime_health = project_runtime_health(
+                host_facts.runtime_status,
+                &StoredRuntimeHealth {
+                    reported_at: row.get("health_reported_at"),
+                    observed_at: row.get("health_observed_at"),
+                    ready: row.get("health_ready"),
+                    reason: row.get("health_reason"),
+                    report_interval_seconds: row
+                        .get::<_, Option<i32>>("health_report_interval_seconds")
+                        .map(i64::from),
+                    reporting_npub: row.get("health_reporting_npub"),
+                },
+                &now,
+            )?;
             Ok(AdminRuntimeOverview {
                 project_id: row.get("project_id"),
                 project_display_name: project_display_name
@@ -6647,20 +6841,101 @@ where
                 source_machine_id: row.get("source_machine_id"),
                 runtime_artifact_id: row.get("runtime_artifact_id"),
                 runtime_artifact_version_label: row.get("runtime_artifact_version_label"),
-                runtime_status: snapshot_status.unwrap_or(host_facts.runtime_status),
-                last_heartbeat_at: row.get("last_heartbeat_at"),
-                status_updated_at: row.get("status_updated_at"),
+                runtime_status: host_facts.runtime_status,
+                // runtime_status_snapshots has no writer; the wire fields stay
+                // serialized as null for dashboard compatibility until the
+                // gated table drop and wire-type change land together.
+                last_heartbeat_at: None,
+                status_updated_at: None,
                 runtime_updated_at: row.get("runtime_updated_at"),
-                hermes_available: snapshot_hermes.or(host_facts.hermes_available),
+                hermes_available: host_facts.hermes_available,
                 published_app_urls: host_facts.published_app_urls.clone(),
                 active_finite_private_key_count: row.get("active_finite_private_key_count"),
                 runtime_link_active: row.get("runtime_link_active"),
                 runtime_capabilities: runtime_capabilities
                     .as_ref()
                     .map(|capabilities| *capabilities.v1()),
+                offboarding_phase,
+                runtime_health,
             })
         })
         .collect()
+}
+
+/// Record one runner-ferried standing-readiness report on the runtime row.
+/// The source host comes from the runner credential and scopes the UPDATE, so
+/// a body naming another host's runtime (or an unknown runtime) misses every
+/// row and fails closed as not-found without leaking cross-host existence.
+async fn postgres_record_runtime_health_report<C>(
+    client: &C,
+    input: RecordRuntimeHealthReportInput,
+) -> CoreResult<RuntimeHealthReportAck>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.clone().unwrap_or(current_time_iso()?);
+    let agent_runtime_id =
+        trim_to_option(Some(&input.agent_runtime_id)).ok_or(CoreError::MissingAgentRuntimeId)?;
+    let source_host_id =
+        trim_to_option(Some(&input.source_host_id)).ok_or(CoreError::MissingSourceHostId)?;
+    let reason = trim_to_option(input.reason.as_deref());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS)
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    // The observation time is runner-clock evidence; it must still parse.
+    parse_time(&input.observed_at)?;
+    let agent_npub = trim_to_option(input.agent_npub.as_deref());
+    if agent_npub
+        .as_ref()
+        .is_some_and(|value| !valid_agent_npub(value))
+    {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = input.report_interval_seconds;
+    if interval_seconds.is_some_and(|value| {
+        !(RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS..=RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS)
+            .contains(&value)
+    }) {
+        return Err(CoreError::InvalidRuntimeHealthReport);
+    }
+    let interval_seconds = interval_seconds
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| CoreError::InvalidRuntimeHealthReport)?;
+    let row = client
+        .query_opt(
+            "UPDATE agent_runtimes
+             SET health_reported_at = $3::text::timestamptz,
+                 health_observed_at = $4::text::timestamptz,
+                 health_ready = $5,
+                 health_reason = $6,
+                 health_report_interval_seconds = $7,
+                 health_reporting_npub = $8
+             WHERE id = $1 AND source_host_id = $2
+             RETURNING id",
+            &[
+                &agent_runtime_id,
+                &source_host_id,
+                &now,
+                &input.observed_at,
+                &input.ready,
+                &reason,
+                &interval_seconds,
+                &agent_npub,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    let Some(row) = row else {
+        return Err(CoreError::ProjectRuntimeNotFound);
+    };
+    Ok(RuntimeHealthReportAck {
+        agent_runtime_id: row.get("id"),
+        recorded_at: now,
+    })
 }
 
 /// Find-or-create a PENDING user by natural key (email). Mirrors
@@ -8369,12 +8644,13 @@ mod tests {
     use crate::BillingSubscriptionStatus;
 
     use super::*;
-    use crate::test_support::with_isolated_postgres;
+    use crate::test_support::{TestDb, with_isolated_postgres};
     use crate::{
         FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
         RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     };
-    use std::collections::BTreeSet;
+    use futures_util::FutureExt;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
         RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
@@ -9182,6 +9458,605 @@ mod tests {
             connection.abort();
         })
         .await;
+    }
+
+    /// The schema as production knew it before the lifecycle state machine:
+    /// every migration except 0021. The remap test below builds this shape,
+    /// seeds the legacy vocabulary, and proves 0021 maps it exactly.
+    const PRE_LIFECYCLE_SCHEMA_SQL: &str = concat!(
+        include_str!("../migrations/0001_core.sql"),
+        "\n",
+        include_str!("../migrations/0002_runtime_upgrade.sql"),
+        "\n",
+        include_str!("../migrations/0003_launch_codes.sql"),
+        "\n",
+        include_str!("../migrations/0004_membership_archive.sql"),
+        "\n",
+        include_str!("../migrations/0005_phala_expand.sql"),
+        "\n",
+        include_str!("../migrations/0006_runtime_capabilities_expand.sql"),
+        "\n",
+        include_str!("../migrations/0007_provider_creation_operations.sql"),
+        "\n",
+        include_str!("../migrations/0008_agent_creation_provisional_runtime.sql"),
+        "\n",
+        include_str!("../migrations/0009_artifact_recovery_support.sql"),
+        "\n",
+        include_str!("../migrations/0010_align_finite_private_generous.sql"),
+        "\n",
+        include_str!("../migrations/0011_agent_email.sql"),
+        "\n",
+        include_str!("../migrations/0012_runtime_retirement_snapshots.sql"),
+        "\n",
+        include_str!("../migrations/0013_double_finite_private_default.sql"),
+        "\n",
+        include_str!("../migrations/0014_finite_private_user_controls.sql"),
+        "\n",
+        include_str!("../migrations/0015_runner_capacity_fences.sql"),
+        "\n",
+        include_str!("../migrations/0016_runtime_cold_relocation.sql"),
+        "\n",
+        include_str!("../migrations/0017_rfc3339_reads.sql"),
+        "\n",
+        include_str!("../migrations/0018_finite_private_5x_profile.sql"),
+        "\n",
+        include_str!("../migrations/0019_brain_agent_departure_facts.sql")
+    );
+
+    #[tokio::test]
+    async fn postgres_lifecycle_migration_remaps_legacy_statuses_exactly() {
+        // A scratch database at the pre-H1 schema, migrated forward by 0021
+        // alone, mirrors the production upgrade path byte for byte.
+        let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL")
+            .expect("FC_CORE_POSTGRES_TEST_URL is required for Core Postgres tests");
+        let (admin, admin_connection) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
+        let admin_connection = tokio::spawn(async move {
+            let _ = admin_connection.await;
+        });
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_name = format!("fc_test_lifecycle_{unique}");
+        admin
+            .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
+            .await
+            .unwrap();
+        let (base, query) = match admin_url.split_once('?') {
+            Some((base, query)) => (base.to_string(), Some(query.to_string())),
+            None => (admin_url.clone(), None),
+        };
+        let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
+        let db_url = match base[scheme_end..].find('/') {
+            Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
+            None => format!("{base}/{db_name}"),
+        };
+        let db_url = match query {
+            Some(query) => format!("{db_url}?{query}"),
+            None => db_url,
+        };
+        let (raw, connection) = tokio_postgres::connect(&db_url, NoTls).await.unwrap();
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let outcome = std::panic::AssertUnwindSafe(async {
+            raw.batch_execute(PRE_LIFECYCLE_SCHEMA_SQL).await.unwrap();
+            raw.batch_execute(
+                "INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                 VALUES ('legacy-user', 'legacy@finite.vip', 'linked', 'workos-legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                 VALUES ('legacy-org', 'legacy-user', 'Legacy', 'grandfathered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                 VALUES ('legacy-project', 'legacy-org', 'legacy-user', 'Legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_artifacts (id, kind, reference, version_label, state_schema_version, created_at, promoted_at)
+                 VALUES ('legacy-artifact', 'oci_image', 'image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'v1', 'state-v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO agent_runtimes (
+                   id, project_id, source_host_id, source_machine_id, source_import_key,
+                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                 ) VALUES
+                   ('legacy-runtime', 'legacy-project', 'legacy-host', 'legacy-machine',
+                    'legacy-host/legacy-machine', 'legacy-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-runtime-2', 'legacy-project', 'legacy-host', 'legacy-machine-2',
+                    'legacy-host/legacy-machine-2', 'legacy-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, status, created_at, updated_at
+                 ) VALUES
+                   ('legacy-requested', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'restart', 'requested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-running', 'legacy-project', 'legacy-runtime-2', 'legacy-host', 'legacy-machine-2', 'legacy-user', 'restart', 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-restart', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'restart', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-stop', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'stop', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-succeeded-destroy', 'legacy-project', 'legacy-runtime-2', 'legacy-host', 'legacy-machine-2', 'legacy-user', 'destroy', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('legacy-failed', 'legacy-project', 'legacy-runtime', 'legacy-host', 'legacy-machine', 'legacy-user', 'upgrade', 'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+            )
+            .await
+            .unwrap();
+
+            raw.batch_execute(include_str!("../migrations/0021_runtime_lifecycle.sql"))
+                .await
+                .unwrap();
+
+            let rows = raw
+                .query(
+                    "SELECT id, status, failure_stage FROM runtime_control_requests ORDER BY id",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let mapped: BTreeMap<String, (String, String)> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get::<_, String>("id"),
+                        (row.get::<_, String>("status"), row.get::<_, String>("failure_stage")),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                mapped.get("legacy-requested"),
+                Some(&("requested".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-running"),
+                Some(&("launching".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-restart"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-stop"),
+                Some(&("stopped".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-succeeded-destroy"),
+                Some(&("stopped".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("legacy-failed"),
+                Some(&("failed".to_string(), "unknown".to_string()))
+            );
+
+            // The new CHECK rejects the legacy vocabulary.
+            let legacy_write = raw
+                .execute(
+                    "UPDATE runtime_control_requests SET status = 'running' WHERE id = 'legacy-requested'",
+                    &[],
+                )
+                .await;
+            assert!(legacy_write.is_err());
+
+            // The one-active index spans every non-terminal state.
+            let index_definition: String = raw
+                .query_one(
+                    "SELECT pg_get_indexdef(indexrelid) FROM pg_index
+                     WHERE indexrelid = 'runtime_control_requests_one_active_per_runtime'::regclass",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(index_definition.contains("'launching'"));
+            assert!(index_definition.contains("'compute_up'"));
+            assert!(!index_definition.contains("'running'"));
+
+            // Reapplying is a no-op: the migration runs at every Core startup.
+            raw.batch_execute(include_str!("../migrations/0021_runtime_lifecycle.sql"))
+                .await
+                .unwrap();
+            let remapped_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM runtime_control_requests WHERE status IN ('running')",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(remapped_count, 0);
+        })
+        .catch_unwind()
+        .await;
+
+        drop(raw);
+        connection.abort();
+        let _ = admin
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"),
+                &[],
+            )
+            .await;
+        drop(admin);
+        admin_connection.abort();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// The symmetric counterpart to
+    /// `postgres_lifecycle_migration_remaps_legacy_statuses_exactly`: 0021
+    /// applies forward onto a pre-H1 database, post-H1 writers mix in the new
+    /// vocabulary, and the operator-initiated reverse remap lands the table on
+    /// a shape the PREVIOUS generation of Core accepts — legacy CHECK and
+    /// index predicate restored, legacy-vocabulary writes admitted once more,
+    /// and the N-1 lease scan finding every relaunched row.
+    #[tokio::test]
+    async fn postgres_lifecycle_reverse_remap_restores_previous_generation_shape() {
+        // A scratch database at the pre-H1 schema migrated forward by 0021
+        // alone mirrors the production state an H1 rollback would face.
+        let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL")
+            .expect("FC_CORE_POSTGRES_TEST_URL is required for Core Postgres tests");
+        let (admin, admin_connection) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
+        let admin_connection = tokio::spawn(async move {
+            let _ = admin_connection.await;
+        });
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_name = format!("fc_test_reverse_remap_{unique}");
+        admin
+            .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
+            .await
+            .unwrap();
+        let (base, query) = match admin_url.split_once('?') {
+            Some((base, query)) => (base.to_string(), Some(query.to_string())),
+            None => (admin_url.clone(), None),
+        };
+        let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
+        let db_url = match base[scheme_end..].find('/') {
+            Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
+            None => format!("{base}/{db_name}"),
+        };
+        let db_url = match query {
+            Some(query) => format!("{db_url}?{query}"),
+            None => db_url,
+        };
+        let (raw, connection) = tokio_postgres::connect(&db_url, NoTls).await.unwrap();
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let outcome = std::panic::AssertUnwindSafe(async {
+            raw.batch_execute(PRE_LIFECYCLE_SCHEMA_SQL).await.unwrap();
+            raw.batch_execute(
+                "INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                 VALUES ('remap-user', 'remap@finite.vip', 'linked', 'workos-remap', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                 VALUES ('remap-org', 'remap-user', 'Remap', 'grandfathered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                 VALUES ('remap-project', 'remap-org', 'remap-user', 'Remap', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_artifacts (id, kind, reference, version_label, state_schema_version, created_at, promoted_at)
+                 VALUES ('remap-artifact', 'oci_image', 'image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'v1', 'state-v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO agent_runtimes (
+                   id, project_id, source_host_id, source_machine_id, source_import_key,
+                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                 ) VALUES
+                   ('remap-runtime-r0', 'remap-project', 'remap-host', 'remap-runtime-r0',
+                    'remap-host/remap-runtime-r0', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r1', 'remap-project', 'remap-host', 'remap-runtime-r1',
+                    'remap-host/remap-runtime-r1', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r2', 'remap-project', 'remap-host', 'remap-runtime-r2',
+                    'remap-host/remap-runtime-r2', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r3', 'remap-project', 'remap-host', 'remap-runtime-r3',
+                    'remap-host/remap-runtime-r3', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r4', 'remap-project', 'remap-host', 'remap-runtime-r4',
+                    'remap-host/remap-runtime-r4', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r5', 'remap-project', 'remap-host', 'remap-runtime-r5',
+                    'remap-host/remap-runtime-r5', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, status, created_at, updated_at
+                 ) VALUES
+                   ('remap-legacy-requested', 'remap-project', 'remap-runtime-r0', 'remap-host', 'remap-runtime-r0', 'remap-user', 'restart', 'requested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-legacy-running', 'remap-project', 'remap-runtime-r1', 'remap-host', 'remap-runtime-r1', 'remap-user', 'restart', 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-legacy-succ-restart', 'remap-project', 'remap-runtime-r2', 'remap-host', 'remap-runtime-r2', 'remap-user', 'restart', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-legacy-succ-stop', 'remap-project', 'remap-runtime-r3', 'remap-host', 'remap-runtime-r3', 'remap-user', 'stop', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-legacy-succ-destroy', 'remap-project', 'remap-runtime-r4', 'remap-host', 'remap-runtime-r4', 'remap-user', 'destroy', 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-legacy-failed', 'remap-project', 'remap-runtime-r5', 'remap-host', 'remap-runtime-r5', 'remap-user', 'upgrade', 'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+            )
+            .await
+            .unwrap();
+
+            raw.batch_execute(include_str!("../migrations/0021_runtime_lifecycle.sql"))
+                .await
+                .unwrap();
+
+            // Post-H1 writers continue against the new vocabulary: active rows
+            // span launching/compute_up/ready, stop/destroy completions land on
+            // 'stopped', and one upgrade request stays in flight so the refusal
+            // guard has something to catch.
+            raw.batch_execute(
+                "INSERT INTO agent_runtimes (
+                   id, project_id, source_host_id, source_machine_id, source_import_key,
+                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                 ) VALUES
+                   ('remap-runtime-r6', 'remap-project', 'remap-host', 'remap-runtime-r6',
+                    'remap-host/remap-runtime-r6', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r7', 'remap-project', 'remap-host', 'remap-runtime-r7',
+                    'remap-host/remap-runtime-r7', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r8', 'remap-project', 'remap-host', 'remap-runtime-r8',
+                    'remap-host/remap-runtime-r8', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r9', 'remap-project', 'remap-host', 'remap-runtime-r9',
+                    'remap-host/remap-runtime-r9', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r10', 'remap-project', 'remap-host', 'remap-runtime-r10',
+                    'remap-host/remap-runtime-r10', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-runtime-r11', 'remap-project', 'remap-host', 'remap-runtime-r11',
+                    'remap-host/remap-runtime-r11', 'remap-artifact', 'state-v1', '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                 INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, status, created_at, updated_at
+                 ) VALUES
+                   ('remap-launching', 'remap-project', 'remap-runtime-r6', 'remap-host', 'remap-runtime-r6', 'remap-user', 'restart', 'launching', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-compute-up', 'remap-project', 'remap-runtime-r7', 'remap-host', 'remap-runtime-r7', 'remap-user', 'recover_known_good_chat_runtime', 'compute_up', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-ready', 'remap-project', 'remap-runtime-r8', 'remap-host', 'remap-runtime-r8', 'remap-user', 'restart', 'ready', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-stopped-stop', 'remap-project', 'remap-runtime-r9', 'remap-host', 'remap-runtime-r9', 'remap-user', 'stop', 'stopped', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-stopped-destroy', 'remap-project', 'remap-runtime-r10', 'remap-host', 'remap-runtime-r10', 'remap-user', 'destroy', 'stopped', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                   ('remap-upgrade-bait', 'remap-project', 'remap-runtime-r11', 'remap-host', 'remap-runtime-r11', 'remap-user', 'upgrade', 'requested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+            )
+            .await
+            .unwrap();
+
+            // The refusal guard aborts the whole rescue while any upgrade-kind
+            // request is still active.
+            let active_error = raw
+                .batch_execute(crate::RUNTIME_LIFECYCLE_REVERSE_REMAP_SQL)
+                .await
+                .unwrap_err();
+            let db_error = active_error
+                .as_db_error()
+                .expect("reverse remap refusal must be a PostgreSQL error");
+            assert_eq!(
+                db_error.code(),
+                &tokio_postgres::error::SqlState::RAISE_EXCEPTION
+            );
+            assert_eq!(
+                db_error.message(),
+                "runtime lifecycle reverse remap refused: active upgrade requests still exist"
+            );
+            raw.batch_execute("ROLLBACK").await.unwrap();
+            let untouched_status: String = raw
+                .query_one(
+                    "SELECT status FROM runtime_control_requests WHERE id = 'remap-launching'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(untouched_status, "launching");
+            let refused_audit_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM finite_private_admin_audit_events
+                     WHERE action = 'runtime.lifecycle.reverse_remap'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(refused_audit_count, 0);
+
+            // The operator makes the blocking request terminal; now the rescue
+            // applies — twice, since the rolled-back generation may start
+            // against a schema this script has already reversed.
+            raw.execute(
+                "UPDATE runtime_control_requests
+                 SET status = 'failed', completed_at = CURRENT_TIMESTAMP
+                 WHERE id = 'remap-upgrade-bait'",
+                &[],
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(crate::RUNTIME_LIFECYCLE_REVERSE_REMAP_SQL)
+                .await
+                .unwrap();
+            raw.batch_execute(crate::RUNTIME_LIFECYCLE_REVERSE_REMAP_SQL)
+                .await
+                .unwrap();
+
+            // Every row is back inside the legacy vocabulary. The relaunched
+            // rows carry 'running'; the stopped stop/destroy rows are terminal
+            // successes again; nothing else moved.
+            let rows = raw
+                .query(
+                    "SELECT id, status, failure_stage FROM runtime_control_requests ORDER BY id",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let mapped: BTreeMap<String, (String, String)> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get::<_, String>("id"),
+                        (row.get::<_, String>("status"), row.get::<_, String>("failure_stage")),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                mapped.get("remap-legacy-requested"),
+                Some(&("requested".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-legacy-running"),
+                Some(&("running".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-legacy-succ-restart"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-legacy-succ-stop"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-legacy-succ-destroy"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-legacy-failed"),
+                Some(&("failed".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-launching"),
+                Some(&("running".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-compute-up"),
+                Some(&("running".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-ready"),
+                Some(&("running".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-stopped-stop"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-stopped-destroy"),
+                Some(&("succeeded".to_string(), "unknown".to_string()))
+            );
+            assert_eq!(
+                mapped.get("remap-upgrade-bait"),
+                Some(&("failed".to_string(), "unknown".to_string()))
+            );
+
+            // The legacy CHECK admits the legacy vocabulary again: the same
+            // write 0021's test proved rejected must now succeed.
+            raw.execute(
+                "UPDATE runtime_control_requests SET status = 'running' WHERE id = 'remap-legacy-requested'",
+                &[],
+            )
+            .await
+            .unwrap();
+
+            // The previous generation of Core inserts with an explicit column
+            // list that predates failure_stage; the NOT NULL DEFAULT 'unknown'
+            // column left in place must fill silently behind it.
+            raw.execute(
+                "INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, target_runtime_artifact_id, status,
+                   runner_id, lease_token, lease_expires_at,
+                   failure_message, created_at, updated_at, completed_at
+                 )
+                 VALUES ('remap-n1-insert', 'remap-project', 'remap-runtime-r2', 'remap-host',
+                         'remap-runtime-r2', 'remap-user', 'restart', NULL, 'requested',
+                         NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+                &[],
+            )
+            .await
+            .unwrap();
+
+            // The N-1 lease scan keys active work off requested/running only;
+            // every relaunched row must be visible to it. 4 relaunched rows +
+            // remap-legacy-running round-tripped to running + the probe above
+            // flipped remap-legacy-requested onto 'running' + the inserted
+            // 'remap-n1-insert' at 'requested'.
+            let n_minus_one_active_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM runtime_control_requests
+                     WHERE status IN ('requested', 'running')",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(n_minus_one_active_count, 6);
+
+            // Constraint and index speak the legacy shape again.
+            let constraint_definition: String = raw
+                .query_one(
+                    "SELECT pg_get_constraintdef(constraint_row.oid)
+                     FROM pg_constraint AS constraint_row
+                     WHERE constraint_row.conrelid = 'runtime_control_requests'::regclass
+                       AND constraint_row.conname = 'runtime_control_requests_status_check'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(!constraint_definition.contains("'launching'"));
+            assert!(!constraint_definition.contains("'stopped'"));
+            let index_definition: String = raw
+                .query_one(
+                    "SELECT pg_get_indexdef(indexrelid) FROM pg_index
+                     WHERE indexrelid = 'runtime_control_requests_one_active_per_runtime'::regclass",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(index_definition.contains("'running'"));
+            assert!(!index_definition.contains("'launching'"));
+            assert!(!index_definition.contains("'compute_up'"));
+
+            // One audit row per rewritten request, preserving prior values.
+            let audit_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM finite_private_admin_audit_events
+                     WHERE action = 'runtime.lifecycle.reverse_remap'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(audit_count, 8);
+            let ready_original: String = raw
+                .query_one(
+                    "SELECT metadata->>'originalStatus'
+                     FROM finite_private_admin_audit_events
+                     WHERE action = 'runtime.lifecycle.reverse_remap'
+                       AND target_id = 'remap-ready'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(ready_original, "ready");
+            let stopped_stop_kind: Option<String> = raw
+                .query_one(
+                    "SELECT metadata->>'originalKind'
+                     FROM finite_private_admin_audit_events
+                     WHERE action = 'runtime.lifecycle.reverse_remap'
+                       AND target_id = 'remap-stopped-stop'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(stopped_stop_kind.as_deref(), Some("stop"));
+        })
+        .catch_unwind()
+        .await;
+
+        drop(raw);
+        connection.abort();
+        let _ = admin
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"),
+                &[],
+            )
+            .await;
+        drop(admin);
+        admin_connection.abort();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test]
@@ -11182,6 +12057,244 @@ mod tests {
         .await;
     }
 
+    /// Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
+    /// 3): a report writes the runtime row's latest-report columns scoped to
+    /// the runner credential's host, and the admin overview projects
+    /// ready / not_ready(+reason) / unknown(stale) at read time — no sweeper.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_record_scope_and_project() {
+        with_isolated_postgres(|store| async move {
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string();
+            let host = format!("health-report-host-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-08-24T12:00:00Z").await;
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: format!("artifact-health-report-{run}"),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:health-report@sha256:{}",
+                        "7".repeat(64)
+                    ),
+                    version_label: "health-report-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("health-report-owner-{run}@finite.vip"),
+                    workos_user_id: format!("workos_health_report_owner_{run}"),
+                    display_name: "Health Report Agent".to_string(),
+                    launch_code,
+                    idempotency_key: format!("health-report-{run}"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-health-{run}"),
+                    source_host_id: None,
+                    lease_token: format!("lease-health-{run}"),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("health report request should lease");
+            assert_eq!(lease.request.id, created.request.id);
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-health-{run}"),
+                    lease_token: format!("lease-health-{run}"),
+                    source_host_id: host.clone(),
+                    source_machine_id: format!("health-report-agent-{run}"),
+                    runtime_artifact_id: Some(format!("artifact-health-report-{run}")),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Health Report Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some("http://127.0.0.1:41001".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            async fn overview_health(
+                store: &CoreStore,
+                runtime_id: &str,
+            ) -> crate::RuntimeHealthProjection {
+                store
+                    .admin_runtime_overviews()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|overview| overview.agent_runtime_id == runtime_id)
+                    .unwrap()
+                    .runtime_health
+            }
+            let report =
+                |ready: bool, reason: Option<&str>, observed_at: &str, now: Option<&str>| {
+                    RecordRuntimeHealthReportInput {
+                        source_host_id: host.clone(),
+                        agent_runtime_id: runtime_id.clone(),
+                        ready,
+                        reason: reason.map(str::to_string),
+                        observed_at: observed_at.to_string(),
+                        agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                        report_interval_seconds: Some(60),
+                        now: now.map(str::to_string),
+                    }
+                };
+
+            // No report yet: the named unknown state, never a frozen ready.
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+            assert_eq!(health.reported_at, None);
+
+            // A fresh ready report projects ready with the pinned npub as
+            // anti-squat evidence.
+            let ack = store
+                .record_runtime_health_report(report(true, None, "2026-08-24T11:59:00Z", None))
+                .await
+                .unwrap();
+            assert_eq!(ack.agent_runtime_id, runtime_id);
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Ready);
+            assert_eq!(
+                health.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str())
+            );
+
+            // A fresh not-ready report surfaces its reason.
+            store
+                .record_runtime_health_report(report(
+                    false,
+                    Some("model endpoint 503"),
+                    "2026-08-24T12:00:00Z",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::NotReady);
+            assert_eq!(health.reason.as_deref(), Some("model endpoint 503"));
+
+            // A report recorded long ago (runner stopped reporting) crosses
+            // the 3x cadence deadline and projects unknown again.
+            store
+                .record_runtime_health_report(report(
+                    true,
+                    None,
+                    "2020-01-01T00:00:00Z",
+                    Some("2020-01-01T00:00:00Z"),
+                ))
+                .await
+                .unwrap();
+            let health = overview_health(&store, &runtime_id).await;
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+
+            // Scope: the credential's host guards the write. Another host's
+            // runtime id and an unknown id both fail closed as not-found.
+            let wrong_host = RecordRuntimeHealthReportInput {
+                source_host_id: format!("other-host-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(wrong_host).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+            let unknown_runtime = RecordRuntimeHealthReportInput {
+                agent_runtime_id: format!("runtime-missing-{run}"),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(unknown_runtime).await,
+                Err(CoreError::ProjectRuntimeNotFound)
+            ));
+
+            // Bounded fields reject out-of-shape reports.
+            let bad_npub = RecordRuntimeHealthReportInput {
+                agent_npub: Some("not-an-npub".to_string()),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_npub).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_interval = RecordRuntimeHealthReportInput {
+                report_interval_seconds: Some(86_400),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_interval).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let long_reason = RecordRuntimeHealthReportInput {
+                reason: Some("x".repeat(crate::MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS + 1)),
+                ..report(false, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(long_reason).await,
+                Err(CoreError::InvalidRuntimeHealthReport)
+            ));
+            let bad_observed = RecordRuntimeHealthReportInput {
+                observed_at: "not-a-time".to_string(),
+                ..report(true, None, "2026-08-24T12:01:00Z", None)
+            };
+            assert!(matches!(
+                store.record_runtime_health_report(bad_observed).await,
+                Err(CoreError::InvalidTimestamp)
+            ));
+        })
+        .await;
+    }
+
+    /// The migration runs inside CORE_SCHEMA_SQL at every Core startup, so
+    /// reapplying it against an already-migrated database must be a no-op.
+    #[tokio::test]
+    async fn postgres_runtime_health_reports_migration_reapplies_cleanly() {
+        with_isolated_postgres(|db| async move {
+            let (raw, connection) = tokio_postgres::connect(&db.url, NoTls).await.unwrap();
+            let handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0022_runtime_health_reports.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            handle.abort();
+        })
+        .await;
+    }
+
     /// Fail-closed repair for a Runtime whose destroy stored a verified
     /// retirement receipt but whose offboarding never ran: the compute-absent
     /// attestation, exact binding, and owner must match, an in-flight control
@@ -11363,7 +12476,7 @@ mod tests {
             store
                 .exec(&format!(
                     "UPDATE runtime_control_requests \
-                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                     SET status = 'stopped', lease_token = NULL, lease_expires_at = NULL, \
                          completed_at = CURRENT_TIMESTAMP \
                      WHERE id = '{}'",
                     destroy.id
@@ -11503,6 +12616,704 @@ mod tests {
             ));
             let facts_after_rerun = store.brain_agent_departure_facts(0, 100).await.unwrap();
             assert_eq!(facts_after_rerun.facts.len(), 1);
+        })
+        .await;
+    }
+
+    /// A stageable retirement fixture: a launched, retirement-capable Runtime
+    /// with one provisioned runtime key and an enqueued exact destroy. Returns
+    /// the project, runtime, destroy request, and leased RuntimeSpec ids the
+    /// destroy completion must bind to.
+    async fn stage_retirement_in_flight(
+        store: &TestDb,
+        run: &str,
+        host: &str,
+    ) -> (String, String, crate::RuntimeControlRequest, String, String) {
+        let owner_email = format!("{run}-owner@finite.vip");
+        let admin_email = format!("{run}-admin@finite.vip");
+        let machine_id = format!("{run}-agent-001");
+        let launch_code = issue_test_launch_code(store, "2026-07-21T12:00:00Z").await;
+        store
+            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: format!("artifact-{run}-v1"),
+                kind: RuntimeArtifactKind::OciImage,
+                reference: format!(
+                    "ghcr.io/finitecomputer/finite-agent-runtime:{run}-v1@sha256:{}",
+                    "6".repeat(64)
+                ),
+                version_label: format!("{run}-v1"),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".to_string(),
+                base_image: None,
+                recover_known_good_chat: false,
+                promoted: true,
+                now: None,
+            })
+            .await
+            .unwrap();
+        store
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: owner_email.clone(),
+                workos_user_id: format!("workos_{run}_owner"),
+                display_name: format!("{run} Agent"),
+                launch_code,
+                idempotency_key: format!("{run}-submit"),
+                now: None,
+            })
+            .await
+            .unwrap();
+        let lease = store
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: format!("runner-{run}"),
+                source_host_id: None,
+                lease_token: format!("lease-{run}"),
+                lease_seconds: Some(300),
+                runner_capacity: None,
+                now: None,
+            })
+            .await
+            .unwrap()
+            .expect("creation request should lease");
+        let completed = store
+            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                request_id: lease.request.id.clone(),
+                runner_id: format!("runner-{run}"),
+                lease_token: format!("lease-{run}"),
+                source_host_id: host.to_string(),
+                source_machine_id: machine_id.clone(),
+                runtime_artifact_id: Some(format!("artifact-{run}-v1")),
+                state_schema_version: Some("state-v1".to_string()),
+                provider_runtime_handle: None,
+                contact_endpoint: Some("http://127.0.0.1:41004/contact".to_string()),
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: Some(format!("{run} Agent")),
+                hostname: None,
+                runtime_host: Some(host.to_string()),
+                runtime_status: Some(RuntimeSummaryStatus::Online),
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: Some(true),
+                published_app_urls: vec!["http://127.0.0.1:41004/contact".to_string()],
+                now: None,
+            })
+            .await
+            .unwrap();
+        let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+        let project_id = completed.project.id.clone();
+        let retirement_capable =
+            serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                runtime_retirement: true,
+                ..*kata_runtime_capabilities().v1()
+            }))
+            .unwrap();
+        store
+            .exec(&format!(
+                "UPDATE agent_runtimes SET runtime_capabilities = '{retirement_capable}'::jsonb \
+                 WHERE id = '{runtime_id}'"
+            ))
+            .await;
+        let destroy = store
+            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                admin_verified_email: admin_email.clone(),
+                admin_workos_user_id: format!("workos_{run}_admin"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine_id.clone(),
+                now: Some("2026-07-21T12:01:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+        let destroy_lease = store
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: format!("runner-{run}"),
+                lease_token: format!("ctl-destroy-{run}"),
+                lease_seconds: Some(600),
+                source_host_id: Some(host.to_string()),
+                runner_capacity: Some(crate::RunnerLeaseCapacity {
+                    runner_classes: vec![crate::RunnerClass::Kata],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            runtime_retirement: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    ..crate::RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-07-21T12:01:30Z".to_string()),
+            })
+            .await
+            .unwrap()
+            .expect("retirement should lease to a capable Kata runner");
+        assert_eq!(destroy_lease.request.id, destroy.id);
+        let destroy_spec = runtime_spec_v1(destroy_lease.runtime_spec.as_ref().unwrap());
+        (
+            project_id,
+            runtime_id,
+            destroy,
+            destroy_spec.durable_state_id.clone(),
+            destroy_spec.runtime_artifact_id.clone(),
+        )
+    }
+
+    async fn offboarding_phase_of(store: &TestDb, runtime_id: &str) -> serde_json::Value {
+        store
+            .row("agent_runtimes", runtime_id)
+            .await
+            .expect("runtime row must read back")["offboarding_phase"]
+            .clone()
+    }
+
+    /// The destroy lifecycle records every phase forward: enqueue writes
+    /// retirement_requested, and one completion transaction carries the
+    /// runtime through receipt_verified, compute_removed, and
+    /// link_deactivated to the terminal archived. The phase never regresses:
+    /// a backward write fails closed and names both phases, while restating
+    /// the recorded phase is an idempotent no-op for replayed completions.
+    #[tokio::test]
+    async fn postgres_destroy_completion_records_forward_only_offboarding_phases() {
+        with_isolated_postgres(|store| async move {
+            let run = "phase-forward";
+            let host = "phase-forward-host";
+            let (project_id, runtime_id, destroy, durable_state_id, spec_artifact_id) =
+                stage_retirement_in_flight(&store, run, host).await;
+
+            // Enqueueing the destroy recorded the first phase.
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("retirement_requested")
+            );
+
+            // A duplicate request dedupes to the same destroy and keeps the
+            // phase.
+            let deduped = store
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: format!("{run}-admin@finite.vip"),
+                    admin_workos_user_id: format!("workos_{run}_admin"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: format!("{run}-agent-001"),
+                    now: Some("2026-07-21T12:01:20Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(deduped.id, destroy.id);
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("retirement_requested")
+            );
+
+            let receipt = RuntimeRetirementSnapshotReceipt {
+                schema: crate::RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+                request_id: destroy.id.clone(),
+                project_id: project_id.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                durable_state_id,
+                runtime_artifact_id: spec_artifact_id,
+                backend: crate::RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+                locator: crate::runtime_retirement_archive_locator(&destroy.id),
+                zip_bytes: 8192,
+                zip_sha256: "a".repeat(64),
+                manifest_sha256: "b".repeat(64),
+                created_at: "2026-07-21T12:02:00Z".to_string(),
+                verified_at: "2026-07-21T12:03:00Z".to_string(),
+                recovery_authority_id: "finite-assisted-test".to_string(),
+                retention_policy: crate::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+            };
+            let completion = CompleteRuntimeControlRequestInput {
+                request_id: destroy.id.clone(),
+                runner_id: format!("runner-{run}"),
+                lease_token: format!("ctl-destroy-{run}"),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: None,
+                runtime_host: None,
+                published_app_urls: None,
+                retirement_snapshot: Some(receipt),
+                now: Some("2026-07-21T12:04:00Z".to_string()),
+            };
+            store
+                .complete_runtime_control_request(completion.clone())
+                .await
+                .unwrap();
+
+            // One transaction carried the runtime to the terminal phase.
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+            assert!(
+                store
+                    .active_runtime_for_project(&project_id)
+                    .await
+                    .is_none()
+            );
+
+            // A replayed identical completion stays idempotent and terminal.
+            store
+                .complete_runtime_control_request(completion)
+                .await
+                .expect("identical completion replay must be idempotent");
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+
+            // The phase never moves backward; restating it is a no-op.
+            let client = store.connection().await.unwrap();
+            let regression = set_offboarding_phase(
+                &**client,
+                &runtime_id,
+                OffboardingPhase::RetirementRequested,
+                "2026-07-21T12:05:00Z",
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                regression,
+                CoreError::OffboardingPhaseRegression {
+                    current: OffboardingPhase::Archived,
+                    attempted: OffboardingPhase::RetirementRequested,
+                }
+            ));
+            set_offboarding_phase(
+                &**client,
+                &runtime_id,
+                OffboardingPhase::Archived,
+                "2026-07-21T12:05:00Z",
+            )
+            .await
+            .expect("restating the recorded phase must be an idempotent no-op");
+            drop(client);
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+        })
+        .await;
+    }
+
+    /// The half-retired ghost from the audit: the destroy stored a verified
+    /// receipt and removed compute under a pre-phase-machine Core, but the
+    /// offboarding never ran (link still active). The 0020 backfill classifies
+    /// the row from its legacy flags, `runtime-retire-exact` resumes from the
+    /// recorded phase instead of minting a new destroy (the uncapped retry
+    /// wedge is unrepresentable), and `runtime-offboard-retired-exact`
+    /// completes the offboarding through the same phase machine.
+    #[tokio::test]
+    async fn postgres_retire_exact_resumes_a_partially_retired_runtime_from_its_phase() {
+        with_isolated_postgres(|store| async move {
+            let run = "phase-resume";
+            let host = "phase-resume-host";
+            let owner_email = format!("{run}-owner@finite.vip");
+            let admin_email = format!("{run}-admin@finite.vip");
+            let machine_id = format!("{run}-agent-001");
+            let (project_id, runtime_id, destroy, durable_state_id, spec_artifact_id) =
+                stage_retirement_in_flight(&store, run, host).await;
+
+            // The legacy ghost: the destroy succeeded and its verified receipt
+            // is stored, but the offboarding never ran. Clearing the phase
+            // simulates a row written before the phase column existed.
+            store
+                .exec(&format!(
+                    "UPDATE runtime_control_requests \
+                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                         completed_at = CURRENT_TIMESTAMP \
+                     WHERE id = '{}'",
+                    destroy.id
+                ))
+                .await;
+            store
+                .exec(&format!(
+                    "INSERT INTO runtime_retirement_snapshots (
+                       request_id, project_id, agent_runtime_id, durable_state_id,
+                       runtime_artifact_id, schema_version, backend, locator,
+                       zip_bytes, zip_sha256, manifest_sha256, created_at,
+                       verified_at, recovery_authority_id, retention_policy, stored_at
+                     ) VALUES (
+                       '{}', '{}', '{}', '{}',
+                       '{}', 'runtime_retirement_snapshot.v1', 'borg', '{}',
+                       8192, '{}', '{}', '2026-07-21T12:02:00Z',
+                       '2026-07-21T12:03:00Z', 'finite-assisted-test',
+                       'indefinite_until_purge', CURRENT_TIMESTAMP
+                     )",
+                    destroy.id,
+                    project_id,
+                    runtime_id,
+                    durable_state_id,
+                    spec_artifact_id,
+                    crate::runtime_retirement_archive_locator(&destroy.id),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                ))
+                .await;
+            store
+                .exec(&format!(
+                    "UPDATE agent_runtimes SET offboarding_phase = NULL WHERE id = '{runtime_id}'"
+                ))
+                .await;
+
+            // Re-applying the migration maps the legacy flags exactly once:
+            // receipt stored plus an active link is compute_removed.
+            store
+                .exec(include_str!(
+                    "../migrations/0020_runtime_offboarding_phases.sql"
+                ))
+                .await;
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("compute_removed")
+            );
+
+            // runtime-retire-exact resumes from the recorded phase: it refuses
+            // to mint a new destroy and names the resume point instead of
+            // looping against the absent container.
+            let resume = store
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: admin_email.clone(),
+                    admin_workos_user_id: format!("workos_{run}_admin"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine_id.clone(),
+                    now: Some("2026-07-21T12:06:00Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                resume,
+                CoreError::RuntimeOffboardingResumeRequired {
+                    phase: OffboardingPhase::ComputeRemoved,
+                }
+            ));
+            assert_eq!(store.all_runtime_control_requests().await.len(), 1);
+
+            // The owner-facing destroy path is gated by the same phase.
+            let owner_resume = store
+                .request_runtime_destroy(RequestRuntimeDestroyInput {
+                    verified_email: owner_email.clone(),
+                    workos_user_id: format!("workos_{run}_owner"),
+                    project_id: project_id.clone(),
+                    now: Some("2026-07-21T12:06:30Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                owner_resume,
+                CoreError::RuntimeOffboardingResumeRequired {
+                    phase: OffboardingPhase::ComputeRemoved,
+                }
+            ));
+            assert_eq!(store.all_runtime_control_requests().await.len(), 1);
+
+            // The resume command completes the offboarding boundary and the
+            // phase machine records the terminal archived phase.
+            let receipt = store
+                .admin_offboard_retired_runtime(AdminOffboardRetiredRuntimeInput {
+                    admin_verified_email: admin_email.clone(),
+                    admin_workos_user_id: format!("workos_{run}_admin"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine_id.clone(),
+                    expected_owner_email: owner_email.clone(),
+                    operator_observed_compute_absent: true,
+                    now: Some("2026-07-21T12:07:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt.retirement_request_id, destroy.id);
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+            assert!(
+                store
+                    .active_runtime_for_project(&project_id)
+                    .await
+                    .is_none()
+            );
+
+            // A rerun fails closed and the terminal phase is untouched.
+            assert!(matches!(
+                store
+                    .admin_offboard_retired_runtime(AdminOffboardRetiredRuntimeInput {
+                        admin_verified_email: admin_email.clone(),
+                        admin_workos_user_id: format!("workos_{run}_admin"),
+                        project_id: project_id.clone(),
+                        expected_agent_runtime_id: runtime_id.clone(),
+                        expected_source_host_id: host.to_string(),
+                        expected_source_machine_id: machine_id.clone(),
+                        expected_owner_email: owner_email.clone(),
+                        operator_observed_compute_absent: true,
+                        now: Some("2026-07-21T12:08:00Z".to_string()),
+                    })
+                    .await
+                    .unwrap_err(),
+                CoreError::ProjectRuntimeNotFound
+            ));
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+        })
+        .await;
+    }
+
+    /// The unrecoverable-archive boundary crosses no receipt phases, but the
+    /// runtime record still lands on the single terminal state.
+    #[tokio::test]
+    async fn postgres_archive_unrecoverable_records_the_terminal_phase() {
+        with_isolated_postgres(|store| async move {
+            let run = "phase-archive";
+            let owner_email = format!("{run}-owner@finite.vip");
+            let admin_email = format!("{run}-admin@finite.vip");
+            let machine_id = format!("{run}-agent-001");
+            let host = "phase-archive-host";
+            let launch_code = issue_test_launch_code(&store, "2026-07-21T12:00:00Z").await;
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: format!("artifact-{run}-v1"),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:{run}-v1@sha256:{}",
+                        "7".repeat(64)
+                    ),
+                    version_label: format!("{run}-v1"),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: owner_email.clone(),
+                    workos_user_id: format!("workos_{run}_owner"),
+                    display_name: format!("{run} Agent"),
+                    launch_code,
+                    idempotency_key: format!("{run}-submit"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    source_host_id: None,
+                    lease_token: format!("lease-{run}"),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("creation request should lease");
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("lease-{run}"),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine_id.clone(),
+                    runtime_artifact_id: Some(format!("artifact-{run}-v1")),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some(format!("{run} Agent")),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            let project_id = completed.project.id.clone();
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                serde_json::Value::Null
+            );
+
+            store
+                .admin_archive_unrecoverable_runtime(AdminArchiveUnrecoverableRuntimeInput {
+                    admin_verified_email: admin_email.clone(),
+                    admin_workos_user_id: format!("workos_{run}_admin"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine_id.clone(),
+                    expected_owner_email: owner_email.clone(),
+                    operator_observed_compute_absent: true,
+                    operator_observed_durable_state_absent: true,
+                    owner_acknowledged_unrecoverable: true,
+                    now: Some("2026-07-21T12:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                offboarding_phase_of(&store, &runtime_id).await,
+                json!("archived")
+            );
+        })
+        .await;
+    }
+
+    /// The read-only pre-deploy census query from the PR body, executed
+    /// verbatim against synthetic fixtures: a live runtime lands in the
+    /// (no receipt, no active destroy, active link) bucket and a
+    /// half-retired ghost in the (receipt, no active destroy, active link)
+    /// bucket.
+    #[tokio::test]
+    async fn postgres_offboarding_census_groups_legacy_flag_combinations() {
+        with_isolated_postgres(|store| async move {
+            // The half-retired ghost: the destroy succeeded with a stored
+            // verified receipt, but its offboarding never ran (link active).
+            let (ghost_project_id, ghost_runtime_id, ghost_destroy, _, _) =
+                stage_retirement_in_flight(&store, "census-ghost", "census-ghost-host").await;
+            store
+                .exec(&format!(
+                    "UPDATE runtime_control_requests \
+                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                         completed_at = CURRENT_TIMESTAMP \
+                     WHERE id = '{}'",
+                    ghost_destroy.id
+                ))
+                .await;
+            store
+                .exec(&format!(
+                    "INSERT INTO runtime_retirement_snapshots (
+                       request_id, project_id, agent_runtime_id, durable_state_id,
+                       runtime_artifact_id, schema_version, backend, locator,
+                       zip_bytes, zip_sha256, manifest_sha256, created_at,
+                       verified_at, recovery_authority_id, retention_policy, stored_at
+                     ) VALUES (
+                       '{}', '{}', '{}', 'census-durable-state',
+                       'artifact-census-ghost-v1', 'runtime_retirement_snapshot.v1', 'borg', '{}',
+                       8192, '{}', '{}', '2026-07-21T12:02:00Z',
+                       '2026-07-21T12:03:00Z', 'finite-assisted-test',
+                       'indefinite_until_purge', CURRENT_TIMESTAMP
+                     )",
+                    ghost_destroy.id,
+                    ghost_project_id,
+                    ghost_runtime_id,
+                    crate::runtime_retirement_archive_locator(&ghost_destroy.id),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                ))
+                .await;
+
+            // A live runtime with no offboarding evidence at all. The ghost
+            // fixture already promoted the artifact this launch binds.
+            let live_launch_code = issue_test_launch_code(&store, "2026-07-21T12:00:00Z").await;
+            store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "census-live-owner@finite.vip".to_string(),
+                    workos_user_id: "workos_census_live_owner".to_string(),
+                    display_name: "Census Live Agent".to_string(),
+                    launch_code: live_launch_code,
+                    idempotency_key: "census-live-submit".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let live_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-census-live".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-census-live".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("live creation request should lease");
+            store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: live_lease.request.id.clone(),
+                    runner_id: "runner-census-live".to_string(),
+                    lease_token: "lease-census-live".to_string(),
+                    source_host_id: "census-live-host".to_string(),
+                    source_machine_id: "census-live-agent-001".to_string(),
+                    runtime_artifact_id: Some("artifact-census-ghost-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:41006/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Census Live Agent".to_string()),
+                    hostname: None,
+                    runtime_host: Some("census-live-host".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: vec!["http://127.0.0.1:41006/contact".to_string()],
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            // The exact read-only census query shipped in the PR body.
+            let client = store.connection().await.unwrap();
+            let rows = client
+                .query(
+                    "SELECT
+                       EXISTS (SELECT 1 FROM runtime_retirement_snapshots s
+                               WHERE s.agent_runtime_id = r.id) AS has_verified_receipt,
+                       EXISTS (SELECT 1 FROM runtime_control_requests c
+                               WHERE c.agent_runtime_id = r.id
+                                 AND c.kind = 'destroy'
+                                 AND c.status IN ('requested', 'running')) AS destroy_request_active,
+                       EXISTS (SELECT 1 FROM project_runtime_links l
+                               WHERE l.agent_runtime_id = r.id AND l.active) AS link_active,
+                       EXISTS (SELECT 1 FROM project_runtime_links l
+                               WHERE l.agent_runtime_id = r.id) AS any_link_exists,
+                       EXISTS (SELECT 1 FROM project_runtime_links l
+                               WHERE l.project_id = r.project_id AND l.active) AS project_has_active_link,
+                       count(*) AS runtimes
+                     FROM agent_runtimes r
+                     GROUP BY 1, 2, 3, 4, 5
+                     ORDER BY 1, 2, 3, 4, 5",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let census: Vec<(bool, bool, bool, bool, bool, i64)> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get("has_verified_receipt"),
+                        row.get("destroy_request_active"),
+                        row.get("link_active"),
+                        row.get("any_link_exists"),
+                        row.get("project_has_active_link"),
+                        row.get("runtimes"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                census,
+                vec![
+                    // The live runtime: no offboarding evidence -> stays NULL.
+                    (false, false, true, true, true, 1),
+                    // The half-retired ghost: receipt verified, no active
+                    // destroy, link still active -> maps to compute_removed.
+                    (true, false, true, true, true, 1),
+                ]
+            );
         })
         .await;
     }
@@ -11692,7 +13503,7 @@ mod tests {
             store
                 .exec(&format!(
                     "UPDATE runtime_control_requests \
-                     SET status = 'succeeded', lease_token = NULL, lease_expires_at = NULL, \
+                     SET status = 'stopped', lease_token = NULL, lease_expires_at = NULL, \
                          completed_at = CURRENT_TIMESTAMP \
                      WHERE id = '{}'",
                     destroy.id
@@ -12070,6 +13881,15 @@ mod tests {
                 .find(|o| o.agent_runtime_id == runtime_id)
                 .unwrap();
             assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            assert_eq!(
+                overview_online.runtime_status,
+                store
+                    .agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status
+            );
             assert!(overview_online.runtime_link_active);
 
             // Upgrade: target is an explicit promoted, digest-pinned artifact;

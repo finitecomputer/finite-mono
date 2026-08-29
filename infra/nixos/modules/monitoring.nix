@@ -82,6 +82,44 @@ in
         "finite-saas-runner.service"
       ]
     );
+    hostIncidentLogSources = [
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=0";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=1";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=2";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=3";
+      }
+      {
+        source = "kernel";
+        matches = "_TRANSPORT=kernel PRIORITY=4";
+      }
+      {
+        source = "systemd";
+        matches = "SYSLOG_IDENTIFIER=systemd";
+      }
+      {
+        source = "nixos-activation";
+        matches = "SYSLOG_IDENTIFIER=nixos";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sshd";
+      }
+      {
+        source = "auth";
+        matches = "SYSLOG_IDENTIFIER=sudo";
+      }
+    ];
     staticVersionMetrics = lib.concatMapStrings versionMetric [
       {
         component = "finite-saas-core";
@@ -232,7 +270,7 @@ in
 
         check finite-saas-core    http://127.0.0.1:4200/healthz
         check dashboard           http://127.0.0.1:3000/healthz
-        check finitechat-server   http://127.0.0.1:8788/health
+        check finitechat-server   http://127.0.0.1:8788/readyz
         check hosted-web-device   http://127.0.0.1:38918/healthz
         check finite-brain        http://127.0.0.1:3015/health
         check finitesitesd        -H "Host: api.finite.chat" http://127.0.0.1:8787/api/v1/healthz

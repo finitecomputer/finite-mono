@@ -1,5 +1,5 @@
 {
-	admin off
+	admin unix//run/finite-monitoring-caddy/admin.sock
 	email ops@finite.computer
 }
 

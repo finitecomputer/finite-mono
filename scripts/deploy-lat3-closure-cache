@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# Activate an exact CI-built finite-lat-3 closure without building on a
+# production host. Existing Kata sandboxes remain owned by containerd.
+set -euo pipefail
+
+LAT3="${FINITE_LAT3_TARGET:-root@207.188.7.157}"
+mode="prepare"
+mode_seen=0
+artifact_dir=""
+approved_extra_units=()
+
+usage() {
+  echo "usage: $0 [--validate-only|--prepare|--activate] [--allow-unit UNIT]... <lat3-closure-artifact-dir>" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --validate-only|--prepare|--activate)
+      if [[ "$mode_seen" == 1 ]]; then
+        echo "choose exactly one rollout mode" >&2
+        usage
+        exit 64
+      fi
+      mode_seen=1
+      case "$1" in
+        --validate-only) mode="validate" ;;
+        --prepare) mode="prepare" ;;
+        --activate) mode="activate" ;;
+      esac
+      ;;
+    --allow-unit)
+      shift
+      if [[ $# -eq 0 || ! "$1" =~ ^[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)$ ]]; then
+        echo "invalid explicitly approved unit" >&2
+        usage
+        exit 64
+      fi
+      approved_extra_units+=("$1")
+      ;;
+    -*) usage; exit 64 ;;
+    *)
+      if [[ -n "$artifact_dir" ]]; then
+        usage
+        exit 64
+      fi
+      artifact_dir="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$artifact_dir" ]]; then
+  usage
+  exit 64
+fi
+
+if [[ ! -d "$artifact_dir" ]]; then
+  echo "artifact directory does not exist: $artifact_dir" >&2
+  exit 66
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+manifest="$artifact_dir/manifest.json"
+if [[ ! -f "$manifest" ]]; then
+  echo "artifact manifest is missing: $manifest" >&2
+  exit 66
+fi
+
+manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat3-closure-manifest.XXXXXX")"
+dry_output_file="$(mktemp "${TMPDIR:-/tmp}/lat3-dry-activate.XXXXXX")"
+trap 'rm -f "$manifest_values_file" "$dry_output_file"' EXIT
+python3 - "$manifest" > "$manifest_values_file" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if data.get("schema") != "finite.lat3.nixos-closure.v1":
+    raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
+if data.get("host") != "finite-lat-3":
+    raise SystemExit(f"unexpected manifest host: {data.get('host')!r}")
+if data.get("repository") != "finitecomputer/finite-mono":
+    raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
+
+rev = data.get("rev")
+system = data.get("system")
+cache = data.get("cache")
+if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
+    raise SystemExit(f"invalid rev: {rev!r}")
+if not isinstance(system, str) or not re.fullmatch(
+    r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-3-[^/\s]+", system
+):
+    raise SystemExit(f"invalid system path: {system!r}")
+if cache != "nix-cache":
+    raise SystemExit(f"invalid cache directory: {cache!r}")
+
+print(rev)
+print(system)
+print(cache)
+PY
+
+REV="$(sed -n '1p' "$manifest_values_file")"
+SYSTEM="$(sed -n '2p' "$manifest_values_file")"
+CACHE_REL="$(sed -n '3p' "$manifest_values_file")"
+CACHE_DIR="$artifact_dir/$CACHE_REL"
+
+if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
+  echo "artifact cache is missing or incomplete: $CACHE_DIR" >&2
+  exit 66
+fi
+
+git fetch origin --prune
+git merge-base --is-ancestor "$REV" origin/main || {
+  echo "refusing: $REV is not on origin/main" >&2
+  exit 65
+}
+
+echo "==> validated finite-lat-3 closure artifact"
+echo "    rev=$REV"
+echo "    system=$SYSTEM"
+if [[ ${#approved_extra_units[@]} -gt 0 ]]; then
+  printf '    explicitly-approved-unit=%s\n' "${approved_extra_units[@]}"
+fi
+if [[ "$mode" == "validate" ]]; then
+  exit 0
+fi
+
+echo "==> verifying lat3 host-local monitoring secrets"
+ssh -o BatchMode=yes "$LAT3" 'bash -s' \
+  < infra/nixos/scripts/check-lat-monitoring-secrets
+
+echo "==> copying the prebuilt closure to finite-lat-3"
+nix copy --no-check-sigs --option builders '' \
+  --from "file://$CACHE_DIR" \
+  --to "ssh-ng://$LAT3" \
+  "$SYSTEM"
+
+echo "==> dry-activating the candidate closure"
+ssh -o BatchMode=yes "$LAT3" \
+  "$SYSTEM/bin/switch-to-configuration" dry-activate \
+  >"$dry_output_file" 2>&1
+cat "$dry_output_file"
+
+# A Runner-only rollout may relink the one-shot worker and refresh its static
+# version metric. Every other named unit requires an explicit CLI approval for
+# this attempt; the default remains fail closed.
+unexpected_units=""
+while IFS= read -r unit; do
+  case "$unit" in
+    finite-saas-runner.service|finite-saas-runner.timer|finite-component-version-metrics.service)
+      continue
+      ;;
+  esac
+  approved=0
+  for approved_unit in "${approved_extra_units[@]}"; do
+    if [[ "$unit" == "$approved_unit" ]]; then
+      approved=1
+      break
+    fi
+  done
+  if [[ "$approved" == 0 ]]; then
+    unexpected_units+="${unit}"$'\n'
+  fi
+done < <({
+  grep -Eo '[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)' "$dry_output_file" || true
+} | sort -u)
+unexpected_units="${unexpected_units%$'\n'}"
+if [[ -n "$unexpected_units" ]]; then
+  echo "refusing Runner-only rollout: dry activation names unexpected units:" >&2
+  printf '%s\n' "$unexpected_units" >&2
+  exit 75
+fi
+
+if [[ "$mode" == "prepare" ]]; then
+  echo "==> PREPARED rev=$REV (no activation performed)"
+  exit 0
+fi
+
+echo "==> activating the fenced Runner-only closure"
+ssh -o BatchMode=yes "$LAT3" bash -s -- "$SYSTEM" <<'LAT3'
+set -euo pipefail
+system="$1"
+[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-3-[^/[:space:]]+$ ]] || exit 64
+test -x "$system/bin/switch-to-configuration"
+nix-store --check-validity "$system" >/dev/null
+
+previous_system="$(readlink -f /run/current-system)"
+previous_profile="$(readlink -f /nix/var/nix/profiles/system)"
+if [[ "$previous_system" != "$previous_profile" ]]; then
+  echo "refusing: current system and system profile already differ" >&2
+  exit 73
+fi
+timer_was_active=0
+systemctl is-active --quiet finite-saas-runner.timer && timer_was_active=1 || true
+containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
+networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
+
+rollback() {
+  status=$?
+  trap - ERR
+  echo "activation failed; rolling back to $previous_system" >&2
+  nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$previous_system" || true
+  "$previous_system/bin/switch-to-configuration" switch || true
+  if [[ "$timer_was_active" == 1 ]]; then
+    systemctl start finite-saas-runner.timer || true
+  else
+    systemctl stop finite-saas-runner.timer || true
+  fi
+  exit "$status"
+}
+trap rollback ERR
+
+# Stop only new Runner invocations. Never kill an in-flight one-shot: wait for
+# it to finish its already-leased operation before crossing the boundary.
+systemctl stop finite-saas-runner.timer
+deadline=$((SECONDS + 600))
+while systemctl is-active --quiet finite-saas-runner.service; do
+  (( SECONDS < deadline )) || {
+    echo "Runner one-shot did not become inactive within 600s" >&2
+    exit 1
+  }
+  sleep 2
+done
+
+echo "==> mutation boundary: switching finite-lat-3 to $system"
+nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
+"$system/bin/switch-to-configuration" switch
+test "$(readlink -f /run/current-system)" = "$system"
+test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
+
+test "$(systemctl show containerd.service --property=MainPID --value)" = "$containerd_pid"
+test "$(systemctl show systemd-networkd.service --property=MainPID --value)" = "$networkd_pid"
+systemctl is-active --quiet containerd.service
+systemctl is-active --quiet systemd-networkd.service
+
+runner_exec="$(
+  systemctl cat finite-saas-runner.service \
+    | sed -n 's/^ExecStart=//p' \
+    | sed '/^[[:space:]]*$/d' \
+    | tail -n 1 \
+    | awk '{print $1}'
+)"
+runner_store="$(printf '%s\n' "$runner_exec" | cut -d/ -f1-4)"
+nix-store -qR "$system" | grep -qxF "$runner_store"
+
+if [[ "$timer_was_active" == 1 ]]; then
+  systemctl start finite-saas-runner.timer
+  systemctl is-active --quiet finite-saas-runner.timer
+else
+  systemctl stop finite-saas-runner.timer
+  ! systemctl is-active --quiet finite-saas-runner.timer
+fi
+trap - ERR
+echo "==> DEPLOYED system=$system runner=$runner_exec"
+LAT3

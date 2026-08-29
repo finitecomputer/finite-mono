@@ -7,9 +7,10 @@ use finite_saas_core::{
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
-    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
-    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeHealthReportAck,
+    RuntimeHealthReportRequest, RuntimeLifecycleStage, RuntimePlacement, RuntimeResourceClass,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -28,6 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod apple_container;
+pub mod health_reports;
 mod kata;
 pub mod lifecycle_probe;
 pub mod phala;
@@ -35,6 +37,7 @@ mod phala_inventory;
 pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
+pub use health_reports::HealthReportConfig;
 pub use kata::{
     KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
 };
@@ -44,8 +47,13 @@ pub use lifecycle_probe::{
 };
 pub use phala::{PhalaConfig, PhalaLauncher};
 
-const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+// The runner-side readiness deadline matches agentd's 180s Finite Chat
+// bridge readiness deadline (post-#571): a restart whose runtime proves
+// nothing within this window fails with the `readiness` lifecycle stage,
+// and a large-room bridge that needs the full 180s is not failed early.
+const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
+const IDENTITY_BINDING_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
@@ -247,6 +255,11 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    /// The post-compute readiness wait expired. Core records this as a
+    /// `readiness`-stage lifecycle failure, distinct from compute faults: a
+    /// restart whose runtime never proves ready must surface as exactly that.
+    #[error("runtime readiness deadline expired: {0}")]
+    RuntimeReadinessTimeout(String),
     #[error("failed to execute command {program}: {message}")]
     CommandExecution { program: String, message: String },
     #[error("command {program} timed out after {timeout_secs}s")]
@@ -344,12 +357,54 @@ pub enum RunOnceOutcome {
     },
 }
 
-fn identity_transport_error(error: ureq::Error) -> RunnerError {
+fn identity_request_error(context: &str, error: ureq::Error) -> RunnerError {
     let message = match error {
-        ureq::Error::Status(status, _) => format!("Identity Authority returned HTTP {status}"),
-        ureq::Error::Transport(error) => format!("Identity Authority transport error: {error}"),
+        ureq::Error::Status(status, _) => format!("{context} returned HTTP {status}"),
+        ureq::Error::Transport(error) => format!("{context} transport error: {error}"),
     };
     RunnerError::AgentIdentityBinding(message)
+}
+
+fn is_transient_identity_request_error(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Status(status, _) => (500..=599).contains(status),
+        ureq::Error::Transport(_) => true,
+    }
+}
+
+fn retry_identity_request<F>(
+    timeout: Duration,
+    context: &str,
+    mut request: F,
+) -> Result<ureq::Response, RunnerError>
+where
+    F: FnMut(&ureq::Agent) -> Result<ureq::Response, ureq::Error>,
+{
+    let started_at = Instant::now();
+    loop {
+        let elapsed = started_at.elapsed();
+        let remaining = timeout.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return Err(RunnerError::AgentIdentityBinding(format!(
+                "{context} did not become available within {}s",
+                timeout.as_secs()
+            )));
+        }
+        let agent = ureq::AgentBuilder::new().timeout(remaining).build();
+        match request(&agent) {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if is_transient_identity_request_error(&error)
+                    && started_at.elapsed() < timeout =>
+            {
+                thread::sleep(
+                    IDENTITY_BINDING_RETRY_INTERVAL
+                        .min(timeout.saturating_sub(started_at.elapsed())),
+                );
+            }
+            Err(error) => return Err(identity_request_error(context, error)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +418,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
+    health_reports: Option<HealthReportConfig>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -392,7 +448,16 @@ where
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
+            health_reports: None,
         })
+    }
+
+    /// Enable the standing readiness ferry: a throttled per-runtime poll of
+    /// the guest `/contact`, reported to Core. Best-effort telemetry; it never
+    /// gates or slows lifecycle work.
+    pub fn with_health_reports(mut self, config: Option<HealthReportConfig>) -> Self {
+        self.health_reports = config;
+        self
     }
 
     pub fn with_agent_identity_authority(
@@ -439,6 +504,12 @@ where
 
     pub fn run_once(&mut self) -> Result<RunOnceOutcome, RunnerError> {
         self.launcher.validate_ready()?;
+        // Best-effort, throttled per runtime: standing health telemetry must
+        // never fail or slow the lease cycle beyond its own bounded HTTP
+        // timeouts.
+        if let Some(config) = self.health_reports.clone() {
+            health_reports::forward_due_reports(&mut self.queue, &config);
+        }
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
@@ -536,48 +607,67 @@ where
                     },
                 );
                 let launch_result = match launch_result {
-                    Ok(_) => match if lease.request.relocation.is_some() {
+                    Ok(_) => match if let Some(relocation) = lease.request.relocation.as_ref() {
                         // The relocation launch already proved that the
                         // restored state exposes the existing Agent
                         // Principal. Rebinding it after Core switches the
                         // Runtime host would add a fallible post-commit
-                        // step to the relocation boundary.
-                        Ok(())
+                        // step to the relocation boundary. The retained
+                        // principal still pins standing health reports.
+                        Ok(Some(relocation.v1().expected_agent_npub.clone()))
                     } else {
                         self.bind_agent_identity(&lease, &facts)
                     } {
-                        Ok(()) => self.queue.complete_agent_creation(
-                            &request_id,
-                            CompleteAgentCreationRequestInput {
-                                request_id: request_id.clone(),
-                                runner_id: self.runner_id.clone(),
-                                lease_token: lease_token.clone(),
-                                source_host_id: facts.source_host_id.clone(),
-                                source_machine_id: facts.source_machine_id.clone(),
-                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                state_schema_version: facts.state_schema_version.clone(),
-                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                contact_endpoint: facts.contact_endpoint.clone(),
-                                display_name: facts.display_name.clone(),
-                                hostname: facts.hostname.clone(),
-                                runtime_host: facts.runtime_host.clone(),
-                                runtime_status: Some(RuntimeSummaryStatus::Online),
-                                active_inference_profile: facts.active_inference_profile.clone(),
-                                hermes_available: facts.hermes_available,
-                                published_app_urls: facts.published_app_urls.clone(),
-                                runtime_capabilities: Some(runtime_capabilities),
-                                now: None,
-                            },
-                        ),
+                        Ok(launch_verified_npub) => self
+                            .queue
+                            .complete_agent_creation(
+                                &request_id,
+                                CompleteAgentCreationRequestInput {
+                                    request_id: request_id.clone(),
+                                    runner_id: self.runner_id.clone(),
+                                    lease_token: lease_token.clone(),
+                                    source_host_id: facts.source_host_id.clone(),
+                                    source_machine_id: facts.source_machine_id.clone(),
+                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                    state_schema_version: facts.state_schema_version.clone(),
+                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                    contact_endpoint: facts.contact_endpoint.clone(),
+                                    display_name: facts.display_name.clone(),
+                                    hostname: facts.hostname.clone(),
+                                    runtime_host: facts.runtime_host.clone(),
+                                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                                    active_inference_profile: facts
+                                        .active_inference_profile
+                                        .clone(),
+                                    hermes_available: facts.hermes_available,
+                                    published_app_urls: facts.published_app_urls.clone(),
+                                    runtime_capabilities: Some(runtime_capabilities),
+                                    now: None,
+                                },
+                            )
+                            .map(|completed| (completed, launch_verified_npub)),
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok(completed) => Ok(RunOnceOutcome::Launched {
-                        request_id,
-                        runtime_id: completed.request.agent_runtime_id,
-                    }),
+                    Ok((completed, launch_verified_npub)) => {
+                        if let Some(config) = &self.health_reports
+                            && let Some(runtime_id) = completed.request.agent_runtime_id.as_deref()
+                        {
+                            health_reports::record_target(
+                                config,
+                                runtime_id,
+                                &facts.source_machine_id,
+                                facts.contact_endpoint.as_deref(),
+                                launch_verified_npub.as_deref(),
+                            );
+                        }
+                        Ok(RunOnceOutcome::Launched {
+                            request_id,
+                            runtime_id: completed.request.agent_runtime_id,
+                        })
+                    }
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -627,13 +717,17 @@ where
         }
     }
 
+    /// Verify and bind the launched runtime's Agent Principal, returning the
+    /// verified npub so callers can pin standing health reports to it.
+    /// `Ok(None)` when this managed agent has no email to bind (nothing was
+    /// verified).
     fn bind_agent_identity(
         &self,
         lease: &AgentCreationLease,
         facts: &RuntimeLaunchFacts,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<Option<String>, RunnerError> {
         let Some(agent_email) = lease.project.agent_email.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let config = self.agent_identity_authority.as_ref().ok_or_else(|| {
             RunnerError::AgentIdentityBinding(
@@ -652,12 +746,13 @@ where
                     "runtime did not publish a valid contact endpoint".to_string(),
                 )
             })?;
-        let agent = ureq::AgentBuilder::new().timeout(config.timeout).build();
-        let contact: serde_json::Value = agent
-            .get(contact_endpoint)
-            .set("Accept", "application/json")
-            .call()
-            .map_err(identity_transport_error)?
+        let contact: serde_json::Value =
+            retry_identity_request(config.timeout, "Runtime contact endpoint", |agent| {
+                agent
+                    .get(contact_endpoint)
+                    .set("Accept", "application/json")
+                    .call()
+            })?
             .into_json()
             .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
         let agent_npub = contact
@@ -670,18 +765,20 @@ where
                     "runtime contact document has no Agent Principal".to_string(),
                 )
             })?;
-        let response: serde_json::Value = agent
-            .post(&format!(
-                "{}/api/v1/operator/agent-email-bindings",
-                config.base_url
-            ))
-            .set("Accept", "application/json")
-            .set("X-Finite-Operator-Token", &config.operator_token)
-            .send_json(serde_json::json!({
-                "email": agent_email,
-                "agent_npub": agent_npub,
-            }))
-            .map_err(identity_transport_error)?
+        let binding_endpoint = format!("{}/api/v1/operator/agent-email-bindings", config.base_url);
+        // The Authority guarantees that an exact retry is idempotent and never
+        // reassigns an Agent Email to a different principal.
+        let response: serde_json::Value =
+            retry_identity_request(config.timeout, "Identity Authority", |agent| {
+                agent
+                    .post(&binding_endpoint)
+                    .set("Accept", "application/json")
+                    .set("X-Finite-Operator-Token", &config.operator_token)
+                    .send_json(serde_json::json!({
+                        "email": agent_email,
+                        "agent_npub": agent_npub,
+                    }))
+            })?
             .into_json()
             .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
         if response.get("email").and_then(serde_json::Value::as_str) != Some(agent_email)
@@ -694,7 +791,7 @@ where
                 "Identity Authority returned a mismatched binding".to_string(),
             ));
         }
-        Ok(())
+        Ok(Some(agent_npub.to_string()))
     }
 
     fn run_runtime_control(
@@ -740,6 +837,8 @@ where
                     runner_id: self.runner_id.clone(),
                     lease_token,
                     failure_message: failure_message.clone(),
+                    // The operation was rejected before any compute ran.
+                    failure_stage: Some(RuntimeLifecycleStage::Launch),
                     now: None,
                 },
             )?;
@@ -851,6 +950,35 @@ where
                         now: None,
                     },
                 )?;
+                // Keep the standing-health registry aligned with the lifecycle
+                // outcome: a deliberately offline runtime is deregistered, and
+                // an upgrade moves the entry to the new contact endpoint
+                // (restart and recover preserve it — Kata asserts the
+                // persisted endpoint is unchanged and Phala restarts the same
+                // CVM).
+                if let Some(config) = &self.health_reports {
+                    match kind {
+                        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
+                            health_reports::remove_target(config, &completed.agent_runtime_id);
+                        }
+                        RuntimeControlKind::Upgrade => {
+                            if let Some(facts) = upgrade_facts.as_ref()
+                                && let Some(contact_endpoint) = facts
+                                    .published_app_urls
+                                    .iter()
+                                    .find(|url| url.ends_with("/contact"))
+                            {
+                                health_reports::refresh_target_endpoint(
+                                    config,
+                                    &completed.agent_runtime_id,
+                                    contact_endpoint,
+                                );
+                            }
+                        }
+                        RuntimeControlKind::Restart
+                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {}
+                    }
+                }
                 Ok(runtime_control_success_outcome(
                     kind,
                     request_id,
@@ -864,6 +992,7 @@ where
                     &request_id,
                     &lease_token,
                     &failure_message,
+                    runtime_control_failure_stage(&error),
                 )?;
                 Ok(runtime_control_failed_outcome(
                     kind,
@@ -880,6 +1009,7 @@ where
         request_id: &str,
         lease_token: &str,
         failure_message: &str,
+        failure_stage: RuntimeLifecycleStage,
     ) -> Result<(), RunnerError> {
         if kind == RuntimeControlKind::Destroy {
             self.queue.retry_runtime_control(
@@ -900,6 +1030,7 @@ where
                     runner_id: self.runner_id.clone(),
                     lease_token: lease_token.to_string(),
                     failure_message: failure_message.to_string(),
+                    failure_stage: Some(failure_stage),
                     now: None,
                 },
             )?;
@@ -1064,6 +1195,13 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: FailAgentCreationRequestInput,
     ) -> Result<AgentCreationRequest, RunnerError>;
+
+    /// Forward one runtime's standing health report to Core. Outbound-only
+    /// telemetry; failures lose the report, never lifecycle work.
+    fn report_runtime_health(
+        &mut self,
+        input: RuntimeHealthReportRequest,
+    ) -> Result<RuntimeHealthReportAck, RunnerError>;
 }
 
 pub trait ProviderOperationJournal {
@@ -1346,6 +1484,17 @@ fn runtime_control_failed_outcome(
             request_id,
             failure_message,
         },
+    }
+}
+
+/// The lifecycle stage a control-operation failure belongs to. Only the
+/// post-compute readiness wait names `readiness`; every other adapter fault
+/// is a compute fault. Pre-dispatch rejections name `launch` at their own
+/// call site.
+fn runtime_control_failure_stage(error: &RunnerError) -> RuntimeLifecycleStage {
+    match error {
+        RunnerError::RuntimeReadinessTimeout(_) => RuntimeLifecycleStage::Readiness,
+        _ => RuntimeLifecycleStage::Compute,
     }
 }
 
@@ -2138,6 +2287,13 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             &input,
         )
     }
+
+    fn report_runtime_health(
+        &mut self,
+        input: RuntimeHealthReportRequest,
+    ) -> Result<RuntimeHealthReportAck, RunnerError> {
+        self.post_json("/api/core/v1/runtime-health-reports", &input)
+    }
 }
 
 fn decode_core_response<T>(response: Result<ureq::Response, ureq::Error>) -> Result<T, RunnerError>
@@ -2873,6 +3029,11 @@ fn wait_for_http_json_ready(
     interval: Duration,
 ) -> Result<(), RunnerError> {
     let started = Instant::now();
+    // The runtime names its not-ready cause (truthful-readiness N+1); carry
+    // the last seen one into the timeout failure so the lifecycle record
+    // says WHY readiness never came. Images before that change simply omit
+    // the field.
+    let mut last_ready_reason: Option<String> = None;
     loop {
         let last_error = match ureq::get(url)
             .timeout(interval.max(Duration::from_millis(250)))
@@ -2887,6 +3048,12 @@ fn wait_for_http_json_ready(
                     {
                         return Ok(());
                     }
+                    if let Some(reason) = value
+                        .get("ready_reason")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        last_ready_reason = Some(reason.to_owned());
+                    }
                     value
                         .get("error")
                         .and_then(serde_json::Value::as_str)
@@ -2899,13 +3066,23 @@ fn wait_for_http_json_ready(
                 let body = response
                     .into_string()
                     .unwrap_or_else(|_| "<unreadable response body>".to_string());
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body)
+                    && let Some(reason) = value
+                        .get("ready_reason")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    last_ready_reason = Some(reason.to_owned());
+                }
                 format!("HTTP {status}: {body}")
             }
             Err(error) => error.to_string(),
         };
         if started.elapsed() >= timeout {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "{name} did not become ready within {}s: {last_error}",
+            let reason = last_ready_reason
+                .map(|reason| format!("; last ready_reason: {reason}"))
+                .unwrap_or_default();
+            return Err(RunnerError::RuntimeReadinessTimeout(format!(
+                "{name} did not become ready within {}s: {last_error}{reason}",
                 timeout.as_secs()
             )));
         }
@@ -4442,6 +4619,82 @@ mod tests {
     }
 
     #[test]
+    fn run_once_registers_a_standing_health_report_target_after_launch() {
+        let registry = tempfile::tempdir().unwrap();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        }));
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        // The email-less sample agent verifies no principal at launch, so the
+        // entry pins on the first contact answer (documented legacy fallback).
+        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(registry.path().join("runtime-from-core.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.contact_endpoint, "http://oslo-host-1/contact");
+        assert_eq!(entry.source_machine_id, "finite-agent_123");
+        assert_eq!(entry.agent_npub, None);
+    }
+
+    #[test]
+    fn run_once_deregisters_the_health_target_when_stop_completes() {
+        let registry = tempfile::tempdir().unwrap();
+        let config = HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        };
+        health_reports::record_target(
+            &config,
+            "runtime_123",
+            "oslo-agent-001",
+            // Nothing listens here; the pre-stop poll reports unreachable and
+            // the completion still deregisters the target.
+            Some("http://127.0.0.1:9/contact"),
+            None,
+        );
+        assert!(registry.path().join("runtime_123.json").exists());
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(config));
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeStopped {
+                request_id: runtime_control.request.id.clone(),
+                runtime_id: runtime_control.runtime.id.clone(),
+            }
+        );
+        assert!(
+            !registry.path().join("runtime_123.json").exists(),
+            "a deliberately offline runtime must not be polled forever"
+        );
+    }
+
+    #[test]
     fn run_once_binds_canonical_agent_email_before_completion() {
         use std::sync::mpsc;
 
@@ -4499,6 +4752,193 @@ mod tests {
         assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
         assert_eq!(runner.queue.completed.len(), 1);
         assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_retries_transient_runtime_contact_failure_before_identity_binding() {
+        use std::sync::mpsc;
+
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut unavailable_contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut unavailable_contact);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut unavailable_contact,
+                503,
+                &serde_json::json!({ "ready": false }).to_string(),
+            );
+
+            let (mut ready_contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut ready_contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut ready_contact, 200, &body);
+
+            let (mut identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            sent.send(request).unwrap();
+            let body = serde_json::json!({
+                "email": "oslo-agent@finite.vip",
+                "agent_npub": AGENT_NPUB,
+                "nip05": "oslo-agent@finite.vip",
+            })
+            .to_string();
+            write_http_json(&mut identity, 200, &body);
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.completed.len(), 1);
+        assert!(runner.queue.failed.is_empty());
+        assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_retries_transient_identity_authority_failure_before_completion() {
+        use std::sync::mpsc;
+
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut contact, 200, &body);
+
+            let (mut unavailable_identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut unavailable_identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            write_http_json(
+                &mut unavailable_identity,
+                503,
+                &serde_json::json!({ "error": "temporarily unavailable" }).to_string(),
+            );
+
+            let (mut ready_identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut ready_identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            sent.send(request).unwrap();
+            let body = serde_json::json!({
+                "email": "oslo-agent@finite.vip",
+                "agent_npub": AGENT_NPUB,
+                "nip05": "oslo-agent@finite.vip",
+            })
+            .to_string();
+            write_http_json(&mut ready_identity, 200, &body);
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.completed.len(), 1);
+        assert!(runner.queue.failed.is_empty());
+        assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn run_once_does_not_retry_identity_authority_client_errors() {
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut contact, 200, &body);
+
+            let (mut identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            write_http_json(
+                &mut identity,
+                409,
+                &serde_json::json!({ "error": "binding conflict" }).to_string(),
+            );
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::LaunchFailed {
+                request_id: "agent_request_123".to_string(),
+                failure_message:
+                    "Agent Identity binding failed: Identity Authority returned HTTP 409"
+                        .to_string(),
+            }
+        );
+        assert!(runner.queue.completed.is_empty());
+        assert_eq!(runner.queue.failed.len(), 1);
         server.join().unwrap();
     }
 
@@ -4568,6 +5008,54 @@ mod tests {
             body.len()
         )
         .unwrap();
+    }
+
+    #[test]
+    fn readiness_timeout_carries_the_runtime_ready_reason() {
+        // The runtime names its not-ready cause on 503 bodies; the timeout
+        // failure must carry it so the lifecycle record says why readiness
+        // never came.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let server = std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                // The wake connect after the call lands here once stop is set.
+                if stop_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = read_http_request(&mut stream);
+                write_http_json(
+                    &mut stream,
+                    503,
+                    r#"{"ready":false,"ready_reason":"bridge_not_connected"}"#,
+                );
+            }
+        });
+
+        let error = wait_for_http_json_ready(
+            &format!("http://{address}/healthz"),
+            "Test runtime /healthz",
+            Duration::from_millis(300),
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        server.join().unwrap();
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, RunnerError::RuntimeReadinessTimeout(_)),
+            "unexpected error variant: {message}"
+        );
+        assert!(
+            message.contains("last ready_reason: bridge_not_connected"),
+            "timeout must name the runtime's ready_reason, got: {message}"
+        );
     }
 
     #[test]
@@ -5685,6 +6173,7 @@ mod tests {
         provider_operation_transitions: Vec<RecordProviderOperationTransitionRequest>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
+        health_reports: Vec<RuntimeHealthReportRequest>,
     }
 
     impl FakeQueue {
@@ -5706,6 +6195,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -5727,6 +6217,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -5748,6 +6239,7 @@ mod tests {
                 provider_operation_transitions: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                health_reports: Vec::new(),
             }
         }
 
@@ -5879,6 +6371,18 @@ mod tests {
         ) -> Result<AgentCreationRequest, RunnerError> {
             self.failed.push(input);
             Ok(sample_lease("agent_request_123").request)
+        }
+
+        fn report_runtime_health(
+            &mut self,
+            input: RuntimeHealthReportRequest,
+        ) -> Result<RuntimeHealthReportAck, RunnerError> {
+            let ack = RuntimeHealthReportAck {
+                agent_runtime_id: input.agent_runtime_id.clone(),
+                recorded_at: "2026-08-24T12:00:00Z".to_string(),
+            };
+            self.health_reports.push(input);
+            Ok(ack)
         }
     }
 
@@ -6323,7 +6827,8 @@ mod tests {
                 requested_by_user_id: "user_123".to_string(),
                 kind,
                 target_runtime_artifact_id: None,
-                status: RuntimeControlRequestStatus::Running,
+                status: RuntimeControlRequestStatus::Launching,
+                failure_stage: None,
                 runner_id: Some("runner-1".to_string()),
                 lease_token: Some("lease-1".to_string()),
                 lease_expires_at: Some("2026-05-25T13:10:00Z".to_string()),

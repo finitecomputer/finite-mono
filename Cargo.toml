@@ -43,7 +43,7 @@ members = [
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/finitecomputer/finite-mono"
-rust-version = "1.88"
+rust-version = "1.91.1"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -83,6 +83,7 @@ pulldown-cmark = "0.13"
 qrcode = { version = "0.14", default-features = false }
 reqwest = { version = "=0.12.27", default-features = false, features = ["blocking", "http2", "json", "rustls-tls-webpki-roots"] }
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+rustix = { version = "1", features = ["process"] }
 secp256k1 = { version = "0.29.1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

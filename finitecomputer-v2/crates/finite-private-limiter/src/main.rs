@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use finite_private_limiter::{LimiterConfig, WatchdogConfig, app};
+use finite_private_limiter::{AdmissionMode, LimiterConfig, WatchdogConfig, app};
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -42,6 +42,16 @@ fn config_from_env() -> Result<LimiterConfig> {
     config.default_model = env::var("FINITE_PRIVATE_MODEL")
         .or_else(|_| env::var("DEFAULT_MODEL"))
         .unwrap_or(config.default_model);
+    config.upstream_model = optional_nonempty_env("FINITE_PRIVATE_UPSTREAM_MODEL")?;
+    config.model_aliases = comma_list_env("FINITE_PRIVATE_MODEL_ALIASES")?;
+    config.admission_mode = match env::var("FINITE_ADMISSION_MODE").unwrap_or_default().trim() {
+        "" | "usage-api" => AdmissionMode::UsageApi,
+        "allowlist" => AdmissionMode::Allowlist,
+        other => anyhow::bail!(
+            "FINITE_ADMISSION_MODE must be \"usage-api\" or \"allowlist\", got {other:?}"
+        ),
+    };
+    config.admission_allowlist = comma_list_env("FINITE_ADMISSION_ALLOWLIST")?;
     config.readiness_timeout = duration_env("READINESS_TIMEOUT_SECS", config.readiness_timeout)?;
     config.usage_api_timeout =
         duration_env("FINITE_USAGE_API_TIMEOUT_SECS", config.usage_api_timeout)?;
@@ -69,6 +79,32 @@ fn config_from_env() -> Result<LimiterConfig> {
         exit_after_failures: bool_env("FINITE_PRIVATE_WATCHDOG_EXIT_AFTER_FAILURES")?,
     };
     Ok(config)
+}
+
+fn optional_nonempty_env(name: &'static str) -> Result<Option<String>> {
+    let Ok(raw) = env::var(name) else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("{name} must not be empty when set");
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn comma_list_env(name: &'static str) -> Result<Vec<String>> {
+    let Ok(raw) = env::var(name) else {
+        return Ok(Vec::new());
+    };
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if values.is_empty() || values.iter().any(String::is_empty) {
+        anyhow::bail!("{name} must be a comma-separated list of non-empty model names");
+    }
+    Ok(values)
 }
 
 fn required_env(name: &'static str) -> Result<String> {

@@ -13,8 +13,20 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
 
+LAT_DASHBOARD_HOSTS = (
+    "finite-lat-1",
+    "finite-lat-2",
+    "finite-lat-3",
+    "finite-lat-4",
+)
+LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-4]"
+
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",
+    "node_cpu_scaling_frequency_hertz",
+    "node_cpu_scaling_frequency_max_hertz",
+    "node_hwmon_sensor_label",
+    "node_hwmon_temp_celsius",
     "node_load1",
     "node_load5",
     "node_load15",
@@ -38,6 +50,9 @@ HOST_PANEL_TITLES = [
     "LAT Host Scrape Health",
     "LAT CPU Busy",
     "LAT Load Average",
+    "LAT CPU Temperature",
+    "LAT CPU Clock",
+    "LAT Thermal Throttling Heuristic",
     "LAT Memory Used",
     "LAT Swap Used",
     "LAT Filesystem Used",
@@ -50,6 +65,22 @@ HOST_PANEL_TITLES = [
 
 LOG_PANEL_TITLES = [
     "LAT Recent Warning Logs",
+    "LAT Host Incident Logs",
+    "LAT Kernel Warning Logs",
+    "LAT Activation And Unit Lifecycle",
+    "LAT SSH And Sudo Logs",
+]
+
+HOST_INCIDENT_LOG_SOURCES = [
+    ("kernel", "_TRANSPORT=kernel PRIORITY=0"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=1"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=2"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=3"),
+    ("kernel", "_TRANSPORT=kernel PRIORITY=4"),
+    ("systemd", "SYSLOG_IDENTIFIER=systemd"),
+    ("nixos-activation", "SYSLOG_IDENTIFIER=nixos"),
+    ("auth", "SYSLOG_IDENTIFIER=sshd"),
+    ("auth", "SYSLOG_IDENTIFIER=sudo"),
 ]
 
 LAT_LOG_UNITS = {
@@ -77,16 +108,56 @@ LAT_LOG_UNITS = {
         "systemd-networkd.service",
         "wireguard-wg-finite.service",
     ],
+    "finite-lat-2": [
+        "alloy.service",
+        "borgbackup-job-finite-hosted-web-chat-offsite.service",
+        "caddy.service",
+        "finite-core-private-proxy.service",
+        "finite-healthcheck.service",
+        "finite-hosted-web-chat-offsite-health.service",
+        "finite-hosted-web-chat-snapshot-health.service",
+        "finite-identity-backup-health.service",
+        "finite-identity-backup.service",
+        "finite-identity-private-proxy.service",
+        "finite-identity.service",
+        "finite-litestream-finite-brain.service",
+        "finite-litestream-finite-chat-server.service",
+        "finite-litestream-health.service",
+        "finite-postgres-backup.service",
+        "finite-runtime-metrics.service",
+        "finite-saas-core.service",
+        "finite-saas-sites.service",
+        "finitechat-hosted-device.service",
+        "finitechat-server.service",
+        "finite-brain-app.service",
+        "prometheus-node-exporter.service",
+        "podman-finite-saas-dashboard.service",
+        "podman-searxng.service",
+        "podman-firecrawl-api.service",
+    ],
+    "finite-lat-4": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd-persistent-storage.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
 }
 
 LAT_ROLES = {
     "finite-lat-1": "app",
     "finite-lat-3": "runner",
+    # Emergency replacement app-plane host (lat1's stack, no runner).
+    "finite-lat-2": "app",
+    "finite-lat-4": "runner",
 }
 
 
 def nix_eval() -> dict[str, Any]:
-    expression = r'''
+    expression = r"""
       let
         flake = builtins.getFlake (toString ./.);
         cfg = flake.nixosConfigurations.finite-monitoring.config;
@@ -96,6 +167,11 @@ def nix_eval() -> dict[str, Any]:
         datasourceUids =
           map (datasource: datasource.uid)
             cfg.services.grafana.provision.datasources.settings.datasources;
+        chatProbe = builtins.head (
+          builtins.filter
+            (job: job.job_name == "chat.finite.computer")
+            cfg.services.prometheus.scrapeConfigs
+        );
       in {
         hostName = cfg.networking.hostName;
         release = cfg.system.nixos.release;
@@ -116,6 +192,11 @@ def nix_eval() -> dict[str, Any]:
           retentionTime = cfg.services.prometheus.retentionTime;
           extraFlags = cfg.services.prometheus.extraFlags;
           scrapeJobs = map (job: job.job_name) cfg.services.prometheus.scrapeConfigs;
+          chatProbe = {
+            interval = chatProbe.scrape_interval;
+            module = builtins.head chatProbe.params.module;
+            target = builtins.head (builtins.head chatProbe.static_configs).targets;
+          };
         };
         blackbox = {
           enable = cfg.services.prometheus.exporters.blackbox.enable;
@@ -131,7 +212,10 @@ def nix_eval() -> dict[str, Any]:
         };
         caddy = {
           enable = cfg.services.caddy.enable;
+          globalConfig = cfg.services.caddy.globalConfig;
           envFiles = cfg.systemd.services.caddy.serviceConfig.EnvironmentFile;
+          runtimeDirectory = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectory;
+          runtimeDirectoryMode = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectoryMode;
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
@@ -140,15 +224,29 @@ def nix_eval() -> dict[str, Any]:
             config = flake.nixosConfigurations.finite-lat-1.config.environment.etc."alloy/config.alloy".text;
             envFiles = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-1.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-1.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
           finite-lat-3 = {
             config = flake.nixosConfigurations.finite-lat-3.config.environment.etc."alloy/config.alloy".text;
             envFiles = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-3.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-3.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-2 = {
+            config = flake.nixosConfigurations.finite-lat-2.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-2.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-2.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-4 = {
+            config = flake.nixosConfigurations.finite-lat-4.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-4.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-4.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-4.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }
-    '''
+    """
     completed = subprocess.run(
         [
             "nix",
@@ -187,11 +285,17 @@ def panel_rect(panel: dict[str, Any]) -> tuple[int, int, int, int]:
 def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_x1, left_y1, left_x2, left_y2 = panel_rect(left)
     right_x1, right_y1, right_x2, right_y2 = panel_rect(right)
-    return left_x1 < right_x2 and right_x1 < left_x2 and left_y1 < right_y2 and right_y1 < left_y2
+    return (
+        left_x1 < right_x2
+        and right_x1 < left_x2
+        and left_y1 < right_y2
+        and right_y1 < left_y2
+    )
 
 
 def check_dashboard_contract() -> None:
     dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    require(dashboard["refresh"] == "30s", "Grafana dashboard must refresh every 30s")
     panels = dashboard["panels"]
     panel_ids = [panel["id"] for panel in panels]
     require(len(panel_ids) == len(set(panel_ids)), "Grafana panel IDs must be unique")
@@ -210,17 +314,29 @@ def check_dashboard_contract() -> None:
         require(title in panels_by_title, f"missing Grafana log panel {title!r}")
 
     rendered_dashboard = json.dumps(dashboard)
+    require(
+        "finite-lat-1|finite-lat-3" not in rendered_dashboard,
+        "Grafana dashboard must not keep the pre-migration lat1/lat3-only selector",
+    )
     for metric_name in HOST_METRIC_NAMES:
         require_contains(rendered_dashboard, metric_name, "Grafana host panels")
 
     for title in HOST_PANEL_TITLES:
         for target in panel_targets(panels_by_title[title]):
             expression = target["expr"]
-            require_contains(expression, 'instance=~"finite-lat-1|finite-lat-3"', title)
-            require(
-                "finite-lat-2" not in expression,
-                f"{title} must not include finite-lat-2 in production host panels",
+            require_contains(
+                expression,
+                f'instance=~"{LAT_DASHBOARD_HOST_REGEX}"',
+                title,
             )
+
+    health_expression = panels_by_title["LAT Host Scrape Health"]["targets"][0]["expr"]
+    for host_name in LAT_DASHBOARD_HOSTS:
+        require_contains(
+            health_expression,
+            f'label_replace(vector(0), "instance", "{host_name}"',
+            "LAT Host Scrape Health retired-host fallback",
+        )
 
     require_contains(
         panels_by_title["LAT Filesystem Used"]["targets"][0]["expr"],
@@ -232,18 +348,63 @@ def check_dashboard_contract() -> None:
         'device=~"en.*|eth.*|wg-finite"',
         "LAT Network Throughput",
     )
+    require_contains(
+        panels_by_title["LAT CPU Temperature"]["targets"][0]["expr"],
+        'label=~"Tctl|Tccd[0-9]+"',
+        "LAT CPU Temperature",
+    )
+    throttle_expression = panels_by_title["LAT Thermal Throttling Heuristic"][
+        "targets"
+    ][0]["expr"]
+    for threshold in (">= bool 95", ">= bool 70", "<= bool 0.70"):
+        require_contains(
+            throttle_expression,
+            threshold,
+            "LAT Thermal Throttling Heuristic",
+        )
 
     for title in LOG_PANEL_TITLES:
         panel = panels_by_title[title]
         require(panel["datasource"]["uid"] == "finite-loki", f"{title} must use Loki")
         for target in panel_targets(panel):
             expression = target["expr"]
-            require_contains(expression, 'host=~"finite-lat-1|finite-lat-3"', title)
-            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
-            require(
-                "finite-lat-2" not in expression,
-                f"{title} must not include finite-lat-2 in production log panels",
+            require_contains(
+                expression,
+                f'host=~"{LAT_DASHBOARD_HOST_REGEX}"',
+                title,
             )
+            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
+
+    require_contains(
+        panels_by_title["LAT Recent Warning Logs"]["targets"][0]["expr"],
+        'priority=~"warning|error|crit|alert|emerg"',
+        "LAT Recent Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Host Incident Logs"]["targets"][0]["expr"],
+        'source=~"kernel|systemd|nixos-activation|auth"',
+        "LAT Host Incident Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Kernel Warning Logs"]["targets"][0]["expr"],
+        'source="kernel"',
+        "LAT Kernel Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Kernel Warning Logs"]["targets"][0]["expr"],
+        'priority=~"warning|error|crit|alert|emerg"',
+        "LAT Kernel Warning Logs",
+    )
+    require_contains(
+        panels_by_title["LAT Activation And Unit Lifecycle"]["targets"][0]["expr"],
+        'source=~"systemd|nixos-activation"',
+        "LAT Activation And Unit Lifecycle",
+    )
+    require_contains(
+        panels_by_title["LAT SSH And Sudo Logs"]["targets"][0]["expr"],
+        'source="auth"',
+        "LAT SSH And Sudo Logs",
+    )
 
 
 def check_ubuntu_contract() -> None:
@@ -257,7 +418,9 @@ def check_ubuntu_contract() -> None:
 def main() -> int:
     contract = nix_eval()
 
-    require(contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname")
+    require(
+        contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname"
+    )
     require(contract["release"] == "26.05", "monitoring host must use NixOS 26.05")
     require(contract["firewallTcp"] == [22, 80, 443], "unexpected public TCP port set")
 
@@ -265,9 +428,15 @@ def main() -> int:
     require(grafana["enable"], "Grafana must be enabled")
     require(grafana["address"] == "127.0.0.1", "Grafana must bind loopback")
     require(grafana["domain"] == "monitoring.finite.computer", "Grafana domain drifted")
-    require("finite-prometheus" in grafana["datasourceUids"], "Prometheus datasource uid missing")
+    require(
+        "finite-prometheus" in grafana["datasourceUids"],
+        "Prometheus datasource uid missing",
+    )
     require("finite-loki" in grafana["datasourceUids"], "Loki datasource uid missing")
-    require(grafana["dashboardProviderCount"] == 1, "expected exactly one dashboard provider")
+    require(
+        grafana["dashboardProviderCount"] == 1,
+        "expected exactly one dashboard provider",
+    )
 
     prometheus = contract["prometheus"]
     require(prometheus["enable"], "Prometheus must be enabled")
@@ -293,6 +462,15 @@ def main() -> int:
         ],
         "public probe job set drifted",
     )
+    require(
+        prometheus["chatProbe"]
+        == {
+            "interval": "1m",
+            "module": "chat_ready",
+            "target": "https://chat.finite.computer/readyz",
+        },
+        "Chat probe must exercise semantic readiness every minute",
+    )
 
     blackbox = contract["blackbox"]
     require(blackbox["enable"], "blackbox exporter must be enabled")
@@ -312,13 +490,29 @@ def main() -> int:
         caddy["envFiles"] == ["/etc/finite/monitoring/caddy.env"],
         "Caddy must load the monitoring credential hash env file",
     )
-    require_contains(caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost")
+    require_contains(
+        caddy["globalConfig"], "admin unix//run/caddy/admin.sock", "Caddy global config"
+    )
+    require(
+        caddy["runtimeDirectory"] == "caddy",
+        "Caddy must own /run/caddy for the Unix admin socket",
+    )
+    require(
+        caddy["runtimeDirectoryMode"] == "0750", "Caddy runtime directory mode drifted"
+    )
+    require_contains(
+        caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost"
+    )
     require_contains(caddy["ingestVhost"], "path /api/v1/write", "ingest vhost")
     require_contains(caddy["ingestVhost"], "path /loki/api/v1/push", "ingest vhost")
     require_contains(caddy["ingestVhost"], "{$METRICS_USERNAME}", "ingest vhost")
     require_contains(caddy["ingestVhost"], "{$LOGS_USERNAME}", "ingest vhost")
-    require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost")
-    require_contains(caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost")
+    require_contains(
+        caddy["ingestVhost"], "reverse_proxy 127.0.0.1:9090", "ingest vhost"
+    )
+    require_contains(
+        caddy["ingestVhost"], "reverse_proxy 127.0.0.1:3100", "ingest vhost"
+    )
 
     for host_name, alloy in contract["latAlloy"].items():
         alloy_config = alloy["config"]
@@ -335,9 +529,20 @@ def main() -> int:
             and "systemd-journal" in alloy["supplementaryGroups"],
             f"{host_name} Alloy must be able to read journald",
         )
+        require_contains(
+            alloy["activation"],
+            "check-lat-monitoring-secrets",
+            f"{host_name} monitoring secret activation preflight",
+        )
 
         for metric_name in HOST_METRIC_NAMES:
             require_contains(alloy_config, metric_name, f"{host_name} Alloy config")
+
+        require_contains(
+            alloy_config,
+            'scrape_interval = "15s"',
+            f"{host_name} Alloy metrics cadence",
+        )
 
         for expected in (
             'loki.relabel "finite_journal"',
@@ -346,12 +551,15 @@ def main() -> int:
             'sys.env("FINITE_LOGS_WRITE_USERNAME")',
             'sys.env("FINITE_LOGS_WRITE_PASSWORD")',
             'source_labels = ["__journal__systemd_unit"]',
+            'source_labels = ["__journal_unit"]',
+            'regex         = "(.+)"',
             'target_label  = "unit"',
             'source_labels = ["__journal_priority_keyword"]',
             'target_label  = "priority"',
             'max_age       = "10m"',
             f'host = "{host_name}"',
             f'role = "{LAT_ROLES[host_name]}"',
+            'source = "service"',
         ):
             require_contains(alloy_config, expected, f"{host_name} Alloy log config")
 
@@ -360,6 +568,23 @@ def main() -> int:
                 alloy_config,
                 f'matches       = "_SYSTEMD_UNIT={unit}"',
                 f"{host_name} journald allowlist",
+            )
+
+        for index, (source, matches) in enumerate(HOST_INCIDENT_LOG_SOURCES):
+            require_contains(
+                alloy_config,
+                f'loki.source.journal "finite_host_incident_{index}"',
+                f"{host_name} host incident journald source",
+            )
+            require_contains(
+                alloy_config,
+                f'matches       = "{matches}"',
+                f"{host_name} host incident journald source",
+            )
+            require_contains(
+                alloy_config,
+                f'source = "{source}"',
+                f"{host_name} host incident source label",
             )
 
     check_dashboard_contract()

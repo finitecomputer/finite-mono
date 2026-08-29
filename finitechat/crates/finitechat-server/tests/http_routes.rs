@@ -11,6 +11,8 @@ use finitechat_transport::MemberId;
 use finitechat_transport::engine::KeyPackage;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
+use std::time::Duration;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -44,6 +46,161 @@ async fn health_reports_ok() {
         assert_non_empty(body.source_branch.as_deref());
     }
     assert!(body.source_dirty.is_some());
+}
+
+#[tokio::test]
+async fn readyz_exercises_the_durable_write_path() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = directory.path().join("finitechat.sqlite3");
+    let state = HttpServerState::from_sqlite_path(&database).expect("durable state");
+    let app = http_router(state);
+
+    let response = get(app.clone(), "/readyz").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["delivery_core"]["status"], "ok");
+    assert_eq!(body["checks"]["durable_store"]["status"], "ok");
+
+    let database = rusqlite::Connection::open(&database).expect("inspect readiness evidence");
+    let first_checked_at_ms: i64 = database
+        .query_row(
+            "SELECT checked_at_ms FROM http_readiness_probe WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("readiness timestamp");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let cached_response = get(app, "/readyz").await;
+    assert_eq!(cached_response.status(), StatusCode::OK);
+    let second_checked_at_ms: i64 = database
+        .query_row(
+            "SELECT checked_at_ms FROM http_readiness_probe WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("cached readiness timestamp");
+    let readiness_rows: u64 = database
+        .query_row("SELECT count(*) FROM http_readiness_probe", [], |row| {
+            row.get(0)
+        })
+        .expect("readiness row count");
+    let delivery_operations: u64 = database
+        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+            row.get(0)
+        })
+        .expect("delivery operation count");
+    assert_eq!(
+        second_checked_at_ms, first_checked_at_ms,
+        "fresh readiness results must be cached instead of committing again"
+    );
+    assert_eq!(readiness_rows, 1, "the readiness table stays a singleton");
+    assert_eq!(
+        delivery_operations, 0,
+        "readiness must not create user delivery history"
+    );
+}
+
+#[tokio::test]
+async fn readyz_adds_health_evidence_without_changing_existing_delivery_state() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = directory.path().join("finitechat.sqlite3");
+    let owner = member("existing-alice-device");
+    let key_package_id = HttpKeyPackageId::new(b"existing-key-package".to_vec());
+    let state = HttpServerState::from_sqlite_path(&database).expect("durable state");
+    state
+        .publish_key_package(HttpKeyPackagePublication {
+            key_package_id: key_package_id.clone(),
+            owner: owner.clone(),
+            key_package: KeyPackage::new(b"existing-key-package-bytes".to_vec()),
+        })
+        .expect("persist existing delivery state");
+    drop(state);
+
+    let legacy = rusqlite::Connection::open(&database).expect("legacy database");
+    let operations_before: u64 = legacy
+        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+            row.get(0)
+        })
+        .expect("existing operation count");
+    assert_eq!(operations_before, 1);
+    legacy
+        .execute("DROP TABLE http_readiness_probe", [])
+        .expect("simulate the pre-readiness schema");
+    drop(legacy);
+
+    let state = HttpServerState::from_sqlite_path(&database).expect("upgrade existing state");
+    let app = http_router(state);
+    let response = get(app.clone(), "/readyz").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let upgraded = rusqlite::Connection::open(&database).expect("upgraded database");
+    let operations_after_readiness: u64 = upgraded
+        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+            row.get(0)
+        })
+        .expect("operation count after readiness");
+    let readiness_rows: u64 = upgraded
+        .query_row("SELECT count(*) FROM http_readiness_probe", [], |row| {
+            row.get(0)
+        })
+        .expect("readiness row count");
+    assert_eq!(operations_after_readiness, operations_before);
+    assert_eq!(readiness_rows, 1);
+    drop(upgraded);
+
+    let response = post_json(
+        app,
+        "/key-packages/claim",
+        &ClaimKeyPackageRequest {
+            owner: owner.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed: Option<finitechat_delivery::HttpClaimedKeyPackage> = read_json(response).await;
+    let claimed = claimed.expect("existing KeyPackage survives schema addition and replay");
+    assert_eq!(claimed.key_package_id, key_package_id);
+    assert_eq!(claimed.owner, owner);
+
+    let after_claim = rusqlite::Connection::open(&database).expect("database after claim");
+    let operations_after_claim: u64 = after_claim
+        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+            row.get(0)
+        })
+        .expect("operation count after claim");
+    assert_eq!(operations_after_claim, operations_before + 1);
+}
+
+#[tokio::test]
+async fn readyz_fails_quickly_when_the_durable_write_path_is_locked() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = directory.path().join("finitechat.sqlite3");
+    let state = HttpServerState::from_sqlite_path(&database).expect("durable state");
+    let app = http_router(state);
+    let lock = rusqlite::Connection::open(&database).expect("lock connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold SQLite write lock");
+
+    let response = tokio::time::timeout(Duration::from_secs(2), get(app.clone(), "/readyz"))
+        .await
+        .expect("readiness has a bounded response time");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["status"], "unavailable");
+    assert_eq!(body["checks"]["delivery_core"]["status"], "ok");
+    assert_eq!(body["checks"]["durable_store"]["status"], "failed");
+
+    // Liveness and the client/server version handshake stay available while
+    // readiness truthfully reports that chat writes cannot be committed.
+    let response = get(app, "/health").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: HealthResponse = read_json(response).await;
+    assert_eq!(body.status, "ok");
+
+    lock.execute_batch("ROLLBACK").expect("release SQLite lock");
 }
 
 fn assert_non_empty(value: Option<&str>) {
@@ -101,6 +258,18 @@ async fn post_json<T: Serialize>(app: Router, uri: &str, body: &T) -> Response<B
             .uri(uri)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(body).expect("json body")))
+            .expect("request"),
+    )
+    .await
+    .expect("response")
+}
+
+async fn get(app: Router, uri: &str) -> Response<Body> {
+    app.oneshot(
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
             .expect("request"),
     )
     .await

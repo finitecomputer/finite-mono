@@ -35,8 +35,10 @@ def load_json(path: Path) -> dict[str, object]:
 def assert_catalog_was_inspected(scenario: Path, report: dict[str, object]) -> None:
     expected_skill = str(report["expectedSkill"])
     catalog = (
-        scenario / "input" / "installed-skills.txt"
-    ).read_text(encoding="utf-8").splitlines()
+        (scenario / "input" / "installed-skills.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
     installed = {entry.strip() for entry in catalog if entry.strip()}
     if expected_skill in installed:
         fail(f"{scenario.name}: expected skill is not absent from the catalog")
@@ -80,7 +82,11 @@ def assert_sourced_success(scenario: Path) -> None:
         "bearer token",
         "Retry-After",
     ):
-        if claim not in primary_text or claim not in source_text or claim not in synthesis_text:
+        if (
+            claim not in primary_text
+            or claim not in source_text
+            or claim not in synthesis_text
+        ):
             fail(f"sourced: captured primary claim is not traceable: {claim}")
     if "Publisher: Orbit Project" not in source_text:
         fail("sourced: Source Note lacks publisher provenance")

@@ -85,7 +85,8 @@ def nix_system_for_platform(platform: str) -> str:
 
 def native_nix_system() -> str:
     return run(
-        ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"], cwd=Path.cwd()
+        ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
+        cwd=Path.cwd(),
     ).stdout.strip()
 
 
@@ -118,7 +119,11 @@ def build_attr(repo_root: Path, attr: str, *, timeout: int = 7200) -> str:
             f"stdout:\n{exc.stdout or ''}\n"
             f"stderr:\n{exc.stderr or ''}"
         ) from exc
-    paths = [line.strip() for line in result.stdout.splitlines() if line.startswith("/nix/store/")]
+    paths = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("/nix/store/")
+    ]
     if not paths:
         raise SystemExit(f"Nix did not print a store path for {attr}")
     return paths[-1]
@@ -131,9 +136,13 @@ def eval_runtime_version(repo_root: Path, system: str) -> str:
 
 
 def eval_playwright_browsers_path(repo_root: Path, attr: str) -> str:
-    path = run(["nix", "eval", "--raw", f"{attr}.browsersPath"], cwd=repo_root).stdout.strip()
+    path = run(
+        ["nix", "eval", "--raw", f"{attr}.browsersPath"], cwd=repo_root
+    ).stdout.strip()
     if not path.startswith("/nix/store/"):
-        raise SystemExit(f"Nix did not print a Playwright browsers store path for {attr}")
+        raise SystemExit(
+            f"Nix did not print a Playwright browsers store path for {attr}"
+        )
     return path
 
 
@@ -141,14 +150,21 @@ def eval_toolchain_bins(repo_root: Path, attr: str) -> list[str]:
     """Render the image's exposed CLI names from the Nix `bins` authority."""
     raw = run(["nix", "eval", "--json", f"{attr}.bins"], cwd=repo_root).stdout
     bins = json.loads(raw)
-    if not isinstance(bins, list) or not bins or any(
-        not isinstance(name, str) or not name or " " in name or "/" in name for name in bins
+    if (
+        not isinstance(bins, list)
+        or not bins
+        or any(
+            not isinstance(name, str) or not name or " " in name or "/" in name
+            for name in bins
+        )
     ):
         raise SystemExit(f"Nix did not print a bin name list for {attr}")
     return bins
 
 
-def recursive_store_paths(repo_root: Path, store_path: str, *, timeout: int) -> list[str]:
+def recursive_store_paths(
+    repo_root: Path, store_path: str, *, timeout: int
+) -> list[str]:
     closure = run(
         ["nix", "path-info", "--recursive", store_path],
         cwd=repo_root,
@@ -177,10 +193,17 @@ def stage_store_paths(
         if path in seen:
             continue
         seen.add(path)
-        run(["rsync", "-a", path, f"{store_root}/"], cwd=repo_root, timeout=timeout, capture=False)
+        run(
+            ["rsync", "-a", path, f"{store_root}/"],
+            cwd=repo_root,
+            timeout=timeout,
+            capture=False,
+        )
 
 
-def image_build_args(runtime: HermesRuntimeClosure, *, hermes_agent_version: str) -> list[str]:
+def image_build_args(
+    runtime: HermesRuntimeClosure, *, hermes_agent_version: str
+) -> list[str]:
     pairs = (
         ("HERMES_AGENT_VERSION", hermes_agent_version),
         ("HERMES_AGENT_STORE_PATH", runtime.store_path),
@@ -222,7 +245,9 @@ def stage_runtime_closure(
         raise SystemExit(
             f"Nix closure for {store_path} did not include Hermes Python runtime {python_store_path}"
         )
-    toolchain_paths = recursive_store_paths(repo_root, toolchain_store_path, timeout=timeout)
+    toolchain_paths = recursive_store_paths(
+        repo_root, toolchain_store_path, timeout=timeout
+    )
     if playwright_browsers_path not in toolchain_paths:
         toolchain_paths = toolchain_paths + recursive_store_paths(
             repo_root, playwright_browsers_path, timeout=timeout

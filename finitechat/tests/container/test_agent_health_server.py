@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -130,6 +131,83 @@ class AgentHealthServerTest(unittest.TestCase):
         healthy = self.health.runtime_health()
         self.assertTrue(self.health.runtime_ready(healthy))
         self.assertEqual(healthy["agentd"]["version"], "0.1.0")
+
+    def write_agentd_status(self, age_secs: float = 0) -> None:
+        status_path = self.agent_home / "agentd" / "status.json"
+        status_path.parent.mkdir(exist_ok=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "version": "0.1.0",
+                    "processes": {
+                        "processes": {
+                            name: {"state": "running"}
+                            for name in ("finitechat", "health", "hermes")
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        if age_secs:
+            old = time.time() - age_secs
+            os.utime(status_path, (old, old))
+
+    def test_frozen_agentd_heartbeat_is_not_ready(self) -> None:
+        # A status file a dead (SIGKILLed) agentd left behind keeps green
+        # contents; the freshness gate must override them (PR 440 backport).
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_agentd_status(age_secs=3600)
+
+        payload = self.health.runtime_health()
+
+        self.assertFalse(self.health.runtime_ready(payload))
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["ready_reason"], "agentd_status_stale")
+        self.assertFalse(payload["agentd"]["ok"])
+        self.assertIs(payload["agentd"]["stale"], True)
+        self.assertEqual(payload["agentd"]["status"], "unavailable")
+
+    def test_fresh_agentd_heartbeat_stays_ready_without_a_reason(self) -> None:
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_agentd_status()
+
+        payload = self.health.runtime_health()
+
+        self.assertTrue(self.health.runtime_ready(payload))
+        self.assertTrue(payload["ready"])
+        self.assertNotIn("ready_reason", payload)
+
+    def test_not_ready_bodies_name_the_cause(self) -> None:
+        missing_bridge = self.health.runtime_health()
+        self.assertEqual(missing_bridge["ready_reason"], "bridge_not_connected")
+        self.assertFalse(missing_bridge["ready"])
+
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_startup_report(
+            {
+                "schema_version": 1,
+                "report_kind": "finite_agent_startup",
+                "boot_mode": "recover_known_good",
+                "status": "refused",
+                "phase": "blocked",
+                "error_code": "identity_missing_or_corrupt",
+            }
+        )
+        refused = self.health.runtime_health()
+        self.assertEqual(refused["ready_reason"], "bootstrap_failed")
+        (self.agent_home / "startup-report.json").unlink()
+
+        self.health.__dict__["AGENTD_REQUIRED"] = True
+        self.addCleanup(setattr, self.health, "AGENTD_REQUIRED", False)
+        agentd_missing = self.health.runtime_health()
+        self.assertEqual(agentd_missing["ready_reason"], "agentd_not_running")
+        self.assertFalse(agentd_missing["agentd"]["ok"])
+
+        self.write_agentd_status()
+        (self.agent_home / "config.json").unlink()
+        missing_identity = self.health.runtime_health()
+        self.assertEqual(missing_identity["ready_reason"], "identity_not_ready")
 
     def test_runtime_startup_never_calls_deleted_invite_cli(self) -> None:
         gateway = GATEWAY.read_text(encoding="utf-8")

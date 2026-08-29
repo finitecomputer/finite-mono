@@ -15,6 +15,19 @@ Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic
 auth credentials.
 
+The Chat public probe is semantic rather than process-only: once per minute it
+calls `https://chat.finite.computer/readyz`. The server must acquire its shared
+delivery lock and commit a service-owned SQLite probe row within one second;
+the blackbox edge-to-store request has a 1.5-second timeout. Either a 503 or a
+slow response makes the existing `chat.finite.computer` availability series
+red in Grafana. The service caches results for thirty seconds to coalesce the
+host and public checks and bound the write rate of this public endpoint.
+
+Roll out the lat1 closure that serves `/readyz` before deploying the monitoring
+receiver change. A rollback to a pre-`/readyz` server closure must also roll the
+receiver target back to `/health`; otherwise Chat can be serving while the
+newer probe correctly reports that its expected semantic endpoint is absent.
+
 The monitoring host stores operational credentials only as operator-provisioned
 host files:
 
@@ -44,17 +57,26 @@ The logs file must contain `FINITE_LOGS_WRITE_USERNAME` and
 credential. It is intentionally separate from the Prometheus remote-write
 credential.
 
-Before activating a LAT host closure that includes journald log shipping,
-validate the host-local files without printing values:
+The repository-provisioned Grafana dashboard includes `finite-lat-1` through
+`finite-lat-4`. Retired hosts remain visible in the scrape-health panel as
+`DOWN` after their remote-written series goes stale, while replacement hosts
+appear as soon as their Alloy collectors begin writing with the corresponding
+host label.
+
+Before activating a LAT host closure that includes journald log shipping, an
+operator can validate the host-local files early without printing values:
 
 ```sh
-ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
-ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-1 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-2 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-3 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-4 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ```
 
 `scripts/deploy-lat1-closure-cache` runs this preflight automatically for lat1
-when the target revision contains the log-shipping Alloy config. Lat3 currently
-needs the explicit preflight before its activation path.
+when the target revision contains the log-shipping Alloy config. The NixOS
+activation also runs the preflight on every host with Alloy log shipping
+configured, including finite-lat-3.
 
 Deploy from a clean checkout after the change is on `origin/main`:
 
