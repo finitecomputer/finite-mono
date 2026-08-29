@@ -52,6 +52,20 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-29 — Chat-server unfreeze (#770) deployed; Agent Runtime `2026-08-29.4` promoted; lat4 rolled
+
+- Chat-authz stack merged 21:28Z (#710, #711, #712; NIP-98 auth included but off).
+- Chat-server closure deployed to lat2: configuration revision
+  `9788a9ad` (includes #770's boot reconciler and snapshot-cadence fix);
+  `finitechat-server` restarted 22:08:20Z. First serving boot runs the
+  frozen-projection reconciliation; outboxes drain via normal retry.
+- `finite-agent-runtime-2026-08-29.4` promoted 22:09Z:
+  `ghcr.io/finitecomputer/agent-runtime:2026-08-29.4@sha256:79d87f10ffc481c64ba8f53ad6e38574f8df0ef2757abd14c7458b6631a11ef6`
+  (sidecar fixes from `.3` plus the chat-authz stack). Core records all 21
+  lat4 Runtimes on `.4`. lat3's 30 Runtimes remain on `2026-08-29.1`.
+  Fresh-launch pin evidence per host still to be recorded; #773 covers the
+  stale kimi-k2-6 launch overrides in the live runner operator files.
+
 ### 2026-08-29 — Agent Runtime `2026-08-29.3` promoted; Waffle Prime canary
 
 - Published from `c94134c7` (PRs #765 + #768):
