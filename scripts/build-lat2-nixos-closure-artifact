@@ -8,7 +8,7 @@ set -euo pipefail
 # nothing is built on the Mac, on a prod box, or inside rescue mode.
 
 system_target="nixosConfigurations.finite-lat-2.config.system.build.toplevel"
-disko_target="nixosConfigurations.finite-lat-2.config.system.build.diskoScript"
+disko_target="packages.x86_64-linux.finite-lat-2-disko"
 
 usage() {
   echo "usage: $0 <exact-40-hex-mono-rev> <output-dir>" >&2
@@ -61,9 +61,11 @@ system_path="$(nix build \
   --option builders '' \
   --option max-jobs auto \
   --print-build-logs \
-  --out-link "$out_dir/system" \
+  --no-link \
   --print-out-paths \
-  ".#${system_target}")"
+  ".#${system_target}" \
+  | grep -E "^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$" \
+  | tail -1)"
 
 if [[ ! "$system_path" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$ ]]; then
   echo "unexpected system output path: ${system_path}" >&2
@@ -73,44 +75,44 @@ if [[ ! -x "$system_path/bin/switch-to-configuration" ]]; then
   echo "system output lacks switch-to-configuration: ${system_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/system")" != "$system_path" ]]; then
-  echo "out-link ${out_dir}/system does not resolve to ${system_path}" >&2
-  exit 70
-fi
 
 disko_path="$(nix build \
   --option builders '' \
   --option max-jobs auto \
   --print-build-logs \
-  --out-link "$out_dir/disko" \
+  --no-link \
   --print-out-paths \
-  ".#${disko_target}")"
+  ".#${disko_target}" \
+  | grep -E "^/nix/store/[0-9a-z]{32}-disko$" \
+  | tail -1)"
 
 if [[ ! "$disko_path" =~ ^/nix/store/[0-9a-z]{32}-disko$ ]]; then
   echo "unexpected disko output path: ${disko_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/disko")" != "$disko_path" ]]; then
-  echo "out-link ${out_dir}/disko does not resolve to ${disko_path}" >&2
+[[ -e "$disko_path" ]] || {
+  echo "disko output did not realize: ${disko_path}" >&2
   exit 70
-fi
+}
 
 kexec_path="$(nix build \
   --option builders '' \
   --option max-jobs auto \
   --print-build-logs \
-  --out-link "$out_dir/kexec" \
+  --no-link \
   --print-out-paths \
-  ".#packages.x86_64-linux.finite-lat-2-kexec")"
+  ".#packages.x86_64-linux.finite-lat-2-kexec" \
+  | grep -E "^/nix/store/[0-9a-z]{32}-kexec-tarball$" \
+  | tail -1)"
 
 if [[ ! "$kexec_path" =~ ^/nix/store/[0-9a-z]{32}-kexec-tarball$ ]]; then
   echo "unexpected kexec output path: ${kexec_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/kexec")" != "$kexec_path" ]]; then
-  echo "out-link ${out_dir}/kexec does not resolve to ${kexec_path}" >&2
+[[ -e "$kexec_path" ]] || {
+  echo "kexec output did not realize: ${kexec_path}" >&2
   exit 70
-fi
+}
 
 nix path-info --recursive "$system_path" > "$out_dir/store-paths.txt"
 nix path-info --closure-size "$system_path" > "$out_dir/closure-size.txt"

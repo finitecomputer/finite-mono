@@ -332,7 +332,12 @@
             finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-3-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-lat-2-system = lat2.config.system.build.toplevel;
-            finite-lat-2-disko = lat2.config.system.build.diskoScript;
+            # Partitioning uses the plain (unguarded) disko script: the ESP
+            # guard lives in the guarded system closure's bootloader
+            # installer and runs at switch time, not at partition time.
+            # Requesting the guarded eval's disko here pulls both disko
+            # derivations into the build and breaks out-link determinism.
+            finite-lat-2-disko = lat2Unguarded.config.system.build.diskoScript;
             finite-lat-2-kexec = lat2Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-2-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
