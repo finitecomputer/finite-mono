@@ -2,14 +2,17 @@
 
 `ghcr.io/finitecomputer/agent-runtime` (mono-owned; the legacy
 `finite-agent-runtime` package is frozen with the deployed pins) — the image
-the lat1 finite-saas-runner will launch into Kata first and Phala as a fast
-follow. Image
+the Kata runners on lat3 and lat4 launch into. Phala is
+a fast follow and must consume the same artifact contract and image digest.
+Image
 definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 [README.md](README.md) — no Kata/Phala/Tinfoil promotion without a Docker proof.
 
-> **Runner status:** finite-saas-runner lives on lat1 as a NixOS systemd timer
-> (`modules/finite-saas-runner.nix`) and advertises the Kata adapter. Phala is
-> a fast follow and must consume the same artifact contract and image digest.
+> **Runner status:** finite-saas-runner runs as a NixOS systemd timer on the
+> active Kata hosts lat3 and lat4 (`modules/finite-saas-runner.nix`) and
+> advertises the Kata adapter. lat1 is retired/leftover-inactive; its runner
+> cannot lease work. Phala is a fast follow and must consume the same
+> artifact contract and image digest.
 
 ## PRECONDITIONS
 
@@ -17,8 +20,8 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
   `depot-ubuntu-24.04` label. Set `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or the
   shared `DEPOT_PROJECT_ID` repository variable or secret for Depot remote
   container builds. The workflow authenticates through `depot/setup-action`
-  OIDC. Image builds run in CI on ephemeral Depot runners/builders; lat1
-  launches only the resulting digest-pinned artifact.
+   OIDC. Image builds run in CI on ephemeral Depot runners/builders; the
+   active hosts launch only the resulting digest-pinned artifact.
 - The tree state you are building is on the ref you dispatch (the single
   checkout SHA pins finitechat + finite-sites + finite-brain + finite-skills
   together; that is the whole point of the mono adaptation — see the header in
@@ -66,11 +69,12 @@ custody, or an empty-target restore. Those remain separate paid-cohort gates;
 do not describe the boot repair or a provider-volume restart as product
 Recovery Readiness.
 
-### 3. Promote to the lat1 runner
+### 3. Promote to the Kata hosts
 
-The runner does **not** read an image tag directly. On NixOS lat1 the env is
-`/etc/finite/runner.env` (secrets bootstrap — `infra/nixos/README.md`;
-template: `infra/hosts/lat1/systemd/runner.env.example`). The pin is:
+The runner does **not** read an image tag directly. On each active NixOS Kata
+host (lat3 and lat4) the env is `/etc/finite/runner.env` (secrets bootstrap —
+`infra/nixos/README.md`; template:
+`infra/hosts/lat1/systemd/runner.env.example`). The pin is:
 
 - **`FC_RUNNER_RUNTIME_ARTIFACT_ID`** (e.g.
   `finite-agent-runtime-canary-20260702-41b0c6d`) — product launches fetch
@@ -171,6 +175,7 @@ tree. It does not enqueue an upgrade:
 ```sh
 scripts/rollout-lat1-runtime-artifact \
   --prepare \
+  --host lat4 \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
@@ -185,6 +190,7 @@ adds only the approved hash:
 ```sh
 scripts/rollout-lat1-runtime-artifact \
   --execute-plan-hash <approved-64-hex-plan-hash> \
+  --host lat4 \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
@@ -328,8 +334,9 @@ in `infra/tinfoil/README.md`.
    uv, Playwright browsers).
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:
-   verify the Core runtime row, `journalctl -u finite-saas-runner` on lat1,
-   `nerdctl --namespace finite inspect`, and the Runtime `/healthz` response.
+   verify the Core runtime row, `journalctl -u finite-saas-runner` on the
+   target host (lat3 or lat4), `nerdctl --namespace finite inspect`, and the
+   Runtime `/healthz` response.
 3. Runtime status and the Product Release manifest agree on the image and
    component versions; no mutable branch or second runtime package is used.
 4. `scripts/finite-status` shows the new pin on every Kata host, and
