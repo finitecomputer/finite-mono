@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,8 +35,8 @@ jobs:
           exit 1
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Build and save the source-pinned compatibility image
         id: build
@@ -108,8 +109,8 @@ jobs:
           IMAGE: ghcr.io/finitecomputer/deepseek-v4-vllm
           VERSION: ${{ inputs.version }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
