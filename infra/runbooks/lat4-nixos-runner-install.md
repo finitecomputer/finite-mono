@@ -198,42 +198,95 @@ stopped-and-intact until each observation window passes.
 
 Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
 
-| Archive | Size | sha256 (archive-level) |
-|---|---|---|
-| `finite-saas-runner.tar.zst` | 19 GB | `a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba` |
-| `finite-saas-runner-kata.tar.zst` (lat1 `/data/finite-saas-runner/kata`) | 13 GB | recorded on receipt |
-| `runtime_95aa8aa8937bf5c32922.tar.zst` (Recovery Set, Aug 26 op) | 7.7 GB | recorded on receipt |
+| Archive | Exact size | sha256 (archive-level) |
+|---|---:|---|
+| `finite-saas-runner.tar.zst` | 20,089,881,363 B | `a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba` |
+| `data-finite-saas-runner.tar.zst` (newer lat1 `/data/finite-saas-runner/kata` state) | 8,189,970,726 B | `df451a5ce610099ad137c9489e12150025f9cfc5fda610c166fd4b6ef140a17d` |
+| `runtime-recovery-archive.tar.zst` (Recovery Set, Aug 26 op) | 8,193,943,598 B | `6c3c1e5312833765e4ec049bd8680e8cd33bd07df5008b939496851a0db5176b` |
+| `manifests-bundle.tar` | 50,765,312 B | `bf9a111956b66db99b675b5bcb38b0da8f5e99d9f40010900ed143740303972e` |
 
-1. Paul scps the archives + `runner-files.sha256` (154,299 lines, paths
-   relative to `finite-saas-runner/`) + `runner-files.sizes` to
-   `/data/staging/` on lat4 (created by `finite-prepare-data-root`). His
-   operator key is in the declarative `operatorKeys`, so scp works the
-   moment Gate C finishes.
+1. Copy the archives plus `runner-files.sha256` / `runner-files.sizes`
+   (154,299 lines, paths relative to `finite-saas-runner/`) and
+   `data-kata-files.sha256` / `data-kata-files.sizes` (7,065 lines including
+   the zero-byte dumbpipe `./.done` transport marker) to `/data/staging/` on
+   lat4. `finite-prepare-data-root` creates that directory as `root:root
+   0700`. An archive-mode rsync from macOS can replace the destination
+   directory metadata with the Mac UID and mode; restore the root-only
+   boundary after transport and before inspection:
+
+   ```sh
+   sudo chown root:root /data/staging
+   sudo chmod 0700 /data/staging
+   sudo find /data/staging -maxdepth 1 -type f \
+     -exec chown root:root {} + -exec chmod 0600 {} +
+   ```
 2. Verify before extracting:
 
    ```sh
-   sudo shasum -a 256 -c <<< 'a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba  /data/staging/finite-saas-runner.tar.zst'
+   sudo sha256sum -c <<'HASHES'
+   a839a582eb5b48fee08a8971c4d9d4cb585adedc3e715b8cd94ef9699d7fe4ba  /data/staging/finite-saas-runner.tar.zst
+   df451a5ce610099ad137c9489e12150025f9cfc5fda610c166fd4b6ef140a17d  /data/staging/data-finite-saas-runner.tar.zst
+   6c3c1e5312833765e4ec049bd8680e8cd33bd07df5008b939496851a0db5176b  /data/staging/runtime-recovery-archive.tar.zst
+   bf9a111956b66db99b675b5bcb38b0da8f5e99d9f40010900ed143740303972e  /data/staging/manifests-bundle.tar
+   HASHES
    ```
 
 3. Extract into the declared work root. lat4's `workRoot` is
    `/data/finite-saas-runner` (lat3-style, on the 1.8T data array — NOT
    lat1's `/var/lib` path); the archive root `finite-saas-runner/` lands
-   there directly, confirmed acceptable for the Core re-point:
+   there directly, confirmed acceptable for the Core re-point. The delivered
+   tarballs contain non-authoritative macOS AppleDouble `._*` records and the
+   `futurepaul/staff` owner. Neither appears in the
+   authoritative manifests. Exclude the metadata and use lat3's proven
+   `root:root` ownership instead of importing a foreign UID/GID:
 
    ```sh
-   sudo tar -I zstd -xf /data/staging/finite-saas-runner.tar.zst -C /data
+   sudo tar --warning=no-unknown-keyword --no-same-owner \
+     --exclude='._*' --exclude='*/._*' \
+     -I zstd -xf /data/staging/finite-saas-runner.tar.zst -C /data
+   sudo chown root:root /data/finite-saas-runner
+   sudo chmod 0700 /data/finite-saas-runner
    ```
 
 4. Per-file integrity over the whole imported tree (all 154,299 lines must
    pass):
 
    ```sh
-   cd /data/finite-saas-runner && sudo sha256sum -c /data/staging/runner-files.sha256
+   sudo sh -c 'cd /data/finite-saas-runner && sha256sum -c --quiet /data/staging/runner-files.sha256'
    ```
 
-5. Repeat verify → extract → per-file check for the kata area and the
-   `runtime_95aa8aa8937bf5c32922` Recovery Set archive (locations confirmed
-   with Paul on receipt).
+5. Overlay the newer kata capture second. It contains the same 7,064 payload
+   paths for `runtime_95aa8aa8937bf5c32922` as the main archive: 7,040 hashes
+   agree and 24 are newer/different. Extracting in the reverse order silently
+   restores the older state. The data manifest's extra `./.done` line is a
+   dumbpipe completion marker, not an archive member; do not fabricate it.
+
+   ```sh
+   sudo tar --warning=no-unknown-keyword --no-same-owner \
+     --exclude='._*' --exclude='*/._*' \
+     -I zstd -xf /data/staging/data-finite-saas-runner.tar.zst -C /data
+   sudo chown root:root /data/finite-saas-runner
+   sudo chmod 0700 /data/finite-saas-runner
+
+   sudo sh -c '
+     cd /data
+     awk "substr(\$0,67) != \"./.done\"" \
+       /data/staging/data-kata-files.sha256 |
+       sha256sum -c --quiet -
+   '
+   sudo sh -c '
+     cd /data/finite-saas-runner
+     awk "substr(\$0,67) !~ /^\\.\\/kata\\/runtime_95aa8aa8937bf5c32922\\//" \
+       /data/staging/runner-files.sha256 |
+       sha256sum -c --quiet -
+   '
+   ```
+
+   This proves the final 154,299-file tree as 147,235 unchanged main-capture
+   files plus 7,064 newer overlay files. Keep
+   `runtime-recovery-archive.tar.zst` hash-verified and root-only in
+   `/data/staging/`; it is an independent Recovery Set, not a third live-tree
+   overlay. Extract it only after Paul names a separate non-canonical target.
 6. Restore gate (per
    `docs/runs/finite-lat-capacity-and-redundancy.md`): writer stopped (the
    Runner is drained and `ConditionPathExists`-gated), no containerd task
@@ -291,7 +344,36 @@ Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
 9. `scripts/finite-status` before/after; migrated Runtimes appear under
    `finite-lat-4` with drain still true.
 
-VERIFY: all three archives hash-clean, 154,299 per-file checks pass,
+First-execution evidence (2026-08-29):
+
+- The operator Mac copied all eight files directly over lat4's public SSH
+  endpoint. Source and destination full sha256 values and exact byte sizes
+  agreed for all four archives; `/data/staging` is restored to `root:root
+  0700` with files `0600`.
+- The target work root was empty, the Runner condition was gated off because
+  `/etc/finite/runner.env` was absent, and containerd had zero containers and
+  zero tasks before import. Both RAID1 arrays were `[UU]`.
+- The main capture followed by the newer kata overlay produced exactly
+  154,299 authoritative regular files. The final combined checksum and size
+  proofs passed as 147,235 non-overlay files plus 7,064 overlay files; no
+  AppleDouble file was imported.
+- All 217 selected SQLite databases outside `workspace`, `.venv`, and
+  `node_modules` trees returned `ok` from `scripts/snapshot-sqlite
+  integrity-check` through manifested scratch copies. No imported database
+  was opened directly.
+- The directory inventory and the checksum-manifest-derived inventory agreed
+  on 35 payload durable-state directories; `.recovery-rollbacks` is a control
+  directory, not a migration candidate. All 35 identity files are regular,
+  non-symlink files. The deployed Runner produced a target state manifest for
+  every candidate in root-only
+  `/data/staging/lat4-target-state-manifests.txt` (record sha256
+  `4de33d7aaf5a7ec777901cac22a38246dc3d4bc11e96be544c7c95c809e6ca1a`).
+- WireGuard handshook with lat2 and `10.254.3.1:14200` was reachable by the end
+  of the import. This is import evidence only: Core enumeration, the exact
+  35-directory/Core-record intersection, Runner credential installation,
+  relocation, chat observation, and Gate F completion remain pending.
+
+VERIFY: all four received archives hash-clean, 154,299 per-file checks pass,
 integrity checks clean, the two enumerations agree exactly, every migrated
 Runtime relocated through `runtime_relocation.v1` and answering chat from
 lat4, and the deployment changelog records Gate F.
