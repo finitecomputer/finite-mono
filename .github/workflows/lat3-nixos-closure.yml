@@ -19,6 +19,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CACHIX_CACHE_NAME: finite
+
 jobs:
   build:
     runs-on: ${{ fromJSON(inputs.runs_on_json) }}
@@ -29,6 +32,12 @@ jobs:
           fetch-depth: 1
 
       - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
 
       - name: Build and package finite-lat-3 closure
         env:
