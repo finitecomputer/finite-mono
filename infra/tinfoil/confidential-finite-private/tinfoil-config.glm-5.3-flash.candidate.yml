@@ -38,13 +38,14 @@ containers:
         "--context-length",
         "393216",
         "--dsa-prefill-backend",
-        "tilelang",
+        "flashmla_sparse",
         "--dsa-decode-backend",
-        "tilelang",
+        "fa3",
         "--kv-cache-dtype",
         "bfloat16",
         "--moe-runner-backend",
         "deep_gemm",
+        "--disable-shared-experts-fusion",
         "--reasoning-parser",
         "glm45",
         "--tool-call-parser",
@@ -80,6 +81,8 @@ containers:
       # Existing issued Runtimes may send either historical label. The limiter
       # canonicalizes only these names; any other model fails before reserve.
       - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"
+      - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
+      - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
       - DASHBOARD_URL: "https://finite.computer/dashboard"
       - READINESS_TIMEOUT_SECS: "5"
       - FINITE_USAGE_API_TIMEOUT_SECS: "15"
