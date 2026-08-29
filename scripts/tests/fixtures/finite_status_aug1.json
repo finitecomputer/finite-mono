@@ -1,5 +1,51 @@
 {
   "now": "2026-08-01T14:00:00Z",
+  "chat_plane": {
+    "server": {
+      "database": "/var/lib/private/finite-chat/data/server.sqlite3",
+      "applicable": true,
+      "ops_head": 206563,
+      "snapshot_watermark": 204801,
+      "room_heads": {
+        "room-lat1-target-01": 206500,
+        "room-lat1-shared-07": 206100
+      },
+      "errors": []
+    },
+    "sync_rate": {
+      "window_seconds": 5,
+      "since": "2026-08-01T13:59:55Z",
+      "available": true,
+      "source": "journal:caddy.service",
+      "total": 2,
+      "clients": [
+        {
+          "ip": "207.188.7.157",
+          "count": 2,
+          "rate_per_second": 0.4,
+          "attributed_host": "finite-lat-3"
+        }
+      ],
+      "errors": []
+    },
+    "client_stores": {
+      "runner_work_root": null,
+      "stores": [
+        {
+          "kind": "hosted-device",
+          "label": "users-3f2a",
+          "path": "/var/lib/private/finitechat-hosted-device/users/users-3f2a/chat/client.sqlite3",
+          "age_seconds": 30,
+          "rooms": {
+            "room-lat1-target-01": 206400,
+            "room-lat1-shared-07": 206050
+          }
+        }
+      ],
+      "skipped": [],
+      "errors": []
+    }
+  },
   "core": {
     "artifacts": [
       {
