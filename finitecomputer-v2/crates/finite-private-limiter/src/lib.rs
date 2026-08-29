@@ -46,8 +46,8 @@ pub struct LimiterConfig {
     /// `x-finite-admission: degraded-allowlist` header so the mode is
     /// observable in captured traffic. Revert by switching the mode back to
     /// `usage-api` (or removing the env) only after `FINITE_USAGE_API_URL`
-    /// still reaches Core — a public HTML outage page on that origin is not
-    /// a usage API. No data format changes either way.
+    /// reaches Core. A public HTML outage page on that origin is not a usage
+    /// API. No data format changes either way.
     pub admission_mode: AdmissionMode,
     pub admission_allowlist: Vec<String>,
     /// When set, omitted `reasoning_effort` on `/v1/chat/completions` is
@@ -189,9 +189,8 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         config: Arc::new(config),
         client: Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            // A 307 from a public outage origin to an HTML 200 would otherwise
-            // look like a healthy usage API. Core does not redirect these
-            // routes; do not follow anyone else's.
+            // Core does not redirect health, reserve, or settle. Following a
+            // public outage origin 307 onto HTML 200 would look like success.
             .redirect(Policy::none())
             .build()
             .map_err(|error| LimiterConfigError::HttpClient(error.to_string()))?,
@@ -335,7 +334,7 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
         usage_api_target,
         Some(&state.config.finite_usage_api_service_key),
         state.config.readiness_timeout,
-        HealthBody::JsonOk,
+        HealthBody::CoreJsonOk,
     );
     let (upstream, usage_api) = tokio::join!(upstream_check, usage_api_check);
     // In allowlist mode the usage API is intentionally out of the request
@@ -362,7 +361,7 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
 #[derive(Clone, Copy)]
 enum HealthBody {
     AnySuccess,
-    JsonOk,
+    CoreJsonOk,
 }
 
 async fn check_component(
@@ -383,10 +382,10 @@ async fn check_component(
             let status = response.status();
             let (ok, error) = match body {
                 HealthBody::AnySuccess => {
-                    let _ = response;
+                    drop(response);
                     (status.is_success(), None)
                 }
-                HealthBody::JsonOk => match usage_api_health_ok(response).await {
+                HealthBody::CoreJsonOk => match usage_api_health_ok(response).await {
                     Ok(()) => (true, None),
                     Err(error) => (false, Some(error)),
                 },
@@ -443,8 +442,13 @@ async fn usage_api_health_ok(response: reqwest::Response) -> Result<(), String> 
         .unwrap_or("")
         .to_ascii_lowercase();
     if !content_type.contains("application/json") {
+        let got = if content_type.is_empty() {
+            "missing Content-Type".to_string()
+        } else {
+            content_type
+        };
         return Err(format!(
-            "usage API health returned {content_type} instead of application/json"
+            "usage API health returned {got} instead of application/json"
         ));
     }
     let body: Value = response

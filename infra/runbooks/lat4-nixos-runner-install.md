@@ -372,20 +372,6 @@ First-execution evidence (2026-08-29):
   of the import. This is import evidence only: Core enumeration, the exact
   35-directory/Core-record intersection, Runner credential installation,
   relocation, chat observation, and Gate F completion remain pending.
-- **Later 2026-08-29:** Paul installed Gate D credentials, undrained lat4
-  (`FC_RUNNER_DRAIN=false`), relocated the active lat1 set (21 tasks in the
-  `finite` containerd namespace; Core records on `finite-lat-4` /
-  `2026-08-29.1`), and rolled lat3's active set to the same artifact. Chat
-  observation is not closed: `finitechat hermes serve` still wedges on
-  unbounded HTTP (fix in PR #765, not yet in the runtime image). Finite
-  Private is in `FINITE_ADMISSION_MODE=allowlist` with one allowlist entry;
-  `https://finite.computer` is the Vercel outage page (usage-API health 307s
-  to HTML), while lat2 at `64.34.80.19` still serves Core
-  `/internal/finite-private/v1/health` as 401 JSON when resolved directly,
-  and `chat.finite.computer` remains on lat2 and healthy. Do not revert the
-  limiter to `usage-api` until `FINITE_USAGE_API_URL` reaches Core, not the
-  outage origin. Lat4's new-launch pin is still
-  `finite-agent-runtime-2026-08-27.2`.
 
 VERIFY: all four received archives hash-clean, 154,299 per-file checks pass,
 integrity checks clean, the two enumerations agree exactly, every migrated
