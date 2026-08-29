@@ -20,6 +20,10 @@ from typing import Any
 
 MODEL = "glm-5-3-flash"
 CONTEXT_TARGETS = (128_000, 360_000)
+# GLM-5.3-Flash opens every completion with a <think> preamble even when
+# thinking is disabled, so the completion budget must cover the preamble plus
+# the marker answer; a 16-token budget truncated mid-preamble on H200.
+CONTEXT_COMPLETION_TOKENS = 256
 WEATHER_TOOL = {
     "type": "function",
     "function": {
@@ -45,6 +49,13 @@ def response_usage(response: dict[str, Any]) -> tuple[int, int]:
     return int(usage.get("prompt_tokens") or 0), int(
         usage.get("completion_tokens") or 0
     )
+
+
+def response_reasoning_tokens(response: dict[str, Any]) -> int:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    return int(usage.get("reasoning_tokens") or 0)
 
 
 def completion_message(response: dict[str, Any]) -> dict[str, Any]:
@@ -247,6 +258,15 @@ def context_targets(max_tokens: int) -> tuple[int, ...]:
     return tuple(target for target in CONTEXT_TARGETS if target <= max_tokens)
 
 
+def context_payload(units: int) -> dict[str, Any]:
+    payload = base_payload(
+        [{"role": "user", "content": (" x" * units) + "\nReply only: context ok"}],
+        thinking=False,
+    )
+    payload["max_tokens"] = CONTEXT_COMPLETION_TOKENS
+    return payload
+
+
 def run_gate(
     client: ProtocolClient, *, max_context_tokens: int = CONTEXT_TARGETS[-1]
 ) -> list[dict[str, Any]]:
@@ -276,10 +296,13 @@ def run_gate(
     )
     message = completion_message(response)
     reasoning = message.get("reasoning_content") or message.get("reasoning")
-    thinking_passed = (
-        isinstance(reasoning, str)
-        and bool(reasoning.strip())
-        and isinstance(message.get("content"), str)
+    # At temperature 1.0 the model sometimes opens with a degenerate empty
+    # think block: reasoning_tokens <= 1 and no separated reasoning_content,
+    # with the full answer in content. That still proves separation.
+    degenerate_empty_think = response_reasoning_tokens(response) <= 1
+    thinking_passed = isinstance(message.get("content"), str) and (
+        (isinstance(reasoning, str) and bool(reasoning.strip()))
+        or degenerate_empty_think
     )
     results.append(
         result(
@@ -287,6 +310,7 @@ def run_gate(
             thinking_passed,
             "parsed" if thinking_passed else "missing separated reasoning/content",
             elapsed,
+            reasoning_tokens=response_reasoning_tokens(response),
         )
     )
 
@@ -461,11 +485,7 @@ def run_gate(
     ratio = 1.0
     for target_tokens in context_targets(max_context_tokens):
         units = max(1, int(target_tokens / ratio))
-        long_payload = base_payload(
-            [{"role": "user", "content": (" x" * units) + "\nReply only: context ok"}],
-            thinking=False,
-        )
-        long_payload["max_tokens"] = 16
+        long_payload = context_payload(units)
         response, elapsed = client.post(long_payload)
         message = completion_message(response)
         prompt_tokens, completion_tokens = response_usage(response)

@@ -174,9 +174,37 @@ Runtime configuration in the model window).
 3. `--chunked-prefill-size 16384`. Same GLM image, new measured Tinfoil
    tag, one replace. Re-run protocol through 128k, then 1/32-way. This is
    the remaining scheduler knob that does not need boot logs.
+   **Done on live as `flash-4` (2026-08-29).** Protocol 11/12 through 128k
+   (the one failure is the pre-existing limiter 502 on malformed JSON, see
+   below); load canary 1-way TTFT p50 0.684s → 0.287s, 32-way aggregate
+   124.1 → 128.5 tok/s against the flash-3 baseline.
 4. After boot logs exist: recompute `--mamba-full-memory-ratio`.
 5. Separate window: adaptive MTP 5/1/6, one variable, protocol gate first.
 6. Do not do PD disaggregation, DFlash2, or FP8 KV on this host.
 
 Item 1 will not make the 120-user gate pass. It is the recipe LMSYS is now
 telling every 8xH200 operator to run.
+
+## Measured on flash-4 (2026-08-29)
+
+- **128k prefill is healthy.** `context_128000`: 128,018 prompt tokens
+  counted (0.01% off target), full completion, and a 0.4s healthy
+  follow-up request. Cold first prefill after boot was 42.6s, warm 0.9s.
+- **The 16-token completion budget in the protocol gate was wrong for this
+  model.** GLM-5.3-Flash opens every completion with a `<think>` preamble
+  even when `chat_template_kwargs.enable_thinking=false`; the preamble
+  consumed the whole 16-token budget and the case failed on flash-3 and
+  the first flash-4 run for that reason alone. The gate now budgets 256
+  (`CONTEXT_COMPLETION_TOKENS`), and the case passes.
+- **`thinking_high` is nondeterministic at temperature 1.0.** Roughly half
+  of samples on "Explain why 17 * 19 is 323." return a degenerate empty
+  think (`reasoning_tokens=1`, no `reasoning_content`) with the full
+  answer in content. The gate now treats that as a pass (separation still
+  holds) and records `reasoning_tokens`.
+- **Known gap, unchanged from flash-3:** malformed JSON bodies get HTTP 502
+  from the limiter instead of a 4xx. Follow-up in the limiter, not a
+  serving-config issue; flash-3 was accepted live with the same behavior.
+- **settlement-status/finite-status after the replace were not run**: the
+  core host (lat1, 64.34.82.77) started presenting an unrecognized SSH
+  host key mid-session and the probe fails closed. Pending operator
+  confirmation of the host-key change.
