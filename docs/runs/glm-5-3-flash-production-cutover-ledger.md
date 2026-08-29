@@ -167,6 +167,17 @@ at time of writing:
   debugging session; the historical name was already dark due to the outage,
   so no additional availability was lost.
 
+Operator decision (same evening, authorized): single-container topology —
+the failed bridge container was deleted rather than further iterated, so the
+historical `kimi-k2-6` hostname is retired until readers migrate. The fleet
+now runs exactly one live container: `finite-private` (GLM-5.3-Flash, ready).
+Rollback is unaffected: it recreates DeepSeek from release
+`v2026-08-13-deepseek-v4-flash-0731-128-2048-1` under the historical name via
+`--replace`. The runbook's historical-route proof step is waived by operator
+authorization for this window; migrating issued Runtime readers to the
+stable `finite-private` endpoint is the follow-up that makes the retirement
+permanent.
+
 ## Parked HITL Slices
 
 | Slice | Why parked | Blocks | Required human action | Draft PR decision |
