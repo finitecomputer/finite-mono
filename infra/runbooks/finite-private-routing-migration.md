@@ -3,14 +3,16 @@
 Status: design and preparation only. No DNS, custom-domain, container, or
 production state mutation is authorized by this file.
 
-The GLM-5.3-Flash cutover additionally prepares a temporary CPU-only bridge at
-the historical generated name. That bridge permits the GPU container to adopt
-`finite-private` in one maintenance window without rewriting issued Runtime
-readers. It does not replace the preferred custom-domain migration below: the
-bridge remains until reader inventory has converged on the stable route and an
-observation window records no historical-route reads. See
-`finite-private-glm-5.3-flash-production-cutover.md` for its bounded deployment
-and rollback contract.
+The GLM-5.3-Flash cutover adopted `finite-private` in one window. The
+temporary CPU-only bridge at the historical generated name was created,
+failed platform healthchecks, and was deleted by operator decision the
+same evening. The historical `kimi-k2-6` hostname is dark. Issued Runtime
+readers still need a follow-up onto
+`https://finite-private.finite.containers.tinfoil.dev`. This file's
+preferred custom-domain migration (`inference.finite.computer`) remains
+the durable route plan and is still unattached. See
+`finite-private-glm-5.3-flash-production-cutover.md` for the bounded
+deployment and rollback contract.
 
 ## Decision
 
@@ -18,8 +20,10 @@ The stable service identity is **Finite Private**, not a model name. Use:
 
 - container name: `finite-private`;
 - preferred custom route: `inference.finite.computer`;
-- current model: `deepseek-v4-flash-0731`;
-- mixed-version model alias: `glm-5-2`.
+- current generated route: `finite-private.finite.containers.tinfoil.dev`;
+- current model: `glm-5-3-flash`;
+- mixed-version model aliases: `deepseek-v4-flash-0731`, `glm-5-2`, and
+  dotted `glm-5.3-flash`.
 
 Do not rename the container to `deepseek-*`. Finite Private has already served
 Kimi, GLM, and DeepSeek, and a model-specific infrastructure name recreates the

@@ -10,9 +10,11 @@
 - Human owner: Finite operator
 - Started: 2026-08-27
 - Current status: GLM-5.3-Flash live on `finite-private` under temporary
-  degraded admission (`v2026-08-28-glm-5-3-flash-3`). DSA backends are the
-  measured H200 pair (`flashmla_sparse`/`fa3`); omitted requests get
-  `reasoning_effort=high`. 32-way TTFT still ~34s. See
+  degraded admission (`v2026-08-28-glm-5-3-flash-4`, container
+  `2aa4d230-0675-4c4a-a7b3-07776b24bfad`). Serving is the H200 DSA pair plus
+  chunked prefill 16384. Wire name is hyphenated `glm-5-3-flash` (dotted
+  `glm-5.3-flash` is a 400). 393,216 context is live-proven. Issued Runtime
+  readers still point at the retired `kimi-k2-6` hostname. See
   `docs/runs/glm-5-3-flash-degraded-admission.md`.
 - Skill setup status: complete (`docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md` are present)
@@ -233,6 +235,38 @@ and fill omitted `reasoning_effort` with `high`. Did not add
   still 33.8s (was 33.1s). Short-prompt load does not show LMSYS's 24k-prefix
   TTFT win. 120-user bars still out of reach.
 
+## 2026-08-29 flash-4 chunked prefill + 392k proof (authorized)
+
+Operator authorized one more `--replace` onto
+`v2026-08-28-glm-5-3-flash-4`: same overlay, same limiter `.6`, add
+`--chunked-prefill-size 16384`. Container
+`2aa4d230-0675-4c4a-a7b3-07776b24bfad` is `ready` on `control.inf9.tinfoil.sh`.
+The Kimi compatibility bridge stays deleted; the fleet has exactly this one
+GPU container.
+
+Load canary vs flash-3 (thinking-off, 64 completion tokens):
+
+| concurrency | flash-3 TTFT p50 | flash-4 TTFT p50 | flash-3 aggregate | flash-4 aggregate | per-request p50 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0.684s | **0.287s** | — | — | 96.8 tok/s |
+| 32 | 15.70s | **15.13s** | 124.1 | **128.5** | 81.9 tok/s |
+
+64-way was measured on this box earlier in the cutover (not re-run on
+flash-4): 69.6 tok/s p50 per stream, 237.4 aggregate, still under the 90s
+TTFT ceiling.
+
+Full advertised context is live, not just configured. A needle probe of
+**387,498 prompt tokens** (98.5% of the 393,216 cap) through the limiter
+returned the needle on cold prefill in 21.3s and on the warm cached path in
+2.5s. Protocol 11/12 through 128k; the remaining failure is the limiter's
+pre-existing 502 on malformed JSON.
+
+Wire-name gotcha, proven the same night: the limiter accepts only the
+hyphenated id `glm-5-3-flash`. The dotted `glm-5.3-flash` (Z.ai product
+spelling) is `400 unsupported_model`. The candidate now lists the dotted
+form as an alias so copied health/docs names do not 400; the canonical
+served name stays hyphenated.
+
 ## Parked HITL Slices
 
 | Slice | Why parked | Blocks | Required human action | Draft PR decision |
@@ -251,18 +285,20 @@ and fill omitted `reasoning_effort` with `high`. Did not add
 ## Remaining release blockers
 
 - The 120-user definition of "decent" is fixed for this candidate at 20 tok/s
-  p50, 10 tok/s p10, 2,400 aggregate output tok/s, and 10-second p95 TTFT. It
-  may be raised before publication; lowering it requires a reviewed PR and a
-  new operator decision.
-- The runbook's named pre-existing fleet exceptions (readiness reporting gap
-  and aggregate/snapshot mismatch) must be reviewed and accepted by the
-  operator before the retry window; without them the entry gate fails exactly
-  as it did on 2026-08-28.
+  p50, 10 tok/s p10, 2,400 aggregate output tok/s, and 10-second p95 TTFT.
+  flash-4 does not meet those bars. Lowering them requires a reviewed PR and
+  a new operator decision.
+- Usage admission on `finite.computer` is still missing, so the live
+  container stays on the degraded allowlist overlay. Settlement and
+  accounting gates cannot pass until that route returns a real 2xx/4xx.
+- Issued Runtime / Hermes / Runner readers still default to the retired
+  `kimi-k2-6` hostname and the DeepSeek model label. That is the stacked
+  follow-up, not this serving PR.
 
 ## Escalations
 
 - The old generated `kimi-k2-6.finite.containers.tinfoil.dev` hostname cannot
-  move with the GPU container. The safe one-window rename therefore requires a
-  separately measured CPU-only compatibility bridge at the historical name,
-  or an already-verified stable custom domain. Directly replacing the hostname
-  would break issued Runtime readers.
+  move with the GPU container. The compatibility bridge was deleted by
+  operator decision the same evening; the historical name is dark. New
+  launches and existing Runtime env still need the reader cutover onto
+  `https://finite-private.finite.containers.tinfoil.dev/v1`.

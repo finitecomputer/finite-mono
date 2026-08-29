@@ -79,9 +79,11 @@ containers:
       - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
       - FINITE_PRIVATE_MODEL: "glm-5-3-flash"
       - FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"
-      # Existing issued Runtimes may send either historical label. The limiter
-      # canonicalizes only these names; any other model fails before reserve.
-      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"
+      # Existing issued Runtimes may send either historical label. The dotted
+      # Z.ai spelling is accepted as an alias; the served name stays hyphenated.
+      # The limiter canonicalizes only these names; any other model fails
+      # before reserve.
+      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"
       - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
       - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
       - DASHBOARD_URL: "https://finite.computer/dashboard"

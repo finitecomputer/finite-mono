@@ -16,8 +16,8 @@ The current model/container/alias map and retired lab state are recorded in
 
 | Repo | Enclave | Inputs pinned from mono |
 |---|---|---|
-| `finitecomputer/confidential-finite-private` | Prepared Finite Private GLM-5.3-Flash inference (8×H200) + finite-private-limiter shim (:8002) | This satellite does not exist yet and the checked-in candidate is deliberately blocked on immutable image and modelwrap pins. The planned outer identity is model-independent `finite-private`; the served model remains `glm-5-3-flash`. |
-| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (DeepSeek V4 Flash 0731, 8×H200) + finite-private-limiter shim (:8002) | The repo/container name is historical compatibility identity. Production serves canonical `deepseek-v4-flash-0731` plus the `glm-5-2` mixed-version alias. The measured 128/2048 scheduler candidate and guarded update runbook live under `infra/tinfoil/confidential-kimi-k2-6/`. |
+| `finitecomputer/confidential-finite-private` | Finite Private GLM-5.3-Flash inference (8×H200) + finite-private-limiter shim (:8002) | Live as external container `finite-private` (`v2026-08-28-glm-5-3-flash-4`). Canonical model `glm-5-3-flash`; aliases `deepseek-v4-flash-0731`, `glm-5-2`, and dotted `glm-5.3-flash`. |
+| `finitecomputer/confidential-kimi-k2-6` | Historical Finite Private satellite (DeepSeek V4 Flash 0731, 8×H200) | The generated hostname is retired. DeepSeek rollback still recreates from this satellite under the historical name. Measured 128/2048 scheduler candidate lives under `infra/tinfoil/confidential-kimi-k2-6/`. |
 | `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Config/proxy sources under `finite-search/tinfoil/searxng-public/` in this repo (that dir mirrors the satellite's content, including its release workflows). |
 | `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
 
@@ -29,7 +29,7 @@ The current model/container/alias map and retired lab state are recorded in
    package; the legacy finite-private-limiter package stays frozen).
    Do not reuse the earlier 2026-07-09 mono image: its source predates the
    legacy-parity import. Build a fresh digest from the exact merged SHA.
-3. Update the digest pin in `confidential-kimi-k2-6`'s config; its measured
+3. Update the digest pin in `confidential-finite-private`'s config; its measured
    release workflow produces the new enclave release.
 4. Follow `infra/runbooks/finite-private-limiter-mono-switch.md`. The ops
    wrapper now lives at `infra/runbooks/finite-private-ops.sh` and requires an

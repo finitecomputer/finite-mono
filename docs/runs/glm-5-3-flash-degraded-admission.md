@@ -6,14 +6,17 @@ Default remains usage-api; this overlay exists to be torn down.
 
 Live identity:
 
-- Container: `finite-private` (`fa79c9b9-551c-4307-9ee0-cba2e5662e2d`)
-- Release: `v2026-08-28-glm-5-3-flash-3`
+- Container: `finite-private` (`2aa4d230-0675-4c4a-a7b3-07776b24bfad`)
+- Release: `v2026-08-28-glm-5-3-flash-4`
 - Overlay: `infra/tinfoil/confidential-finite-private/tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`
 - Limiter image: `ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461`
 - SGLang image: unchanged `glm-5-3-flash-sglang:2026-08-28.3`
 - DSA: `--dsa-prefill-backend flashmla_sparse --dsa-decode-backend fa3`
+- Chunked prefill: `--chunked-prefill-size 16384`
+- Context cap: `--context-length 393216` (needle-proven at 387,498 tokens)
+- Wire name: `glm-5-3-flash` (hyphenated). Dotted `glm-5.3-flash` is an alias.
 - Default thinking: `FINITE_PRIVATE_DEFAULT_REASONING_EFFORT=high` (fill-if-absent)
-- Code: PR #746 (allowlist) + PR #748 (DSA pin + thinking default)
+- Code: PR #746 (allowlist) + PR #748 (DSA pin + thinking default + flash-4)
 
 The GLM checkpoint, SGLang image, and MPK are unchanged from
 `v2026-08-28-glm-5-3-flash-1`. `flash-2` was the same overlay with TileLang
@@ -155,3 +158,27 @@ noise on short prompts. Our 32-way thinking-on load is the short-prompt case,
 so this was the cheapest correct recipe change, not a 120-user fix. Next
 one-variable lever is still `--mamba-full-memory-ratio` from boot pool sizes,
 then adaptive MTP.
+
+## flash-4 chunked prefill (2026-08-29)
+
+Same overlay, one `--replace` onto `v2026-08-28-glm-5-3-flash-4`. Only serving
+delta vs `flash-3`: `--chunked-prefill-size 16384`. Container
+`2aa4d230-0675-4c4a-a7b3-07776b24bfad`.
+
+Thinking off, 64 output tokens (`load-canary`):
+
+| concurrency | flash-3 TTFT p50 | flash-4 TTFT p50 | flash-3 aggregate | flash-4 aggregate | flash-4 per-request p50 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0.684s | 0.287s | — | — | 96.8 tok/s |
+| 32 | 15.70s | 15.13s | 124.1 | 128.5 | 81.9 tok/s |
+
+The 1-way TTFT win is real. 32-way TTFT only moved ~4%; the queued-burst
+edge is still prefill, not decode. 64-way on this box earlier in the
+cutover held at 69.6 tok/s p50 per stream / 237.4 aggregate.
+
+393,216 context: a 387,498-token needle through the live limiter retrieved
+correctly (cold 21.3s, warm 2.5s). That is one retrieval, not a quality
+eval at depth.
+
+Wire name: request `glm-5-3-flash`. The dotted `glm-5.3-flash` 400s unless
+listed as an alias.

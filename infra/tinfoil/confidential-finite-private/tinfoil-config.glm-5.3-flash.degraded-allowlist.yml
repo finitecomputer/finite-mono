@@ -1,12 +1,12 @@
 # TEMPORARY overlay. Not the production-default candidate.
 #
-# Intended live tag: v2026-08-28-glm-5-3-flash-4. Same GLM checkpoint,
-# SGLang image, DSA pair (flashmla_sparse / fa3), and limiter 2026-08-28.6
-# as flash-3, plus --chunked-prefill-size 16384 from the LMSYS 8xH200 A/B.
-# Deltas from the candidate remain FINITE_ADMISSION_MODE=allowlist and the
-# FINITE_ADMISSION_ALLOWLIST secret. Usage admission on finite.computer is
-# still missing (POST /internal/finite-private/v1/reservations redirects to
-# the homepage).
+# Live tag: v2026-08-28-glm-5-3-flash-4 (container 2aa4d230…). Same GLM
+# checkpoint, SGLang image, DSA pair (flashmla_sparse / fa3), and limiter
+# 2026-08-28.6 as flash-3, plus --chunked-prefill-size 16384 from the LMSYS
+# 8xH200 A/B. Deltas from the candidate remain FINITE_ADMISSION_MODE=allowlist
+# and the FINITE_ADMISSION_ALLOWLIST secret. Usage admission on
+# finite.computer is still missing (POST /internal/finite-private/v1/reservations
+# redirects to the homepage).
 #
 # Trade-off, revert, and mature path:
 #   docs/runs/glm-5-3-flash-degraded-admission.md
@@ -97,9 +97,11 @@ containers:
       - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
       - FINITE_PRIVATE_MODEL: "glm-5-3-flash"
       - FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"
-      # Existing issued Runtimes may send either historical label. The limiter
-      # canonicalizes only these names; any other model fails before reserve.
-      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"
+      # Existing issued Runtimes may send either historical label. The dotted
+      # Z.ai spelling is accepted as an alias; the served name stays hyphenated.
+      # The limiter canonicalizes only these names; any other model fails
+      # before reserve.
+      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"
       - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
       - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
       - DASHBOARD_URL: "https://finite.computer/dashboard"

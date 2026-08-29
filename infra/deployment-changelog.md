@@ -42,12 +42,25 @@ the sources above cannot carry lands here.
   Releases installed before the 2026-07-08 monorepo cut (`finitechat`
   v0.1.0–v0.1.3, `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from legacy repo
   URLs; no live users depend on those URLs.
-- The historical `glm-5-2` request alias remains for mixed-version clients;
-  `deepseek-v4-flash-0731` is the canonical model label everywhere else.
+- The historical `glm-5-2` and `deepseek-v4-flash-0731` request aliases
+  remain for mixed-version clients; `glm-5-3-flash` is the canonical model
+  label. The dotted `glm-5.3-flash` spelling is a limiter alias only.
+- The historical `kimi-k2-6` Tinfoil hostname is retired; issued Runtime
+  readers still need the follow-up onto `finite-private`.
 - Runtime artifact ids promoted before 2026-08-05 (`2026-07-10.2` through
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-08-29 — Finite Private GLM flash-4 (chunked prefill + 392k proof)
+
+- Replaced `v2026-08-28-glm-5-3-flash-3` with
+  `v2026-08-28-glm-5-3-flash-4` (`2aa4d230…`, 8xH200). Same overlay,
+  limiter `.6`, and DSA pair; added `--chunked-prefill-size 16384`.
+- 1-way TTFT 0.684s → 0.287s; 32-way aggregate 124.1 → 128.5 tok/s.
+  387,498-token needle retrieved correctly (cold 21.3s, warm 2.5s).
+- Wire name is hyphenated `glm-5-3-flash`. Dotted `glm-5.3-flash` is now
+  a limiter alias so copied docs/health names do not 400.
 
 ### 2026-08-28 — Finite Private GLM flash-3 (H200 DSA auto + thinking high)
 

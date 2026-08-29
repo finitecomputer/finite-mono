@@ -84,7 +84,7 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
     ) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace(
-            'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"',
+            'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"',
             'FINITE_PRIVATE_MODEL_ALIASES: "*"',
         )
         with temporary_repository(main_text=text) as temporary_directory:

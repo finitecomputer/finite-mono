@@ -1816,11 +1816,20 @@ mod tests {
         let mut config = test_config(core_url, upstream_url);
         config.default_model = "glm-5-3-flash".to_string();
         config.upstream_model = Some("glm-5-3-flash".to_string());
-        config.model_aliases = vec!["deepseek-v4-flash-0731".to_string(), "glm-5-2".to_string()];
+        config.model_aliases = vec![
+            "deepseek-v4-flash-0731".to_string(),
+            "glm-5-2".to_string(),
+            "glm-5.3-flash".to_string(),
+        ];
         let limiter_url = spawn(app(config).unwrap()).await;
 
         let client = reqwest::Client::new();
-        for requested_model in ["glm-5-3-flash", "deepseek-v4-flash-0731", "glm-5-2"] {
+        for requested_model in [
+            "glm-5-3-flash",
+            "deepseek-v4-flash-0731",
+            "glm-5-2",
+            "glm-5.3-flash",
+        ] {
             let response = client
                 .post(format!("{limiter_url}/v1/chat/completions"))
                 .bearer_auth("fpk_live_aliases")
@@ -1836,13 +1845,13 @@ mod tests {
         }
 
         let bodies = upstream.bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies.len(), 4);
         for body in bodies.iter() {
             let forwarded: Value = serde_json::from_slice(body).unwrap();
             assert_eq!(forwarded["model"], "glm-5-3-flash");
         }
         let reservations = core.reservations.lock().unwrap();
-        assert_eq!(reservations.len(), 3);
+        assert_eq!(reservations.len(), 4);
         assert!(
             reservations
                 .iter()

@@ -19,7 +19,8 @@ same 8xH200 A/B. Speculative decoding stays off until a separate measured
 window. `--mamba-full-memory-ratio` stays at the default until the two pool
 sizes are readable off this CVM.
 
-The external Tinfoil container is `finite-private`. Issued Runtimes that
-still call the historical hostname need the CPU-only compatibility bridge
-in `../confidential-kimi-k2-6/tinfoil-config.compatibility-bridge.candidate.yml`.
+The external Tinfoil container is `finite-private`
+(`v2026-08-28-glm-5-3-flash-4`). The historical `kimi-k2-6` hostname is
+retired; the CPU-only compatibility bridge was deleted rather than
+iterated. Issued Runtime readers still need a follow-up onto this route.
 Replace procedure: `../../runbooks/finite-private-glm-5.3-flash-production-cutover.md`.
