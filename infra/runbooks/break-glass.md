@@ -11,7 +11,7 @@ For incidents. Host facts (services, ports, secrets locations) live in
 ## lat1 — finite-lat-1 (64.34.82.77) — THE app server, NixOS
 
 Since the 2026-07-09 cutover lat1 runs EVERYTHING (Core, dashboard, native
-Postgres, chat, sites, search) as NixOS. No k3s, no kubectl. Config is
+Postgres, chat, sites) as NixOS. No k3s, no kubectl. Config is
 `infra/nixos/`; routine deploy uses the service runbooks and the exact prebuilt
 closure. There is currently no accepted bare-metal rebuild procedure.
 
@@ -36,8 +36,6 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   - `journalctl -u finite-saas-runner` — Kata agent-creation runner; its Nix
     timer is enabled, but live canary readiness must be verified. Phala remains
     a separate fast-follow adapter.
-  - search: `journalctl -u podman-searxng` (up); firecrawl API (:3002) is
-    currently DOWN — follow-up.
 - **Restart:**
   - `sudo systemctl restart caddy`
   - `sudo systemctl restart finite-saas-core` / `finite-saas-sites` /

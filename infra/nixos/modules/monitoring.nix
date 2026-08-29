@@ -38,8 +38,6 @@ let
     in
     if digest != "" then digest else last (lib.splitString ":" containerImage);
   dashboardImage = config.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
-  searxngImage = config.virtualisation.oci-containers.containers.searxng.image;
-  firecrawlImage = config.virtualisation.oci-containers.containers.firecrawl-api.image;
   probedServiceUnits = [
     "finite-saas-core.service"
     "podman-finite-saas-dashboard.service"
@@ -47,8 +45,6 @@ let
     "finitechat-hosted-device.service"
     "finite-brain-app.service"
     "finite-saas-sites.service"
-    "podman-searxng.service"
-    "podman-firecrawl-api.service"
     "prometheus-node-exporter.service"
   ];
 in
@@ -158,18 +154,6 @@ in
         source = "nix";
       }
       {
-        component = "searxng";
-        version = imageVersion searxngImage;
-        imageDigest = imageDigest searxngImage;
-        source = "image";
-      }
-      {
-        component = "firecrawl";
-        version = imageVersion firecrawlImage;
-        imageDigest = imageDigest firecrawlImage;
-        source = "image";
-      }
-      {
         component = "postgres";
         version = config.services.postgresql.package.version;
         source = "nix";
@@ -274,8 +258,6 @@ in
         check hosted-web-device   http://127.0.0.1:38918/healthz
         check finite-brain        http://127.0.0.1:3015/health
         check finitesitesd        -H "Host: api.finite.chat" http://127.0.0.1:8787/api/v1/healthz
-        check searxng             http://127.0.0.1:8080/healthz
-        check firecrawl           http://127.0.0.1:3002/v0/health/readiness
         check node-exporter       http://127.0.0.1:9100/metrics
 
         publish_metrics

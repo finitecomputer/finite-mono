@@ -8,7 +8,7 @@
 > the single-node k3s control plane they describe was **wiped** in the 2026-07-09
 > consolidation cutover. lat1 now runs everything natively — finite-saas-core,
 > dashboard (podman), **native** Postgres 16, finitechat-server (:8788),
-> finitesitesd (:8787), finite-search, and **one** Caddy edge — with **no k3s,
+> finitesitesd (:8787), and **one** Caddy edge — with **no k3s,
 > no Traefik, and no on-host podman builds**. Nothing below is current; it is
 > kept as provenance for how the box ran before the cutover. Deploy is now
 > `nixos-rebuild --flake ...#finite-lat-1`, not `kubectl apply`.

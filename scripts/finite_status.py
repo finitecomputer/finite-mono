@@ -40,8 +40,6 @@ CONTRACT: dict[str, Any] = {
             "finitechat-hosted-device.service",
             "finite-brain-app.service",
             "finite-saas-sites.service",
-            "podman-searxng.service",
-            "podman-firecrawl-api.service",
             "prometheus-node-exporter.service",
         ],
         "probes": {
@@ -51,8 +49,6 @@ CONTRACT: dict[str, Any] = {
             "hosted-web-device": "http://127.0.0.1:38918/healthz",
             "finite-brain": "http://127.0.0.1:3015/health",
             "finitesitesd": "http://127.0.0.1:8787/api/v1/healthz",
-            "searxng": "http://127.0.0.1:8080/healthz",
-            "firecrawl": "http://127.0.0.1:3002/v0/health/readiness",
             "node-exporter": "http://127.0.0.1:9100/metrics",
         },
     },

@@ -18,7 +18,6 @@ in
     ../../modules/finitesitesd.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
-    ../../modules/finite-search.nix
     ../../modules/caddy.nix
     ../../modules/postgres.nix
     ../../modules/backups.nix
@@ -309,7 +308,7 @@ in
     }
   ];
 
-  # Container-shaped services (dashboard, finite-search) run under podman.
+  # Container-shaped services (dashboard) run under podman.
   virtualisation.podman.enable = true;
   virtualisation.oci-containers.backend = "podman";
 

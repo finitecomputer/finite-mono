@@ -220,8 +220,6 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-1-litestream` bucket at Latitude.sh object storage (chi region — nearest to lat1); store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
-| `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
-| `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
 The machine-readable, values-free file inventory is
@@ -314,11 +312,9 @@ that final operation read-only unless the tester explicitly intends a write.
 | 22 | public | sshd (root key-only) | lat1 |
 | 80/443 | public | Caddy — ALL vhosts | lat1 + lat2 + clawland + smoke edges |
 | 3000 | 127.0.0.1 | dashboard (podman, host-net) | was lat1 k3s NodePort 30080 |
-| 3002 | 127.0.0.1 | firecrawl api (podman) | lat2 |
 | 3015 | 127.0.0.1 | finite-brain | smoke (previously public-bound there) |
 | 4200 | 127.0.0.1 | finite-saas-core (nix-built binary) | was lat1 k3s ClusterIP |
 | 5432 | 127.0.0.1 | postgres 16 native (`finite_core`) | was lat1 k3s StatefulSet |
-| 8080 | 127.0.0.1 | searxng (podman) | lat2 |
 | 8790 | 127.0.0.1 | Finite Identity Authority | new |
 | 8787 | 127.0.0.1 | finitesitesd | lat2 |
 | **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
@@ -364,6 +360,4 @@ by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
   Agent Runtimes on the same containerd host. Production activation must follow
   `runbooks/deploy-sites.md`, including the coordinated v3 snapshot and a
   named disposable state-survival canary.
-- **firecrawl API** (:3002) down — searxng works; crawl/scrape degraded.
-- Dead-man's-switch ping (`modules/monitoring.nix`); finite-search image
-  digest pins (`modules/finite-search.nix`).
+- Dead-man's-switch ping (`modules/monitoring.nix`).

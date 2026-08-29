@@ -21,8 +21,6 @@ PROBED_SERVICE_UNITS = [
     "finitechat-hosted-device.service",
     "finite-brain-app.service",
     "finite-saas-sites.service",
-    "podman-searxng.service",
-    "podman-firecrawl-api.service",
     "prometheus-node-exporter.service",
 ]
 HEALTH_PROBES = tuple(finite_status.CONTRACT["healthcheck"]["probes"])
@@ -47,7 +45,13 @@ def nix_eval(attribute: str, *, raw: bool = False) -> str:
 def run_synthetic(
     script: str, *, recover_after_first_pass: bool
 ) -> tuple[subprocess.CompletedProcess[str], str, list[str], int]:
-    curl_body = '[ "$curl_calls" -gt 9 ]' if recover_after_first_pass else "return 1"
+    # Failing every call of the first full probe pass models a transient
+    # outage, so the recovery threshold tracks the probe count.
+    curl_body = (
+        f'[ "$curl_calls" -gt {len(HEALTH_PROBES)} ]'
+        if recover_after_first_pass
+        else "return 1"
+    )
     harness = f"""
 curl_calls=0
 curl() {{
@@ -244,9 +248,11 @@ def main() -> None:
             raise SystemExit(
                 f"transient recovery output is missing {expected!r}:\n{recovery_output}"
             )
-    if recovery_curl_count != 18:
+    expected_recovery_calls = 2 * len(HEALTH_PROBES)
+    if recovery_curl_count != expected_recovery_calls:
         raise SystemExit(
-            f"transient recovery made {recovery_curl_count} curl calls, expected 18"
+            f"transient recovery made {recovery_curl_count} curl calls, "
+            f"expected {expected_recovery_calls}"
         )
     verify_metrics(recovery_metrics, 1)
     if recovery_leftovers:
@@ -270,9 +276,12 @@ def main() -> None:
             raise SystemExit(
                 f"persistent failure output is missing {expected!r}:\n{failure_output}"
             )
-    if failure_curl_count != 117:
+    # monitoring.nix bounds the healthcheck to 13 attempts before it gives up.
+    expected_failure_calls = 13 * len(HEALTH_PROBES)
+    if failure_curl_count != expected_failure_calls:
         raise SystemExit(
-            f"persistent failure made {failure_curl_count} curl calls, expected 117"
+            f"persistent failure made {failure_curl_count} curl calls, "
+            f"expected {expected_failure_calls}"
         )
     verify_metrics(failure_metrics, 0)
     if failure_leftovers:

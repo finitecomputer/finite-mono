@@ -45,9 +45,6 @@ let
     "finite-brain-app.service"
     "finite-identity.service"
     "podman-finite-saas-dashboard.service"
-    "podman-searxng.service"
-    "podman-firecrawl-api.service"
-    "init-firecrawl-network.service"
     "finite-healthcheck.service"
     "finite-healthcheck.timer"
     "finite-postgres-backup.service"
@@ -85,7 +82,6 @@ in
     ../../modules/finitesitesd.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
-    ../../modules/finite-search.nix
     ../../modules/caddy.nix
     ../../modules/postgres.nix
     ../../modules/backups.nix
