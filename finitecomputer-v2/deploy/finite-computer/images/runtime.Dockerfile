@@ -2,7 +2,11 @@
 # finitecomputer-v2/scripts/build_runtime_image.py. Rust artifacts are built
 # together from the one root workspace and lockfile.
 
-FROM rust:1.88-trixie AS finite-rust-builder
+# The Rust version comes from rust-toolchain.toml (the repo's single Rust
+# pin), parsed and passed as RUST_TOOLCHAIN by build_runtime_image.py; this
+# Dockerfile carries no version string of its own.
+ARG RUST_TOOLCHAIN
+FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder
 WORKDIR /build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
