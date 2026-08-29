@@ -7080,6 +7080,126 @@ async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
 }
 
 #[tokio::test]
+async fn sqlite_boot_prefers_v2_snapshot_over_stale_legacy_row() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-stale-legacy-row".to_owned();
+    let mls_group_id = "mls-stale-legacy-row".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut last_seq = 0;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("stale legacy row message {index}").as_bytes(),
+            &format!("stale-legacy-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("v2 snapshot");
+    drop(app);
+    drop(state);
+
+    // Leave a stale v1 row behind, exactly as any database last
+    // snapshot-written by a pre-v2 build carries it — but with a bogus,
+    // HIGHER watermark, the shape that misled forensics on 2026-08-29:
+    // the dead table looks authoritative to a human diffing watermarks.
+    // Boot must ignore it while the v2 row exists, regardless of the
+    // claimed v1 seq.
+    let (v2_seq, compressed): (i64, Vec<u8>) = {
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT last_op_seq, snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("v2 snapshot row")
+    };
+    let fake_v1_seq = v2_seq + 500;
+    {
+        let json = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        conn.execute(
+            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
+             VALUES (1, ?1, ?2)",
+            rusqlite::params![fake_v1_seq, String::from_utf8(json).expect("snapshot utf8")],
+        )
+        .expect("write stale legacy row");
+    }
+
+    // Boot prefers v2: the served head is the v2 snapshot's state, and the
+    // bogus v1 watermark never feeds boot or seq assignment.
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 0,
+            limit: 50,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), last_seq as usize);
+    assert_eq!(page.next_after_seq, last_seq);
+
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"continues from the v2 head".as_ref(),
+        "stale-legacy-msg-continuation",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: EventAccepted = read_json(response).await;
+    assert_eq!(accepted.seq, last_seq + 1);
+
+    // And nothing writes the legacy row: v1 stays byte-identical, pinning
+    // "write-dead in code" alongside the boot-preference contract.
+    let (v1_seq_now, v1_json_now): (i64, String) = {
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT last_op_seq, snapshot_json FROM http_state_snapshots WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("stale legacy row survives untouched")
+    };
+    assert_eq!(v1_seq_now, fake_v1_seq);
+    let expected_json = {
+        let json = zstd::decode_all(compressed.as_slice()).expect("decompress again");
+        String::from_utf8(json).expect("snapshot utf8")
+    };
+    assert_eq!(v1_json_now, expected_json);
+}
+
+#[tokio::test]
 async fn sqlite_snapshot_save_prunes_ops_covered_by_previous_snapshot() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
