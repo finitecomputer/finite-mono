@@ -73,7 +73,7 @@ if [[ ! -x "$system_path/bin/switch-to-configuration" ]]; then
   echo "system output lacks switch-to-configuration: ${system_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/system")" != "$system_path" ]]; then
+if [[ "$(readlink "$out_dir/system")" != "$system_path" ]]; then
   echo "out-link ${out_dir}/system does not resolve to ${system_path}" >&2
   exit 70
 fi
@@ -90,7 +90,7 @@ if [[ ! "$disko_path" =~ ^/nix/store/[0-9a-z]{32}-disko$ ]]; then
   echo "unexpected disko output path: ${disko_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/disko")" != "$disko_path" ]]; then
+if [[ "$(readlink "$out_dir/disko")" != "$disko_path" ]]; then
   echo "out-link ${out_dir}/disko does not resolve to ${disko_path}" >&2
   exit 70
 fi
@@ -107,7 +107,7 @@ if [[ ! "$kexec_path" =~ ^/nix/store/[0-9a-z]{32}-kexec-tarball$ ]]; then
   echo "unexpected kexec output path: ${kexec_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$out_dir/kexec")" != "$kexec_path" ]]; then
+if [[ "$(readlink "$out_dir/kexec")" != "$kexec_path" ]]; then
   echo "out-link ${out_dir}/kexec does not resolve to ${kexec_path}" >&2
   exit 70
 fi

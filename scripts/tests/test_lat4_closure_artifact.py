@@ -90,6 +90,17 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertIn('"kexec": "$kexec_path"', source)
         self.assertEqual(source.count("nixosConfigurations.finite-lat-4."), 2)
 
+    def test_build_script_compares_the_immediate_out_link_target(self) -> None:
+        # nix build --out-link points directly at the printed out path, but
+        # some outputs (e.g. the disko script) are themselves store symlinks.
+        # `readlink -f` resolves through the WHOLE chain and fails the guard
+        # on a perfectly valid build (real Gate B failure on 2026-08-29); the
+        # guard must compare the out-link's immediate target.
+        source = BUILD.read_text(encoding="utf-8")
+        for link in ("system", "disko", "kexec"):
+            self.assertIn(f'[[ "$(readlink "$out_dir/{link}")"', source)
+        self.assertNotIn('readlink -f "$out_dir/', source)
+
     def test_valid_manifest_requires_file_binary_cache(self) -> None:
         def valid_manifest() -> dict:
             return {
