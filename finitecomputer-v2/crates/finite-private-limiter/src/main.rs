@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use finite_private_limiter::{LimiterConfig, WatchdogConfig, app};
+use finite_private_limiter::{AdmissionMode, LimiterConfig, WatchdogConfig, app};
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -44,6 +44,14 @@ fn config_from_env() -> Result<LimiterConfig> {
         .unwrap_or(config.default_model);
     config.upstream_model = optional_nonempty_env("FINITE_PRIVATE_UPSTREAM_MODEL")?;
     config.model_aliases = comma_list_env("FINITE_PRIVATE_MODEL_ALIASES")?;
+    config.admission_mode = match env::var("FINITE_ADMISSION_MODE").unwrap_or_default().trim() {
+        "" | "usage-api" => AdmissionMode::UsageApi,
+        "allowlist" => AdmissionMode::Allowlist,
+        other => anyhow::bail!(
+            "FINITE_ADMISSION_MODE must be \"usage-api\" or \"allowlist\", got {other:?}"
+        ),
+    };
+    config.admission_allowlist = comma_list_env("FINITE_ADMISSION_ALLOWLIST")?;
     config.readiness_timeout = duration_env("READINESS_TIMEOUT_SECS", config.readiness_timeout)?;
     config.usage_api_timeout =
         duration_env("FINITE_USAGE_API_TIMEOUT_SECS", config.usage_api_timeout)?;
