@@ -4,9 +4,11 @@ import json
 import unittest
 
 from scripts.check_finite_private_glm53_protocol import (
+    CONTEXT_TARGETS,
     MODEL,
     accumulate_tool_calls,
     completion_message,
+    context_targets,
     response_usage,
     score_tool_calls,
 )
@@ -97,6 +99,13 @@ class Glm53ProtocolTests(unittest.TestCase):
         self.assertEqual(
             score_tool_calls(calls, {"austin"}), (False, "invalid tool JSON")
         )
+
+    def test_context_targets_can_skip_the_unproven_near_limit_case(self) -> None:
+        self.assertEqual(context_targets(128_000), (128_000,))
+        self.assertEqual(context_targets(CONTEXT_TARGETS[-1]), CONTEXT_TARGETS)
+        self.assertEqual(context_targets(64_000), ())
+        with self.assertRaisesRegex(ValueError, "positive"):
+            context_targets(0)
 
     def test_usage_accepts_openai_chat_shape(self) -> None:
         self.assertEqual(

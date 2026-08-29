@@ -19,6 +19,7 @@ from typing import Any
 
 
 MODEL = "glm-5-3-flash"
+CONTEXT_TARGETS = (128_000, 360_000)
 WEATHER_TOOL = {
     "type": "function",
     "function": {
@@ -240,7 +241,15 @@ def result(
     }
 
 
-def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
+def context_targets(max_tokens: int) -> tuple[int, ...]:
+    if max_tokens <= 0:
+        raise ValueError("max_context_tokens must be positive")
+    return tuple(target for target in CONTEXT_TARGETS if target <= max_tokens)
+
+
+def run_gate(
+    client: ProtocolClient, *, max_context_tokens: int = CONTEXT_TARGETS[-1]
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
     response, elapsed = client.post(
@@ -450,7 +459,7 @@ def run_gate(client: ProtocolClient) -> list[dict[str, Any]]:
     )
 
     ratio = 1.0
-    for target_tokens in (128_000, 360_000):
+    for target_tokens in context_targets(max_context_tokens):
         units = max(1, int(target_tokens / ratio))
         long_payload = base_payload(
             [{"role": "user", "content": (" x" * units) + "\nReply only: context ok"}],
@@ -510,22 +519,37 @@ def main() -> int:
     )
     parser.add_argument("--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY")
     parser.add_argument("--timeout-seconds", type=float, default=1200)
+    parser.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=CONTEXT_TARGETS[-1],
+        help=(
+            "Run context cases whose target is at most this many tokens. "
+            "128000 proves the cheap long-prefill path; 360000 is the "
+            "near-limit case and is skipped until this image family is "
+            "cleared above 262144."
+        ),
+    )
     arguments = parser.parse_args()
     api_key = os.environ.get(arguments.api_key_env, "")
     if not api_key:
         parser.error(f"{arguments.api_key_env} is required")
     if arguments.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if arguments.max_context_tokens <= 0:
+        parser.error("--max-context-tokens must be positive")
 
     try:
         results = run_gate(
-            ProtocolClient(arguments.endpoint, api_key, arguments.timeout_seconds)
+            ProtocolClient(arguments.endpoint, api_key, arguments.timeout_seconds),
+            max_context_tokens=arguments.max_context_tokens,
         )
     except Exception as error:
         results = [result("unhandled", False, str(error), 0.0)]
     report = {
         "schema": "finite-private-glm53-protocol-v1",
         "model": MODEL,
+        "max_context_tokens": arguments.max_context_tokens,
         "passed": sum(bool(item["passed"]) for item in results),
         "total": len(results),
         "results": results,

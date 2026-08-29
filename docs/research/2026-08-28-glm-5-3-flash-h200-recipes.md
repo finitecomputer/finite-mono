@@ -137,10 +137,12 @@ those boot numbers off the Tinfoil box yet (limiter `/metrics` is not SGLang's).
 [Cookbook memory section](https://docs.sglang.io/cookbook/autoregressive/GLM/GLM-5.3-Flash),
 [PR #36895 follow-up](https://github.com/sgl-project/sglang/pull/36895).
 
-Chunked-prefill size is the other scheduler knob. On GLM-5.2, raising
-`--chunked-prefill-size` from 2048 to 32768 cut TTFT 39–59% on 8xH200 at
-8k-in/1k-out. The 5.3 Flash A/B above used 16k. Worth a later trial; not the
-first delta.
+Chunked-prefill size is the other scheduler knob we can set without boot
+logs. On GLM-5.2, raising `--chunked-prefill-size` from 2048 to 32768 cut
+TTFT 39–59% on 8xH200 at 8k-in/1k-out. The 5.3 Flash A/B above used 16k.
+SGLang's default when the flag is omitted is 2048, which leaves long
+prefill in many small chunks (128k is 64 chunks). Pin `16384` to match
+the published 5.3 Flash H200 A/B. Do not stack 32768 in the same replace.
 [GLM-5.2 cookbook](https://docs.sglang.io/cookbook/autoregressive/GLM/GLM-5.2).
 
 ## Default thinking: high, not max
@@ -166,12 +168,15 @@ Runtime configuration in the model window).
 
 ## Recommended order
 
-1. DSA pin → `flashmla_sparse` / `fa3`. Same GLM image, new measured Tinfoil
-   tag, one replace. Re-run 1/32-way. Do not add `--disable-shared-experts-fusion`.
-2. Limiter default `reasoning_effort=high` when omitted.
-3. After boot logs exist: recompute `--mamba-full-memory-ratio`.
-4. Separate window: adaptive MTP 5/1/6, one variable, protocol gate first.
-5. Do not do PD disaggregation, DFlash2, or FP8 KV on this host.
+1. DSA pin → `flashmla_sparse` / `fa3`. Done on live as `flash-3`.
+2. Limiter default `reasoning_effort=high` when omitted. Done on live as
+   `flash-3`.
+3. `--chunked-prefill-size 16384`. Same GLM image, new measured Tinfoil
+   tag, one replace. Re-run protocol through 128k, then 1/32-way. This is
+   the remaining scheduler knob that does not need boot logs.
+4. After boot logs exist: recompute `--mamba-full-memory-ratio`.
+5. Separate window: adaptive MTP 5/1/6, one variable, protocol gate first.
+6. Do not do PD disaggregation, DFlash2, or FP8 KV on this host.
 
 Item 1 will not make the 120-user gate pass. It is the recipe LMSYS is now
 telling every 8xH200 operator to run.

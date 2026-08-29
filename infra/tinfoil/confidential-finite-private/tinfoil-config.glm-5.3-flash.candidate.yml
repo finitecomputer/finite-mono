@@ -37,6 +37,8 @@ containers:
         "8",
         "--context-length",
         "393216",
+        "--chunked-prefill-size",
+        "16384",
         "--dsa-prefill-backend",
         "flashmla_sparse",
         "--dsa-decode-backend",
