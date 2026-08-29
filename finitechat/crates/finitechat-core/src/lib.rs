@@ -91,10 +91,10 @@ const DEFAULT_CREDENTIAL_VALIDITY_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 const DEFAULT_APP_UPDATE_WAIT_MILLIS: u64 = 30_000;
 const DEFAULT_EPHEMERAL_ACTIVITY_EXPIRY_MILLIS: u64 = 30_000;
 const SERVER_CONTRACT_HEALTH_TIMEOUT_SECS: u64 = 5;
-/// Per-request budget for a Blossom attachment upload: sized for the protocol's
-/// per-turn attachment ceiling on a slow uplink, unlike the small-call default
-/// every other transport request uses.
-const ATTACHMENT_UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Per-request budget for a Blossom attachment transfer: sized for the
+/// protocol's per-turn attachment ceiling (32 MiB) on a slow uplink, unlike
+/// the small-call default every other transport request uses.
+const ATTACHMENT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_PROFILE_CACHE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 const MAX_PROFILE_DISPLAY_NAME_BYTES: u32 = 128;
 const MAX_PROFILE_ABOUT_BYTES: u32 = 4 * 1024;
@@ -8562,7 +8562,7 @@ impl CoreState {
             // Attachment bodies run up to the protocol's per-turn byte
             // ceiling, so this one request overrides the client's small-call
             // default with a budget that fits a large upload on a slow link.
-            .timeout(ATTACHMENT_UPLOAD_TIMEOUT)
+            .timeout(ATTACHMENT_TRANSFER_TIMEOUT)
             .send()
             .map_err(delivery_error)?;
         let status = response.status();
@@ -8635,6 +8635,10 @@ impl CoreState {
         let request = prepare_blossom_download_http_request(reference).map_err(client_error)?;
         let response = shared_blocking_http_client()
             .get(request.url)
+            // Same ceiling as the upload path: the blob can run to the
+            // per-turn attachment maximum, so the small-call default would
+            // false-trip a large download on a slow link.
+            .timeout(ATTACHMENT_TRANSFER_TIMEOUT)
             .send()
             .map_err(delivery_error)?;
         let status = response.status();

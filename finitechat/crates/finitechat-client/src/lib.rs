@@ -4848,18 +4848,6 @@ pub struct ReqwestHttpRuntimeTransport {
 pub const DEFAULT_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub const HTTP_CONNECT_TIMEOUT_ENV: &str = "FINITECHAT_HTTP_CONNECT_TIMEOUT_MILLIS";
-pub const HTTP_TIMEOUT_ENV: &str = "FINITECHAT_HTTP_TIMEOUT_MILLIS";
-
-fn env_timeout_millis(name: &str, default: Duration) -> Duration {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|millis| *millis > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(default)
-}
-
 /// The standard blocking HTTP client for runtime transports: every call is
 /// bounded. An unbounded `reqwest::blocking` call parks its calling thread on
 /// the client's internal channel for as long as the server stays silent, and
@@ -4868,10 +4856,7 @@ fn env_timeout_millis(name: &str, default: Duration) -> Duration {
 /// hiccup, server pause) then wedges the whole sidecar with no error, no
 /// retry, and no restart (`scripts/repro-hermes-wedge` reproduces it).
 pub fn blocking_http_client() -> reqwest::blocking::Client {
-    blocking_http_client_with_timeouts(
-        env_timeout_millis(HTTP_CONNECT_TIMEOUT_ENV, DEFAULT_HTTP_CONNECT_TIMEOUT),
-        env_timeout_millis(HTTP_TIMEOUT_ENV, DEFAULT_HTTP_TIMEOUT),
-    )
+    blocking_http_client_with_timeouts(DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_TIMEOUT)
 }
 
 /// Testable core of [`blocking_http_client`].
@@ -4884,6 +4869,24 @@ pub fn blocking_http_client_with_timeouts(
         .timeout(timeout)
         .build()
         .expect("static reqwest blocking client configuration is valid")
+}
+
+/// Heartbeat interval the server uses when the stream request does not
+/// negotiate one (mirrors the server default).
+const SYNC_STREAM_DEFAULT_HEARTBEAT_MILLIS: u64 = 15_000;
+
+/// Per-read budget for one SSE hint stream, derived from the negotiated
+/// heartbeat: the server emits an event at least every `heartbeat_ms`, so
+/// allow three missed intervals plus slack. The blocking client applies the
+/// request timeout to *each* body read, so a healthy stream never trips this
+/// while a silent one errors and the caller reconnects. Deriving it from the
+/// heartbeat (instead of the client's flat total bound) keeps the server's
+/// maximum heartbeat interval (60s) from false-tripping a healthy stream.
+fn sync_stream_read_timeout(request: &SyncStreamRequest) -> Duration {
+    let heartbeat_ms = request
+        .heartbeat_ms
+        .unwrap_or(SYNC_STREAM_DEFAULT_HEARTBEAT_MILLIS);
+    Duration::from_millis(heartbeat_ms.saturating_mul(3).saturating_add(5_000))
 }
 
 impl ReqwestHttpRuntimeTransport {
@@ -4918,6 +4921,7 @@ impl ReqwestHttpRuntimeTransport {
             .client
             .post(self.route_url("/sync/stream"))
             .json(request)
+            .timeout(sync_stream_read_timeout(request))
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
         let status = response.status();
@@ -14017,9 +14021,9 @@ mod tests {
             })
             .expect("healthy stream opens");
 
-        // 40 heartbeats at 50 ms = ~2 s of stream life, far past the 250 ms
-        // per-read bound: every read reset proves heartbeats keep a healthy
-        // stream alive under the same timeout that kills a silent one.
+        // 40 heartbeats at 50 ms = ~2 s of stream life: every read reset
+        // proves heartbeats keep a healthy stream alive under the same
+        // heartbeat-derived per-read budget that kills a silent one.
         let mut received = 0usize;
         for _ in 0..40 {
             match stream.next_hint() {
@@ -14029,5 +14033,70 @@ mod tests {
             }
         }
         assert!(received >= 30, "expected mostly heartbeats, got {received}");
+    }
+
+    #[test]
+    fn sync_stream_read_timeout_tracks_negotiated_heartbeat() {
+        let request = |heartbeat_ms: Option<u64>| SyncStreamRequest {
+            rooms: Vec::new(),
+            inbox: None,
+            heartbeat_ms,
+        };
+        // Unset heartbeat: the server default (15s) governs.
+        assert_eq!(
+            sync_stream_read_timeout(&request(None)),
+            Duration::from_secs(50)
+        );
+        // Resident bridge default (10s heartbeats).
+        assert_eq!(
+            sync_stream_read_timeout(&request(Some(10_000))),
+            Duration::from_secs(35)
+        );
+        // Server maximum (60s heartbeats): a flat 60s client bound would
+        // false-trip here; the derived budget must clear it.
+        assert_eq!(
+            sync_stream_read_timeout(&request(Some(60_000))),
+            Duration::from_secs(185)
+        );
+        // Absurd input saturates instead of overflowing.
+        let _ = sync_stream_read_timeout(&request(Some(u64::MAX)));
+    }
+
+    #[test]
+    fn sync_stream_survives_heartbeat_slower_than_the_client_bound() {
+        // Heartbeats every 200 ms against a flat 50 ms client bound: the
+        // heartbeat-derived read budget (not the small-call bound) must
+        // govern stream reads, or a healthy slow-heartbeat stream dies.
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            for _ in 0..6 {
+                let _ = stream.write_all(b"data: {\"type\":\"heartbeat\"}\n\n");
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let mut transport = bounded_transport(Duration::from_millis(50), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(200),
+            })
+            .expect("healthy stream opens");
+
+        for _ in 0..6 {
+            match stream.next_hint() {
+                Ok(SyncHintEvent::Heartbeat) => {}
+                Ok(_) => {}
+                Err(error) => {
+                    panic!("healthy slow-heartbeat stream must not time out: {error}")
+                }
+            }
+        }
     }
 }

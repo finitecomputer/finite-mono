@@ -3,12 +3,17 @@
 #
 # Boots the freshly built `finitechat hermes serve` sidecar against a fake
 # chat server, lets it reach steady state, then flips the fake server into
-# stall mode (established SSE stream goes silent; new requests never answered)
-# and shows the sidecar never recovers: no reconnect, no error, no progress.
+# stall mode (established SSE stream goes silent; new requests never answered).
+# On an unfixed binary the sidecar never recovers — no reconnect, no error, no
+# progress; on a fixed binary each stalled call errors within its HTTP bound
+# and healthy traffic resumes when the stall lifts.
 #
-# Usage: run.sh [phase2-wait-seconds]
+# Usage: run.sh [phase2-wait-seconds [phase3-watch-seconds]]
 #   phase 1 (healthy) runs ~15s, then stall is engaged and we watch for
-#   PHASE2_SECS (default 60) more seconds.
+#   PHASE2_SECS (default 60) more seconds; phase 3 then watches the healed
+#   server for PHASE3_SECS (default 15 — raise to ~90 when running the fixed
+#   binary at its default 60s bounds, so an in-flight stalled request can
+#   time out and recover within the window).
 
 set -euo pipefail
 
@@ -112,11 +117,11 @@ echo
 echo "== phase 3: UNSTALL — does the sidecar recover?"
 echo "healthy" > "$MODE_FILE"
 UNSTALL_AT=$(date +%s)
-sleep 15
+sleep "${2:-15}"
 echo "-- requests after unstall (recovery proof; empty = still wedged):"
 awk -v t="$(date -r $UNSTALL_AT +%H:%M:%S)" 'substr($1,1,8)>t' "$SCRATCH/server.log" | grep -v STALL | tail -6 || true
 
 echo
 echo "Repro complete. Artifacts in $SCRATCH (server.log, serve.err, sample.txt)."
-echo "Set FINITECHAT_HTTP_TIMEOUT_MILLIS=5000 before run.sh to watch the fixed"
-echo "binary error-and-retry through the stall instead of parking on it."
+echo "On the fixed binary the default 60s bounds apply: give phase 2 at least"
+echo "~75s to watch error-and-retry through the stall instead of the park."
