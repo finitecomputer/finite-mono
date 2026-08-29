@@ -95,10 +95,14 @@ in
 
   networking.hostName = "finite-lat-2";
 
-  # Start-down: flip to false only in the go-live closure, after the state
-  # import has passed every verification gate (see the cutover runbook).
+  # Go-live closure (Gate E): the state import passed every verification
+  # gate — chat MAX(seq) 206563 exact vs the litestream replica, brain /
+  # identity / sites / hosted-device integrity green, Postgres dump
+  # restored with the api-keys invariant checked (see the cutover runbook)
+  # — so the product stack boots normally against the imported state.
+  # The units list is kept for any future re-import scenario.
   finite.importMode = {
-    enable = true;
+    enable = false;
     units = importModeUnits;
   };
 
@@ -157,8 +161,7 @@ in
       # Sites' tier-2 apps run through the shared Kata host runtime; the KVM
       # module must be loaded or every Kata guest launch fails at runtime.
       assertion =
-        !config.virtualisation.containerd.enable
-        || builtins.elem "kvm-amd" config.boot.kernelModules;
+        !config.virtualisation.containerd.enable || builtins.elem "kvm-amd" config.boot.kernelModules;
       message = "finite-lat-2 Kata app runtime requires the kvm-amd kernel module";
     }
   ];
@@ -206,7 +209,7 @@ in
 
   # This host inherits lat1's role as the wg-finite overlay hub at
   # 10.254.3.1: the Core socket proxy and Identity Authority proxy live
-  # here, and the runner hosts (lat3 now, lat4 later) peer with it.
+  # here, and the runner hosts (lat3 and lat4) peer with it.
   networking.wireguard.interfaces."wg-finite" = {
     ips = [ "10.254.3.1/29" ];
     listenPort = 51820;
@@ -217,6 +220,15 @@ in
         publicKey = "zykV8vPF1iaoN6Ycc2QQxEF+T8NHBYq9Qgk81U/V+mk=";
         allowedIPs = [ "10.254.3.2/32" ];
         endpoint = "207.188.7.157:51820";
+        persistentKeepalive = 25;
+      }
+      {
+        # finite-lat-4 runner host. Pubkey read live off the box
+        # (`wg show wg-finite public-key`, 2026-08-29) after its
+        # evacuation; lat4 peers with this hub per its own config.
+        publicKey = "q4y+ra4Hp3kUezXLQVtodilm6pFnkyl/1pOLP+ChB2Y=";
+        allowedIPs = [ "10.254.3.4/32" ];
+        endpoint = "152.236.34.15:51820";
         persistentKeepalive = 25;
       }
     ];
@@ -232,10 +244,11 @@ in
       443
     ];
     allowedUDPPorts = [ 51820 ];
-    # Preserve the bounded live rules: only finite-lat-3's public address can
-    # establish WireGuard, and only that authenticated overlay address can
-    # reach the private Core and Identity proxies. extraCommands run before
-    # the final reject rule in the iptables firewall.
+    # Preserve the bounded live rules: only the runner hosts' public
+    # addresses (lat3, lat4) can establish WireGuard, and only those
+    # authenticated overlay addresses can reach the private Core and
+    # Identity proxies. extraCommands run before the final reject rule in
+    # the iptables firewall.
     extraCommands = ''
       iptables -w -A nixos-fw \
         -s 207.188.7.157/32 -d 64.34.80.19/32 \
@@ -251,6 +264,21 @@ in
         -s 10.254.3.2/32 -d 10.254.3.1/32 -i wg-finite \
         -p tcp --dport 18790 \
         -m comment --comment finite-lat3-identity \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 152.236.34.15/32 -d 64.34.80.19/32 \
+        -p udp --dport 51820 \
+        -m comment --comment finite-lat4-wg \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.4/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 14200 \
+        -m comment --comment finite-lat4-core \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.4/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 18790 \
+        -m comment --comment finite-lat4-identity \
         -j nixos-fw-accept
     '';
   };
