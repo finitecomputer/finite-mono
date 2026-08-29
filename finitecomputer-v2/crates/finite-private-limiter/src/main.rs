@@ -52,6 +52,8 @@ fn config_from_env() -> Result<LimiterConfig> {
         ),
     };
     config.admission_allowlist = comma_list_env("FINITE_ADMISSION_ALLOWLIST")?;
+    config.default_reasoning_effort = optional_reasoning_effort_env()?;
+    config.default_enable_thinking = optional_bool_env("FINITE_PRIVATE_DEFAULT_ENABLE_THINKING")?;
     config.readiness_timeout = duration_env("READINESS_TIMEOUT_SECS", config.readiness_timeout)?;
     config.usage_api_timeout =
         duration_env("FINITE_USAGE_API_TIMEOUT_SECS", config.usage_api_timeout)?;
@@ -79,6 +81,29 @@ fn config_from_env() -> Result<LimiterConfig> {
         exit_after_failures: bool_env("FINITE_PRIVATE_WATCHDOG_EXIT_AFTER_FAILURES")?,
     };
     Ok(config)
+}
+
+fn optional_reasoning_effort_env() -> Result<Option<String>> {
+    let Some(value) = optional_nonempty_env("FINITE_PRIVATE_DEFAULT_REASONING_EFFORT")? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "low" | "high" | "max" => Ok(Some(value)),
+        other => anyhow::bail!(
+            "FINITE_PRIVATE_DEFAULT_REASONING_EFFORT must be low, high, or max, got {other:?}"
+        ),
+    }
+}
+
+fn optional_bool_env(name: &'static str) -> Result<Option<bool>> {
+    let Ok(raw) = env::var(name) else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        other => anyhow::bail!("{name} must be a boolean, got {other:?}"),
+    }
 }
 
 fn optional_nonempty_env(name: &'static str) -> Result<Option<String>> {

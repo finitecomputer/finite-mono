@@ -59,10 +59,10 @@ let
     # namespace passes the gates in docs/runs/runtime-retirement-readiness.md.
     FC_RUNNER_KATA_RETIREMENT_ENABLED = "false";
 
-    FC_RUNNER_FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-    # The hostname is a historical compatibility route. DeepSeek is the
-    # product model; glm-5-2 remains a server-side mixed-version alias only.
-    FC_RUNNER_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731";
+    FC_RUNNER_FINITE_PRIVATE_BASE_URL = "https://finite-private.finite.containers.tinfoil.dev/v1";
+    # Generated hostname is finite-private after the 2026-08-28 GLM cutover.
+    # deepseek-v4-flash-0731 and glm-5-2 remain server-side mixed-version aliases.
+    FC_RUNNER_FINITE_PRIVATE_MODEL = "glm-5-3-flash";
 
     FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS = "300";
     FC_RUNNER_RUNTIME_READY_INTERVAL_MS = "2000";

@@ -2172,7 +2172,8 @@ wait "$postgres_pid"
                             .ok()
                             .filter(|value| !value.trim().is_empty())
                             .unwrap_or_else(|| {
-                                "https://kimi-k2-6.finite.containers.tinfoil.dev/v1".to_string()
+                                "https://finite-private.finite.containers.tinfoil.dev/v1"
+                                    .to_string()
                             })
                     },
                 ),

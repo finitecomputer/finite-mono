@@ -1,6 +1,19 @@
-# Release-ready source for the model-independent `finite-private` Tinfoil
-# container. The checkpoint, modelwrap artifact, and Finite images are pinned
-# to immutable identities for the authorized 2026-08-28 production window.
+# TEMPORARY overlay. Not the production-default candidate.
+#
+# Live tag: v2026-08-28-glm-5-3-flash-4 (container 2aa4d230…). Same GLM
+# checkpoint, SGLang image, DSA pair (flashmla_sparse / fa3), and limiter
+# 2026-08-28.6 as flash-3, plus --chunked-prefill-size 16384 from the LMSYS
+# 8xH200 A/B. Deltas from the candidate remain FINITE_ADMISSION_MODE=allowlist
+# and the FINITE_ADMISSION_ALLOWLIST secret. Usage admission on
+# finite.computer is still missing (POST /internal/finite-private/v1/reservations
+# redirects to the homepage).
+#
+# Trade-off, revert, and mature path:
+#   docs/runs/glm-5-3-flash-degraded-admission.md
+# Do not promote this file over the candidate. Revert by recreating the
+# container from v2026-08-28-glm-5-3-flash-3 (same overlay without the
+# chunked-prefill pin), from flash-1 (usage-api GLM), or from a later
+# measured release that omits FINITE_ADMISSION_MODE.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -74,6 +87,11 @@ containers:
     image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
     restart: always
     env:
+      # DEGRADED ADMISSION (temporary, revert when the usage API recovers):
+      # admits only keys listed in the FINITE_ADMISSION_ALLOWLIST secret, no
+      # reservation, settlement skipped, x-finite-admission header on every
+      # response. See docs/runs/glm-5-3-flash-degraded-admission.md.
+      - FINITE_ADMISSION_MODE: "allowlist"
       - LISTEN_ADDR: "0.0.0.0:8002"
       - FINITE_USAGE_API_URL: "https://finite.computer"
       - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
@@ -95,6 +113,7 @@ containers:
     secrets:
       - FINITE_USAGE_API_SERVICE_KEY
       - VLLM_INTERNAL_API_KEY
+      - FINITE_ADMISSION_ALLOWLIST
     networks: [model-net, core-api]
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]

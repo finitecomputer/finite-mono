@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly CANONICAL_FINITE_PRIVATE_MODEL="deepseek-v4-flash-0731"
-readonly LEGACY_FINITE_PRIVATE_MODEL="glm-5-2"
-readonly FINITE_PRIVATE_PRODUCT_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+readonly CANONICAL_FINITE_PRIVATE_MODEL="glm-5-3-flash"
+readonly FINITE_PRIVATE_PRODUCT_BASE_URL="https://finite-private.finite.containers.tinfoil.dev/v1"
+readonly HISTORICAL_FINITE_PRIVATE_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+
+is_legacy_finite_private_model() {
+    case "$1" in
+        glm-5-2|deepseek-v4-flash-0731|glm-5.3-flash) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 agent_home="${FINITECHAT_HOME:-/data/agent}"
 hermes_home="${HERMES_HOME:-${agent_home}/hermes-home}"
@@ -17,9 +24,12 @@ if [[ "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" ]]; then
     model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-${CANONICAL_FINITE_PRIVATE_MODEL}}}"
     provider="${FINITECHAT_HERMES_PROVIDER:-custom}"
     base_url="${FINITECHAT_HERMES_BASE_URL:-${FINITE_PRIVATE_BASE_URL:-${FINITE_PRIVATE_PRODUCT_BASE_URL}}}"
-    if [[ "$model" == "$LEGACY_FINITE_PRIVATE_MODEL" \
-        && "$provider" == "custom" \
-        && "$base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
+    if [[ "$base_url" == "$HISTORICAL_FINITE_PRIVATE_BASE_URL" ]]; then
+        base_url="$FINITE_PRIVATE_PRODUCT_BASE_URL"
+    fi
+    if is_legacy_finite_private_model "$model" \
+        && [[ "$provider" == "custom" ]] \
+        && [[ "$base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
         model="$CANONICAL_FINITE_PRIVATE_MODEL"
     fi
     context_length="${FINITECHAT_HERMES_CONTEXT_LENGTH:-${FINITE_PRIVATE_CONTEXT_LENGTH:-393216}}"

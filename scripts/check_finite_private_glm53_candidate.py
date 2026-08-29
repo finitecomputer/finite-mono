@@ -17,6 +17,9 @@ BRIDGE_CANDIDATE = Path(
 RUNBOOK = Path("infra/runbooks/finite-private-glm-5.3-flash-production-cutover.md")
 
 CHECKPOINT = 'repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"'
+MODEL_ALIASES = (
+    'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"'
+)
 SGLANG_IMAGE_PLACEHOLDER = 'image: "REPLACE_WITH_VERIFIED_GL53_SGLANG_IMAGE"'
 LIMITER_IMAGE_PLACEHOLDER = 'image: "REPLACE_WITH_VERIFIED_GL53_LIMITER_IMAGE"'
 SGLANG_IMAGE_PATTERN = re.compile(
@@ -70,8 +73,9 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
             '"--tp-size",\n        "8"',
             '"--ep-size",\n        "8"',
             '"--context-length",\n        "393216"',
-            '"--dsa-prefill-backend",\n        "tilelang"',
-            '"--dsa-decode-backend",\n        "tilelang"',
+            '"--chunked-prefill-size",\n        "16384"',
+            '"--dsa-prefill-backend",\n        "flashmla_sparse"',
+            '"--dsa-decode-backend",\n        "fa3"',
             '"--kv-cache-dtype",\n        "bfloat16"',
             '"--moe-runner-backend",\n        "deep_gemm"',
             '"--reasoning-parser",\n        "glm45"',
@@ -79,7 +83,9 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
             'UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"',
             'FINITE_PRIVATE_MODEL: "glm-5-3-flash"',
             'FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"',
-            ('FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'),
+            MODEL_ALIASES,
+            'FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"',
+            'FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"',
             "upstream-container: finite-private-limiter",
             "authenticated: false",
             '- "/*"',
@@ -102,8 +108,9 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
                 '"--tp-size",\n        "8"',
                 '"--ep-size",\n        "8"',
                 '"--context-length",\n        "393216"',
+                '"--chunked-prefill-size",\n        "16384"',
                 'FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"',
-                ('FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'),
+                MODEL_ALIASES,
                 '- "/*"',
             ),
             "GLM candidate",
@@ -133,6 +140,9 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         '"--speculative-num-steps"',
         '"--speculative-eagle-topk"',
         '"--mem-fraction-static"',
+        '"--dsa-prefill-backend",\n        "tilelang"',
+        '"--dsa-decode-backend",\n        "tilelang"',
+        '"--disable-shared-experts-fusion"',
         '"--kv-cache-dtype",\n        "fp8"',
         "vllm/vllm-openai",
         'lmsysorg/sglang:glm-5.3-flash"',
@@ -140,10 +150,10 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         if forbidden in text:
             violations.append(f"GLM candidate contains forbidden anchor: {forbidden}")
 
-    aliases = 'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"'
-    if aliases not in text:
+    if MODEL_ALIASES not in text:
         violations.append(
-            "GLM candidate model aliases must be exactly deepseek-v4-flash-0731,glm-5-2"
+            "GLM candidate model aliases must be exactly "
+            "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"
         )
 
     has_sglang_image = SGLANG_IMAGE_PATTERN.search(text) is not None

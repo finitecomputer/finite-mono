@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
-const DEFAULT_MODEL: &str = "deepseek-v4-flash-0731";
+const DEFAULT_MODEL: &str = "glm-5-3-flash";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -47,6 +47,14 @@ pub struct LimiterConfig {
     /// `usage-api` (or removing the env); no data format changes either way.
     pub admission_mode: AdmissionMode,
     pub admission_allowlist: Vec<String>,
+    /// When set, omitted `reasoning_effort` on `/v1/chat/completions` is
+    /// filled with this value. Explicit client values are left alone.
+    /// GLM-5.3-Flash's checkpoint default is `max`; Finite's product default
+    /// is `high`.
+    pub default_reasoning_effort: Option<String>,
+    /// When set, omitted `chat_template_kwargs.enable_thinking` /
+    /// `chat_template_kwargs.thinking` is filled. Explicit client values win.
+    pub default_enable_thinking: Option<bool>,
 }
 
 /// Admission operating mode. See [`LimiterConfig`](struct.LimiterConfig.html)
@@ -93,6 +101,8 @@ impl LimiterConfig {
             watchdog: WatchdogConfig::default(),
             admission_mode: AdmissionMode::UsageApi,
             admission_allowlist: Vec::new(),
+            default_reasoning_effort: None,
+            default_enable_thinking: None,
         }
     }
 }
@@ -404,6 +414,8 @@ fn public_config_snapshot(config: &LimiterConfig) -> PublicConfigSnapshot {
         upstream_stream_idle_timeout_ms: config.upstream_stream_idle_timeout.as_millis(),
         admission_mode: config.admission_mode.as_str().to_string(),
         admission_allowlist_entries: config.admission_allowlist.len(),
+        default_reasoning_effort: config.default_reasoning_effort.clone(),
+        default_enable_thinking: config.default_enable_thinking,
         required_secrets: RequiredSecretsSnapshot {
             finite_usage_api_service_key_present: !config.finite_usage_api_service_key.is_empty(),
             vllm_internal_api_key_present: !config.vllm_internal_api_key.is_empty(),
@@ -566,8 +578,14 @@ async fn proxy_openai(
         .upstream_model
         .as_ref()
         .map(|_| routed_model.as_str());
-    let upstream_body =
-        upstream_body_for_request(&uri, body, parsed_body, is_streaming, rewrite_model);
+    let upstream_body = upstream_body_for_request(
+        &uri,
+        body,
+        parsed_body,
+        is_streaming,
+        rewrite_model,
+        &state.config,
+    );
     if is_streaming {
         let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
             Ok(response) => response,
@@ -1073,9 +1091,13 @@ fn upstream_body_for_request(
     mut value: Value,
     streaming: bool,
     routed_model: Option<&str>,
+    config: &LimiterConfig,
 ) -> Bytes {
-    let add_stream_usage = uri.path() == "/v1/chat/completions" && streaming;
-    if !add_stream_usage && routed_model.is_none() {
+    let is_chat = uri.path() == "/v1/chat/completions";
+    let add_stream_usage = is_chat && streaming;
+    let thinking_defaults = is_chat
+        && (config.default_reasoning_effort.is_some() || config.default_enable_thinking.is_some());
+    if !add_stream_usage && routed_model.is_none() && !thinking_defaults {
         return body;
     }
     let Some(object) = value.as_object_mut() else {
@@ -1090,7 +1112,41 @@ fn upstream_body_for_request(
     if let Some(routed_model) = routed_model {
         object.insert("model".to_string(), Value::String(routed_model.to_string()));
     }
+    if thinking_defaults {
+        apply_thinking_defaults(
+            object,
+            config.default_reasoning_effort.as_deref(),
+            config.default_enable_thinking,
+        );
+    }
     serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+}
+
+/// Fill omitted thinking fields. Never overwrite a client-supplied value.
+fn apply_thinking_defaults(
+    object: &mut serde_json::Map<String, Value>,
+    default_reasoning_effort: Option<&str>,
+    default_enable_thinking: Option<bool>,
+) {
+    if let Some(effort) = default_reasoning_effort
+        && !object.contains_key("reasoning_effort")
+    {
+        object.insert(
+            "reasoning_effort".to_string(),
+            Value::String(effort.to_string()),
+        );
+    }
+    if let Some(enable_thinking) = default_enable_thinking {
+        let kwargs = object
+            .entry("chat_template_kwargs")
+            .or_insert_with(|| json!({}));
+        let Some(kwargs) = kwargs.as_object_mut() else {
+            return;
+        };
+        if !kwargs.contains_key("enable_thinking") && !kwargs.contains_key("thinking") {
+            kwargs.insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
+        }
+    }
 }
 
 fn estimate_usage(facts: &RequestFacts) -> EstimatedUsage {
@@ -1341,6 +1397,10 @@ struct PublicConfigSnapshot {
     upstream_stream_idle_timeout_ms: u128,
     admission_mode: String,
     admission_allowlist_entries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_enable_thinking: Option<bool>,
     required_secrets: RequiredSecretsSnapshot,
 }
 
@@ -1686,6 +1746,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn omitted_thinking_fields_take_configured_defaults() {
+        let core = FakeCoreState::new("fpk_live_thinking", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_reasoning_effort = Some("high".to_string());
+        config.default_enable_thinking = Some(true);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_thinking")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bodies = upstream.bodies.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(forwarded["reasoning_effort"], "high");
+        assert_eq!(forwarded["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[tokio::test]
+    async fn explicit_thinking_fields_are_not_overwritten() {
+        let core = FakeCoreState::new("fpk_live_thinking_explicit", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_reasoning_effort = Some("high".to_string());
+        config.default_enable_thinking = Some(true);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_thinking_explicit")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64,
+                "reasoning_effort": "max",
+                "chat_template_kwargs": { "enable_thinking": false }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bodies = upstream.bodies.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(forwarded["reasoning_effort"], "max");
+        assert_eq!(forwarded["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[tokio::test]
     async fn configured_model_aliases_route_to_one_upstream_model() {
         let core = FakeCoreState::new("fpk_live_aliases", 10_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
@@ -1694,11 +1816,20 @@ mod tests {
         let mut config = test_config(core_url, upstream_url);
         config.default_model = "glm-5-3-flash".to_string();
         config.upstream_model = Some("glm-5-3-flash".to_string());
-        config.model_aliases = vec!["deepseek-v4-flash-0731".to_string(), "glm-5-2".to_string()];
+        config.model_aliases = vec![
+            "deepseek-v4-flash-0731".to_string(),
+            "glm-5-2".to_string(),
+            "glm-5.3-flash".to_string(),
+        ];
         let limiter_url = spawn(app(config).unwrap()).await;
 
         let client = reqwest::Client::new();
-        for requested_model in ["glm-5-3-flash", "deepseek-v4-flash-0731", "glm-5-2"] {
+        for requested_model in [
+            "glm-5-3-flash",
+            "deepseek-v4-flash-0731",
+            "glm-5-2",
+            "glm-5.3-flash",
+        ] {
             let response = client
                 .post(format!("{limiter_url}/v1/chat/completions"))
                 .bearer_auth("fpk_live_aliases")
@@ -1714,13 +1845,13 @@ mod tests {
         }
 
         let bodies = upstream.bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies.len(), 4);
         for body in bodies.iter() {
             let forwarded: Value = serde_json::from_slice(body).unwrap();
             assert_eq!(forwarded["model"], "glm-5-3-flash");
         }
         let reservations = core.reservations.lock().unwrap();
-        assert_eq!(reservations.len(), 3);
+        assert_eq!(reservations.len(), 4);
         assert!(
             reservations
                 .iter()
@@ -1842,7 +1973,7 @@ mod tests {
             .unwrap();
         assert_eq!(live.status(), StatusCode::OK);
         let live: Value = live.json().await.unwrap();
-        assert_eq!(live["config"]["defaultModel"], "deepseek-v4-flash-0731");
+        assert_eq!(live["config"]["defaultModel"], "glm-5-3-flash");
         assert_eq!(live["config"]["upstreamHealthPath"], "/health");
         assert_eq!(
             live["config"]["requiredSecrets"]["finiteUsageApiServiceKeyPresent"],
@@ -1861,7 +1992,7 @@ mod tests {
         assert_eq!(ready.status(), StatusCode::OK);
         let ready: Value = ready.json().await.unwrap();
         assert_eq!(ready["ok"], true);
-        assert_eq!(ready["config"]["defaultModel"], "deepseek-v4-flash-0731");
+        assert_eq!(ready["config"]["defaultModel"], "glm-5-3-flash");
         assert_eq!(ready["components"]["upstream"]["name"], "upstream");
         assert_eq!(ready["components"]["upstream"]["ok"], true);
         assert_eq!(

@@ -42,12 +42,51 @@ the sources above cannot carry lands here.
   Releases installed before the 2026-07-08 monorepo cut (`finitechat`
   v0.1.0–v0.1.3, `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from legacy repo
   URLs; no live users depend on those URLs.
-- The historical `glm-5-2` request alias remains for mixed-version clients;
-  `deepseek-v4-flash-0731` is the canonical model label everywhere else.
+- The historical `glm-5-2` and `deepseek-v4-flash-0731` request aliases
+  remain for mixed-version clients; `glm-5-3-flash` is the canonical model
+  label. The dotted `glm-5.3-flash` spelling is a limiter alias only.
+- The historical `kimi-k2-6` Tinfoil hostname is retired; issued Runtime
+  readers still need the follow-up onto `finite-private`.
 - Runtime artifact ids promoted before 2026-08-05 (`2026-07-10.2` through
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-08-29 — Finite Private GLM flash-4 (chunked prefill + 392k proof)
+
+- Replaced `v2026-08-28-glm-5-3-flash-3` with
+  `v2026-08-28-glm-5-3-flash-4` (`2aa4d230…`, 8xH200). Same overlay,
+  limiter `.6`, and DSA pair; added `--chunked-prefill-size 16384`.
+- 1-way TTFT 0.684s → 0.287s; 32-way aggregate 124.1 → 128.5 tok/s.
+  387,498-token needle retrieved correctly (cold 21.3s, warm 2.5s).
+- Wire name is hyphenated `glm-5-3-flash`. Dotted `glm-5.3-flash` is now
+  a limiter alias so copied docs/health names do not 400.
+
+### 2026-08-28 — Finite Private GLM flash-3 (H200 DSA auto + thinking high)
+
+- Replaced `v2026-08-28-glm-5-3-flash-2` with
+  `v2026-08-28-glm-5-3-flash-3` on the same host (`fa79c9b9…`, 8xH200).
+  Checkpoint and SGLang image unchanged. DSA backends are now
+  `flashmla_sparse`/`fa3`; limiter `2026-08-28.6` fills omitted
+  `reasoning_effort` with `high`. Degraded allowlist admission unchanged.
+- 32-way thinking-on TTFT stayed ~34s. Recipe notes:
+  [`docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md`](../docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md),
+  measurements:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+
+### 2026-08-28 — Finite Private GLM-5.3-Flash live under temporary degraded admission
+
+- GPU container `finite-private` now serves GLM-5.3-Flash on 8xH200.
+  Release `v2026-08-28-glm-5-3-flash-2` (overlay
+  `tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`). DeepSeek
+  `v2026-08-13-deepseek-v4-flash-0731-128-2048-1` remains the rollback tag.
+- Usage admission on `finite.computer` was missing
+  (`POST /internal/finite-private/v1/reservations` 307'd home), so the
+  limiter is in env-gated allowlist mode (PR #746): listed keys only, no
+  reservation or settlement. Full trade-off and revert:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+- Historical `kimi-k2-6` hostname retired by operator decision; issued
+  Runtime readers still need a follow-up migration onto `finite-private`.
 
 ### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
 

@@ -4,9 +4,14 @@ import json
 import unittest
 
 from scripts.check_finite_private_glm53_protocol import (
+    CONTEXT_COMPLETION_TOKENS,
+    CONTEXT_TARGETS,
     MODEL,
     accumulate_tool_calls,
     completion_message,
+    context_payload,
+    context_targets,
+    response_reasoning_tokens,
     response_usage,
     score_tool_calls,
 )
@@ -98,6 +103,20 @@ class Glm53ProtocolTests(unittest.TestCase):
             score_tool_calls(calls, {"austin"}), (False, "invalid tool JSON")
         )
 
+    def test_context_targets_can_skip_the_unproven_near_limit_case(self) -> None:
+        self.assertEqual(context_targets(128_000), (128_000,))
+        self.assertEqual(context_targets(CONTEXT_TARGETS[-1]), CONTEXT_TARGETS)
+        self.assertEqual(context_targets(64_000), ())
+        with self.assertRaisesRegex(ValueError, "positive"):
+            context_targets(0)
+
+    def test_context_payload_budgets_for_the_think_preamble(self) -> None:
+        payload = context_payload(1000)
+        self.assertEqual(payload["max_tokens"], CONTEXT_COMPLETION_TOKENS)
+        self.assertGreaterEqual(CONTEXT_COMPLETION_TOKENS, 64)
+        self.assertTrue(payload["messages"][0]["content"].endswith("\nReply only: context ok"))
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+
     def test_usage_accepts_openai_chat_shape(self) -> None:
         self.assertEqual(
             response_usage(
@@ -110,6 +129,13 @@ class Glm53ProtocolTests(unittest.TestCase):
             ),
             (128000, 16),
         )
+        self.assertEqual(
+            response_reasoning_tokens(
+                {"usage": {"reasoning_tokens": 1, "completion_tokens": 281}}
+            ),
+            1,
+        )
+        self.assertEqual(response_reasoning_tokens({}), 0)
 
 
 if __name__ == "__main__":

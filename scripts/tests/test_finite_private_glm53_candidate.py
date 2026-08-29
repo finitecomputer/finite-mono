@@ -67,12 +67,24 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
         self.assertTrue(any("tp-size" in item for item in violations), violations)
         self.assertTrue(any("bfloat16" in item for item in violations), violations)
 
+    def test_chunked_prefill_size_is_pinned_to_the_h200_ab(self) -> None:
+        text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        text = text.replace(
+            '"--chunked-prefill-size",\n        "16384"',
+            '"--chunked-prefill-size",\n        "2048"',
+        )
+        with temporary_repository(main_text=text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any("chunked-prefill-size" in item for item in violations), violations
+        )
+
     def test_legacy_aliases_are_required_but_unknown_labels_are_not_wildcarded(
         self,
     ) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace(
-            'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2"',
+            'FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"',
             'FINITE_PRIVATE_MODEL_ALIASES: "*"',
         )
         with temporary_repository(main_text=text) as temporary_directory:

@@ -7,9 +7,9 @@ if [ -f "$CANARY_ENV_FILE" ]; then
   source "$CANARY_ENV_FILE"
 fi
 
-CONTAINER="${FINITE_PRIVATE_CONTAINER:-kimi-k2-6}"
-ENDPOINT="${FINITE_PRIVATE_ENDPOINT:-https://kimi-k2-6.finite.containers.tinfoil.dev}"
-MODEL="${FINITE_PRIVATE_MODEL:-deepseek-v4-flash-0731}"
+CONTAINER="${FINITE_PRIVATE_CONTAINER:-finite-private}"
+ENDPOINT="${FINITE_PRIVATE_ENDPOINT:-https://finite-private.finite.containers.tinfoil.dev}"
+MODEL="${FINITE_PRIVATE_MODEL:-glm-5-3-flash}"
 EXPECTED_RESPONSE_MODEL="${FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL:-}"
 TIMEOUT_SECS="${FINITE_PRIVATE_CANARY_TIMEOUT_SECS:-180}"
 READY_TIMEOUT_SECS="${FINITE_PRIVATE_READY_TIMEOUT_SECS:-4200}"
@@ -44,9 +44,9 @@ Mutating command (requires explicit approval and confirmation env):
   relaunch TAG         Relaunch the Tinfoil container from measured TAG.
 
 Environment:
-  FINITE_PRIVATE_CONTAINER             default: kimi-k2-6
-  FINITE_PRIVATE_ENDPOINT              default: https://kimi-k2-6.finite.containers.tinfoil.dev
-  FINITE_PRIVATE_MODEL                 default: deepseek-v4-flash-0731
+  FINITE_PRIVATE_CONTAINER             default: finite-private
+  FINITE_PRIVATE_ENDPOINT              default: https://finite-private.finite.containers.tinfoil.dev
+  FINITE_PRIVATE_MODEL                 default: glm-5-3-flash
   FINITE_PRIVATE_EXPECTED_RESPONSE_MODEL
                                        optional exact model identity required in responses
   FINITE_PRIVATE_CANARY_ENV_FILE       default: secrets/finite-private-canary.env
