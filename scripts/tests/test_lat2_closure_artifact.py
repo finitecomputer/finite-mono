@@ -146,8 +146,17 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertNotIn("finite-saas-runner.timer", source)
         self.assertNotIn("Runner-only", source)
         self.assertNotIn("ExecStart", source)
-        # The absence guard is the only runner reference allowed.
-        self.assertIn("finite-saas-runner.service exists on the app-plane host", source)
+        # The absence guard is the only runner reference allowed: a live
+        # runner on the host, or any runner unit in the candidate closure,
+        # refuses; an inert husk in the outgoing closure is crossable
+        # because only a runner-free closure can remove it.
+        self.assertIn(
+            "finite-saas-runner.service is active on the app-plane host", source
+        )
+        self.assertIn("candidate closure contains finite-saas-runner.service", source)
+        self.assertIn(
+            "candidate closure contains finite-saas-runner-phala.service", source
+        )
 
     def test_dry_activation_fences_the_declared_app_plane_unit_set(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
@@ -177,7 +186,13 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn("previous_system", source)
         self.assertIn("switch-to-configuration\" switch", source)
         self.assertIn("rollback", source)
-        self.assertIn("refusing: finite-saas-runner.service exists on the app-plane host", source)
+        self.assertIn(
+            "refusing: finite-saas-runner.service is active on the app-plane host",
+            source,
+        )
+        self.assertIn(
+            "refusing: candidate closure contains finite-saas-runner.service", source
+        )
 
     def test_go_live_requires_product_health_after_the_switch(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

@@ -264,10 +264,23 @@ if [[ "$previous_system" != "$previous_profile" ]]; then
   exit 73
 fi
 
-# This host runs no Agent Runner by design (ADR 0007): if a runner unit ever
-# appears here, stop before mutating anything.
-if systemctl cat finite-saas-runner.service >/dev/null 2>&1; then
-  echo "refusing: finite-saas-runner.service exists on the app-plane host" >&2
+# This host runs no Agent Runner by design (ADR 0007). Refuse when a runner
+# is LIVE on this host, or when the CANDIDATE closure would bring one. An
+# inert never-startable husk unit in the OUTGOING closure is explicitly
+# crossable: the 2026-08-29 finite-identity husk bug (#751) left exactly
+# that behind, and /etc/systemd/system resolves into the running closure's
+# read-only store path — so switching to a runner-free closure is the ONLY
+# way such a leftover can ever be removed.
+if systemctl is-active --quiet finite-saas-runner.service; then
+  echo "refusing: finite-saas-runner.service is active on the app-plane host" >&2
+  exit 74
+fi
+if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner.service"; then
+  echo "refusing: candidate closure contains finite-saas-runner.service" >&2
+  exit 74
+fi
+if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner-phala.service"; then
+  echo "refusing: candidate closure contains finite-saas-runner-phala.service" >&2
   exit 74
 fi
 
