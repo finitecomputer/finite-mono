@@ -65,58 +65,6 @@ The unresolved decisions are intentionally outside this record:
    its temporary canonical operator override can be removed; and
 4. no Agent migration or Runtime rollout may use this record as authorization.
 
-The 2026-08-23 list above is the snapshot from that record. Status as of
-2026-08-28 is in the addendum below; do not treat the snapshot as current
-operator work.
-
-### Later developments (2026-08-28)
-
-This addendum does not authorize retain, restore, a lat3 operator-file edit,
-credential rotation, a Runtime rewrite, an Agent migration, a GLM cutover, a
-lat2 cutover, or a lat4 import.
-
-Proven in git after the 2026-08-23 snapshot:
-
-- PR #658 merged on 2026-08-24. That merge shipped Austin migration tooling
-  only. It did not authorize the 2026-08-23 host edits retroactively.
-- The 2026-08-24 Austin exercise observed effective model
-  `deepseek-v4-flash-0731` on the fleet collector path. See
-  [`2026-08-24-austin-hermes-migration-exercise.md`](../../docs/research/2026-08-24-austin-hermes-migration-exercise.md).
-- PR #669 merged on 2026-08-24 and added the fenced
-  `just deploy-lat3-closure` path. The 2026-08-27 platform wave then deployed
-  rev `b9254c81` to both NixOS closures, with a `lat3-nixos-closure-…`
-  rollback artifact. See [`deployment-changelog.md`](../deployment-changelog.md).
-  Shared `kata-runner-host.nix` already declared
-  `FC_RUNNER_FINITE_PRIVATE_MODEL=deepseek-v4-flash-0731`, so a later lat3
-  closure removes the original reason for a host-local model override. This
-  addendum does not observe whether that operator line is still present and
-  does not authorize removing it.
-- ADR 0007 records that finite-lat-1 suffered a thermal failure on
-  2026-08-27, sits in rescue with disks mounted read-only, and is no longer
-  the live app/Runner host. lat3 remained up. See
-  [`0007-finite-lat-2-emergency-app-plane-cutover.md`](../../docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md).
-- The named lat1 agent-state evacuation archives on the operator Mac
-  (`finite-saas-runner.tar.zst`, kata tree, recovery archive, manifests
-  bundle) do not name
-  `/var/lib/finite-runner-model-repair/`. Survival of the lat1 pre-image on
-  the rescue disks or in the broader off-box state pull is unproven. See
-  [`lat4-provisioning-prep.md`](../../docs/runs/lat4-provisioning-prep.md).
-
-Current status of the snapshot decisions:
-
-1. lat3 operator file: still an owner choice, now a cleanup rather than a
-   closure-path blocker. Keep or remove the canonical-model override only
-   with a separately authorized host-local edit.
-2. lat1 operator file and pre-image: live retain or restore on a booted lat1
-   is unavailable. Confirm whether the 2026-08-23 pre-image still exists in
-   rescue or an off-box copy before treating rollback as possible. Do not
-   reconstruct `/etc/finite/runner.env` on lat4 from this record.
-3. Exposed Runtime provider credentials: no rotation record has landed.
-   Rotation and consumer verification still require a separately authorized,
-   reviewed operation because the credentials are shared by running Agents.
-4. No Agent migration, Runtime rollout, GLM cutover, lat2 cutover, or lat4
-   import may use this record as authorization.
-
 ## Fixed current state
 
 | Role | Identity |
