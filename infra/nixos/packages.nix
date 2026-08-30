@@ -424,11 +424,6 @@ rec {
       "finitechat/crates/finitechat-proto"
     ];
   };
-  finite-specialization-worker = mkWorkspaceCrate {
-    pname = "finite-specialization-worker";
-    dir = "finitecomputer-v2/crates/finite-specialization-worker";
-    sourcePaths = [ "finitecomputer-v2/crates/finite-specialization-worker" ];
-  };
   finitesitesd = mkWorkspaceCrate {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";
