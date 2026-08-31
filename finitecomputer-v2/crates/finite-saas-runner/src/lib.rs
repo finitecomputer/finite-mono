@@ -14,6 +14,13 @@ use finite_saas_core::{
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
+// The runtime environment key contract (reserved keys, secret shape, key
+// shape) is shared with finite-saas-core through finite-saas-runtime-contract
+// so this crate's launch checks can never drift from Core's validation.
+use finite_saas_runtime_contract::{
+    reserved_runtime_environment_key, retired_specialization_environment_key,
+    secret_runtime_environment_key, valid_runtime_environment_key,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -74,7 +81,6 @@ pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
-const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
 const MAX_RUNTIME_ENVIRONMENT_VALUE_BYTES: usize = 4 * 1024;
 const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES: usize = 64;
@@ -1947,72 +1953,6 @@ fn validate_runtime_environment_disjoint(
         )));
     }
     Ok(())
-}
-
-fn valid_runtime_environment_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= MAX_RUNTIME_ENVIRONMENT_KEY_BYTES
-        && key.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
-        })
-}
-
-pub(crate) fn retired_specialization_environment_key(key: &str) -> bool {
-    matches!(
-        key,
-        "FINITE_SPECIALIZATION_BUNDLE"
-            | "FINITE_SPECIALIZATION_WORKER_API_KEY"
-            | "FBRAIN_EMBEDDING_ENDPOINT"
-            | "FBRAIN_EMBEDDING_BEARER_TOKEN"
-    )
-}
-
-fn reserved_runtime_environment_key(key: &str) -> bool {
-    // Retired AEON worker keys stay reserved so leftover host or operator env
-    // cannot re-inject the clawland specialization bundle. Reserved-alone is
-    // not enough on Kata upgrade: that path copies reserved keys forward, so
-    // upgrade and replacement also drop them from retained env.
-    retired_specialization_environment_key(key)
-        || matches!(
-            key,
-            "FINITE_SERVER_URL"
-                | "FINITECHAT_SERVER_URL"
-                | "FINITE_AGENT_BOOT_INTENT_JSON"
-                | "FINITE_AGENT_STATE_ROOT"
-                | "FINITECHAT_HOME"
-                | "FINITE_HOME"
-                | "HERMES_HOME"
-                | "FINITECHAT_WORKSPACE"
-                | "FINITE_AGENT_HTTP_HOST"
-                | "FINITE_AGENT_HTTP_PORT"
-                | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
-                | "FINITE_AGENT_ID"
-                | "FINITE_AGENT_NAME"
-                | "FINITECHAT_HERMES_AGENT_NAME"
-                | "FINITECHAT_HERMES_ROOM_NAME"
-                | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
-                | "FINITECHAT_HERMES_INBOUND_STREAM"
-                | "FINITECHAT_ALLOW_ALL_USERS"
-                | "FINITE_ALLOW_ALL_USERS"
-                | "GATEWAY_ALLOW_ALL_USERS"
-                | "FINITE_DEFAULT_INFERENCE_PROFILE"
-                | "FINITE_PRIVATE_MODEL"
-                | "FINITE_PRIVATE_CONTEXT_LENGTH"
-                | "FINITE_PRIVATE_BASE_URL"
-                | "FINITE_PRIVATE_API_KEY"
-                | "FINITECHAT_HERMES_MODEL"
-                | "FINITECHAT_HERMES_CONTEXT_LENGTH"
-                | "FINITECHAT_HERMES_PROVIDER"
-                | "FINITECHAT_HERMES_BASE_URL"
-                | "FINITECHAT_HERMES_API_MODE"
-                | "OPENAI_API_KEY"
-        )
-}
-
-fn secret_runtime_environment_key(key: &str) -> bool {
-    ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
-        .iter()
-        .any(|part| key.split('_').any(|segment| segment == *part))
 }
 
 impl std::fmt::Debug for FinitePrivateLaunchKey {
@@ -5601,6 +5541,42 @@ mod tests {
             std::fs::read_to_string(env_file)
                 .unwrap()
                 .contains("FINITE_PRIVATE_API_KEY=fpk_must_never_reach_argv")
+        );
+    }
+
+    /// Core and this crate share one reserved-key list via
+    /// finite-saas-runtime-contract (E16): iterating that list through the
+    /// launch gate proves the runner side is wired to the single source, so
+    /// no key can be runner-reserved-but-core-accepted (brick-a-launch) or
+    /// the reverse (Core storing env the runner silently accepts).
+    #[test]
+    fn launch_environment_rejects_every_contract_reserved_key() {
+        let valid = BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "http://192.168.64.1:18789".to_string(),
+        )]);
+        validate_runtime_environment(&valid)
+            .expect("benign environment key must stay configurable");
+
+        for key in [
+            finite_saas_runtime_contract::RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+            finite_saas_runtime_contract::RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let invalid = BTreeMap::from([(key.to_string(), "value".to_string())]);
+            assert!(
+                validate_runtime_environment(&invalid).is_err(),
+                "runner accepted reserved runtime environment key {key}"
+            );
+        }
+
+        let secret_shaped =
+            BTreeMap::from([("FINITE_AGENT_LAUNCH_TOKEN".to_string(), "value".to_string())]);
+        assert!(
+            validate_runtime_environment(&secret_shaped).is_err(),
+            "secret-shaped keys must be rejected by the shared heuristic"
         );
     }
 
