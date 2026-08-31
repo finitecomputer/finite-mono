@@ -33,10 +33,6 @@ compatibility_bridge:
   bridge_base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
   secret_inputs:
     FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN: external_secret_only
-  reconciliation:
-    command: agent.specialization.aeon.reconcile
-    schema: finite.agent.specialization.aeon.reconcile.v1
-    owned_path: auxiliary.vision
   prompt_versions:
     image: aeon-image-analysis-v1
     audio: aeon-audio-understanding-v1

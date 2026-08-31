@@ -31,25 +31,20 @@ Platform Channel:
 
 - `agent.status.inspect`
 - `agent.owner.claim`
-- `agent.hermes.restart`
-- `agent.chat.recover`
 - `agent.connections.status`
 - `agent.inference.apply`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
-- `agent.hermes.config.preview`
-- `agent.hermes.config.apply`
-- `agent.hermes.config.rollback`
 
 AEON specialization is retired. Runner no longer injects
 `FINITE_SPECIALIZATION_BUNDLE` / `FINITE_SPECIALIZATION_WORKER_API_KEY`, and
 Kata upgrade/recovery drop leftover copies. `finite-agentd` ignores leftover
 copies of those variables, does not activate or probe `auxiliary.vision`, and
-rejects `agent.specialization.aeon.reconcile` as unsupported. Status still
-includes a `specialization` object so mixed-version readers keep working; it
-is always `desired=false` / `effective=false`. Persisted Hermes
-`auxiliary.vision` rows are left alone.
+answers retired specialization commands with the generic unsupported-command
+error. Status still includes a `specialization` object so mixed-version
+readers keep working; it is always `desired=false` / `effective=false`.
+Persisted Hermes `auxiliary.vision` rows are left alone.
 
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill
