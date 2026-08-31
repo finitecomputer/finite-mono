@@ -9152,4 +9152,244 @@ mod tests {
             BTreeSet::from([("team-notes".to_owned(), PendingGrantWrapReason::Invitation)])
         );
     }
+
+    /// Auth-kernel cut compat proof: a Brain DB written by the pre-cut code
+    /// (main) must load, list, and keep failing closed under the post-cut
+    /// code. Every row injected here is a shape only the old writers
+    /// produced: a member stamped by the deleted departure-facts consumer
+    /// (`origin_kind = 'departure'`), an approval-committed npub invitation
+    /// (`origin_kind = 'approval'` with plan provenance), a pending
+    /// email-bootstrap invitation (claim route deleted), a pending
+    /// invitation-plan row (route deleted), a stale departure cursor, and an
+    /// applied `invite-commit` approval nonce. None of these may brick
+    /// load/list/accept, deny, replay protection, or the new invite-token
+    /// path running on the same brain.
+    #[test]
+    fn auth_kernel_cut_loads_and_fails_closed_on_pre_cut_state_shapes() {
+        use finite_brain_core::sha256_hex;
+
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let now = "2026-08-29T00:00:00.000Z";
+
+        // --- Old shape 1: member stamped by the departure-facts consumer. ---
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_members (brain_id, user_id, delegated_by_npub, origin_kind, origin_ref)
+                 VALUES ('acme', 'npub-departed-member', 'npub-admin', 'departure', 'fact-42')",
+                [],
+            )
+            .unwrap();
+
+        // --- Old shape 2: approval-committed npub invitation with plan
+        // provenance (columns V22 added; writer deleted). ---
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitations (
+                    id, brain_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+                    bootstrap_payload_hash, bootstrap_wrapped_event_json,
+                    bootstrap_authorization_event_json, bootstrap_scope_json,
+                    status, invite_code, accept_path, initial_folder_access_json,
+                    created_by_npub, expires_at, created_at, updated_at, folder_only,
+                    origin_ref, roster_revision, origin_kind
+                ) VALUES (
+                    'invitation-precut-npub', 'acme', 'npub-precut-invitee', 'npub', NULL, NULL,
+                    NULL, NULL, NULL, '[]',
+                    'pending', 'invite-precut-npub-0123456789',
+                    '/v1/brain-invitation-links/invite-precut-npub-0123456789/accept',
+                    '["strategy"]',
+                    'npub-admin', '2026-09-30T00:00:00.000Z', ?1, ?1, 0,
+                    'plan-precut', 7, 'approval'
+                )
+                "#,
+                params![now],
+            )
+            .unwrap();
+
+        // --- Old shape 3: pending email-bootstrap invitation (claim route
+        // deleted; rows may sit pending until expiry). ---
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitations (
+                    id, brain_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+                    bootstrap_payload_hash, bootstrap_wrapped_event_json,
+                    bootstrap_authorization_event_json, bootstrap_scope_json,
+                    status, invite_code, accept_path, initial_folder_access_json,
+                    created_by_npub, expires_at, created_at, updated_at, folder_only
+                ) VALUES (
+                    'invitation-precut-email', 'acme', NULL, 'email_bootstrap',
+                    'invitee@example.com', 'npub-unwrap',
+                    'hash-precut', '{}', '{}', '[]',
+                    'pending', 'invite-precut-email-012345678',
+                    '/v1/brain-invitation-links/invite-precut-email-012345678/claim',
+                    '[]',
+                    'npub-admin', '2026-09-30T00:00:00.000Z', ?1, ?1, 0
+                )
+                "#,
+                params![now],
+            )
+            .unwrap();
+
+        // --- Old shape 4: pending invitation-plan row (route deleted). ---
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitation_plans (
+                    id, brain_id, plan_hash, inviter_npub, workos_user_id, human_email,
+                    human_npub, agents_json, exclusions_json, roster_revision,
+                    status, expires_at, created_at, updated_at
+                ) VALUES (
+                    'plan-precut', 'acme', 'hash-plan-precut', 'npub-admin', 'user_precut',
+                    'invitee@example.com', NULL, '[]', '[]', 7,
+                    'pending', '2026-09-30T00:00:00.000Z', ?1, ?1
+                )
+                "#,
+                params![now],
+            )
+            .unwrap();
+
+        // --- Old shape 5: stale departure machinery rows (consumer deleted). ---
+        store
+            .conn
+            .execute(
+                "UPDATE brain_departure_fact_cursor
+                 SET last_applied_revision = 42, updated_at = ?1
+                 WHERE id = 1",
+                params![now],
+            )
+            .unwrap();
+
+        // --- Old shape 6: applied invite-commit approval nonce + pending
+        // invite-commit request (execution deleted; deny must still work and
+        // the old nonce must still count as seen). ---
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_approval_nonces (
+                    brain_id, nonce, approval_event_id, signer_npub, action, applied_at
+                 ) VALUES ('acme', 'nonce-precut-applied', 'event-precut', 'npub-admin', 'invite-commit', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .create_brain_approval_request(&StoredBrainApprovalRequest {
+                id: "approval-precut".to_owned(),
+                brain_id: brain_id.clone(),
+                action: "invite-commit".to_owned(),
+                payload_json: "{\"version\":1,\"brainId\":\"acme\",\"action\":\"invite-commit\",\"planId\":\"plan-precut\",\"targetNpubs\":[],\"nonce\":\"nonce-precut\",\"expiresAt\":1790000000}".to_owned(),
+                nonce: "nonce-precut".to_owned(),
+                expires_at_unix: 1_790_000_000,
+                requested_by_npub: admin.clone(),
+                status: ApprovalRequestStatus::Pending,
+                result_invitations: Some(Vec::new()),
+                approval_event_id: None,
+                resolved_by_npub: None,
+                created_at: now.to_owned(),
+                updated_at: now.to_owned(),
+            })
+            .unwrap();
+
+        // --- The proofs: nothing above bricks the core surface. ---
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == "npub-departed-member")
+        );
+
+        let invitations = store.list_brain_invitations(&brain_id).unwrap();
+        assert!(
+            invitations
+                .iter()
+                .any(|invitation| invitation.id == "invitation-precut-npub"
+                    && invitation.origin_kind == ProvenanceOriginKind::Approval
+                    && invitation.roster_revision == Some(7))
+        );
+        assert!(
+            invitations
+                .iter()
+                .any(|invitation| invitation.id == "invitation-precut-email"
+                    && invitation.target_kind == BrainInvitationTargetKind::EmailBootstrap)
+        );
+
+        // The pre-cut npub invitation still accepts and stamps membership.
+        let invitee = UserId::new("npub-precut-invitee").unwrap();
+        store
+            .accept_brain_invitation_by_code("invite-precut-npub-0123456789", &invitee, now)
+            .unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == "npub-precut-invitee")
+        );
+
+        // The email-bootstrap row fails closed instead of bricking accept.
+        let claimant = UserId::new("npub-claimant").unwrap();
+        assert!(matches!(
+            store.accept_brain_invitation_by_code("invite-precut-email-012345678", &claimant, now),
+            Err(StoreError::UnavailableLink { .. })
+        ));
+
+        // Old approval state: still listed, still replay-protected, still
+        // deniable.
+        let requests = store.list_brain_approval_requests(&brain_id).unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.id == "approval-precut" && request.action == "invite-commit"));
+        assert!(
+            store
+                .approval_nonce_seen(&brain_id, "nonce-precut-applied")
+                .unwrap()
+        );
+        store
+            .resolve_brain_approval_request(
+                "approval-precut",
+                ApprovalRequestStatus::Denied,
+                None,
+                &admin,
+                now,
+            )
+            .unwrap();
+
+        // New path coexists with all of the above on the same brain.
+        let raw_token = "fbit-precut-coexist-token";
+        let token_hash = sha256_hex(raw_token);
+        store
+            .create_brain_invite_token(
+                &brain_id,
+                &token_hash,
+                BrainInviteTokenRole::Member,
+                &admin,
+                "2026-09-20T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let redeemed = store
+            .redeem_brain_invite_token(&token_hash, &claimant, now)
+            .unwrap();
+        assert_eq!(
+            redeemed.redeemed_by_npub.as_ref().map(UserId::as_str),
+            Some(claimant.as_str())
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == "npub-claimant")
+        );
+    }
 }
