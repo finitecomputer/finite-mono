@@ -1126,36 +1126,6 @@ pub struct StoredFolderMount {
     pub updated_at: String,
 }
 
-/// Historical Mount access whose original ownership cannot be reconstructed safely.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct LegacyFolderAccessSourceRepair {
-    /// Mount connection whose historical ownership is ambiguous.
-    pub connection_id: String,
-    /// Native source Brain.
-    pub brain_id: BrainId,
-    /// Native source Folder.
-    pub folder_id: FolderId,
-    /// Participant whose access requires an explicit ownership decision.
-    pub user_id: UserId,
-    /// Human-readable repair reason.
-    pub reason: String,
-    /// Timestamp inherited from the historical participant row.
-    pub created_at: String,
-}
-
-/// A historical Personal Mount that could not be migrated without guessing.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct LegacyPersonalMountRepair {
-    /// Historical mount id.
-    pub legacy_mount_id: String,
-    /// Resolved destination Brain when one was unambiguous.
-    pub destination_brain_id: Option<BrainId>,
-    /// Human-readable repair reason.
-    pub reason: String,
-    /// Last migration-attempt timestamp inherited from the legacy row.
-    pub updated_at: String,
-}
-
 /// Direction of a shared-folder relationship relative to one Brain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SharedFolderDirection {
@@ -6220,12 +6190,15 @@ mod tests {
             migrated.managed_access_npubs,
             BTreeSet::from([destination_admin.clone()])
         );
-        assert!(
-            store
-                .load_legacy_folder_access_source_repairs()
-                .unwrap()
-                .is_empty()
-        );
+        let recorded_repairs: u64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_folder_access_source_repairs WHERE status = 'repair'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded_repairs, 0);
 
         revoke_mount_for_test(
             &mut store,
@@ -6312,19 +6285,50 @@ mod tests {
             migrated.managed_access_npubs.is_empty(),
             "ambiguous legacy access must not be treated as exclusively Mount-owned"
         );
-        let repairs = store.load_legacy_folder_access_source_repairs().unwrap();
-        assert_eq!(repairs.len(), 1);
+        let repair_row_count: u64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_folder_access_source_repairs WHERE status = 'repair'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repair_row_count, 1);
+        let (
+            repair_connection_id,
+            repair_brain_id,
+            repair_folder_id,
+            repair_user_id,
+            repair_reason,
+            repair_created_at,
+        ): (String, String, String, String, String, String) = store
+            .conn
+            .query_row(
+                "SELECT connection_id, brain_id, folder_id, user_id, reason, created_at
+                 FROM legacy_folder_access_source_repairs
+                 WHERE status = 'repair'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(repair_connection_id, "mount-ambiguous-pre-v19");
+        assert_eq!(repair_brain_id, source_brain_id.as_str());
+        assert_eq!(repair_folder_id, source_folder_id.as_str());
+        assert_eq!(repair_user_id, destination_admin.as_str());
         assert_eq!(
-            repairs[0],
-            LegacyFolderAccessSourceRepair {
-                connection_id: "mount-ambiguous-pre-v19".to_owned(),
-                brain_id: source_brain_id.clone(),
-                folder_id: source_folder_id.clone(),
-                user_id: destination_admin.clone(),
-                reason: "legacy manages_folder_access=false cannot distinguish preexisting direct access from a pre-V17 Mount-owned grant".to_owned(),
-                created_at: now.to_owned(),
-            }
+            repair_reason,
+            "legacy manages_folder_access=false cannot distinguish preexisting direct access from a pre-V17 Mount-owned grant"
         );
+        assert_eq!(repair_created_at, now);
 
         revoke_mount_for_test(
             &mut store,
@@ -6418,10 +6422,25 @@ mod tests {
             BTreeSet::from([UserId::new("npub-owner").unwrap()])
         );
 
-        let repairs = store.load_legacy_personal_mount_repairs().unwrap();
-        assert_eq!(repairs.len(), 1);
-        assert_eq!(repairs[0].legacy_mount_id, "legacy-mount-needs-repair");
-        assert!(repairs[0].reason.contains("has no Personal Brain"));
+        let repair_row_count: u64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_personal_mount_migrations WHERE status = 'repair'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repair_row_count, 1);
+        let repair_reason: String = store
+            .conn
+            .query_row(
+                "SELECT reason FROM legacy_personal_mount_migrations
+                 WHERE status = 'repair' AND legacy_mount_id = 'legacy-mount-needs-repair'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repair_reason.contains("has no Personal Brain"));
         let legacy_row_count: u64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM personal_folder_mounts", [], |row| {
