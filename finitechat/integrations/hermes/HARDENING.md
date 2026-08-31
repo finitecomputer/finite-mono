@@ -636,11 +636,11 @@ Tinfoil canary runbook draft:
    `scripts/hermes-tinfoil-canary-artifacts.py`.
 5. Create one manually controlled Tinfoil container from the public config repo
    and release tag. The config should pin `image.digest`, expose `/healthz` on
-   port 8080, set `FINITE_AGENT_RESTORE_ON_START=1`,
-   `FINITE_AGENT_RESTORE_LATEST=1`, `FINITE_AGENT_BACKUP_ON_EXIT=1`,
-   `FINITE_AGENT_RESTIC_REPOSITORY`, `FINITE_AGENT_RESTIC_BACKUP_TAG`,
-   `FINITE_SERVER_URL=https://chat.finite.computer`,
+   port 8080, set `FINITE_SERVER_URL=https://chat.finite.computer`,
    `FINITECHAT_HERMES_INBOUND_STREAM=1`, and AWS-style object-storage secrets.
+   The entrypoint restic restore/backup env names formerly listed here were
+   retired; off-host retirement storage is the Borg lane
+   (`docs/runs/runtime-retirement-readiness.md`).
 6. Start from empty local disk, let the runtime entrypoint restore the latest
    restic snapshot tagged `finite-agent-state`, and fetch invite URL/PIN from
    the runtime endpoint. Before handing the invite to a human, run the
