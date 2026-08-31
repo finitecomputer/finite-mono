@@ -7,9 +7,23 @@ Everything Finite runs in production is defined here. The north star:
 > prod box. Nothing requires knowledge that lives only in someone's shell
 > history.
 
-## Post-cutover headline (2026-07-09)
+## Current headline (2026-08-29)
 
-**finite-lat-1 is now the consolidated NixOS app server, and it runs the whole
+**finite-lat-2 is the live app-plane host and runs the coupled cluster** (Core,
+Postgres, chat, hosted-device, Sites, Brain, Identity, dashboard, Caddy,
+backups — defined in `infra/nixos/`, per ADR 0007 and the 2026-08-29 emergency
+cutover from lat1's thermal failure). **lat3 and lat4 are the active Agent
+Runner (Kata) hosts.** lat1 is retired: it holds no production role, its
+runner is leftover/inactive, and it is not deployment authority. DNS for
+`finite.computer` and `*.finite.chat` points at lat2.
+
+## Historical: the 2026-07-09 lat1 consolidation
+
+The section below is a dated record of the earlier consolidation, kept for
+history. It described the fleet before ADR 0007 moved the app plane to lat2;
+do not read its present-tense statements as current topology.
+
+**finite-lat-1 was the consolidated NixOS app server, and it ran the whole
 coupled cluster.** Its definition is `infra/nixos/` (host `finite-lat-1`); the
 2026-07-09 reinstall transcript is
 `infra/runbooks/lat1-nixos-reinstall.md`, but destructive reuse is paused while
@@ -38,12 +52,12 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   system path. On-host `podman build` is gone;
   first-party images are CI-built and digest-pinned (`infra/images/`).
 
-Still elsewhere: lat2 is becoming the replacement single app server (ADR
+Still elsewhere: lat2 became the replacement single app server (ADR
 0007, 2026-08-28 — emergency cutover for lat1's thermal failure). Its stale
-Ubuntu data is skipped-by-decision; the box is wiped via provider reinstall
-and reinstalled from the `Lat2 NixOS Closure` artifact with lat1's service
-stack minus any Agent Runner (`runbooks/lat2-replacement-cutover.md`). Until
-the cutover completes it holds no production role.
+Ubuntu data was skipped-by-decision; the box was wiped via provider reinstall
+and reinstalled from the `Lat2 NixOS Closure` artifact with the service
+stack minus any Agent Runner (`runbooks/lat2-replacement-cutover.md`). The
+cutover completed 2026-08-29; lat2 now holds the production app plane.
 **clawland** remains the legacy finite.vip fleet box; **Tinfoil** is unchanged.
 The old FiniteBrain smoke service remains a rollback source, not the
 production origin.
@@ -71,10 +85,10 @@ production-mutation authority.
 ```
 infra/
   deployment-queue.md  # merged work awaiting a release/deploy/rollout
-  nixos/       # finite-lat-1 AS CODE — the live definition of the app server
+  nixos/       # THE NixOS fleet as code (lat2, lat3, lat4) — live definitions
   hosts/
-    lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)
-    lat2/      # finite-lat-2 (64.34.80.19) — historical captures; box being repurposed as the replacement app server (ADR 0007)
+    lat1/      # finite-lat-1 (64.34.82.77) — RETIRED; pre-cutover k3s reference only (superseded by infra/nixos/)
+    lat2/      # finite-lat-2 (64.34.80.19) — historical captures from the pre-cutover repurposing; lat2 is now defined in infra/nixos/
     smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
@@ -83,7 +97,8 @@ infra/
   runbooks/    # per-service: deploy, rollback, backup/restore, break-glass
 ```
 
-`infra/nixos/` is the declared source of truth for lat1. Every
+`infra/nixos/` is the declared source of truth for the NixOS fleet (lat2,
+lat3, lat4; lat1 is retired). Every
 `infra/hosts/<name>/` directory is a dated capture or migration record unless
 its own banner explicitly says otherwise; it is not permission to deploy its
 old units. `hosts/lat1/` describes the wiped pre-cutover k3s control plane, and
@@ -101,32 +116,33 @@ capacity. The one accepted next candidate and its hard gates live in
 
 | Host | Role | Services |
 |---|---|---|
-| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: CI-built closure published to Cachix, metadata artifact `lat1-nixos-closure-REV`, and exact-path activation by `scripts/deploy-lat1-closure-cache`. |
-| **finite-lat-2** (64.34.80.19) | **Emergency replacement app server (ADR 0007, in progress).** Currently Ubuntu 26.04+nix; the stale-data archive is skipped by owner decision and the box is wiped via provider reinstall. It re-installs with lat1's service stack — Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard, Caddy, backups, litestream — minus any Agent Runner, boots in declarative import mode, and inherits the Recovery Authority role and the `wg-finite` hub at `10.254.3.1`. | Until Gate E of `runbooks/lat2-replacement-cutover.md` completes: no production service, CI, build, deploy, capacity, recovery, or archive authority. The installed GitHub runners on the old Ubuntu box are removal inventory (`hosts/lat2/runners.md`). |
+| **finite-lat-1** (64.34.82.77) | **RETIRED 2026-08-29 (thermal failure, ADR 0007) — leftover/inactive only.** Former consolidated app server and Kata Runner (`infra/nixos/` history); NixOS 25.11; single-disk root and `/data`. Its runner cannot lease relocations or creation work; do not address it for Core CLI, rollout, or closure activation. | Historical service stack (Core, Postgres, chat, hosted-device, Brain, Sites, dashboard, runner, Caddy) is dark. The physical disks hold stale 2026-07 metadata and may be touched only by a separately authorized reinstall. |
+| **finite-lat-2** (64.34.80.19) | **Live app-plane host (ADR 0007).** Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard, Caddy, backups, litestream. No Agent Runner. Recovery Authority and the `wg-finite` hub at `10.254.3.1`. | `finite.computer` DNS points here. Post-cutover cleanup (old runners, leftover credentials, stale smoke row) is still open. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 42.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=42`. This owner-authorized ceiling deliberately overcommits the declared 8-GiB guest maximum against physical RAM; swap is not counted as usable Agent capacity. No Recovery Authority exists here. |
-| **finite-lat-4** (152.236.34.15) | **Third NixOS Agent Runner host (ADR 0007 model, in progress).** Same chassis class as lat3 (Supermicro AS-3015MR-H10TNR, EPYC 4564P, 187 GiB RAM); exact-size RAID1 root and `/data` (same geometry, fresh captured identities); dual ESPs; 64-GiB swapfile plus zswap. Currently an interim Ubuntu install pending the artifact-driven NixOS reinstall. | Host config drafted in `infra/nixos/hosts/finite-lat-4/`; install and drained bring-up run only through `runbooks/lat4-nixos-runner-install.md` (Gates A–E). Admits **drained**; the undrain decision is a separate owner approval. Takes the `10.254.3.4` WireGuard address after the PR #715 /29 widening merges. Deploy: CI-built `lat4-nixos-closure-REV` artifact switched by `scripts/deploy-lat4-closure-cache`. No Recovery Authority here unless decided otherwise. |
+| **finite-lat-4** (152.236.34.15) | **Second live NixOS Agent Runner** (same chassis class as lat3). RAID1 root and `/data`; `10.254.3.4` on `wg-finite`. | `FC_RUNNER_DRAIN=false`. Holds the relocated lat1 cohort (21 active Runtimes as of 2026-08-29). No Recovery Authority. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
-| **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |
-| Tinfoil | Measured enclaves | GLM-5.3-Flash inference + finite-private-limiter enclave on container `finite-private` (`v2026-08-28-glm-5-3-flash-4`); searxng enclave. Canonical model `glm-5-3-flash`; `deepseek-v4-flash-0731` and `glm-5-2` remain mixed-version request aliases. The historical `kimi-k2-6` hostname is retired. Deployed from the public satellite repos (`tinfoil/`). |
+| **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (chat lives on the app-plane host, lat2). |
+| Tinfoil | Measured enclaves | GLM-5.3-Flash inference + finite-private-limiter enclave on container `finite-private` (`v2026-08-28-glm-5-3-flash-5`, `acc651a6…`); searxng enclave. Admission is usage-api. Canonical model `glm-5-3-flash`; `deepseek-v4-flash-0731` and `glm-5-2` remain mixed-version request aliases. The historical `kimi-k2-6` hostname is retired. Deployed from the public satellite repos (`tinfoil/`). |
 
 ## DNS (current)
 
-- `finite.computer`, `brain.finite.computer`, `chat.finite.computer` → **lat1** (Namecheap).
-- `*.finite.chat` → **Cloudflare** (Full strict) → lat1 origin (Cloudflare
-  Origin CA cert); `*.docs.finite.chat` same edge.
+- `finite.computer`, `brain.finite.computer`, `chat.finite.computer` → **lat2** (`64.34.80.19`, Namecheap).
+- `*.finite.chat` → **Cloudflare** (Full strict) → lat2 origin (Cloudflare
+  Origin CA cert, served by lat2's Caddy since the 2026-08-29 cutover);
+  `*.docs.finite.chat` same edge.
 - `brain.finite.computer` is the canonical production Brain signing/API
   origin. The WorkOS-protected embedded client remains under
   `finite.computer/client`; its capability names the canonical Brain origin.
 - `identity.finite.vip` is the canonical Finite Identity signing/API origin.
-  Only its exact record moves to lat1; the `finite.vip` apex and wildcard stay
-  on the legacy fleet.
+  Its exact record points at lat2 (`64.34.80.19`); the `finite.vip` apex and
+  wildcard stay on the legacy fleet.
 - `brain.smoke.finite.computer` / `*.smoke.finite.computer` → smoke, retained
   only as an explicit rollback target.
 
 ## Secrets policy
 
 **No secret values in this repo, ever.** This repo is public. Secrets live
-where they run: on lat1, root-owned `/etc/finite/*.env` and
+where they run: on each production host, root-owned `/etc/finite/*.env` and
 `/etc/finite-saas/` files (bootstrap checklist in `infra/nixos/README.md`);
 Tinfoil sealed secrets; Phala sealed env; the legacy fleet's k8s Secrets on
 smoke/clawland. Each host README documents which secrets each service needs —
@@ -135,16 +151,16 @@ secret value committed here, rotate it first, then delete it.
 
 CI-only operational secrets live as GitHub Actions repository or organization
 secrets. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
-cache used by CI Nix service package jobs and lat1 production closure
+cache used by CI Nix service package jobs and production closure
 publication. The cache must remain readable without that token for forked pull
 requests and production hosts to substitute from it.
 
 ## Images
 
 First-party images are **built by CI**, tagged with the git SHA, pushed to
-GHCR, and deployed by digest (`infra/images/`). On-host `podman build` (the old
-lat1 k3s pattern) is gone: the confidential-compute company's control plane
-does not run binaries built from "whatever was on the box." The lat1 dashboard
+GHCR, and deployed by digest (`infra/images/`). On-host builds (the old k3s
+pattern) are gone: the confidential-compute company's control plane
+does not run binaries built from "whatever was on the box." The dashboard
 runs a digest-pinned image under podman; core and the sites/chat/brain binaries
 are built by Nix from `infra/nixos/packages.nix`.
 
@@ -152,17 +168,22 @@ are built by Nix from `infra/nixos/packages.nix`.
 
 Tinfoil enclaves are deployed from the public satellite repos, not from here —
 `infra/tinfoil/` holds the pins and notes. The Finite Private limiter enclave
-validates usage against lat1 Core (`FINITE_USAGE_API_SERVICE_KEY` pairs with
-lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
+validates usage against Core on the app-plane host (lat2;
+`FINITE_USAGE_API_SERVICE_KEY` pairs with the host's
+`FC_FINITE_PRIVATE_USAGE_API_TOKEN`).
 
 ## Deploy principles
 
-1. **lat1 = exact NixOS closure activation from a release rev.** The rev that
+1. **Each NixOS host = exact NixOS closure activation from a release rev.**
+   The rev that
    tagged the binaries is the rev the host runs. CI builds the closure, pushes
    it to the `finite` Cachix cache, and the host substitutes only trusted store
-   paths before activating the recorded `SYSTEM` path. Rollback:
-   `nixos-rebuild --rollback` on the host, or pin the previous rev. Source of
-   truth: `infra/nixos/`. The old bare-metal transcript in
+   paths before activating the recorded `SYSTEM` path. This is how lat2, lat3,
+   and lat4 deploy (`scripts/deploy-lat1-closure-cache` retains its name for
+   the tooling history but its current use targets the active fleet; source of
+   truth: `infra/nixos/`). Rollback:
+   `nixos-rebuild --rollback` on the host, or pin the previous rev. The old
+   bare-metal transcript in
    `infra/runbooks/lat1-nixos-reinstall.md` is historical and not current wipe
    authority.
 2. **Images are built by CI**, tagged with the git SHA, pushed to GHCR, and
@@ -175,8 +196,11 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
    contract gate).
 5. **Backups are only real once restored.** Before first-slice user data, every
    stateful service must have a service-consistent backup, an off-host copy, a
-   restore runbook, and an empty-target restore drill. The current deployment
-   does not yet satisfy this rule: lat1 is single-disk. The Hosted Web Chat
+    restore runbook, and an empty-target restore drill. The July deployment on
+    lat1 did not satisfy this rule (it was
+    single-disk); lat2 is now the app-plane host and its recovery boundary is
+    tracked by the lat2 cutover records and `scripts/finite-status`. The
+    Hosted Web Chat
    module creates a service-consistent snapshot only when a deploy or operator
    triggers it; its disruptive 15-minute timer was removed after it broke live
    streams. Snapshot health currently tolerates seven days, and Borg ships the

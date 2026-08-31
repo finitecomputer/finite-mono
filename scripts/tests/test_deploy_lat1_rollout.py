@@ -93,7 +93,7 @@ def provider_fact(
     principal = f"npub1{runtime}principal"
     work_root = (
         "/data/finite-saas-runner"
-        if host == "finite-lat-3"
+        if host in {"finite-lat-3", "finite-lat-4"}
         else "/var/lib/finite-saas-runner"
     )
     return {
@@ -311,6 +311,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         environment = {
             "PATH": f"{temp}:{os.environ['PATH']}",
             "LAT1": "root@test-lat1",
+            "LAT2": "root@test-lat2",
+            "LAT3": "root@test-lat3",
+            "LAT4": "root@test-lat4",
             "ROLLOUT_STATE_ROOT": str(state_root),
             "FAKE_SSH_LOG": str(log),
             "FAKE_STATE_DIR": str(state_dir),
@@ -1321,10 +1324,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             )
             # The fake receives only the remote command, so inspect the script source for
             # the invariant that protects loops/process substitutions from SSH stdin, and
-            # for the pin that keeps Core CLI calls on lat1 for every rollout host.
+            # for the pin that keeps Core CLI calls on lat2 for every rollout host.
             source = ROLLOUT.read_text(encoding="utf-8")
             self.assertIn('ssh -n -o BatchMode=yes -- "$destination"', source)
-            self.assertIn('run_remote_bash "$LAT1"', source)
+            self.assertIn('run_remote_bash "$LAT2"', source)
 
     def read_events(self, state_root: Path, plan_hash: str) -> list[dict[str, object]]:
         return [
@@ -1733,7 +1736,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             core_calls = [call for call in calls if "--plan-only" in call]
             self.assertTrue(core_calls)
             self.assertTrue(
-                all(call.startswith("root@test-lat1\t") for call in core_calls), calls
+                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
             )
             provider_calls = [
                 call
@@ -1787,6 +1790,53 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     for call in log.read_text(encoding="utf-8").splitlines()
                 )
             )
+
+    def test_host_lat4_scopes_plan_and_addresses_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            entries = [
+                plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-4")
+            ]
+            facts = [
+                provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-4")
+            ]
+            env, log, state_root = self.fake_ssh_environment(
+                temp, rollout_report(entries, host="finite-lat-4"), facts
+            )
+            env["LAT4"] = "root@test-lat4"
+            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-4"
+            scope = ("--host", "lat4", "--roll-project-id", "project-a")
+            prepared, plan_hash = self.prepare(env, *scope)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            saved = json.loads(
+                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["source_host_id"], "finite-lat-4")
+
+            calls = log.read_text(encoding="utf-8").splitlines()
+            core_calls = [call for call in calls if "--plan-only" in call]
+            self.assertTrue(core_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
+            )
+            provider_calls = [
+                call
+                for call in calls
+                if "provider-snapshot-v1" in call or "provider-contact-v1" in call
+            ]
+            self.assertTrue(provider_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat4\t") for call in provider_calls),
+                calls,
+            )
+
+            executed = self.run_rollout(
+                "--execute-plan-hash", plan_hash, *self.actor_args(), *scope, env=env
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            events = self.read_events(state_root, plan_hash)
+            execute_events = [event for event in events if event["phase"] == "execute"]
+            self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_unknown_host_is_rejected(self) -> None:
         result = self.run_rollout(
