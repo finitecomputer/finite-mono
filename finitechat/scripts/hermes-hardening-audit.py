@@ -130,7 +130,6 @@ REQUIRED_CANARY_SECRET_ENV = {
 REQUIRED_GITHUB_PUBLISH_ARTIFACTS = {
     "target/hermes-hardening-audit.json",
     "target/hermes-docker-smoke/report.json",
-    "target/hermes-docker-smoke/restic-preflight.json",
     "target/hermes-docker-smoke/image-publish.json",
     "target/hermes-docker-smoke/tinfoil-handoff.json",
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
@@ -510,39 +509,6 @@ def validate_real_s3_smoke_facts(facts: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_s3_preflight(preflight: dict[str, Any] | None) -> list[str]:
-    if not preflight:
-        return ["requires S3 restic preflight report"]
-
-    errors: list[str] = []
-    if preflight.get("status") != "ok":
-        errors.append(f"preflight status={preflight.get('status')!r}; expected 'ok'")
-    if preflight.get("backend") != "s3":
-        errors.append(f"preflight backend={preflight.get('backend')!r}; expected 's3'")
-    repository = preflight.get("repository")
-    if not non_empty_str(repository) or not str(repository).startswith("s3:"):
-        errors.append("preflight repository must be an s3: URL")
-
-    report_errors = preflight.get("errors")
-    if isinstance(report_errors, list) and report_errors:
-        errors.append(f"preflight errors: {', '.join(str(item) for item in report_errors)}")
-
-    env = preflight.get("env")
-    if not isinstance(env, dict):
-        errors.append("preflight env is required")
-    else:
-        for key in (
-            "FINITE_DOCKER_RESTIC_REPOSITORY",
-            "FINITE_DOCKER_RESTIC_PASSWORD",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-        ):
-            if env.get(key) is not True:
-                errors.append(f"preflight env.{key} must be true")
-
-    return errors
-
-
 def validate_tinfoil_handoff(
     handoff: dict[str, Any] | None,
     *,
@@ -567,7 +533,7 @@ def validate_tinfoil_handoff(
     if not isinstance(source_reports, dict):
         errors.append("handoff source_reports is required")
     else:
-        for key in ("smoke", "preflight", "publish"):
+        for key in ("smoke", "publish"):
             if not non_empty_str(source_reports.get(key)):
                 errors.append(f"handoff source_reports.{key} is required")
 
@@ -728,7 +694,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     s3_emulator_path = Path(args.s3_emulator_report)
     github_setup_path = Path(args.github_setup_report)
     github_publish_gate_path = Path(args.github_publish_gate_report)
-    preflight_path = Path(args.preflight_report)
     publish_path = Path(args.publish_report)
     handoff_path = Path(args.handoff_report)
     canary_summary_path = Path(args.canary_summary)
@@ -742,7 +707,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     s3_emulator = load_optional_json(s3_emulator_path)
     github_setup = load_optional_json(github_setup_path)
     github_publish_gate = load_optional_json(github_publish_gate_path)
-    preflight = load_optional_json(preflight_path)
     publish = load_optional_json(publish_path)
     handoff = load_optional_json(handoff_path)
     canary_summary = load_optional_json(canary_summary_path)
@@ -981,16 +945,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
 
-    preflight_s3_errors = validate_s3_preflight(preflight)
-    preflight_s3 = not preflight_s3_errors
-    add_check(
-        checks,
-        name="s3_restic_preflight",
-        status="passed" if preflight_s3 else "missing",
-        evidence=str(preflight_path) if preflight else None,
-        detail=None if preflight_s3 else "; ".join(preflight_s3_errors),
-    )
-
     publish_errors = validate_publish_report(publish, docker_facts=docker_facts)
     publish_passed = not publish_errors
     add_check(
@@ -1098,10 +1052,6 @@ def main() -> int:
     parser.add_argument(
         "--github-publish-gate-report",
         default="target/hermes-github-publish-gate/report.json",
-    )
-    parser.add_argument(
-        "--preflight-report",
-        default="target/hermes-docker-smoke/restic-preflight.json",
     )
     parser.add_argument(
         "--publish-report",

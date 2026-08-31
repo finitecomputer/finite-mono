@@ -142,7 +142,6 @@ jobs:
             finitechat/target/hermes-hardening-audit.json
             finitechat/target/hermes-docker-smoke/image-build.json
             finitechat/target/hermes-docker-smoke/report.json
-            finitechat/target/hermes-docker-smoke/restic-preflight.json
             finitechat/target/hermes-durable-home-docker-smoke/report.json
             finitechat/target/hermes-chat-interruption-docker-smoke/report.json
           if-no-files-found: ignore

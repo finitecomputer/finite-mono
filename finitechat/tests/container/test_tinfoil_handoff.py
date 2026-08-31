@@ -71,15 +71,12 @@ class TinfoilHandoffTest(unittest.TestCase):
         tmp: Path,
         *,
         smoke: dict[str, object] | None = None,
-        preflight: dict[str, object] | None = None,
         publish: dict[str, object] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         smoke_path = tmp / "smoke.json"
-        preflight_path = tmp / "preflight.json"
         publish_path = tmp / "publish.json"
         handoff_path = tmp / "handoff.json"
         write_json(smoke_path, smoke or proven_smoke_report())
-        write_json(preflight_path, preflight or {"status": "ok", "backend": "s3"})
         write_json(
             publish_path,
             publish
@@ -95,8 +92,6 @@ class TinfoilHandoffTest(unittest.TestCase):
                 str(HANDOFF_SCRIPT),
                 "--smoke-report",
                 str(smoke_path),
-                "--preflight-report",
-                str(preflight_path),
                 "--publish-report",
                 str(publish_path),
                 "--handoff-report",

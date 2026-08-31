@@ -34,7 +34,6 @@ RECOVERY_SCOPE = {
 GITHUB_PUBLISH_ARTIFACTS = [
     "target/hermes-hardening-audit.json",
     "target/hermes-docker-smoke/report.json",
-    "target/hermes-docker-smoke/restic-preflight.json",
     "target/hermes-docker-smoke/image-publish.json",
     "target/hermes-docker-smoke/tinfoil-handoff.json",
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
@@ -278,7 +277,6 @@ def handoff_report(image_digest: str = IMAGE_DIGEST) -> dict:
         "recovery_scope": dict(RECOVERY_SCOPE),
         "source_reports": {
             "smoke": "target/hermes-docker-smoke/report.json",
-            "preflight": "target/hermes-docker-smoke/restic-preflight.json",
             "publish": "target/hermes-docker-smoke/image-publish.json",
         },
         "image": {
@@ -352,29 +350,6 @@ def publish_report(restic_backend: str = "s3") -> dict:
             "gateway_admission_before_restore": True,
             "gateway_admission_after_restore": True,
         },
-    }
-
-
-def s3_preflight_report() -> dict:
-    return {
-        "status": "ok",
-        "backend": "s3",
-        "repository": RESTIC_REPOSITORY,
-        "env": {
-            "FINITE_DOCKER_RESTIC_BACKEND": True,
-            "FINITE_DOCKER_RESTIC_REPOSITORY": True,
-            "FINITE_DOCKER_RESTIC_PASSWORD": True,
-            "AWS_ACCESS_KEY_ID": True,
-            "AWS_SECRET_ACCESS_KEY": True,
-            "AWS_SESSION_TOKEN": False,
-            "AWS_REGION": True,
-            "AWS_DEFAULT_REGION": False,
-            "FINITE_DOCKER_RESTIC_AWS_ACCESS_KEY_ID": True,
-            "FINITE_DOCKER_RESTIC_AWS_SECRET_ACCESS_KEY": True,
-            "FINITE_LATITUDE_STORAGE_BUCKET": False,
-        },
-        "warnings": [],
-        "errors": [],
     }
 
 
@@ -521,8 +496,6 @@ def run_audit(tmp: Path, *, require_complete: bool = False) -> tuple[int, dict]:
         str(tmp / "github-setup.json"),
         "--github-publish-gate-report",
         str(tmp / "github-publish-gate.json"),
-        "--preflight-report",
-        str(tmp / "preflight.json"),
         "--publish-report",
         str(tmp / "publish.json"),
         "--handoff-report",
@@ -544,7 +517,6 @@ def write_complete_audit_inputs(
     tmp: Path,
     *,
     docker: dict | None = None,
-    preflight: dict | None = None,
 ) -> None:
     write_json(tmp / "adapter-regressions.json", adapter_regression_report())
     write_json(tmp / "sidecar.json", sidecar_report())
@@ -554,10 +526,6 @@ def write_complete_audit_inputs(
     write_json(tmp / "s3-emulator.json", s3_emulator_report())
     write_json(tmp / "github-setup.json", {"status": "ready"})
     write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-    write_json(
-        tmp / "preflight.json",
-        preflight if preflight is not None else s3_preflight_report(),
-    )
     write_json(tmp / "publish.json", publish_report())
     write_json(tmp / "handoff.json", handoff_report())
     write_canary_artifacts(tmp)
@@ -570,7 +538,6 @@ class HardeningAuditTest(unittest.TestCase):
             tmp = Path(tmp_value)
             write_json(tmp / "sidecar.json", sidecar_report())
             write_json(tmp / "docker.json", docker_report(restic_backend="local"))
-            write_json(tmp / "preflight.json", {"status": "ok", "backend": "local"})
             status, audit = run_audit(tmp, require_complete=True)
 
         self.assertEqual(status, 2)
@@ -639,17 +606,6 @@ class HardeningAuditTest(unittest.TestCase):
             details["docker_runtime_local_or_s3_smoke"],
         )
 
-    def test_audit_rejects_s3_preflight_status_without_repository_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_value:
-            tmp = Path(tmp_value)
-            write_complete_audit_inputs(tmp, preflight={"status": "ok", "backend": "s3"})
-            status, audit = run_audit(tmp, require_complete=True)
-
-        self.assertEqual(status, 2)
-        self.assertIn("s3_restic_preflight", audit["missing"])
-        details = {check["name"]: check["detail"] for check in audit["checks"]}
-        self.assertIn("repository", details["s3_restic_preflight"])
-
     def test_audit_rejects_s3_smoke_without_snapshot_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:
             tmp = Path(tmp_value)
@@ -701,7 +657,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_canary_artifacts(tmp)
@@ -723,7 +678,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", {"status": "passed"})
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_canary_artifacts(tmp)
@@ -747,7 +701,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(
                 tmp / "publish.json",
                 {
@@ -779,7 +732,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", {"status": "ready"})
             write_canary_artifacts(tmp)
@@ -803,7 +755,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_json(tmp / "canary-summary.json", {"status": "ready"})
@@ -863,7 +814,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_canary_artifacts(tmp)
@@ -889,7 +839,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_canary_artifacts(tmp)
@@ -911,7 +860,6 @@ class HardeningAuditTest(unittest.TestCase):
             write_json(tmp / "s3-emulator.json", s3_emulator_report())
             write_json(tmp / "github-setup.json", {"status": "ready"})
             write_json(tmp / "github-publish-gate.json", github_publish_gate_report())
-            write_json(tmp / "preflight.json", s3_preflight_report())
             write_json(tmp / "publish.json", publish_report())
             write_json(tmp / "handoff.json", handoff_report())
             write_canary_artifacts(tmp)
