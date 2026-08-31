@@ -192,8 +192,6 @@ in
     }
     {
       assertion =
-    {
-      assertion =
         !(builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile);
       message = "Sites must not receive the Identity Authority operator credential";
     }
