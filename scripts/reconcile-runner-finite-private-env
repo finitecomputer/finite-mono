@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Reconcile retired Finite Private overrides in a host-local Runner env file.
+set -euo pipefail
+
+readonly RETIRED_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+readonly RETIRED_MODEL="deepseek-v4-flash-0731"
+readonly BASE_URL_KEY="FC_RUNNER_FINITE_PRIVATE_BASE_URL"
+readonly MODEL_KEY="FC_RUNNER_FINITE_PRIVATE_MODEL"
+
+usage() {
+  echo "usage: $0 (--check|--apply) /ABSOLUTE/RUNNER_ENV" >&2
+  exit 64
+}
+
+[[ $# -eq 2 && ( $1 == "--check" || $1 == "--apply" ) ]] || usage
+mode="$1"
+runner_env="$2"
+
+[[ $runner_env == /* ]] || usage
+
+if [[ ! -f $runner_env || -L $runner_env ]]; then
+  echo "refusing: Runner env must be a regular, non-symlink file" >&2
+  exit 66
+fi
+
+link_count="$(stat -c %h "$runner_env" 2>/dev/null || stat -f %l "$runner_env")"
+if [[ $link_count != "1" ]]; then
+  echo "refusing: Runner env has unexpected hard links" >&2
+  exit 66
+fi
+
+lock_directory=""
+replacement_path=""
+filtered_content_path=""
+backup_path=""
+remove_backup_on_exit=0
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+cleanup() {
+  [[ -z $replacement_path ]] || rm -f "$replacement_path"
+  [[ -z $filtered_content_path ]] || rm -f "$filtered_content_path"
+  if (( remove_backup_on_exit == 1 )); then
+    rm -f "$backup_path"
+  fi
+  [[ -z $lock_directory ]] || rmdir "$lock_directory" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+inspection_path="$runner_env"
+before_checksum=""
+if [[ $mode == "--apply" ]]; then
+  lock_candidate="${runner_env}.reconcile-lock"
+  if ! mkdir "$lock_candidate"; then
+    echo "refusing: another Runner env reconciliation holds $lock_candidate" >&2
+    exit 75
+  fi
+  lock_directory="$lock_candidate"
+  replacement_path="$(mktemp "${runner_env}.replacement.XXXXXX")"
+  filtered_content_path="$(mktemp "${runner_env}.filtered.XXXXXX")"
+  cp -p "$runner_env" "$replacement_path"
+  inspection_path="$replacement_path"
+  before_checksum="$(cksum < "$inspection_path")"
+fi
+
+base_url_count=0
+base_url=""
+model_count=0
+model=""
+while IFS= read -r line || [[ -n $line ]]; do
+  case "$line" in
+    "$BASE_URL_KEY="*)
+      base_url_count=$((base_url_count + 1))
+      base_url="${line#*=}"
+      ;;
+    "$MODEL_KEY="*)
+      model_count=$((model_count + 1))
+      model="${line#*=}"
+      ;;
+  esac
+done < "$inspection_path"
+
+if (( base_url_count > 1 || model_count > 1 )); then
+  echo "refusing: duplicate Finite Private Runner override key" >&2
+  exit 65
+fi
+
+if (( base_url_count == 0 && model_count == 0 )); then
+  echo "clean"
+  exit 0
+fi
+
+if (( base_url_count == 1 && model_count == 1 )) \
+  && [[ $base_url == "$RETIRED_BASE_URL" && $model == "$RETIRED_MODEL" ]]; then
+  if [[ $mode == "--check" ]]; then
+    echo "needs-migration"
+    exit 0
+  fi
+
+  backup_path="${runner_env}.pre-glm53-route"
+  if [[ -e $backup_path || -L $backup_path ]]; then
+    echo "refusing: rollback copy already exists: $backup_path" >&2
+    exit 73
+  fi
+
+  {
+    while true; do
+      line=""
+      if IFS= read -r line; then
+        had_newline=1
+      else
+        had_newline=0
+        [[ -n $line ]] || break
+      fi
+      case "$line" in
+        "$BASE_URL_KEY="*|"$MODEL_KEY="*) ;;
+        *)
+          printf '%s' "$line"
+          (( had_newline == 0 )) || printf '\n'
+          ;;
+      esac
+      (( had_newline == 1 )) || break
+    done < "$inspection_path"
+  } > "$filtered_content_path"
+  cat "$filtered_content_path" > "$replacement_path"
+
+  # The hard-link backup is an atomic, metadata-identical rollback copy of the
+  # inode at the live path. The identity/checksum fence immediately before the
+  # rename prevents a concurrent sanctioned reconciliation from being lost.
+  ln "$runner_env" "$backup_path"
+  remove_backup_on_exit=1
+  if [[ ! "$runner_env" -ef "$backup_path" ]] \
+    || [[ $(cksum < "$backup_path") != "$before_checksum" ]] \
+    || [[ $(cksum < "$runner_env") != "$before_checksum" ]]; then
+    echo "refusing: Runner env changed during reconciliation" >&2
+    exit 75
+  fi
+  mv "$replacement_path" "$runner_env"
+  replacement_path=""
+  remove_backup_on_exit=0
+  echo "migrated; rollback=$backup_path"
+  exit 0
+fi
+
+echo "refusing: Finite Private Runner overrides are partial or unexpected" >&2
+exit 65
