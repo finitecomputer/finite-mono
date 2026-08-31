@@ -201,11 +201,10 @@ def stage_store_paths(
         )
 
 
-def image_build_args(
-    runtime: HermesRuntimeClosure, *, hermes_agent_version: str
-) -> list[str]:
+def image_build_args(runtime: HermesRuntimeClosure) -> list[str]:
     pairs = (
-        ("HERMES_AGENT_VERSION", hermes_agent_version),
+        # runtime.version is evaluated from the flake.lock pin, never a literal.
+        ("HERMES_AGENT_VERSION", runtime.version),
         ("HERMES_AGENT_STORE_PATH", runtime.store_path),
         ("HERMES_AGENT_PYTHON_PATH", runtime.python_store_path),
         ("HERMES_AGENT_NIX_ATTR", runtime.attr),

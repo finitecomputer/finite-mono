@@ -49,7 +49,7 @@ class HermesNixRuntimeTests(unittest.TestCase):
         )
 
     def test_image_build_args_pin_hermes_and_toolchains(self) -> None:
-        args = image_build_args(_closure(), hermes_agent_version="0.20.0")
+        args = image_build_args(_closure())
         self.assertEqual(
             args[1::2],
             [
@@ -68,9 +68,9 @@ class HermesNixRuntimeTests(unittest.TestCase):
     def test_image_build_args_fail_closed_on_missing_toolchain(self) -> None:
         runtime = replace(_closure(), toolchain_store_path="")
         with self.assertRaises(SystemExit):
-            image_build_args(runtime, hermes_agent_version="0.20.0")
+            image_build_args(runtime)
 
     def test_image_build_args_fail_closed_on_missing_bins(self) -> None:
         runtime = replace(_closure(), toolchain_bins=[])
         with self.assertRaises(SystemExit):
-            image_build_args(runtime, hermes_agent_version="0.20.0")
+            image_build_args(runtime)

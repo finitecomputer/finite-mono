@@ -76,7 +76,7 @@ export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
 # here best-effort so a manually launched gateway still sees current state.
 # FINITECHAT_ALLOWED_USERS entries are comma-separated 64-hex account ids,
 # compared verbatim against the finitechat adapter's source.user_id —
-# verified against the pinned hermes-agent (flake.lock v2026.8.3)
+# verified against the pinned hermes-agent (see flake.lock)
 # gateway/authz_mixin.py. The runner injects FINITECHAT_ALLOW_ALL_USERS=true
 # for old-image compatibility, so allowlist mode must actively unset it. The
 # mirror is read once at gateway process start; admission changes made after
