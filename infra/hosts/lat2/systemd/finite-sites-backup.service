@@ -10,9 +10,8 @@
 # Caveats, on purpose kept out of the script to stay dead simple:
 # - registry.db is SQLite in WAL mode; a live tar can catch a mid-write
 #   state. The restore drill MUST run `sqlite3 registry.db 'PRAGMA
-#   integrity_check;'` (see infra/hosts/lat2/backups.md). The stop-the-world
-#   variant in finite-sites/docs/deploy-finite-lat-2.md §6 remains the gold
-#   path before destructive operations.
+#   integrity_check;'` (see infra/hosts/lat2/backups.md). Perform a
+#   stop-the-world backup before destructive operations.
 # - The tarball CONTAINS SECRETS (RESEND_API_KEY, origin TLS key). It is
 #   root-owned 0600 under /data/backups; never copy it off-box unencrypted.
 # - /data is on the same chassis. This fixes the "newest backup is in tmpfs"

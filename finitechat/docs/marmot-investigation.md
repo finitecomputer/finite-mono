@@ -12,7 +12,6 @@ Related local sources:
 - `README.md`
 - `docs/protocol-v1.md`
 - `docs/adr/0001-server-ordered-mls-delivery-service.md`
-- `docs/implementation-plan.md`
 - `docs/scenario-coverage.md`
 - `docs/storage-plan.md`
 

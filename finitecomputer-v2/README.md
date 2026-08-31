@@ -52,9 +52,8 @@ and the active
   stack (image Dockerfiles and runtime template; the k8s manifests and systemd
   units moved to `../infra/hosts/lat1/`). These need renaming and pruning as
   the split hardens.
-- `../infra/hosts/lat1/scripts/deploy-finitechat-server.sh` and
-  `deploy/finite-chat/lat1`: hosted Finite Chat server deployment lane for the
-  SaaS stack.
+- `../infra/runbooks/deploy-finitechat-server.md`: hosted Finite Chat server
+  deployment lane for the SaaS stack.
 
 ## External Product Dependencies
 

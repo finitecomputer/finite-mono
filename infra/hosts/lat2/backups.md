@@ -66,10 +66,9 @@ scripts/snapshot-sqlite integrity-check \
   EXTRACTED_SNAPSHOT/var/lib/finite-sites/registry.db
 ```
 
-Expected output is `ok`, per `finite-sites/docs/deploy-finite-lat-2.md` §6.
-The helper refuses an unmanifested directory and never opens the extracted
-evidence in place. registry.db is WAL-mode SQLite, so a live tar can be
-mid-write; the stop-the-world backup in that doc remains the gold path before
+Expected output is `ok`. The helper refuses an unmanifested directory and
+never opens the extracted evidence in place. registry.db is WAL-mode SQLite,
+so a live tar can be mid-write; perform a stop-the-world backup before
 destructive operations.
 
 Known limits of this proposal, accepted to keep it dead simple:

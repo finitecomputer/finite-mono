@@ -315,9 +315,9 @@ Work top-down. Every retained item is required.
 ### P0 — Add only the $300 Confidential delta to the accepted Checkout path
 
 - Begin only after Stripe Checkout Readiness is accepted and removed. Extend
-  that proven path and `billing-v0.md` to two recurring Prices: Standard at
-  $200/month and Confidential at $300/month. Preserve amounts and intervals as
-  Stripe facts and use separate allowlisted Price ids.
+  that proven Checkout path to two recurring Prices: Standard at $200/month
+  and Confidential at $300/month. Preserve amounts and intervals as Stripe
+  facts and use separate allowlisted Price ids.
 - Let Checkout select a Hosting Tier, then have the signed webhook fetch the
   current Subscription and map exactly one recognized recurring Price to one
   tier. Unknown, missing, or conflicting hosted-agent Prices fail closed.
@@ -709,7 +709,6 @@ true:
 
 - [Run-document governance](README.md)
 - [Monorepo doctrine](../monorepo-doctrine.md)
-- [Fedimint monorepo structure analysis](../fedimint-monorepo-structure-analysis.md)
 - [Recoverability precedes operator-blindness](../adr/0001-recoverability-precedes-operator-blindness.md)
 - [Managed skills are product revisions](../adr/0002-managed-skills-are-hot-swappable-product-revisions.md)
 - [`finite-agentd` is the agent-owned boundary](../adr/0003-agentd-is-the-agent-owned-platform-boundary.md)
@@ -718,7 +717,7 @@ true:
 - [Runtime Control Contract](../../finitecomputer-v2/docs/runtime-control-contract.md)
 - [Runtime recovery and observability plan](../../finitecomputer-v2/docs/runtime-recovery-and-observability-plan.md)
 - [Hermes Runtime test matrix](../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md)
-- [Billing v0](../../finitecomputer-v2/docs/billing-v0.md)
+- [Stripe billing runbook](../../infra/runbooks/stripe-billing.md)
 - [Finite stack deployment](../../finitecomputer-v2/docs/finite-stack-deployment.md)
 - [Pairing and SaaS postmortem](../../finitecomputer-v2/docs/postmortem-pairing-and-saas-2026-07-06.md)
 - [Infrastructure contract](../../infra/README.md)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Start a fresh real-Hermes agent for the physical-phone canary.
 
-This is the local layer of docs/hermes-phone-canary-loop.md. It uses the
-hosted Finite Chat server by default, starts finitechat hermes serve before the
-real Hermes gateway, proves owner-side invite admission with a throwaway CLI
-client, then prints a human invite URL only after the preflight passes.
+Uses the hosted Finite Chat server by default, starts finitechat hermes serve
+before the real Hermes gateway, proves owner-side invite admission with a
+throwaway CLI client, then prints a human invite URL only after the preflight
+passes.
 """
 
 from __future__ import annotations

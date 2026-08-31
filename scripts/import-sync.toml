@@ -1,8 +1,8 @@
 # Import-sync manifest: source-of-record for every repo imported into finite-mono.
 # `last_import_sha` is the source commit whose tree is fully reflected in the mono
-# directory (modulo the deliberate mono-side edits listed in
-# docs/monorepo-migration-log.md: sub-workspace Cargo.toml/Cargo.lock removed,
-# path-dep retargets, etc.). scripts/import-sync updates this file after each sync.
+# directory (modulo deliberate mono-side edits such as removed sub-workspace
+# Cargo.toml/Cargo.lock files and path-dep retargets). scripts/import-sync
+# updates this file after each sync.
 #
 # Once a source repo is archived (post-cutover), its entry stays here as the
 # permanent provenance record.

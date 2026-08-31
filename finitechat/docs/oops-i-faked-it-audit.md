@@ -40,7 +40,7 @@ copies the current finitechat plugin into Hermes, sources local provider
 secrets without printing them, and runs the real Hermes gateway loop.
 It is not the physical-phone product canary because it may use loopback URLs
 and does not gate human handoff on a preflight admission probe. The product
-canary runbook is `docs/hermes-phone-canary-loop.md`.
+canary entry point is `scripts/hermes-phone-canary.py`.
 
 ## Typing Indicator Finding
 
@@ -57,6 +57,6 @@ current app DTO does not carry the activity kind.
   tests.
 - A simulator and physical-phone proof capture a back-and-forth app
   conversation with real Hermes, including media, through
-  `docs/hermes-phone-canary-loop.md` or its successor.
+  `scripts/hermes-phone-canary.py` or its successor.
 - A product harness asserts there is no `Hermes local demo reply`, `agent text
   echo`, or `agent media echo` string in any accepted real-Hermes proof.

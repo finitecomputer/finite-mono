@@ -3,7 +3,7 @@
 //! Run with:
 //! `cargo test --release -p finitechat-server --test perf_baseline -- --ignored --nocapture`
 //!
-//! Numbers are recorded in `docs/perf-log.md`; the tests assert nothing
+//! Numbers are recorded with the change evidence; the tests assert nothing
 //! about timing so CI never flakes on load.
 
 use std::time::{Duration, Instant};

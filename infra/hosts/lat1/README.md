@@ -149,10 +149,9 @@ appendix. A sibling backup `deploy.env.pre-core-relay-routing-20260525`
 - `systemd/` — `finite-saas-runner.service` + `.timer` (moved from
   `finitecomputer-v2/deploy/finite-computer/systemd/`; line-identical to the
   units captured from `/etc/systemd/system/`) and `runner.env.example`.
-- `scripts/deploy-finitechat-server.sh` — the finitechat server's FUTURE lat1
-  deploy path (moved from
-  `finitecomputer-v2/scripts/deploy_finitechat_server_lat1.sh`); the live
-  server is on clawland today. See the script header for host mismatches.
+- `deploy.md` and `infra/runbooks/deploy-finitechat-server.md` — current
+  finitechat server deployment authority. The old pre-NixOS future-lat1 deploy
+  script was removed during the 2026-08-29 cleanup.
 - `deploy.md` — how deploys work today (deprecated on-host podman flow) and
   the target CI/GHCR flow.
 
@@ -204,9 +203,9 @@ appendix. A sibling backup `deploy.env.pre-core-relay-routing-20260525`
    matters). The k8s Service `fc-chat/finitechat-server` created during the
    deploy is gone; the namespace no longer exists. Live
    `chat.finite.computer` runs on **clawland (15.204.108.57)**. The exact
-   piped script was not recoverable from the host; the in-repo copy
-   (`scripts/deploy-finitechat-server.sh`) uses `nix shell` and Traefik
-   IngressRoutes, neither of which exists on lat1, so the two diverge.
+   piped script was not recoverable from the host; the removed in-repo copy
+   used `nix shell` and Traefik IngressRoutes, neither of which matched the
+   captured Ubuntu lat1 host, so the two diverged.
 8. **Hardcoded ClusterIP, twice.** `/etc/caddy/Caddyfile` and
    `runner.env.example`'s `FC_CORE_URL` both bake in `10.43.237.180`.
 9. **systemd units.** In-repo `finite-saas-runner.service`/`.timer` match the

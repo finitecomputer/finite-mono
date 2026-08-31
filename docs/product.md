@@ -18,4 +18,8 @@ During the internal-canary and white-glove-training phase, the public landing pa
 - The agent's identity and durable work belong to the agent; a person's account opens their own dashboard and Devices. We never present a privacy or recovery promise stronger than the evidence.
 - User data must not become locked or inaccessible. The first trusted cohort can use honest, Finite-assisted recovery while stronger user-controlled recovery and operator privacy are proven.
 
-This page deliberately links to, rather than replaces, the working product and architecture contracts: [SaaS v1 PRD](../finitecomputer-v2/docs/vertical-slice-v1-prd.md), [ADR 0001](adr/0001-recoverability-precedes-operator-blindness.md), [ADR 0002](adr/0002-managed-skills-are-hot-swappable-product-revisions.md), [ADR 0003](adr/0003-agentd-is-the-agent-owned-platform-boundary.md), and the [architecture overview](architecture-overview.md).
+This page deliberately links to, rather than replaces, the working product and
+architecture contracts: [SaaS v1 PRD](../finitecomputer-v2/docs/vertical-slice-v1-prd.md),
+[ADR 0001](adr/0001-recoverability-precedes-operator-blindness.md),
+[ADR 0002](adr/0002-managed-skills-are-hot-swappable-product-revisions.md),
+and [ADR 0003](adr/0003-agentd-is-the-agent-owned-platform-boundary.md).

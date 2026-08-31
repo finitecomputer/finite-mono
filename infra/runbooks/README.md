@@ -49,7 +49,6 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
 | [runner-finite-private-route.md](runner-finite-private-route.md) | Guarded removal of stale host-local Finite Private route/model overrides on the active Kata Runners |
-| [finite-private-deepseek-production-update.md](finite-private-deepseek-production-update.md) | Guarded promotion of the measured DeepSeek 128/2048 scheduler and canonical model label, with exact current DeepSeek rollback |
 | [finite-private-routing-migration.md](finite-private-routing-migration.md) | Staged migration from the historical Kimi container/hostname to the stable `finite-private` identity without breaking issued Runtime readers |
 | [runtime-cold-relocation.md](runtime-cold-relocation.md) | Operator-only stopped Kata Runtime move between exact hosts, with state-manifest and Agent Principal fencing |
 | [legacy-hermes-box1-to-lat3.md](legacy-hermes-box1-to-lat3.md) | Versioned, identity-fenced migration of one box1 Hermes bot into a new lat3 Runtime; Austin is the first canary |

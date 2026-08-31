@@ -11,9 +11,9 @@ This track is independent of Tinfoil. Tinfoil should only add deployment and
 persistence constraints, not hide basic adapter defects.
 
 For the repeated human canary flow "fresh Hermes instance -> Paul's physical
-phone -> real multi-turn chat", use
-[../../docs/hermes-phone-canary-loop.md](../../docs/hermes-phone-canary-loop.md).
-That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
+phone -> real multi-turn chat", use `scripts/hermes-phone-canary.py`.
+Provider promotion policy lives with the runtime test matrix and current
+deployment runbooks.
 
 ## Acceptance Criteria
 

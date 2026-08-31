@@ -3,8 +3,8 @@
 #
 # This is not the hardened physical-phone canary gate. It may use loopback
 # server URLs and does not prove the full product flow on a phone. For the
-# local phone and remote Docker canary gates, see
-# docs/hermes-phone-canary-loop.md. Provider promotion belongs to
+# local phone canary gate, see scripts/hermes-phone-canary.py. Provider
+# promotion belongs to
 # ../finitecomputer-v2/docs/hermes-runtime-test-matrix.md.
 set -euo pipefail
 

@@ -3,8 +3,8 @@
 This is the short session checklist, not a new runbook. Deployed truth and the
 lat1 sequence remain in [`finite-lat-capacity-and-redundancy.md`](finite-lat-capacity-and-redundancy.md).
 PR [#110](https://github.com/finitecomputer/finite-mono/pull/110) is the rollout
-post-mortem context. [`triage-and-priorities-2026-07-17.md`](../triage-and-priorities-2026-07-17.md)
-is historical, not current authority.
+post-mortem context. The old 2026-07-17 triage memo was historical and was
+removed during the 2026-08-29 documentation cleanup.
 
 ## Now
 

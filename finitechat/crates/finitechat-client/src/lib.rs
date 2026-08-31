@@ -5066,7 +5066,8 @@ pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 /// the callers here include the single-threaded runtime actor and the resident
 /// bridge sync thread — one silently-stalled connection (half-open TCP, edge
 /// hiccup, server pause) then wedges the whole sidecar with no error, no
-/// retry, and no restart (`scripts/repro-hermes-wedge` reproduces it).
+/// retry, and no restart. The bounded HTTP transport tests below pin this
+/// wedge class.
 pub fn blocking_http_client() -> reqwest::blocking::Client {
     blocking_http_client_with_timeouts(DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_TIMEOUT)
 }
@@ -14225,7 +14226,7 @@ mod tests {
 
     // ---- bounded HTTP transport ------------------------------------------
     //
-    // These pin the sidecar wedge class (repro: scripts/repro-hermes-wedge):
+    // These pin the sidecar wedge class:
     // `reqwest::blocking` parks its calling thread on the client's internal
     // channel until the server speaks, and the callers are the single-
     // threaded runtime actor and the resident bridge sync thread. A server

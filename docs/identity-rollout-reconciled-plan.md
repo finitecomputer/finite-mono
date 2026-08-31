@@ -33,8 +33,8 @@ the reconciliation Q&A. Deferred items are listed as deferred, not scheduled.
 
 ## Locked decisions (Paul, 2026-07-30)
 
-1. Merge PR #337 as-is, including `level-up.md` — it is the first stage of a
-   wanted trajectory (catch problems before deploy, iterate faster).
+1. Merge PR #337 as-is as the first stage of a wanted trajectory: catch
+   problems before deploy and iterate faster.
 2. Merge PR #336. Human PRs may change human governance rules; this is one.
 3. Validate PR #172 (brain) locally with devfinity, deploy, test with a new
    agent and Upgrade Canary on lat3 (possibly also a lat1 agent), human-test,

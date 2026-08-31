@@ -21,7 +21,7 @@ Newest first. Never record a secret value.
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
 | CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
 | Server binaries on lat2 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
-| Finite Private (Tinfoil) | [`runbooks/finite-private-deepseek-production-update.md`](runbooks/finite-private-deepseek-production-update.md) and [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) | `just finite-private-deepseek-contract` |
+| Finite Private (Tinfoil) | [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) plus checked-in candidate configs under `infra/tinfoil/` | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `infra/nixos/modules/finite-saas-phala-runner.nix` | the unit environment is the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
 
 Pending, not-yet-deployed work is tracked in
@@ -257,7 +257,8 @@ the sources above cannot carry lands here.
   `b0322ad6b2bb89f7971002c61868a9b4e53301e6d75a0762849fe06b0f0ee56b`.
 - Rollback: commit `e337db3606d67c53387113700362adec7b4dfdf7`, tag
   `v2026-08-05-deepseek-v4-flash-0731-retry-2-3`.
-- Procedure and gates: `runbooks/finite-private-deepseek-production-update.md`.
+- Candidate and deployment facts are preserved in this changelog and the
+  checked-in Finite Private candidate contract.
 
 ### 2026-08-11 — Agent Runtime `2026-08-11.1` and `fbrain` v0.2.2
 

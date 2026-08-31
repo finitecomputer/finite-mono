@@ -96,7 +96,7 @@ Work top-down. Every retained item is required.
 - [`docs/monorepo-doctrine.md`](../monorepo-doctrine.md)
 - [`docs/adr/0001-recoverability-precedes-operator-blindness.md`](../adr/0001-recoverability-precedes-operator-blindness.md)
 - [`finitecomputer-v2/CONTEXT.md`](../../finitecomputer-v2/CONTEXT.md)
-- [`finitecomputer-v2/docs/billing-v0.md`](../../finitecomputer-v2/docs/billing-v0.md)
+- [`infra/runbooks/stripe-billing.md`](../../infra/runbooks/stripe-billing.md)
 - [`finitecomputer-v2/docs/identity-boundary-v1.md`](../../finitecomputer-v2/docs/identity-boundary-v1.md)
 - [`finitecomputer-v2/docs/vertical-slice-v1-prd.md`](../../finitecomputer-v2/docs/vertical-slice-v1-prd.md)
 - [`infra/README.md`](../../infra/README.md)

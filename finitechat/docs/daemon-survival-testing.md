@@ -213,5 +213,5 @@ survival cases should pass:
 ## Debt Trigger
 
 If any finitecomputer feature requires Hermes to be healthy before the user can
-observe status, send a recovery command, or read existing room state, add a row
-to `docs/technical-debt-ledger.md` before merging it.
+observe status, send a recovery command, or read existing room state, record
+the source, risk, proof, and delete condition before merging it.

@@ -246,7 +246,7 @@ slogan:
 ## 9. Performance characteristics
 
 Measured on the repo's benchmark harness (`perf_baseline` tests, release
-mode; history in `docs/perf-log.md`):
+mode):
 
 | Operation | Result | Design reason |
 | --- | --- | --- |
@@ -282,7 +282,7 @@ Decisions are ADRs; vocabulary is the glossary; running work is logged.
   and the hermes bridge onboarding surface
 - `CONTEXT.md` / `docs/protocol-glossary.md` — domain language and the
   user-promise behind each mechanism
-- `docs/perf-plan.md` / `docs/perf-log.md` — performance program and ledger
+- `docs/perf-plan.md` — performance program
 - `docs/feature-audit-marmot-pika.md` — what adjacent projects taught us
 
 ## 11. Deliberately not built yet

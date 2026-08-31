@@ -4,8 +4,6 @@
   finitecomputer and what must be cut.
 - [Service dependencies](service-dependencies.md): separate repos and services
   that v2 deploys or integrates.
-- [Legacy cleanup manifest](legacy-cleanup-manifest.md): what can be removed
-  from the original finitecomputer repo after v2 owns it.
 - [Finite stack deployment lanes](finite-stack-deployment.md): v2-owned deploy
   authority for Core/dashboard, hosted Finite Chat, runtime, and coordinated
   releases.
@@ -26,5 +24,6 @@
 - [Identity Boundary v1](identity-boundary-v1.md): active separation of WorkOS
   Account Auth, human Finite Chat identity, Devices, and per-agent Finite
   Identity keys.
-- [Billing v0](billing-v0.md): Stripe Checkout, promo codes, Core
-  entitlements, Finite Private limits, Runtime Retirement, and purge isolation.
+- [Stripe billing runbook](../../infra/runbooks/stripe-billing.md): live Stripe
+  readiness, webhook/Core reconciliation, dunning, cancellation/refund, and
+  secret rotation.
