@@ -9,11 +9,14 @@ human user's Finite Chat key. See
 [CLI-CONVENTIONS.md](./CLI-CONVENTIONS.md) for the `auth status` /
 `auth import` verbs every Finite CLI exposes on top of this crate.
 
-This repo also contains the v1 Identity Authority: an HTTP service that owns
-Finite VIP Email bindings, NIP-05 serving, Email Challenges, Email-Only
-Principals, Principal Resolution, and operator inspect/disable actions. See
-[docs/identity-authority.md](./docs/identity-authority.md) for deployment and
-product-integration guidance.
+This repo also contains the v1 Identity Directory (the shrunken Identity
+Authority): an HTTP service that owns Finite VIP Email bindings, NIP-05
+serving, Email Challenges (proof-of-control for name claiming only), and
+operator inspect/disable actions. Grant resolution, mailbox proofs,
+email-only principals, WorkOS account bindings, and the sites-notification
+relay were deleted; products answer authorization questions against their own
+tables. See [docs/identity-authority.md](./docs/identity-authority.md) for
+deployment and product-integration guidance.
 
 ## Convention over configuration
 
@@ -117,14 +120,11 @@ The service exposes:
 | --- | --- | --- |
 | `GET /health` | Liveness | public |
 | `GET /.well-known/nostr.json?name=<localpart>` | Serve Finite VIP NIP-05 `names` JSON (with `Access-Control-Allow-Origin: *`) | public |
-| `POST /api/v1/email-challenges` | Issue an Email Challenge for a Finite VIP Email or Invited Email | public |
+| `POST /api/v1/email-challenges` | Issue an Email Challenge (proof-of-control for claiming a name) | public |
 | `POST /api/v1/vip-email-bindings/redeem` | Bind a Finite VIP Email to the NIP-98 signer | public |
-| `POST /api/v1/email-only-principals/redeem` | Verify an Invited Email as an Email-Only Principal | public |
-| `POST /api/v1/mailbox-proofs/redeem` | Bind one fresh Email Challenge to the exact NIP-98 signer without creating a Principal Link | public |
 | `POST /api/v1/nip05-resolution` | Resolve and classify a Finite NIP-05 Name | public |
-| `POST /api/v1/principal-resolution/satisfies-grant` | Resolve whether a pubkey satisfies a Product Grant | public (NIP-98 signer must be `actor_pubkey`); tokenless on loopback for trusted services |
-| `POST /api/v1/mailbox-proofs/consume` | Let a product consume that short-lived proof once | loopback only |
 | `POST /api/v1/operator/inspect` | Inspect public identity state with an operator token | loopback only |
+| `POST /api/v1/operator/agent-email-bindings` | Register a Managed Agent NIP-05 (trusted provisioning) | loopback only |
 | `POST /api/v1/operator/disable-binding` | Disable a binding without reassignment or recovery | loopback only |
 
 ### Importing an existing secret

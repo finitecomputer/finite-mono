@@ -9,16 +9,15 @@ use crate::{
     AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
     AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, AgentRuntime,
-    BillingOverview, BrainAccountAgentRoster, BrainAccountRosterLookup, BrainAgentAccount,
-    BrainAgentDepartureFactsPage, CancelAgentCreationRequestInput,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
-    CustomerBillingAccount, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkStripeCustomerRequest, LinkVerifiedUserInput, Project,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    BillingOverview, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
+    FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
@@ -289,27 +288,6 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
 #[serde(rename_all = "camelCase")]
 pub struct CancelAgentCreationRequest {
     pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAgentAccountRequest {
-    pub managed_agent_email: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAccountAgentRosterRequest {
-    pub workos_user_id: Option<String>,
-    pub email: Option<String>,
-    pub managed_agent_email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainDepartureFactsRequest {
-    pub after_revision: Option<i64>,
-    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -722,18 +700,6 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     Router::new()
         .route("/healthz", get(healthz))
         .route(
-            "/api/core/v1/brain/agent-account",
-            post(brain_agent_account),
-        )
-        .route(
-            "/api/core/v1/brain/account-agent-roster",
-            post(brain_account_agent_roster),
-        )
-        .route(
-            "/api/core/v1/brain/departure-facts",
-            post(brain_agent_departure_facts),
-        )
-        .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",
             get(runtime_artifact).put(upsert_runtime_artifact),
         )
@@ -942,65 +908,6 @@ fn optional_env_value(name: &str) -> Option<String> {
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
-}
-
-async fn brain_agent_account(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainAgentAccountRequest>,
-) -> Result<Json<BrainAgentAccount>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let email = normalize_owner_email(Some(&request.managed_agent_email))
-        .ok_or_else(|| ApiError::bad_request("invalid Managed Agent Email"))?;
-    let binding = state
-        .store
-        .brain_agent_account(&email)
-        .await?
-        .ok_or_else(|| ApiError::not_found("active account-agent association not found"))?;
-    Ok(Json(binding))
-}
-
-async fn brain_account_agent_roster(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainAccountAgentRosterRequest>,
-) -> Result<Json<BrainAccountAgentRoster>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let lookup = BrainAccountRosterLookup {
-        workos_user_id: request.workos_user_id,
-        email: request.email,
-        managed_agent_email: request.managed_agent_email,
-    };
-    if lookup.is_empty() {
-        return Err(ApiError::bad_request(
-            "one of workosUserId, email, or managedAgentEmail is required",
-        ));
-    }
-    let roster = state
-        .store
-        .brain_account_agent_roster(&lookup)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account not found"))?;
-    Ok(Json(roster))
-}
-
-async fn brain_agent_departure_facts(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainDepartureFactsRequest>,
-) -> Result<Json<BrainAgentDepartureFactsPage>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let after_revision = request.after_revision.unwrap_or(0);
-    if after_revision < 0 {
-        return Err(ApiError::bad_request("afterRevision must be non-negative"));
-    }
-    let limit = i64::from(request.limit.unwrap_or(100));
-    Ok(Json(
-        state
-            .store
-            .brain_agent_departure_facts(after_revision, limit)
-            .await?,
-    ))
 }
 
 async fn runtime_artifact(
@@ -2465,14 +2372,6 @@ impl ApiError {
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-            correlation_id: None,
-        }
-    }
-
     fn service_unavailable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -3259,263 +3158,6 @@ mod tests {
                 .unwrap();
             assert_eq!(overview["runtime_health"]["status"], "not_ready");
             assert_eq!(overview["runtime_health"]["reason"], "unreachable");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn core_api_brain_roster_and_departure_facts_are_service_authenticated() {
-        with_isolated_postgres(|db| async move {
-            let store = db.store.clone();
-            let launch_code = issue_test_launch_code(&store).await;
-            let app = router(store, scoped_test_auth());
-            let service_headers =
-                || vec![("authorization".to_string(), "Bearer core-token".to_string())];
-
-            // Both Brain enrichment endpoints require the service credential.
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &[],
-                Some(serde_json::json!({"workosUserId": "user_workos_new"})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &[],
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-            // The roster lookup needs one account handle; unknown accounts miss.
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"workosUserId": "user_workos_missing"})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
-
-            // The departure-facts log starts empty; cursors must be non-negative.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &service_headers(),
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["facts"], serde_json::json!([]));
-            assert_eq!(body["maxRevision"], 0);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &service_headers(),
-                Some(serde_json::json!({"afterRevision": -1})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "kind": "oci_image",
-                                "reference": format!(
-                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                    "a".repeat(64)
-                                ),
-                                "versionLabel": "v1",
-                                "stateSchemaVersion": "state-v1",
-                                "baseImage": "python:3.11-trixie",
-                                "promoted": true,
-                                "now": "2026-05-25T12:00:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/me/agent-creation-requests")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_new",
-                                    "new@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "displayName": "Roster Agent",
-                                "launchCode": launch_code,
-                                "idempotencyKey": "roster-submit-1"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let agent_email = created["project"]["agent_email"]
-                .as_str()
-                .expect("hosted agent receives a canonical email")
-                .to_string();
-
-            // A requested-but-never-completed creation is not on the roster yet.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"managedAgentEmail": agent_email})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["agents"], serde_json::json!([]));
-            assert_eq!(body["rosterRevision"], 0);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/agent-creation-requests/lease")
-                        .header("authorization", runner_authorization())
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "leaseSeconds": 300,
-                                "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let lease: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let request_id = lease["request"]["id"].as_str().unwrap().to_string();
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!(
-                            "/api/core/v1/agent-creation-requests/{request_id}/complete"
-                        ))
-                        .header("authorization", runner_authorization())
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "sourceHostId": "oslo-host-1",
-                                "sourceMachineId": "oslo-agent-roster",
-                                "runtimeArtifactId": "artifact-v1",
-                                "runtimeHost": "oslo-host-1",
-                                "runtimeStatus": "online",
-                                "activeInferenceProfile": "finite-private",
-                                "hermesAvailable": true,
-                                "publishedAppUrls": [],
-                                "runtimeCapabilities": runtime_capabilities_json(false),
-                                "now": "2026-05-25T13:01:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            // The completed agent joins the roster and bumps the account revision.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"managedAgentEmail": agent_email})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["workosUserId"], "user_workos_new");
-            assert_eq!(body["humanMailbox"], "new@finite.vip");
-            assert_eq!(body["rosterRevision"], 1);
-            assert_eq!(body["departed"], serde_json::json!([]));
-            let agents = body["agents"].as_array().unwrap();
-            assert_eq!(agents.len(), 1);
-            assert_eq!(agents[0]["managedAgentEmail"], agent_email);
-            assert_eq!(agents[0]["status"], "active");
-            assert_eq!(agents[0]["placementRunnerClass"], "kata");
-            assert!(agents[0].get("agentNpub").is_none());
-
-            // The same account resolves by WorkOS user id or verified mailbox.
-            for lookup in [
-                serde_json::json!({"workosUserId": "user_workos_new"}),
-                serde_json::json!({"email": "New@Finite.VIP"}),
-            ] {
-                let (status, body) = send_json(
-                    &app,
-                    "POST",
-                    "/api/core/v1/brain/account-agent-roster",
-                    &service_headers(),
-                    Some(lookup),
-                )
-                .await;
-                assert_eq!(status, StatusCode::OK);
-                assert_eq!(body["agents"].as_array().unwrap().len(), 1);
-                assert_eq!(body["rosterRevision"], 1);
-            }
         })
         .await;
     }
@@ -4320,30 +3962,6 @@ mod tests {
                 .expect("new hosted agents receive a canonical email");
             assert!(agent_email.starts_with("oslo-agent-"));
             assert!(agent_email.ends_with("@finite.vip"));
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/brain/agent-account")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({ "managedAgentEmail": agent_email }).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let binding: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(binding["workosUserId"], "user_workos_new");
-            assert_eq!(binding["managedAgentEmail"], agent_email);
-            assert_eq!(binding["status"], "active");
 
             assert!(result.project.import_candidate_id.is_none());
             assert!(result.request.agent_runtime_id.is_none());
@@ -5633,17 +5251,16 @@ mod tests {
                 }
             }
 
-            // A service-token-only route: auth is checked before the empty
-            // email is rejected, so the wrong credential sees 401 and the
-            // right one sees the post-auth validation error instead.
-            let brain_probe = serde_json::json!({ "managedAgentEmail": "" });
+            // A service-token-only route: auth is checked before the missing
+            // creation request is rejected, so the wrong credential sees 401
+            // and the right one sees the post-auth lookup error instead.
             for headers in [&runner, &usage] {
                 let (status, _) = send_json(
                     &app,
                     "POST",
-                    "/api/core/v1/brain/agent-account",
+                    "/api/core/v1/agent-creation-requests/missing/cancel",
                     headers,
-                    Some(brain_probe.clone()),
+                    Some(serde_json::json!({})),
                 )
                 .await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -5651,9 +5268,9 @@ mod tests {
             let (status, _) = send_json(
                 &app,
                 "POST",
-                "/api/core/v1/brain/agent-account",
+                "/api/core/v1/agent-creation-requests/missing/cancel",
                 &service,
-                Some(brain_probe),
+                Some(serde_json::json!({})),
             )
             .await;
             assert_ne!(status, StatusCode::UNAUTHORIZED);

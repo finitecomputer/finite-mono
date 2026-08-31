@@ -76,11 +76,12 @@ human who owns its SaaS Project. `fsite` never copies the secret elsewhere.
 fsite auth status --output json
 ```
 
-### Mailboxes, NIP-05, And Identity Authority
+### Mailboxes, NIP-05, And Email Proofs
 
-`fsite` uses `https://identity.finite.vip` as the production Identity Authority
-by default. `FINITE_IDENTITY_AUTHORITY` is only a self-hosting and local-test
-override. CLI behavior does not change merely because that variable is present.
+`fsite` resolves NIP-05 names against `https://identity.finite.vip` by
+default. `FINITE_IDENTITY_AUTHORITY` is only a self-hosting and local-test
+override for that name directory. CLI behavior does not change merely because
+that variable is present.
 
 `--email` always means a deliverable Mailbox Address. `--nip05` always means a
 Finite Identity resolution name, and `--npub` always means a native key.
@@ -88,13 +89,16 @@ Managed Agent NIP-05 names are not mailboxes: passing one to an email flag
 fails before any invitation or challenge is delivered and points to the
 corresponding NIP-05 flag.
 
-For `@finite.vip` Mailbox Addresses, redeeming after `fsite auth link-email
-MAILBOX` or redeeming with `--link-native` binds the mailbox to the current
-Local Identity Key in finite-identity. Do not run that flow from an agent
-merely to inherit the human's permissions; human-to-agent access requires an
-explicit, revocable Finite Sites Email Access Delegation. For non-`@finite.vip`
-Mailbox Addresses, redeeming preserves the email-only collaborator flow: the
-mailbox can satisfy its grant, but it does not become a native Finite identity.
+Email proofs are daemon-local: finitesitesd emails a 15-minute, single-use
+token from its own mailer, and `fsite auth redeem MAILBOX TOKEN` redeems it
+against the same daemon. Redeeming verifies a mailbox-scoped Email Key; with
+`--link-native` (or after `fsite auth link-email`) it also links the mailbox to
+the local native Principal so future email grants resolve to that key. Do not
+run the link flow from an agent merely to inherit the human's permissions;
+human-to-agent access requires an explicit, revocable Finite Sites Email
+Access Delegation. Without a link, redeeming preserves the email-only
+collaborator flow: the mailbox-scoped key can satisfy its grant, but it does
+not become a native Finite identity.
 
 The Sites-only delegation flow is:
 
@@ -104,39 +108,16 @@ fsite auth sites-key add paul@example.com TOKEN_FROM_EMAIL --output json
 fsite auth sites-key revoke paul@example.com TOKEN_FROM_EMAIL npub1... --output json
 ```
 
-Every add or revoke uses fresh mailbox proof. Multiple npubs can remain active
-for one mailbox; revoking one does not change Chat NIP-05 resolution, Brain
-encryption recipients, other keys, or the underlying mailbox grants.
+Every add or revoke consumes a fresh daemon-local email proof. Multiple npubs
+can remain active for one mailbox; revoking one does not change Chat NIP-05
+resolution, Brain encryption recipients, other keys, or the underlying mailbox
+grants.
 
-The additive operator reconciliation is a deliberate one-off action. Preview
-against a transactionally consistent in-memory copy first; this is the default
-and does not initialize or mutate the source registry:
-
-```sh
-FC_CORE_API_TOKEN=... \
-finitesitesd reconcile-identity --data DATA_DIR \
-  --identity-authority-url https://identity.finite.vip \
-  --core-api-url https://core.example
-```
-
-After reviewing the preview, naming the backup and rollback boundary, and
-receiving separate production-mutation approval, apply the same reconciliation
-explicitly:
-
-```sh
-FC_CORE_API_TOKEN=... \
-finitesitesd reconcile-identity --data DATA_DIR --apply yes \
-  --identity-authority-url https://identity.finite.vip \
-  --core-api-url https://core.example
-```
-
-The Core URL and server-only `FC_CORE_API_TOKEN` are optional as a pair.
-Without them, reconciliation still preserves legacy access and converts
-Managed Agent NIP-05 grants to native grants. With them, a verified active Core
-account-to-Agent association may create the missing mailbox-to-npub Sites key.
-Automated evidence never reactivates a revoked key; only a new mailbox
-challenge can do that. Normal Sites startup creates the compatible schema but
-never runs this data reconciliation.
+The operator-only `reconcile-identity` one-shot was a completed migration tool
+and has been removed (see `docs/technical-debt-ledger.md` item 13): the legacy
+mailbox-grant reconciliation it applied is done, and the SaaS Core
+account-lookup endpoint it could consult no longer exists. Normal Sites
+startup never ran it; durable authorization state is unaffected.
 
 ### Migrating an existing key
 

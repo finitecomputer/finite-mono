@@ -9,16 +9,12 @@
     after = [
       "network-online.target"
       "finitechat-server.service"
-      "finite-identity.service"
     ];
-    requires = [
-      "finitechat-server.service"
-      "finite-identity.service"
-    ];
+    requires = [ "finitechat-server.service" ];
     # Aug 11 fence left hosted-device down: Requires= already stopped it with
     # finitechat-server, but starting the server did not pull it back. Mirror
     # finite-litestream.nix: PartOf= the owner so stop/restart of chat-server
-    # takes this unit with it. Do not PartOf identity.
+    # takes this unit with it.
     partOf = [ "finitechat-server.service" ];
     wantedBy = [ "multi-user.target" ];
 
@@ -29,7 +25,6 @@
       # bind the canonical URL that the joining Device is configured to trust.
       FINITECHAT_SERVER_URL = "http://127.0.0.1:8788";
       FINITECHAT_PUBLIC_URL = "https://chat.finite.computer";
-      FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
     };
 
     serviceConfig = {
@@ -45,10 +40,9 @@
       # Operator-created, root:root 0600. It is shared with the dashboard
       # container and contains the same random value under both names:
       #   FINITECHAT_HOSTED_API_TOKEN
-      EnvironmentFile = [
-        "/etc/finite/hosted-web-device.env"
-        "/etc/finite/identity-operator.env"
-      ];
+      # The retired identity-operator.env load is gone: the daemon no longer
+      # reads FINITE_IDENTITY_OPERATOR_TOKEN.
+      EnvironmentFile = [ "/etc/finite/hosted-web-device.env" ];
       Restart = "always";
       RestartSec = 2;
       NoNewPrivileges = true;

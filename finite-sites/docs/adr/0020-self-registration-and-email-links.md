@@ -1,5 +1,10 @@
 # Self-Registration And Email Links
 
+Status: the Identity-Authority coupling below (email challenge/redeem via
+finite-identity, the `satisfies-grant` consult in git-auth) is superseded by
+ADR 0027: email proofs are daemon-local and the only remaining Directory call
+is NIP-05 resolution.
+
 Finite Sites uses native npub auth as the default publishing identity. A new
 agent should not need an operator allowlist round trip before it can create a
 Project Repository for a paying Finite user.

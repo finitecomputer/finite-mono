@@ -289,13 +289,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
             ),
             {"run_nix_checks"},
         )
-        self.assertEqual(
-            selected(
-                "scripts/identity-edge-contract-gate.py",
-                "scripts/tests/test_identity_edge_contract_gate.py",
-            ),
-            {"run_nix_checks"},
-        )
 
     def test_stripe_price_contract_path_runs_nix_checks(self) -> None:
         self.assertEqual(

@@ -7,11 +7,9 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use finitesites_blob::BlobStore;
@@ -97,21 +95,6 @@ impl TestServer {
         Self::start_inner(
             None,
             git_auto_reconcile,
-            None,
-            false,
-            Some(VIEWER_SESSION_SERVICE_TOKEN),
-        )
-        .await
-    }
-
-    async fn start_with_identity_authority(
-        allowed_pubkey: &str,
-        identity_authority_url: String,
-    ) -> TestServer {
-        Self::start_inner(
-            Some(allowed_pubkey),
-            true,
-            Some(identity_authority_url),
             false,
             Some(VIEWER_SESSION_SERVICE_TOKEN),
         )
@@ -125,7 +108,6 @@ impl TestServer {
         Self::start_inner(
             Some(allowed_pubkey),
             git_auto_reconcile,
-            None,
             false,
             Some(VIEWER_SESSION_SERVICE_TOKEN),
         )
@@ -136,7 +118,6 @@ impl TestServer {
         Self::start_inner(
             Some(allowed_pubkey),
             true,
-            None,
             true,
             Some(VIEWER_SESSION_SERVICE_TOKEN),
         )
@@ -144,13 +125,12 @@ impl TestServer {
     }
 
     async fn start_without_viewer_session_service(allowed_pubkey: &str) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), true, None, false, None).await
+        Self::start_inner(Some(allowed_pubkey), true, false, None).await
     }
 
     async fn start_inner(
         allowed_pubkey: Option<&str>,
         git_auto_reconcile: bool,
-        identity_authority_url: Option<String>,
         single_origin_git: bool,
         viewer_session_service_token: Option<&str>,
     ) -> TestServer {
@@ -194,10 +174,6 @@ impl TestServer {
             document_base_domain: document_base_domain(),
             api_url,
             git_base_url,
-            identity_sites_notification_token: identity_authority_url
-                .as_ref()
-                .map(|_| "11".repeat(32)),
-            identity_authority_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
@@ -362,125 +338,6 @@ fn hook_helper_path() -> PathBuf {
 
 fn json_body<T: serde::de::DeserializeOwned>(response: ureq::Response) -> T {
     response.into_json().unwrap()
-}
-
-fn identity_authority_stub(satisfied: bool) -> (String, mpsc::Receiver<serde_json::Value>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 512];
-        let body_start = loop {
-            let read = stream.read(&mut chunk).unwrap();
-            assert_ne!(read, 0, "identity authority client closed before headers");
-            buffer.extend_from_slice(&chunk[..read]);
-            if let Some(end) = buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|index| index + 4)
-            {
-                break end;
-            }
-        };
-        let headers = String::from_utf8_lossy(&buffer[..body_start]).into_owned();
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                line.split_once(':').and_then(|(name, value)| {
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-            })
-            .unwrap_or(0);
-        while buffer.len() < body_start + content_length {
-            let read = stream.read(&mut chunk).unwrap();
-            assert_ne!(read, 0, "identity authority client closed before body");
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        let request_line = headers.lines().next().unwrap_or_default();
-        assert_eq!(
-            request_line,
-            "POST /api/v1/principal-resolution/satisfies-grant HTTP/1.1"
-        );
-        let body: serde_json::Value =
-            serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
-        sender.send(body).unwrap();
-
-        let response_body = serde_json::json!({ "satisfied": satisfied }).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-    });
-    (url, receiver)
-}
-
-fn mailbox_proof_stub(
-    email: &str,
-    request_count: usize,
-) -> (String, mpsc::Receiver<serde_json::Value>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (sender, receiver) = mpsc::channel();
-    let email = email.to_string();
-    std::thread::spawn(move || {
-        for _ in 0..request_count {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 512];
-            let body_start = loop {
-                let read = stream.read(&mut chunk).unwrap();
-                assert_ne!(read, 0, "identity authority client closed before headers");
-                buffer.extend_from_slice(&chunk[..read]);
-                if let Some(end) = buffer
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .map(|index| index + 4)
-                {
-                    break end;
-                }
-            };
-            let headers = String::from_utf8_lossy(&buffer[..body_start]).into_owned();
-            assert_eq!(
-                headers.lines().next().unwrap_or_default(),
-                "POST /api/v1/mailbox-proofs/consume HTTP/1.1"
-            );
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.split_once(':').and_then(|(name, value)| {
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                })
-                .unwrap_or(0);
-            while buffer.len() < body_start + content_length {
-                let read = stream.read(&mut chunk).unwrap();
-                assert_ne!(read, 0, "identity authority client closed before body");
-                buffer.extend_from_slice(&chunk[..read]);
-            }
-            let body: serde_json::Value =
-                serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
-            sender.send(body.clone()).unwrap();
-            let response_body = serde_json::json!({
-                "email": email,
-                "pubkey": body["pubkey"],
-                "verified": true,
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        }
-    });
-    (url, receiver)
 }
 
 fn outbox_link(outbox: &Path) -> String {
@@ -2632,12 +2489,10 @@ async fn project_init_and_git_auth_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key() {
+async fn linked_email_satisfies_git_auth_without_sites_email_key() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let stranger_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
-    let (identity_authority_url, identity_authority_requests) = identity_authority_stub(true);
-    let server =
-        TestServer::start_with_identity_authority(&user_pubkey, identity_authority_url).await;
+    let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
         let body = serde_json::to_vec(&project_init_request(false)).unwrap();
@@ -2666,6 +2521,15 @@ async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key()
         );
         assert!(grant.collaborator.created);
 
+        // A daemon-local Email Link, with no Sites email key and no Identity
+        // Authority anywhere, satisfies the email grant for the linked key.
+        {
+            let mut store = Store::open(&server.data_dir().join("registry.db")).unwrap();
+            store
+                .link_email_to_native_principal("skyler@example.com", &stranger_pubkey, now_unix())
+                .unwrap();
+        }
+
         let auth_body = serde_json::to_vec(&GitAuthRequest {
             email: Some("skyler@example.com".into()),
         })
@@ -2684,23 +2548,28 @@ async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key()
         assert_eq!(credential.username, credential.credential_id);
         assert_eq!(credential.password.len(), 64);
 
-        let identity_request = identity_authority_requests
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        assert_eq!(identity_request["grant"], "skyler@example.com");
-        assert_eq!(identity_request["actor_pubkey"], stranger_pubkey);
+        // An unlinked key with the same email claim fails closed.
+        let error = server
+            .signed(
+                &viewer_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&auth_body),
+            )
+            .unwrap_err();
+        assert!(matches!(error, ureq::Error::Status(403, _)));
     });
     task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_grant() {
+async fn email_proof_registers_and_revokes_sites_key_without_identity_authority() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
-    let stranger_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
-    let stranger_npub = finitesites_proto::npub::encode_npub(&stranger_pubkey).unwrap();
-    let (identity_authority_url, proof_requests) = mailbox_proof_stub("paul@finite.vip", 2);
-    let server =
-        TestServer::start_with_identity_authority(&user_pubkey, identity_authority_url).await;
+    let stranger_npub = finitesites_proto::npub::encode_npub(
+        &finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap(),
+    )
+    .unwrap();
+    let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
         let body = serde_json::to_vec(&project_init_request(false)).unwrap();
@@ -2725,8 +2594,23 @@ async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_g
             )
             .unwrap();
 
+        // Daemon-local challenge: the token arrives via the local mailer.
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "paul@finite.vip".into(),
+        })
+        .unwrap();
+        server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap();
+        let token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
+
         let register_body = serde_json::to_vec(&SitesAuthorizedKeyRegisterRequest {
-            mailbox_proof: "proof-for-stranger".into(),
+            email: "paul@finite.vip".into(),
+            token: token.clone(),
         })
         .unwrap();
         let registered: SitesAuthorizedKeyResponse = json_body(
@@ -2743,6 +2627,17 @@ async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_g
         assert_eq!(registered.email, "paul@finite.vip");
         assert_eq!(registered.npub, stranger_npub);
 
+        // The proof is single-use: replaying it fails closed.
+        let replay = server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/sites-authorized-keys/register",
+                Some(&register_body),
+            )
+            .unwrap_err();
+        assert!(matches!(replay, ureq::Error::Status(401, _)));
+
         let auth_body = serde_json::to_vec(&GitAuthRequest {
             email: Some("paul@finite.vip".into()),
         })
@@ -2756,9 +2651,19 @@ async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_g
             )
             .unwrap();
 
+        // Revocation also requires a fresh daemon-local proof.
+        server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap();
+        let fresh_token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
         let revoke_body = serde_json::to_vec(&SitesAuthorizedKeyRevokeRequest {
-            mailbox_proof: "fresh-proof-for-owner".into(),
-            target_npub: stranger_npub,
+            email: "paul@finite.vip".into(),
+            token: fresh_token,
+            target_npub: stranger_npub.clone(),
         })
         .unwrap();
         let revoked: SitesAuthorizedKeyResponse = json_body(
@@ -2782,11 +2687,6 @@ async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_g
             )
             .unwrap_err();
         assert!(matches!(error, ureq::Error::Status(403, _)));
-
-        let first = proof_requests.recv_timeout(Duration::from_secs(2)).unwrap();
-        let second = proof_requests.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(first["pubkey"], stranger_pubkey);
-        assert_eq!(second["pubkey"], user_pubkey);
     });
     task.await.unwrap();
 }

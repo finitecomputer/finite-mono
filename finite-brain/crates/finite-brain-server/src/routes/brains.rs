@@ -25,11 +25,25 @@ pub(crate) async fn create_brain_handler(
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor_npub = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let actor_user_id = UserId::new(actor_npub.clone())?;
     let request: CreateBrainRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
-    let requested_organization_requester = match request.kind {
+    // Account-bound agent selection was verified through the Core/Identity
+    // authorities, which this server no longer consults (auth kernel cut).
+    // There is no server-side replacement: agents join by npub invitation or
+    // capability Invite Token after creation.
+    if request.personal_agent_email.is_some()
+        || request.personal_agent_npub.is_some()
+        || request.initial_agent_email.is_some()
+        || request.initial_agent_npub.is_some()
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "account-bound agent selection is no longer resolved by the Brain server; invite the agent by npub or capability Invite Token after creation",
+        ));
+    }
+
+    let organization_requester = match request.kind {
         CreateBrainKind::Personal if request.requesting_user_npub.is_some() => {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -37,6 +51,9 @@ pub(crate) async fn create_brain_handler(
             ));
         }
         CreateBrainKind::Personal => None,
+        // The requester is declared provenance, not an authority-verified
+        // identity: the Agent Runtime's turn-scoped lease remains the
+        // client-side guard, and every initial admin can add admins anyway.
         CreateBrainKind::Organization => request
             .requesting_user_npub
             .as_deref()
@@ -45,174 +62,20 @@ pub(crate) async fn create_brain_handler(
             .map(UserId::new)
             .transpose()?,
     };
-    let organization_requester = if request.kind == CreateBrainKind::Organization {
-        if state.agent_bootstrap_authorities.is_none() {
-            if requested_organization_requester.is_some() {
-                return Err(ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "authenticated Organization Brain requester verification is not configured",
-                ));
-            }
-            None
-        } else {
-            match (
-                try_resolve_account_agent_principals(&state, &actor_user_id).await?,
-                requested_organization_requester,
-            ) {
-                (Some(principals), Some(requester)) if requester == principals.owner_npub => {
-                    Some(requester)
-                }
-                (Some(_), Some(_)) => {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "authenticated requester does not own the signing Managed Agent Principal",
-                    ));
-                }
-                (Some(_), None) => {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "Managed Agent Organization Brain creation requires authenticated requester context; retry from the authenticated chat turn",
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "direct human Organization Brain creation cannot provide a separate requester identity",
-                    ));
-                }
-                (None, None) => None,
-            }
-        }
-    } else {
-        None
-    };
 
-    let personal_agent = match request.kind {
-        CreateBrainKind::Organization
-            if request.personal_agent_email.is_some() || request.personal_agent_npub.is_some() =>
-        {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "Personal Agent identity is only valid for a Personal Brain",
-            ));
-        }
-        CreateBrainKind::Organization => None,
-        CreateBrainKind::Personal => {
-            let email_identity = match request.personal_agent_email.as_deref() {
-                Some(email) => Some(resolve_identity_input(&state, email).await?),
-                None => None,
-            };
-            let npub_identity = match request.personal_agent_npub.as_deref() {
-                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
-                None => None,
-            };
-            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
-                && email.npub != npub.npub
-            {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
-                ));
-            }
-            let requested_agent = email_identity
-                .as_ref()
-                .or(npub_identity.as_ref())
-                .ok_or_else(|| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "Personal Brain creation requires a Personal Agent email or npub",
-                    )
-                })?;
-            let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
-            let principals =
-                resolve_account_agent_principals(&state, &requested_agent_npub).await?;
-            if principals.owner_npub != UserId::new(actor_npub.clone())? {
-                return Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "selected Personal Agent does not belong to the signed owner's account",
-                ));
-            }
-            if let Some(email) = request.personal_agent_email.as_deref()
-                && canonical_email(email)? != principals.managed_agent_email
-            {
-                return Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "Finite Identity returned a mismatched Managed Agent email",
-                ));
-            }
-            Some(principals)
-        }
-    };
-    let initial_agent = match request.kind {
-        CreateBrainKind::Personal
-            if request.initial_agent_email.is_some() || request.initial_agent_npub.is_some() =>
-        {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "Initial Organization Brain agent identity is only valid for an Organization Brain",
-            ));
-        }
-        CreateBrainKind::Personal => None,
-        CreateBrainKind::Organization => {
-            let email_identity = match request.initial_agent_email.as_deref() {
-                Some(email) => Some(resolve_identity_input(&state, email).await?),
-                None => None,
-            };
-            let npub_identity = match request.initial_agent_npub.as_deref() {
-                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
-                None => None,
-            };
-            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
-                && email.npub != npub.npub
-            {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "initialAgentEmail and initialAgentNpub resolve to different Agent Principals",
-                ));
-            }
-            if let Some(requested_agent) = email_identity.as_ref().or(npub_identity.as_ref()) {
-                if organization_requester.is_some() {
-                    return Err(ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "requestingUserNpub and initial agent identity are mutually exclusive bootstrap paths",
-                    ));
-                }
-                let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
-                let principals =
-                    resolve_account_agent_principals(&state, &requested_agent_npub).await?;
-                if principals.owner_npub != UserId::new(actor_npub.clone())? {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "selected Organization Brain agent does not belong to the signed owner's account",
-                    ));
-                }
-                if let Some(email) = request.initial_agent_email.as_deref()
-                    && canonical_email(email)? != principals.managed_agent_email
-                {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "Finite Identity returned a mismatched Managed Agent email",
-                    ));
-                }
-                Some(principals)
-            } else {
-                None
-            }
-        }
-    };
+    if request.kind == CreateBrainKind::Personal {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Personal Brain creation runs through the account agent bootstrap, which no longer resolves through this server",
+        ));
+    }
+
     let output = match request.kind {
         CreateBrainKind::Personal => {
-            bootstrap_personal_brain(request.brain_id, request.name, actor_npub.clone())?
+            unreachable!("personal brain creation returned above")
         }
         CreateBrainKind::Organization => {
-            if let Some(agent) = initial_agent.as_ref() {
-                bootstrap_organization_brain_with_requester(
-                    request.brain_id,
-                    request.name,
-                    actor_npub.clone(),
-                    agent.agent_npub.as_str().to_owned(),
-                )?
-            } else if let Some(requester) = organization_requester {
+            if let Some(requester) = organization_requester {
                 bootstrap_organization_brain_with_requester(
                     request.brain_id,
                     request.name,
@@ -238,24 +101,7 @@ pub(crate) async fn create_brain_handler(
 
     let stored = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        if let Some(principals) = personal_agent.as_ref() {
-            let created_at = server_timestamp(&state);
-            let identity_aliases = account_agent_identity_aliases(principals, &created_at)?;
-            store.create_personal_brain_bootstrap_with_identities(
-                &output,
-                &grants,
-                &principals.agent_npub,
-                &UserId::new(actor_npub.clone())?,
-                &created_at,
-                &identity_aliases,
-            )?;
-        } else if let Some(principals) = initial_agent.as_ref() {
-            let created_at = server_timestamp(&state);
-            let identity_aliases = account_agent_identity_aliases(principals, &created_at)?;
-            store.create_brain_bootstrap_with_identities(&output, &grants, &identity_aliases)?;
-        } else {
-            store.create_brain_bootstrap(&output, &grants)?;
-        }
+        store.create_brain_bootstrap(&output, &grants)?;
         store.load_brain(&brain_id)?
     };
 
@@ -817,7 +663,9 @@ pub(crate) async fn create_brain_invitation_handler(
 
     let npub_target = if let Ok(public_key) = NostrPublicKey::parse(&target_input) {
         Some(public_key.to_npub().map_err(nostr_identity_error)?)
-    } else if finite_vip_email(&target_input) {
+    } else if email_like(&target_input) {
+        // Any email-shaped target resolves through public NIP-05 only; there
+        // is no account authority to consult (auth kernel).
         match resolve_and_record_identity(&state, &target_input).await {
             Ok(identity) => Some(identity.npub),
             Err(error) if error.status == StatusCode::NOT_FOUND => None,
@@ -827,7 +675,13 @@ pub(crate) async fn create_brain_invitation_handler(
         None
     };
 
-    let invitation = if let Some(target_npub) = npub_target {
+    let Some(target_npub) = npub_target else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invitation target must be an npub, hex key, or resolvable NIP-05 identifier; to invite by email, create a capability Invite Token with email delivery",
+        ));
+    };
+    let invitation = {
         let target = UserId::new(target_npub)?;
         let initial_folder_access = selected_folder_ids(&request.initial_folder_access)?;
         let id = generated_link_id(
@@ -864,127 +718,6 @@ pub(crate) async fn create_brain_invitation_handler(
             &invite_code,
             &accept_path,
             &initial_folder_access,
-            &actor_user_id,
-            &request.expires_at,
-            &created_at,
-        )?
-    } else {
-        if !email_like(&target_input) {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invitation target must be npub, hex, active finite.vip NIP-05, or email",
-            ));
-        }
-        let invited_email = canonical_email(&target_input)?;
-        let invite_unwrap_npub = UserId::new(canonical_npub_from_public_key_input(
-            request.invite_unwrap_npub.as_deref().ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "inviteUnwrapNpub is required for email bootstrap invitations",
-                )
-            })?,
-        )?)?;
-        let bootstrap_payload_hash = request
-            .bootstrap_payload_hash
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "bootstrapPayloadHash is required for email bootstrap invitations",
-                )
-            })?;
-        let bootstrap_wrapped_event_json = request
-            .bootstrap_wrapped_event_json
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "bootstrapWrappedEventJson is required for email bootstrap invitations",
-                )
-            })?;
-        let bootstrap_authorization_event_json = request
-            .bootstrap_authorization_event_json
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "bootstrapAuthorizationEventJson is required for email bootstrap invitations",
-                )
-            })?;
-        validate_folder_key_grant_wrapper(bootstrap_wrapped_event_json, &invite_unwrap_npub)?;
-        let selected_restricted_folder_access =
-            selected_folder_ids(&request.initial_folder_access)?;
-        let invitation_scope_key = if request.folder_only {
-            selected_restricted_folder_access
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            "brain-membership".to_owned()
-        };
-        let id = generated_link_id(
-            "invitation",
-            &[
-                brain_id.as_str(),
-                invited_email.as_str(),
-                &invitation_scope_key,
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-            ],
-            16,
-        );
-        let invite_code = generated_link_id(
-            "invite",
-            &[
-                brain_id.as_str(),
-                invited_email.as_str(),
-                &invitation_scope_key,
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-                "code",
-            ],
-            16,
-        );
-        let accept_path = format!("/v1/brain-invitation-links/{invite_code}/claim");
-        let mut store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_brain(&brain_id)?;
-        ensure_brain_admin(&stored, &actor)?;
-        let scope = email_bootstrap_scope_for_brain(
-            &stored,
-            &selected_restricted_folder_access,
-            request.folder_only,
-        )?;
-        validate_email_bootstrap_authorization(
-            bootstrap_authorization_event_json,
-            &actor,
-            &brain_id,
-            &invited_email,
-            &invite_unwrap_npub,
-            bootstrap_payload_hash,
-            &request.expires_at,
-            &scope,
-        )?;
-        store.create_email_brain_invitation(
-            &brain_id,
-            &id,
-            &invited_email,
-            &invite_unwrap_npub,
-            bootstrap_payload_hash,
-            bootstrap_wrapped_event_json,
-            bootstrap_authorization_event_json,
-            &invite_code,
-            &accept_path,
-            &selected_restricted_folder_access,
-            request.folder_only,
             &actor_user_id,
             &request.expires_at,
             &created_at,
@@ -1033,144 +766,30 @@ pub(crate) async fn public_brain_invitation_instructions_handler(
         let store = state.store.lock().map_err(lock_error)?;
         store.load_brain_invitation_by_code(&invite_code)?
     };
-    match invitation.target_kind {
-        BrainInvitationTargetKind::EmailBootstrap => {
-            Ok(text_response(public_invite_instructions_text()))
-        }
-        BrainInvitationTargetKind::Npub => {
-            // E1: the npub variant reveals the target npub and invitation id,
-            // so it resolves only while the invitation is still acceptable;
-            // terminal and expired invitations get the identity-hiding
-            // unavailable response, same as unknown codes.
-            let now = server_timestamp(&state);
-            if invitation.status != LinkStatus::Pending
-                || timestamp_expired(&invitation.expires_at, &now)
-            {
-                return Err(StoreError::UnavailableLink {
-                    kind: "brain invitation",
-                }
-                .into());
-            }
-            let text = npub_invite_instructions_text(&state, &invitation).ok_or(
-                StoreError::UnavailableLink {
-                    kind: "brain invitation",
-                },
-            )?;
-            Ok(text_response(text))
-        }
-    }
-}
-
-pub(crate) async fn post_proof_brain_invitation_instructions_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath(invite_code): AxumPath<String>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request: PostProofInviteInstructionsRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let invitation = load_post_proof_email_invitation(
-        &state,
-        &headers,
-        &method,
-        &uri,
-        &invite_code,
-        &body,
-        &request,
-    )
-    .await?;
-    let stored = {
-        let store = state.store.lock().map_err(lock_error)?;
-        store.load_brain(&invitation.brain_id)?
-    };
-    Ok(text_response(post_proof_invite_instructions_text(
-        &state,
-        &invitation,
-        &stored,
-    )))
-}
-
-pub(crate) async fn post_proof_brain_invitation_bootstrap_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath(invite_code): AxumPath<String>,
-    body: Bytes,
-) -> Result<Json<BrainInvitationResponse>, ApiError> {
-    let request: PostProofInviteInstructionsRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let invitation = load_post_proof_email_invitation(
-        &state,
-        &headers,
-        &method,
-        &uri,
-        &invite_code,
-        &body,
-        &request,
-    )
-    .await?;
-    if invitation.status == LinkStatus::Pending && invitation.bootstrap_wrapped_event_json.is_none()
-    {
+    // Only npub-targeted invitations have public instructions. Legacy
+    // email-bootstrap codes (a removed flow) get the identity-hiding
+    // unavailable response, same as unknown codes.
+    if invitation.target_kind != BrainInvitationTargetKind::Npub {
         return Err(StoreError::UnavailableLink {
             kind: "brain invitation",
         }
         .into());
     }
-    let mut response = brain_invitation_response(invitation);
-    attach_invitation_public_url(&state, &mut response);
-    {
-        let store = state.store.lock().map_err(lock_error)?;
-        enrich_brain_invitation_identities(&store, &mut response)?;
-    }
-    Ok(Json(response))
-}
-
-async fn load_post_proof_email_invitation(
-    state: &ServerState,
-    headers: &HeaderMap,
-    method: &Method,
-    uri: &axum::http::Uri,
-    invite_code: &str,
-    body: &Bytes,
-    request: &PostProofInviteInstructionsRequest,
-) -> Result<StoredBrainInvitation, ApiError> {
-    let actor = validate_request_auth(state, headers, method, uri, Some(body))?;
-    let actor_user_id = UserId::new(actor)?;
-    let invited_email = canonical_email(&request.email)?;
-    let invitation = {
-        let store = state.store.lock().map_err(lock_error)?;
-        store.load_brain_invitation_by_code(invite_code)?
-    };
-    if invitation.target_kind != BrainInvitationTargetKind::EmailBootstrap {
+    // E1: the npub variant reveals the target npub and invitation id, so it
+    // resolves only while the invitation is still acceptable; terminal and
+    // expired invitations get the identity-hiding unavailable response.
+    let now = server_timestamp(&state);
+    if invitation.status != LinkStatus::Pending || timestamp_expired(&invitation.expires_at, &now) {
         return Err(StoreError::UnavailableLink {
             kind: "brain invitation",
         }
         .into());
     }
-    if invitation.invited_email.as_deref() != Some(invited_email.as_str()) {
-        return Err(StoreError::UnavailableLink {
+    let text =
+        npub_invite_instructions_text(&state, &invitation).ok_or(StoreError::UnavailableLink {
             kind: "brain invitation",
-        }
-        .into());
-    }
-    if invitation.status == LinkStatus::Accepted
-        && invitation.claimed_by_npub.as_ref() != Some(&actor_user_id)
-    {
-        return Err(StoreError::UnavailableLink {
-            kind: "brain invitation",
-        }
-        .into());
-    }
-    validate_email_proof_window(
-        &invitation,
-        &request.email_proof_created_at,
-        &server_timestamp(state),
-    )?;
-    verify_identity_authority_email_proof(state, invited_email.as_str(), &actor_user_id).await?;
-    Ok(invitation)
+        })?;
+    Ok(text_response(text))
 }
 
 pub(crate) async fn accept_brain_invitation_link_handler(
@@ -1183,136 +802,11 @@ pub(crate) async fn accept_brain_invitation_link_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor = UserId::new(actor)?;
     let now = server_timestamp(&state);
-    let narrowing = {
-        let invitation = {
-            let store = state.store.lock().map_err(lock_error)?;
-            store.load_brain_invitation_by_code(&invite_code)?
-        };
-        check_invitation_acceptance_narrowing(&state, &invitation, &actor).await?
-    };
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.accept_brain_invitation_by_code(&invite_code, &actor, &now)?
     };
     let mut response = brain_invitation_response(invitation);
-    response.narrowed = narrowing;
-    attach_invitation_public_url(&state, &mut response);
-    {
-        let store = state.store.lock().map_err(lock_error)?;
-        enrich_brain_invitation_identities(&store, &mut response)?;
-    }
-    Ok(Json(response))
-}
-
-pub(crate) async fn claim_email_brain_invitation_link_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath(invite_code): AxumPath<String>,
-    body: Bytes,
-) -> Result<Json<BrainInvitationResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let actor_user_id = UserId::new(actor.clone())?;
-    let request: ClaimEmailBrainInvitationRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let now = server_timestamp(&state);
-    let invited_email = canonical_email(&request.email)?;
-
-    let invitation = {
-        let store = state.store.lock().map_err(lock_error)?;
-        store.load_brain_invitation_by_code(&invite_code)?
-    };
-    if invitation.target_kind != BrainInvitationTargetKind::EmailBootstrap {
-        return Err(StoreError::UnavailableLink {
-            kind: "brain invitation",
-        }
-        .into());
-    }
-    if invitation.invited_email.as_deref() != Some(invited_email.as_str()) {
-        return Err(StoreError::UnavailableLink {
-            kind: "brain invitation",
-        }
-        .into());
-    }
-
-    let mut narrowing = None;
-    let invitation = if invitation.status == LinkStatus::Accepted {
-        if invitation.claimed_by_npub.as_ref() == Some(&actor_user_id) {
-            let mut invitation = invitation;
-            invitation.duplicate_accept = true;
-            invitation
-        } else {
-            return Err(StoreError::UnavailableLink {
-                kind: "brain invitation",
-            }
-            .into());
-        }
-    } else {
-        narrowing =
-            check_invitation_acceptance_narrowing(&state, &invitation, &actor_user_id).await?;
-        validate_email_proof_window(&invitation, &request.email_proof_created_at, &now)?;
-        verify_identity_authority_email_proof(&state, invited_email.as_str(), &actor_user_id)
-            .await?;
-        if let (Some(authorization), Some(invite_unwrap_npub), Some(payload_hash)) = (
-            invitation.bootstrap_authorization_event_json.as_deref(),
-            invitation.invite_unwrap_npub.as_ref(),
-            invitation.bootstrap_payload_hash.as_deref(),
-        ) {
-            validate_email_bootstrap_authorization(
-                authorization,
-                invitation.created_by_npub.as_str(),
-                &invitation.brain_id,
-                invited_email.as_str(),
-                invite_unwrap_npub,
-                payload_hash,
-                &invitation.expires_at,
-                &invitation.bootstrap_scope,
-            )?;
-            let proof_event_json = request
-                .invite_unwrap_proof_event_json
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "inviteUnwrapProofEventJson is required for email bootstrap claims",
-                    )
-                })?;
-            validate_email_bootstrap_claim_proof(
-                proof_event_json,
-                invite_unwrap_npub,
-                &invitation.brain_id,
-                &invite_code,
-                invited_email.as_str(),
-                &actor_user_id,
-                payload_hash,
-                &request.email_proof_created_at,
-            )?;
-        } else {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "email bootstrap invitation is missing authorization metadata",
-            ));
-        }
-        let grants = bootstrap_grant_requests_to_metadata(&request.grants, &actor, &now)?;
-        let control_records = grants
-            .iter()
-            .map(folder_key_grant_sync_record)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut store = state.store.lock().map_err(lock_error)?;
-        store.claim_email_brain_invitation_by_code_with_control_records(
-            &invite_code,
-            invited_email.as_str(),
-            &actor_user_id,
-            &grants,
-            &control_records,
-            &now,
-        )?
-    };
-
-    let mut response = brain_invitation_response(invitation);
-    response.narrowed = narrowing;
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;
