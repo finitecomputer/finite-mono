@@ -1,0 +1,29 @@
+# Delete-A-Thon reporter: on every merged PR, count the repo's tracked
+# lines and push one data point to the linecount fragment
+# (https://linecount.fragment.club). No-op until FRAGMENT_INBOX_URL exists,
+# so this file can merge before the secret is set. workflow_dispatch seeds
+# the baseline — run it once after setting the secret.
+name: linecount
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+      - name: count and push
+        run: bash scripts/linecount-push.sh
+        env:
+          FRAGMENT_INBOX_URL: ${{ secrets.FRAGMENT_INBOX_URL }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
