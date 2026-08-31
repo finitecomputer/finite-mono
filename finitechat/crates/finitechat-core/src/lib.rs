@@ -12729,8 +12729,8 @@ fn nostr_identity_from_secret(
 /// loops). Construct once, clone the handle (it is an Arc internally).
 /// Every call through it is bounded: the runtime actor and the resident
 /// bridge sync thread park on these calls, so one silently-stalled
-/// connection would otherwise wedge the whole process
-/// (`scripts/repro-hermes-wedge`).
+/// connection would otherwise wedge the whole process. The bounded-timeout
+/// tests in `finitechat-client` pin this wedge class.
 fn shared_blocking_http_client() -> reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT

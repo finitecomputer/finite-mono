@@ -2,11 +2,7 @@
 
 This is THE Finite company repository — all first-party code, apps, protocols,
 and infrastructure definitions live here. `docs/monorepo-doctrine.md` is the
-constitution; `docs/monorepo-plan.md` and `docs/monorepo-migration-log.md`
-record how we got here.
-
-Before implementing a monorepo-level component, check the corresponding
-Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
+constitution.
 
 ## Ground rules
 
@@ -27,6 +23,10 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 - **Work lands here first.** The old per-component repos are archived (or
   awaiting archive); never "sync back." A stray commit on an unarchived
   source repo is merged in with `scripts/import-sync <name>`.
+- **Prefer pruning stale legacy material.** Git history is the archive. Delete
+  or consolidate imported, proposed, historical, and one-off docs/scripts once
+  no current authority, production boundary, migration gate, or test contract
+  depends on them.
 - **Releases are component-scoped tags**: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
   `fbrain/vX.Y.Z`; images version via workflow dispatch. Release asset names
   are product contracts — never rename them. Source tags live in this repo;

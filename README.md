@@ -15,7 +15,7 @@ and infrastructure definition in one tree.
 | `finite-specialization/` | Hermes capability vocabulary and safe specialization config examples |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
-| `docs/` | doctrine, plan, migration log, architecture |
+| `docs/` | doctrine, ADRs, run records, postmortems, audits |
 
 Read [docs/monorepo-doctrine.md](docs/monorepo-doctrine.md) for the rules
 (single-repo model, component-scoped release tags, what deliberately stays
@@ -48,6 +48,5 @@ reusing unchanged service, binary, and Runtime image digests.
 ## More
 
 - [Docs index](docs/README.md)
-- [Migration log](docs/monorepo-migration-log.md) · [import-sync provenance](scripts/import-sync.toml)
+- [import-sync provenance](scripts/import-sync.toml)
 - [Deploy root](infra/README.md)
-- [Fedimint structure analysis](docs/fedimint-monorepo-structure-analysis.md)

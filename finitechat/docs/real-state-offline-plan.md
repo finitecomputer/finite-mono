@@ -638,6 +638,5 @@ and prove:
 - `docs/storage-plan.md`
 - `docs/adr/0007-hint-channel-abstraction.md`
 - `docs/adr/0008-rust-owned-app-runtime.md`
-- `docs/technical-debt-ledger.md`
 - `docs/feature-audit-marmot-pika.md`
 - [RMP Architecture Bible](https://github.com/rust-multiplatform/rmp/blob/master/rmp-architecture-bible.md)

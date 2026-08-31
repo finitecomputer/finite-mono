@@ -160,15 +160,15 @@ registry, blob, and git repository state.
 
 Runbook and deploy files:
 
-- `docs/deploy-finite-lat-2.md`
+- `../infra/runbooks/deploy-sites.md`
 - `infra/hosts/lat2/` (mono root — unit files, Caddyfile, and env example;
-  moved from `deploy/finite-lat-2/`)
+  historical capture moved from `deploy/finite-lat-2/`)
 - `docs/technical-debt-ledger.md`
 
 Important production rule: use `fsite` for agent-facing publishing and editor
 handoff. Do not bypass it with raw Nostr events, direct registry writes, DNS
 edits, or proxy edits unless you are doing an explicit operator recovery from
-the runbook.
+the current deploy runbook.
 
 ## Release Shape
 

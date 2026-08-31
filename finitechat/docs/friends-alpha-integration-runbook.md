@@ -1,8 +1,7 @@
 # Friends Alpha Integration Runbook
 
-This runbook is the Phase 8 gate for `docs/friends-alpha-hardening-plan.md`.
-Use it to collect evidence before inviting friends. Do not count dev-only
-fixtures, transient stores, or manual database edits as product proof.
+Use this runbook to collect evidence before inviting friends. Do not count
+dev-only fixtures, transient stores, or manual database edits as product proof.
 
 ## Required Inputs
 
@@ -188,5 +187,6 @@ Record:
 | Blob shared substrate | chat plus one other product caller | Pending | |
 
 Commit final evidence after the first full pass. If a shortcut is used to
-unblock Friends Alpha, add it to `docs/technical-debt-ledger.md` with source,
-risk, first proof, and delete condition before calling the gate passed.
+unblock Friends Alpha, record the source, risk, first proof, and delete
+condition in the owning issue, PR, or current design document before calling
+the gate passed.

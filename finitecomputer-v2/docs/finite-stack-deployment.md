@@ -388,25 +388,13 @@ This repo owns the hosted Finite Chat production deploy mechanics for the SaaS
 product. The `finitechat` repo owns source, protocol compatibility, local
 checks, and the release-blocking decision about which commit is safe to deploy.
 
-The deploy script now lives in `infra/hosts/lat1/scripts/` (it resolves the
-workspace path relative to the finite-mono root):
+Current deploy authority lives in
+`../../infra/runbooks/deploy-finitechat-server.md`. The old
+`infra/hosts/lat1/scripts/deploy-finitechat-server.sh` workspace and
+`deploy/finite-chat/lat1` operator config were removed during the 2026-08-29
+cleanup because they described a pre-NixOS future-lat1 path.
 
-```sh
-../infra/hosts/lat1/scripts/deploy-finitechat-server.sh \
-  finitecomputer-v2/deploy/finite-chat/lat1 \
-  <finitechat-full-sha>
-```
-
-Operator config lives in:
-
-```text
-deploy/finite-chat/lat1/secrets/workspace.env
-```
-
-Use `deploy/finite-chat/lat1/workspace.env.example` as the template. Do not
-commit filled secrets.
-
-The current deploy script:
+The historical deploy script:
 
 1. fetches `https://github.com/finitecomputer/finitechat.git` on lat1 at a
    pinned commit;

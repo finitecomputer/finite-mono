@@ -8,10 +8,9 @@ delete condition is unfinished design, not accepted debt.
 
 `HttpMailer` (Resend, via the shared `finite-mail` transport) ships behind
 the `Mailer` trait, selected with `--mailer` + `--mail-from`, key via env
-var. Remaining work is
-configuration, tracked in `docs/deploy-finite-lat-2.md` (domain
-verification + a real-inbox validation gate). Local and Devfinity select
-the dev mailer with `--mailer dev`; omitting the flag is an error.
+var. Remaining work is configuration: domain verification plus a real-inbox
+validation gate in the current Sites deploy authority. Local and Devfinity
+select the dev mailer with `--mailer dev`; omitting the flag is an error.
 
 ## 2. Login-link rate limiting only; no platform-wide limits
 
@@ -84,8 +83,8 @@ the dev mailer with `--mailer dev`; omitting the flag is an error.
 passed on 2026-06-09 and later updated to the Project Repository flow:
 project init plus git push from a remote machine through Cloudflare
 succeeded against finite-lat-2. The residual behavior (a
-misconfigured `--api-url` fails closed with "url mismatch") is documented
-in `docs/deploy-finite-lat-2.md` along with the on-box smoke procedure.
+misconfigured `--api-url` fails closed with "url mismatch") remains the
+expected signed-call behavior.
 
 ## 8. RESOLVED — tier-2 runs in Kata microVMs
 

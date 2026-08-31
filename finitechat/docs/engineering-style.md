@@ -77,10 +77,9 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   existing workspace dependencies, or a small Rust crate over shell/Python
   tooling. New scripts should be Rust binaries or tests unless a non-Rust tool
   is clearly the better fit.
-- Document tolerated technical debt in `docs/technical-debt-ledger.md` before
-  relying on it. Each item needs an observed source, risk, first proof, and
-  delete condition. A shortcut without a delete condition is not accepted debt;
-  it is unfinished design.
+- Document tolerated technical debt before relying on it. Each item needs an
+  observed source, risk, first proof, and delete condition. A shortcut without
+  a delete condition is not accepted debt; it is unfinished design.
 - Prefer hard cuts over compatibility shadow paths. Do not keep duplicate
   old/new APIs, fallbacks, launch/test-only shims, or parallel implementations
   merely to preserve pre-release tests or harnesses. Rewrite tests and callers

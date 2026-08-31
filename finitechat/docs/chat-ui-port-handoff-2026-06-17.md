@@ -15,7 +15,6 @@ Start with these files:
 - `docs/engineering-style.md`
 - `docs/real-state-offline-plan.md`
 - `docs/storage-plan.md`
-- `docs/technical-debt-ledger.md`
 - `docs/adr/0007-hint-channel-abstraction.md`
 - `docs/adr/0008-rust-owned-app-runtime.md`
 - `docs/feature-audit-marmot-pika.md`

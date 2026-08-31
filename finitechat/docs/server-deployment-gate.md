@@ -88,14 +88,9 @@ with:
 - any server data/backfill/rollback notes;
 - the Nix-derived expected Chat fingerprint and post-deploy `/health` payload.
 
-The current v2 deployment lane is documented in
-`../finitecomputer-v2/docs/finite-stack-deployment.md` and currently uses:
-
-```sh
-../infra/hosts/lat1/scripts/deploy-finitechat-server.sh \
-  finitecomputer-v2/deploy/finite-chat/lat1 \
-  <finitechat-commit>
-```
+The current deployment lane is documented in
+`../../infra/runbooks/deploy-finitechat-server.md` and uses the reviewed
+lat1 NixOS closure artifact path.
 
 Treat the exact deploy command as owned by v2. The required finite-chat
 acceptance criterion is that production `/health` reports the expected Chat

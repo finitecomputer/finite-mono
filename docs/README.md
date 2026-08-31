@@ -2,34 +2,18 @@
 
 This folder is the root documentation entry point for `finite-mono`.
 
-Docs here are split into two groups:
-
-- Current monorepo docs: maintained as part of the migration and local
-  developer loop.
-- Imported orientation docs: copied from `finite-eng-docs` for continuity, but
-  not fully revalidated after the monorepo import.
-
-When in doubt, prefer the current monorepo docs and verify imported operational
-commands against the owning source folder before relying on them.
+Docs here are current monorepo guidance, durable decisions, run records,
+postmortems, and audits. Imported orientation docs from `finite-eng-docs` were
+removed during the 2026-08-29 cleanup so agents start from current root docs,
+component `CONTEXT.md`, ADRs, and runbooks instead of stale navigation layers.
 
 ## Current Monorepo Docs
 
-- [Monorepo plan](monorepo-plan.md): phased construction checklist.
-- [Migration log](monorepo-migration-log.md): source snapshots, validation
-  notes, and migration decisions.
 - [Local integration harness](local-integration-harness.md): `devfinity`,
   `process-compose`, and `just dev` usage.
-- [Devfinity architecture plan](devfinity-architecture-plan.md): plan for
-  evolving `devfinity` into a typed integration harness.
-- [CI gate MVP hard-cut plan](ci-gate-mvp-plan.md): narrow fail-closed change
-  classification, one authoritative merge check, rollout acceptance, and the
-  post-MVP module onboarding queue.
 - [LAT logs and host metrics plan](lat-logs-and-host-metrics-plan.md): narrow
   Grafana/Loki/Alloy plan for centralized LAT service logs and basic host
   performance metrics.
-- [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
-  reference analysis used to calibrate Finite's Rust, Nix, command, docs,
-  harness, CI, and quality-gate choices.
 - [Recoverability precedes operator-blindness](adr/0001-recoverability-precedes-operator-blindness.md):
   system security decision governing recovery, privacy claims, TEEs, and
   Break-Glass Recovery.
@@ -59,26 +43,12 @@ commands against the owning source folder before relying on them.
 - [Agent Runtime upgrade and rollout post-mortem](postmortems/agent-runtime-upgrade-rollout-2026-07-16.md):
   why upgrades and deploys risked stranding Agents, which guardrails now exist,
   and the prioritized build, rollout, and recovery work still required.
-- [Production onboarding and chat causality post-mortem](postmortems/production-onboarding-chat-causality-2026-07-25.md):
-  the zero-creator onboarding gap, fresh-Agent identity-readiness race,
-  pre-pairing Hosted Chat incompatibility, and a causal-review framework for
-  state lineage, mixed versions, production reachability, and fewer better
-  tests.
 - [Artifact identity and manual drift audit](audits/artifact-identity-and-drift-2026-08-02.md):
   automatic package fingerprints, confirmed compatibility-record drift, and
   the boundary between intentional pins and redundant release bookkeeping.
-
-## Imported Orientation Docs
-
-These were copied from `finite-eng-docs` during Phase 7. They are useful as a
-starting point, but they still contain pre-monorepo assumptions and references
-to repos that are not yet imported into `finite-mono`.
-
-- [Architecture overview](architecture-overview.md)
-- [System flow and trust boundaries](system-flow-and-trust-boundaries.md)
-- [Navigation plan](navigation-plan.md)
-- [Local development matrix](local-dev-matrix.md)
-- [Slop audit](slop-audit.md)
+- [Script surface audit](audits/script-surface-audit-2026-08-29.md):
+  inventory of scripts, command facades, workflows, safety patterns, drift
+  risks, and recommended script hardening passes.
 
 ## Repo-Local Docs
 
@@ -104,8 +74,9 @@ Some imported repos also have root-level source repo docs:
 - [`finite-skills/README.md`](../finite-skills/README.md)
 - [`finite-specialization/README.md`](../finite-specialization/README.md)
 
-Treat repo-local docs as owner-scoped background until the Phase 13 stale-docs
-audit promotes, rewrites, or deletes them.
+Treat repo-local docs as owner-scoped background. Prefer current root docs,
+component `CONTEXT.md`, ADRs, and runbooks over historical plans or imported
+orientation.
 
 ## Docs Rules
 
@@ -113,5 +84,5 @@ audit promotes, rewrites, or deletes them.
 - Keep implementation details with the owning source folder until they are
   stable enough to promote.
 - Mark imported or unreviewed docs before linking them as canonical.
-- Update `monorepo-migration-log.md` when migration phases change docs layout
-  or authority.
+- Delete stale caches instead of preserving extra navigation layers; git
+  history is the archive.
