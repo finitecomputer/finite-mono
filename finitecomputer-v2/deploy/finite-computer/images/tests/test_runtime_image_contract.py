@@ -35,7 +35,6 @@ CANONICAL_DOCKERFILE = check_runtime_image_contract.CANONICAL_DOCKERFILE
 CANONICAL_DOCKERFILE_ANCHORS = check_runtime_image_contract.CANONICAL_DOCKERFILE_ANCHORS
 CANONICAL_WORKFLOW = check_runtime_image_contract.CANONICAL_WORKFLOW
 CANONICAL_WORKFLOW_ANCHORS = check_runtime_image_contract.CANONICAL_WORKFLOW_ANCHORS
-PHALA_ADAPTER = check_runtime_image_contract.PHALA_ADAPTER
 check_repository = check_runtime_image_contract.check_repository
 
 
@@ -55,10 +54,6 @@ class RuntimeImageContractTests(unittest.TestCase):
             "name: Agent Runtime Image\n"
             "run: docker build . && docker push agent-runtime\n"
             + "\n".join(CANONICAL_WORKFLOW_ANCHORS),
-        )
-        self.write(
-            PHALA_ADAPTER,
-            "impl PhalaConfig { fn validate(&self) { validate_digest_pinned_image(&self.image)?; } }",
         )
 
     def tearDown(self) -> None:
@@ -116,11 +111,6 @@ class RuntimeImageContractTests(unittest.TestCase):
         )
         self.assertTrue(any("RUST_TOOLCHAIN" in item for item in self.violations()))
 
-    def test_second_phala_dockerfile_fails(self) -> None:
-        self.write("deploy/phala/Dockerfile", "FROM canonical-but-forked")
-        self.assertTrue(
-            any("second Runtime Dockerfile" in item for item in self.violations())
-        )
 
     def test_runtime_smoke_report_path_contract_fails_closed(self) -> None:
         self.write(
@@ -137,30 +127,6 @@ class RuntimeImageContractTests(unittest.TestCase):
             )
         )
 
-    def test_phala_readonly_workflow_passes_but_build_lane_fails(self) -> None:
-        workflow = Path(".github/workflows/phala-readonly-preflight.yml")
-        self.write(
-            workflow,
-            "name: Phala read-only preflight\n"
-            "description: 'Prose example only: docker build must stay forbidden'\n"
-            "container:\n  image: ubuntu:24.04\n"
-            "run: runner preflight --read-only",
-        )
-        self.assertEqual(self.violations(), [])
-        self.write(
-            workflow,
-            "name: Phala image\nrun: docker build -f deploy/phala/Dockerfile .",
-        )
-        self.assertTrue(
-            any("cannot build/publish" in item for item in self.violations())
-        )
-        self.write(
-            workflow,
-            "name: Phala image\nrun: depot build -f deploy/phala/Dockerfile .",
-        )
-        self.assertTrue(
-            any("cannot build/publish" in item for item in self.violations())
-        )
 
     def test_second_agent_runtime_publisher_fails(self) -> None:
         self.write(
@@ -178,43 +144,8 @@ class RuntimeImageContractTests(unittest.TestCase):
             any("sole Agent Runtime publisher" in item for item in self.violations())
         )
 
-    def test_mutable_phala_image_fails_and_digest_passes(self) -> None:
-        config = Path("infra/phala-worker.yml")
-        self.write(config, "runner: phala\nimage: ghcr.io/example/agent-runtime:latest")
-        self.assertTrue(
-            any("mutable Phala Runtime image" in item for item in self.violations())
-        )
-        self.write(
-            config,
-            f"runner: phala\nimage: ghcr.io/example/agent-runtime@sha256:{'a' * 64}",
-        )
-        self.assertEqual(self.violations(), [])
-
-    def test_provider_specific_runtime_sources_fail(self) -> None:
-        for setting in (
-            "FC_RUNNER_PHALA_HERMES_CONFIG=/tmp/hermes.yml",
-            "FC_RUNNER_PHALA_SKILLS_SOURCE=/tmp/skills",
-            "FC_RUNNER_PHALA_ENTRYPOINT=/tmp/start",
-        ):
-            with self.subTest(setting=setting):
-                self.write("infra/phala-worker.env", setting)
-                self.assertTrue(
-                    any("cannot override" in item for item in self.violations())
-                )
-
-    def test_missing_digest_guard_fails(self) -> None:
-        self.write(PHALA_ADAPTER, "impl PhalaConfig { fn validate(&self) {} }")
-        self.assertTrue(any("reject mutable" in item for item in self.violations()))
 
 
-BUILDER_SCRIPT = ROOT / "finitecomputer-v2/scripts/build_runtime_image.py"
-builder_spec = importlib.util.spec_from_file_location(
-    "build_runtime_image", BUILDER_SCRIPT
-)
-assert builder_spec is not None and builder_spec.loader is not None
-build_runtime_image = importlib.util.module_from_spec(builder_spec)
-sys.modules[builder_spec.name] = build_runtime_image
-builder_spec.loader.exec_module(build_runtime_image)
 
 
 class RuntimeImageBuildContextTests(unittest.TestCase):

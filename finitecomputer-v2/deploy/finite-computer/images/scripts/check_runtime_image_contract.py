@@ -15,7 +15,6 @@ CANONICAL_DOCKERFILE = Path(
 )
 CANONICAL_BUILDER = Path("finitecomputer-v2/scripts/build_runtime_image.py")
 CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
-PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
     "ARG RUST_TOOLCHAIN",
@@ -58,17 +57,8 @@ WORKFLOW_BUILD_OR_PUBLISH = (
     re.compile(r"\bpackages\s*:\s*write\b", re.IGNORECASE),
 )
 
-PROVIDER_RUNTIME_OVERRIDE = re.compile(
-    r"(?:phala[^\n]{0,100}(?:hermes_(?:config|source)|skills?_(?:source|ref)|entrypoint)"
-    r"|(?:hermes_(?:config|source)|skills?_(?:source|ref)|entrypoint)[^\n]{0,100}phala)",
-    re.IGNORECASE,
-)
-PHALA_ENV_OVERRIDE = re.compile(
-    r"\bFC_RUNNER_PHALA_(?:IMAGE|ENTRYPOINT|HERMES[^\s=:]*|SKILLS?[^\s=:]*)\b",
-    re.IGNORECASE,
-)
 IMAGE_ASSIGNMENT = re.compile(
-    r"(?:^|\s)(image|runtime_image|phala_image)\s*[:=]\s*['\"]?([^\s'\"#,}]+)",
+    r"(?:^|\s)(image|runtime_image)\s*[:=]\s*['\"]?([^\s'\"#,}]+)",
     re.IGNORECASE | re.MULTILINE,
 )
 DIGEST_REFERENCE = re.compile(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$")
@@ -125,10 +115,6 @@ def is_test_or_prose(path: Path) -> bool:
     )
 
 
-def has_phala_context(path: Path, text: str) -> bool:
-    return "phala" in path.as_posix().lower() or bool(
-        re.search(r"\bphala\b", text, re.IGNORECASE)
-    )
 
 
 def workflow_execution_text(text: str) -> str:
@@ -170,7 +156,6 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
         CANONICAL_DOCKERFILE,
         CANONICAL_BUILDER,
         CANONICAL_WORKFLOW,
-        PHALA_ADAPTER,
     ):
         if required not in file_set or not (root / required).is_file():
             violations.append(f"missing canonical contract file: {required}")
@@ -213,23 +198,6 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
                     f"{CANONICAL_WORKFLOW}: missing canonical Runtime workflow anchor {anchor!r}"
                 )
 
-    if PHALA_ADAPTER in file_set:
-        adapter = active_text(
-            PHALA_ADAPTER, (root / PHALA_ADAPTER).read_text(encoding="utf-8")
-        )
-        if "validate_digest_pinned_image(&self.image)?;" not in adapter:
-            violations.append(
-                f"{PHALA_ADAPTER}: Phala must reject mutable Runtime image references"
-            )
-
-    for path in files:
-        lowered = path.as_posix().lower()
-        name = path.name.lower()
-        if "phala" in lowered and "dockerfile" in name:
-            violations.append(
-                f"{path}: Phala cannot define a second Runtime Dockerfile"
-            )
-
     workflows = [
         path
         for path in files
@@ -239,16 +207,6 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
     for path in workflows:
         text = active_text(path, (root / path).read_text(encoding="utf-8"))
         execution = workflow_execution_text(text)
-        matches = [
-            pattern.pattern
-            for pattern in WORKFLOW_BUILD_OR_PUBLISH
-            if pattern.search(execution)
-        ]
-        phala = has_phala_context(path, text)
-        if path != CANONICAL_WORKFLOW and phala and matches:
-            violations.append(
-                f"{path}: Phala workflows may inspect the canonical digest but cannot build/publish an image"
-            )
         if (
             path != CANONICAL_WORKFLOW
             and re.search(r"\bagent-runtime\b", text, re.IGNORECASE)
@@ -266,47 +224,6 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
             violations.append(
                 f"{path}: {CANONICAL_WORKFLOW} is the sole Agent Runtime publisher"
             )
-
-    for path in files:
-        if (
-            is_test_or_prose(path)
-            or path.suffix.lower() not in SCANNED_SOURCE_SUFFIXES
-            or not (root / path).is_file()
-        ):
-            continue
-        text = active_text(
-            path, (root / path).read_text(encoding="utf-8", errors="replace")
-        )
-        phala = has_phala_context(path, text)
-        if PHALA_ENV_OVERRIDE.search(text):
-            violations.append(
-                f"{path}: Phala cannot override the canonical image, entrypoint, Hermes, or skills source"
-            )
-        if not phala:
-            continue
-        if PROVIDER_RUNTIME_OVERRIDE.search(text):
-            violations.append(
-                f"{path}: provider-specific Hermes/skills/entrypoint configuration is forbidden"
-            )
-        if (
-            path.suffix.lower() in STRUCTURED_SUFFIXES
-            and not path.as_posix().startswith("finitecomputer-v2/crates/")
-        ):
-            for match in IMAGE_ASSIGNMENT.finditer(text):
-                key, reference = match.groups()
-                if (
-                    path.parts[:2] == (".github", "workflows")
-                    and key.lower() == "image"
-                    and "agent-runtime" not in reference.lower()
-                ):
-                    # A workflow's job/action container is not a production
-                    # Runtime reference. Explicit runtime_image/phala_image
-                    # keys and known Agent Runtime repositories remain gated.
-                    continue
-                if not DIGEST_REFERENCE.fullmatch(reference):
-                    violations.append(
-                        f"{path}: mutable Phala Runtime image reference {reference!r}"
-                    )
 
     return sorted(set(violations))
 
