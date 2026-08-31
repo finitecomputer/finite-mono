@@ -91,7 +91,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let init = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -172,7 +172,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let poll = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "poll",
         "--request-json",
@@ -187,7 +187,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "send",
         "--request-json",
@@ -221,7 +221,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     std::fs::write(&image_path, image_bytes).unwrap();
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "send",
         "--request-json",
@@ -303,7 +303,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     let invalid_error = finitechat_cli::run(
         [
             "hermes".to_owned(),
-            "--home".to_owned(),
+            "--agent-home".to_owned(),
             agent_home.clone(),
             "send".to_owned(),
             "--request-json".to_owned(),
@@ -346,7 +346,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let status = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "room-status",
         "--room-id",
@@ -373,7 +373,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -434,7 +434,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
     let poll = |timeout_millis: u64| -> Vec<Value> {
         cli_json(&[
             "hermes",
-            "--home",
+            "--agent-home",
             &agent_home,
             "poll",
             "--request-json",
@@ -447,7 +447,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
     let settle = |action: &str, event: &Value| {
         cli_json(&[
             "hermes",
-            "--home",
+            "--agent-home",
             &agent_home,
             action,
             "--request-json",
@@ -642,7 +642,7 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -683,7 +683,7 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
 
     let status = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "room-status",
         "--room-id",

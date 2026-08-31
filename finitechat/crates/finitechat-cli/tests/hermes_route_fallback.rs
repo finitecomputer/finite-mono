@@ -101,7 +101,7 @@ fn setup_agent_room() -> (String, String) {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -137,7 +137,7 @@ fn send_with_unknown_thread(home: &str, room_id: &str) -> Result<Value, finitech
     let result = finitechat_cli::run(
         [
             "hermes".to_owned(),
-            "--home".to_owned(),
+            "--agent-home".to_owned(),
             home.to_owned(),
             "send".to_owned(),
             "--request-json".to_owned(),

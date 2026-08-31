@@ -7,7 +7,7 @@
 //! The agent's account key is the shared Finite identity at
 //! `$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/`),
 //! minted by whichever Finite tool runs first and never copied into the
-//! agent home. The agent's durable home lives under `--home` /
+//! agent home. The agent's durable home lives under `--agent-home` /
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
@@ -3499,7 +3499,7 @@ fn app_bridge_activity_input(
 
 /// Resolve the agent home (durable agent state — never the identity, whose
 /// location is fixed by the Finite Identity Contract). Precedence:
-/// `--agent-home`/`--home` (parsed by clap), then `$FINITE_AGENT_HOME`,
+/// `--agent-home` (parsed by clap), then `$FINITE_AGENT_HOME`,
 /// then `$FINITECHAT_HOME`, then `~/.finite/agent`.
 fn resolve_home(agent_home: Option<String>) -> Result<PathBuf, CliError> {
     if let Some(path) = agent_home {

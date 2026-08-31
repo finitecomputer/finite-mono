@@ -7,11 +7,9 @@
 //!
 //! Parity invariants carried over from the previous hand-rolled parser:
 //! - The family-level options (`http --server`, `app --data-dir/--server/
-//!   --device-id/--now`, `hermes --agent-home/--home/--json/--request-json`)
+//!   --device-id/--now`, `hermes --agent-home/--json/--request-json`)
 //!   may appear before OR after their subcommand; they are clap `global`
 //!   arguments for that reason.
-//! - `--home` is a hidden compatibility alias of `hermes --agent-home`
-//!   (the Hermes Python adapter still invokes it).
 //! - The hermes agent home falls back to `$FINITE_AGENT_HOME`, then
 //!   `$FINITECHAT_HOME`, then `~/.finite/agent`; that chain is resolved in
 //!   code after parsing so its precedence is testable.
@@ -719,14 +717,8 @@ pub(crate) struct RepairSkipEntryArgs {
 #[derive(Debug, Args)]
 pub(crate) struct HermesArgs {
     /// Durable agent home directory (default: $FINITE_AGENT_HOME, then
-    /// $FINITECHAT_HOME, then ~/.finite/agent). `--home` is a compatibility
-    /// alias.
-    #[arg(
-        long = "agent-home",
-        alias = "home",
-        global = true,
-        allow_hyphen_values = true
-    )]
+    /// $FINITECHAT_HOME, then ~/.finite/agent).
+    #[arg(long = "agent-home", global = true, allow_hyphen_values = true)]
     pub(crate) agent_home: Option<String>,
 
     /// Machine-readable JSON output for the commands that support it.
@@ -930,11 +922,22 @@ mod tests {
     /// tooling breaks — keep them green.
 
     #[test]
+    fn removed_home_alias_is_rejected() {
+        // `--home` was a hidden compatibility alias of `--agent-home` kept
+        // for the Hermes Python adapter; every in-repo caller now spells
+        // `--agent-home`, so the alias is gone. A stale caller (e.g. an
+        // adapter copy installed by an older CLI) must fail loudly with a
+        // usage error instead of silently acting on a different home.
+        let stderr = parse_err(&["hermes", "--home", "/agent/home", "poll", "--json"]);
+        assert!(stderr.contains("--home"), "{stderr:?}");
+    }
+
+    #[test]
     fn adapter_service_spawn_form_parses() {
         // adapter.py _ensure_service: spawn the resident service.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "serve",
             "--addr",
@@ -957,10 +960,10 @@ mod tests {
 
     #[test]
     fn adapter_cli_fallback_action_forms_parse() {
-        // adapter.py _finitechat_json fallback: `<bin> hermes --home H
+        // adapter.py _finitechat_json fallback: `<bin> hermes --agent-home H
         // <action> --json` with the request on stdin.
         for action in ["poll", "ack", "send", "edit", "recover", "activity"] {
-            let args = hermes(&["hermes", "--home", "/agent/home", action, "--json"]);
+            let args = hermes(&["hermes", "--agent-home", "/agent/home", action, "--json"]);
             assert!(args.json, "{action} must see --json");
             assert!(args.request_json.is_none());
         }
@@ -968,7 +971,7 @@ mod tests {
         // hermes_flow.rs request form: --request-json replaces stdin.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "poll",
             "--request-json",
@@ -1052,10 +1055,10 @@ mod tests {
         assert!(wait_update_ms.is_none());
         assert!(room_id.is_none());
 
-        // The docker hermes wrapper runs `finitechat hermes --home ...`.
+        // The docker hermes wrapper runs `finitechat hermes --agent-home ...`.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/home/node/.finitechat/agent",
             "room-status",
             "--room-id",
@@ -1089,7 +1092,7 @@ mod tests {
         // hermes_flow.rs init form, flags after the subcommand.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "init",
             "--server",

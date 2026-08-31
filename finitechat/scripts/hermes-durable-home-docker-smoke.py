@@ -259,7 +259,7 @@ def docker_agent_hermes(
             container,
             "finitechat",
             "hermes",
-            "--home",
+            "--agent-home",
             "/home/node/.finitechat/agent",
             *args,
         ],

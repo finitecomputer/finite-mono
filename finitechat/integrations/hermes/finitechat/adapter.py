@@ -1653,7 +1653,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return _FiniteChatResult(False, {}, "finitechat CLI is not configured", False)
         command = [*self._finitechat_cmd, "hermes"]
         if self.home:
-            command += ["--home", self.home]
+            command += ["--agent-home", self.home]
         command += [action, "--json"]
         try:
             stdin = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -1727,7 +1727,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         command = [
             *self._finitechat_cmd,
             "hermes",
-            "--home",
+            "--agent-home",
             self.home,
             "serve",
             "--addr",

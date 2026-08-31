@@ -86,7 +86,7 @@ export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
 # (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
 allowed_users_file="${agent_home}/allowed-users"
 if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
-    "$finitechat_bin" hermes --home "$agent_home" admission seed \
+    "$finitechat_bin" hermes --agent-home "$agent_home" admission seed \
         >/dev/null 2>&1 \
         || echo "run_hermes_gateway: admission seed unavailable; using existing admission state" >&2
 fi
@@ -179,7 +179,7 @@ if [[ ! -f "${agent_home}/config.json" ]]; then
         echo "FINITE_AGENT_START_ERROR missing bundled Finite Skills at $bundled_skills_dir" >&2
         exit 64
     fi
-    "$finitechat_bin" hermes --home "$agent_home" init \
+    "$finitechat_bin" hermes --agent-home "$agent_home" init \
         --server "$server_url" \
         --device-id "$device_id" \
         --agent-name "$agent_name" \
@@ -188,7 +188,7 @@ if [[ ! -f "${agent_home}/config.json" ]]; then
 fi
 
 if [[ "$recover_boot" -ne 1 ]]; then
-    "$finitechat_bin" hermes --home "$agent_home" install \
+    "$finitechat_bin" hermes --agent-home "$agent_home" install \
         --plugins-dir "${hermes_home}/plugins" \
         --plugin-name "$plugin_name" \
         --finitechat-bin "$finitechat_bin" \

@@ -302,7 +302,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
         self.assertIn("Room admission is Welcome-first", script)
-        self.assertNotIn('hermes --home "$agent_home" invite', script)
+        self.assertNotIn('hermes --agent-home "$agent_home" invite', script)
         self.assertNotIn("home-channel show", script)
         self.assertNotIn("home-channel set", script)
         self.assertNotIn("invite_room_id", script)
@@ -324,7 +324,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
         fresh_agent_branch = script.index('if [[ ! -f "${agent_home}/config.json" ]]')
         seed = script.index('cp -a "${bundled_skills_dir}/."', fresh_agent_branch)
-        init = script.index('"$finitechat_bin" hermes --home "$agent_home" init', seed)
+        init = script.index('"$finitechat_bin" hermes --agent-home "$agent_home" init', seed)
         branch_end = script.index("\nfi\n", init)
         self.assertLess(fresh_agent_branch, seed)
         self.assertLess(seed, init)

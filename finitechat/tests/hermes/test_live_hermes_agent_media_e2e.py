@@ -184,7 +184,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
             [
                 str(FINITECHAT_BIN),
                 "hermes",
-                "--home",
+                "--agent-home",
                 str(agent_home),
                 "init",
                 "--server",
@@ -241,7 +241,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                 [
                     str(FINITECHAT_BIN),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(agent_home),
                     "invite",
                     "--json",
@@ -252,7 +252,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                 [
                     str(FINITECHAT_BIN),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(user_home),
                     "init",
                     "--server",
@@ -265,7 +265,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                 [
                     str(FINITECHAT_BIN),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(user_home),
                     "join",
                     "--url",
@@ -284,7 +284,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                 [
                     str(FINITECHAT_BIN),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(user_home),
                     "send",
                     "--request-json",
@@ -333,7 +333,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                     [
                         str(FINITECHAT_BIN),
                         "hermes",
-                        "--home",
+                        "--agent-home",
                         str(user_home),
                         "poll",
                         "--request-json",

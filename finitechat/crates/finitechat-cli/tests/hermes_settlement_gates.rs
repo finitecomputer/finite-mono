@@ -137,7 +137,7 @@ fn open_settlement_fixture(dir: &Path, now: u64) -> SettlementFixture {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -260,7 +260,7 @@ fn routed_inbound_event(fixture: &mut SettlementFixture, text: &str) -> (String,
 
     let polled = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "poll",
         "--request-json",
@@ -277,7 +277,7 @@ fn routed_inbound_event(fixture: &mut SettlementFixture, text: &str) -> (String,
 fn poll_events(fixture: &SettlementFixture, timeout_millis: u64) -> Vec<Value> {
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "poll",
         "--request-json",
@@ -447,7 +447,7 @@ fn thread_id_reply_resolves_from_the_durable_store_across_restarts() {
 
     let sent = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "send",
         "--request-json",
@@ -481,7 +481,7 @@ fn edit_without_route_fields_resolves_scope_from_the_running_turn_file() {
     // Turn start (fresh process): running status records the original.
     let started = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "send",
         "--request-json",
@@ -492,7 +492,7 @@ fn edit_without_route_fields_resolves_scope_from_the_running_turn_file() {
     // Streamed revision (another fresh process): no route fields at all.
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "edit",
         "--request-json",
@@ -503,7 +503,7 @@ fn edit_without_route_fields_resolves_scope_from_the_running_turn_file() {
     // route fields, and the running-turn entry is consumed.
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "edit",
         "--request-json",
@@ -564,7 +564,7 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
         let refused = finitechat_cli::run(
             [
                 "hermes".to_owned(),
-                "--home".to_owned(),
+                "--agent-home".to_owned(),
                 fixture.agent_home.clone(),
                 "send".to_owned(),
                 "--request-json".to_owned(),
@@ -586,7 +586,7 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
     unknown_thread_send("must not deliver");
     let resolved = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "send",
         "--request-json",
@@ -600,7 +600,7 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
     unsafe { std::env::set_var(POLICY_ENV, "error") };
     let quiet_home = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "send",
         "--request-json",
@@ -614,7 +614,7 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
         unsafe { std::env::set_var(POLICY_ENV, policy) };
         let home_routed = cli_json(&[
             "hermes",
-            "--home",
+            "--agent-home",
             &fixture.agent_home,
             "send",
             "--request-json",
@@ -696,7 +696,7 @@ fn durable_recovery_never_resurrects_an_acked_entry_even_when_the_cursor_is_behi
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &fixture.agent_home,
         "ack",
         "--request-json",
