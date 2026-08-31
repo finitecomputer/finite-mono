@@ -410,13 +410,13 @@ scripts/hermes-tinfoil-handoff.py \
 It fails unless the smoke used `restic_backend=s3`, the image was actually
 published, and the published source image id matches the image proven by the
 Docker smoke.
-The handoff's restore section uses the runtime env names consumed by
-`/opt/agent-entrypoint.sh`: `FINITE_AGENT_RESTORE_ON_START=1`,
-`FINITE_AGENT_RESTORE_LATEST=1`, `FINITE_AGENT_BACKUP_ON_EXIT=1`,
-`FINITE_AGENT_RESTIC_REPOSITORY`, `FINITE_AGENT_RESTIC_BACKUP_TAG`, and
-`FINITE_AGENT_RESTIC_PASSWORD`. The generated Tinfoil config must point at the
-same per-agent restic repository proven by the S3-backed Docker smoke; it must
-not point at emulator buckets or local artifact paths.
+The handoff's restore section still carries the historical
+`FINITE_AGENT_RESTIC_*` env names; the entrypoint restic contract they targeted
+has been retired (no production launcher ever set it), and off-host retirement
+storage is the Borg lane (`docs/runs/runtime-retirement-readiness.md`). The
+generated Tinfoil config must point at the same per-agent restic repository
+proven by the S3-backed Docker smoke; it must not point at emulator buckets or
+local artifact paths.
 
 After a ready S3/published handoff, generate the Tinfoil canary config and
 runbook:
