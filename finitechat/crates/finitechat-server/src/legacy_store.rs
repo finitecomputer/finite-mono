@@ -106,11 +106,6 @@ impl SqliteHttpDeliveryStore {
                 wake_id TEXT PRIMARY KEY,
                 record_json TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS http_state_snapshots (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                last_op_seq INTEGER NOT NULL,
-                snapshot_json TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS http_state_snapshots_v2 (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_op_seq INTEGER NOT NULL,
@@ -678,18 +673,34 @@ impl SqliteHttpDeliveryStore {
             let snapshot = serde_json::from_reader(zstd::Decoder::new(compressed.as_slice())?)?;
             return Ok(Some((seq, snapshot)));
         }
-        // Uncompressed rows written before the v2 table existed.
-        let row = conn
-            .query_row(
-                "SELECT last_op_seq, snapshot_json FROM http_state_snapshots WHERE id = 1",
+        // The uncompressed v1 table stopped being written when v2 landed and
+        // is no longer minted, but databases booted by older builds still
+        // carry it. A v1 row with no v2 successor is ambiguous, not empty:
+        // the old cross-generation MIN() prune may have cut the op log down
+        // to that row's horizon, so replaying from op zero could silently
+        // discard history. Fail closed (boot refuses, nothing is mutated)
+        // and let an operator recover — e.g. boot a v2-writing build once
+        // to mint a successor snapshot, or restore from backup.
+        let legacy_seq: Option<i64> = if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'http_state_snapshots')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? == 1
+        {
+            conn.query_row(
+                "SELECT last_op_seq FROM http_state_snapshots WHERE id = 1",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get(0),
             )
-            .optional()?;
-        match row {
-            Some((seq, json)) => Ok(Some((seq, serde_json::from_str(&json)?))),
-            None => Ok(None),
+            .optional()?
+        } else {
+            None
+        };
+        if let Some(last_op_seq) = legacy_seq {
+            return Err(DurableStoreError::LegacySnapshotWithoutV2Successor { last_op_seq });
         }
+        Ok(None)
     }
 
     pub(crate) fn save_state_snapshot(
@@ -705,15 +716,13 @@ impl SqliteHttpDeliveryStore {
         serde_json::to_writer(&mut encoder, snapshot)?;
         let compressed = encoder.finish()?;
         let conn = self.connection();
-        let prune_horizon: Option<i64> = conn.query_row(
-            "SELECT MIN(last_op_seq) FROM (
-                 SELECT last_op_seq FROM http_state_snapshots WHERE id = 1
-                 UNION ALL
-                 SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1
-             )",
-            [],
-            |row| row.get::<_, Option<i64>>(0),
-        )?;
+        let prune_horizon: Option<i64> = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
         conn.execute(
             "INSERT INTO http_state_snapshots_v2 (id, last_op_seq, snapshot_zstd)
              VALUES (1, ?1, ?2)
@@ -723,10 +732,11 @@ impl SqliteHttpDeliveryStore {
              WHERE excluded.last_op_seq >= http_state_snapshots_v2.last_op_seq",
             params![last_op_seq, compressed],
         )?;
-        // Ops at or below every retained snapshot's horizon can never be
-        // replayed again. The MIN across both snapshot generations keeps a
-        // still-present legacy row (and a rollback build that boots from it)
-        // fully replayable.
+        // Ops at or below the retained snapshot's horizon can never be
+        // replayed again. v2 is the only generation this build reads or
+        // writes (a v1 row without a v2 successor fails boot closed), so the
+        // horizon is the previous v2 watermark alone — a stale v1 row can no
+        // longer pin ops the v2 snapshot already covers.
         if let Some(horizon) = prune_horizon {
             conn.execute(
                 "DELETE FROM http_delivery_ops WHERE seq <= ?1",

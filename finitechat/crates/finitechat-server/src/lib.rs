@@ -113,6 +113,13 @@ pub enum DurableStoreError {
     Replay(#[from] HttpServerError),
     #[error("persisted blob object is corrupt: {sha256}")]
     BlobObjectCorrupt { sha256: String },
+    #[error(
+        "legacy uncompressed http_state_snapshots row at op {last_op_seq} has no v2 successor; \
+         refusing to boot: the op log may have been pruned to that row's horizon, so silent \
+         replay from op zero could discard history. Boot a v2-snapshot-writing build once to \
+         mint a successor snapshot, or restore from backup."
+    )]
+    LegacySnapshotWithoutV2Successor { last_op_seq: i64 },
 }
 
 #[derive(Debug)]
