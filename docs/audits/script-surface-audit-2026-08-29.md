@@ -341,7 +341,6 @@ than repo-level command facades.
 | `finite-skills/skills/productivity/powerpoint-finite/scripts/office/helpers/merge_runs.py` | Python | imported/sourced by other commands |
 | `finite-skills/skills/productivity/powerpoint-finite/scripts/office/helpers/simplify_redlines.py` | Python | imported/sourced by other commands |
 | `finitechat/apps/electron-chat/scripts/generate-macos-update-manifest.mjs` | Node | imported/sourced by other commands |
-| `finitechat/scripts/hermes-restic-preflight.py` | Python | imported/sourced by other commands |
 | `finitechat/scripts/seed-local-chat-stress.mjs` | Node | imported/sourced by other commands |
 | `finitecomputer-v2/apps/dashboard/scripts/playwright-browser.ts` | TS | imported/sourced by other commands |
 | `scripts/ci/changed_paths.py` | Python | imported/sourced by other commands |
@@ -369,12 +368,6 @@ than repo-level command facades.
 | --- | --- | --- |
 | `finite-search/scripts/benchmark-stack.sh` | Shell | scenario, repro, benchmark, or research proof |
 | `finitechat/scripts/hermes-real-gateway-demo.sh` | Shell | scenario, repro, benchmark, or research proof |
-| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-benchmark.py` | Python | scenario, repro, benchmark, or research proof |
-| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-context-gate.py` | Python | scenario, repro, benchmark, or research proof |
-| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-lab-launch.sh` | Shell | scenario, repro, benchmark, or research proof |
-| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-protocol-gate.py` | Python | scenario, repro, benchmark, or research proof |
-| `scripts/devfinity-adr46-slice` | Shell | scenario, repro, benchmark, or research proof |
-| `scripts/devfinity-adr46-slice-up` | Shell | scenario, repro, benchmark, or research proof |
 | `scripts/prepare_glm53_blind_comparison.py` | Python | scenario, repro, benchmark, or research proof |
 
 #### Review Candidate
@@ -659,13 +652,20 @@ covered by tests, current docs, or no longer needed.
 | `scripts/devfinity-brain-card-hands-on` and `scripts/devfinity-brain-card-hands-on-up` | They staged a one-off Brain card demo and had no current external references beyond their own headers. |
 | `scripts/devfinity-chat-authz-upgrade` | It was a large one-off local acceptance script for a specific chat-authz migration and had no current external references. |
 
+### Deleted In Follow-Up Cleanup Pass
+
+| Removed script | Why it was removable |
+| --- | --- |
+| `scripts/tests/test_devfinity_restart_process.py` | Unwired source-inspection test. The tested command remains called from `devfinity/justfile`, but no current facade or PR validation runs this test. |
+| `scripts/tests/test_ci_changed_paths.py` | Unwired duplicate coverage for CI path normalization; active CI selection is covered by `scripts/tests/test_ci_select_harnesses.py`. |
+| `finitechat/scripts/hermes-restic-preflight.py` and `finitechat/tests/container/test_restic_preflight.py` | Standalone restic preflight had no current runner. The remaining active contract is GitHub secret/variable preflight plus S3-backed Docker smoke evidence. |
+| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-benchmark.py`, `deepseek-v4-context-gate.py`, `deepseek-v4-lab-launch.sh`, and `deepseek-v4-protocol-gate.py` | Dated lab helpers for the 2026-08-07 DeepSeek measurement. Durable facts remain in the research note and current validation lives behind `just finite-private-deepseek-contract`. |
+
 ### Remaining Script Removal Candidates
 
 | Candidate | Why it may be removable | Before deleting |
 | --- | --- | --- |
 | `finitechat/scripts/hermes-real-gateway-demo.sh` | It is documented as a low-level manual runner, and stronger canary/smoke scripts now exist. | Confirm `hermes-phone-canary.py` and `hermes-real-gateway-admission-smoke.py` cover the intended proof, then update Hermes docs and `finitechat/scripts/ios-local-agent.sh` references that still mention the demo. |
-| `infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-benchmark.py`, `deepseek-v4-context-gate.py`, `deepseek-v4-lab-launch.sh`, and `deepseek-v4-protocol-gate.py` | They are research/lab helpers for a dated DeepSeek candidate. | Keep only if DeepSeek evaluation is still active; otherwise move any durable findings into the dated research note, update links in `docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md`, and delete the helpers. |
-| `scripts/devfinity-adr46-slice` and `scripts/devfinity-adr46-slice-up` | They are ADR-specific proof scripts rather than reusable developer commands. | Keep until ADR 46 acceptance is complete; then replace with normal tests or a shorter runbook transcript. |
 | `scripts/prepare_glm53_blind_comparison.py` | It is a one-off model-evaluation helper. | Delete after the GLM comparison is no longer an active decision input, the result is captured in research/docs, and the runbook, `finitecomputer-v2/justfile`, and unit-test references are removed. |
 
 ### Keep Until A Named External Condition Closes

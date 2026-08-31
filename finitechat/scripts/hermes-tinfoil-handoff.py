@@ -52,17 +52,14 @@ def first_digest(publish: dict[str, Any]) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke-report", required=True)
-    parser.add_argument("--preflight-report", required=True)
     parser.add_argument("--publish-report", required=True)
     parser.add_argument("--handoff-report", required=True)
     args = parser.parse_args()
 
     smoke_path = Path(args.smoke_report)
-    preflight_path = Path(args.preflight_report)
     publish_path = Path(args.publish_report)
     handoff_path = Path(args.handoff_report)
     smoke = load_json(smoke_path)
-    preflight = load_json(preflight_path)
     publish = load_json(publish_path)
     facts = smoke.get("facts") if isinstance(smoke.get("facts"), dict) else {}
     backup = (
@@ -74,7 +71,6 @@ def main() -> int:
 
     require(smoke.get("status") == "passed", "Docker smoke report must be passed", errors)
     require_recovery_scope(smoke.get("recovery_scope"), errors)
-    require(preflight.get("status") == "ok", "Restic preflight must be ok", errors)
     require(publish.get("status") == "published", "Image publish report must be published", errors)
     require(facts.get("restic_backend") == "s3", "Docker smoke must use restic_backend=s3", errors)
     require(
@@ -92,7 +88,6 @@ def main() -> int:
         "Docker smoke must prove gateway admission after restore",
         errors,
     )
-    require(preflight.get("backend") == "s3", "Restic preflight must use backend=s3", errors)
     require(repository.get("kind") == "s3", "Restic repository proof must be kind=s3", errors)
     require(bool(snapshot.get("id")), "Restic snapshot id is required", errors)
     snapshot_paths = snapshot.get("paths")
@@ -118,7 +113,6 @@ def main() -> int:
         "recovery_scope": dict(RECOVERY_SCOPE),
         "source_reports": {
             "smoke": str(smoke_path),
-            "preflight": str(preflight_path),
             "publish": str(publish_path),
         },
         "image": {

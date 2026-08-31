@@ -402,7 +402,6 @@ After publish, build the redacted Tinfoil handoff report:
 ```bash
 scripts/hermes-tinfoil-handoff.py \
   --smoke-report target/hermes-docker-smoke/report.json \
-  --preflight-report target/hermes-docker-smoke/restic-preflight.json \
   --publish-report target/hermes-docker-smoke/image-publish.json \
   --handoff-report target/hermes-docker-smoke/tinfoil-handoff.json
 ```

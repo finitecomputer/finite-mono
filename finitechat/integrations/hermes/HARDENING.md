@@ -478,15 +478,12 @@ endpoint and runs the existing Docker smoke with `FINITE_DOCKER_RESTIC_BACKEND=s
 against it. This proves the runtime/restic S3 path without real object-storage
 credentials, but the audit marks it separately as `docker_runtime_s3_emulator_smoke`
 and still requires a non-emulated S3 report for the actual Latitude/GitHub gate.
-The restic preflight fails before the image build when S3 env is incomplete,
-requires an explicit non-default backup encryption secret for remote repos, and writes a JSON
-report that is uploaded alongside the Docker smoke report. The hardening audit
-does not accept a status-only S3/preflight report: the Docker report must show
+The GitHub CI preflight fails before the slow workflow when required S3 secret
+or variable names are absent. The hardening audit does not accept status-only
+S3 evidence: the Docker report must show
 the entrypoint-created encrypted restic backup, matching repository metadata,
 a latest-tagged snapshot rooted at the full `/data` recovery root, a restored
-`/data/workspace` probe, and a non-emulated S3 backend; the
-preflight report must show the derived `s3:` repository plus required password
-and AWS credential env presence.
+`/data/workspace` probe, and a non-emulated S3 backend.
 Passing this Hermes hardening audit is deliberately narrower than Agent Runtime
 Recovery Readiness. Every generated smoke, handoff, canary, and audit report
 keeps the application-consistent snapshot barrier, independently recoverable
@@ -531,8 +528,8 @@ Current CI shape:
   focused reliability gate fails, so the missing, skipped, or failed boundary
   and its asserted dispatch/ack/completion/restart contract remain inspectable.
 - The Docker runtime smoke runs on `main`, tags, or manual dispatch with
-  `docker_smoke=true`; it uploads `target/hermes-docker-smoke/report.json` and
-  `target/hermes-docker-smoke/restic-preflight.json`, plus the local encrypted
+  `docker_smoke=true`; it uploads `target/hermes-docker-smoke/report.json`,
+  plus the local encrypted
   restic repository when the default local backend is used. The report includes
   the local Docker image ID, image metadata, restic backend, restic snapshot
   metadata, repository metadata, encrypted backup flag, snapshot tag, and
@@ -570,8 +567,7 @@ Current CI shape:
   The hardening audit rejects a placeholder publish-gate `{"status":"passed"}`
   report: it requires the dispatched run id/URL, successful watch/download
   exits, a local audit refresh, and copied canonical artifacts for the Docker
-  smoke, restic preflight, image publish report, Tinfoil handoff, and canary
-  summary.
+  smoke, image publish report, Tinfoil handoff, and canary summary.
   After the S3-backed smoke passes, it logs into GHCR, tags the exact
   `facts.image_id` from the passing smoke report as
   `ghcr.io/<owner>/finite-chat-hermes-runtime:<commit-sha>`, pushes it, and

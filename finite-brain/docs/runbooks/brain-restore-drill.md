@@ -7,8 +7,8 @@ restore-the-file and prove-the-facts. The automated proof is
 `built_fbrain_process_brain_restore_drill`
 (`finite-brain/crates/finite-brain-cli/tests/fbrain_process_acceptance.rs`);
 the automatic Core-departure leg of the same story was removed with the
-auth-kernel cut (the `scripts/devfinity-adr46-slice` driver is deleted);
-revocation is now an explicit admin call, which the drill covers.
+auth-kernel cut; revocation is now an explicit admin call, which the drill
+covers.
 
 ## What survives a restore, by construction
 

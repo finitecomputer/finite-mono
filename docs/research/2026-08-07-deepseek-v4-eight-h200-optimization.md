@@ -52,9 +52,8 @@ not trade away single-user speed.
   CUDA graphs as reported by vLLM.
 - Speculation: disabled. DSpark remained excluded.
 
-The complete winning command is preserved in
-[`deepseek-v4-lab-launch.sh`](../../infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-lab-launch.sh),
-and the Tinfoil-shaped candidate is
+The complete winning launch shape is preserved in this note, and the
+Tinfoil-shaped candidate is
 [`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`](../../infra/tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml).
 
 ## Method
@@ -122,8 +121,8 @@ The pre-load and post-soak gates both passed:
 - automatic tool choice emitted a structured `get_weather` call; and
 - no protocol-gate failure was recorded.
 
-The exact gate is
-[`deepseek-v4-protocol-gate.py`](../../infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-protocol-gate.py).
+The dated lab helper that ran this gate was removed after the production
+contract moved to `just finite-private-deepseek-contract`.
 
 ### Near-limit context
 
@@ -131,8 +130,8 @@ A request with 380,009 prompt tokens, 96.6% of the 393,216-token service
 ceiling, returned `OK` successfully in 37.209 seconds. This proves the winner
 retains the advertised per-request context ceiling with chunked prefill.
 
-The exact gate is
-[`deepseek-v4-context-gate.py`](../../infra/tinfoil/confidential-kimi-k2-6/deepseek-v4-context-gate.py).
+The dated lab helper that ran this gate was removed after the production
+contract moved to `just finite-private-deepseek-contract`.
 
 ### Sustained output soak
 

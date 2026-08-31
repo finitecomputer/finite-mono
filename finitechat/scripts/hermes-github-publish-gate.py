@@ -21,7 +21,6 @@ DEFAULT_REPORT = "target/hermes-github-publish-gate/report.json"
 CANONICAL_ARTIFACTS = [
     "target/hermes-hardening-audit.json",
     "target/hermes-docker-smoke/report.json",
-    "target/hermes-docker-smoke/restic-preflight.json",
     "target/hermes-docker-smoke/image-publish.json",
     "target/hermes-docker-smoke/tinfoil-handoff.json",
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
