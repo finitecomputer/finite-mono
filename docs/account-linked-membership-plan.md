@@ -49,7 +49,7 @@ wrong in a useful way. `fsite` and `fbrain` sign every request with NIP-98
 | 4b | Cut-off speed? | Per-mutation checks, short cache TTL; denial lands everywhere within one TTL; never purges data. |
 | 5 | Local agent coverage? | **Key Attestations** signed by the user's root key — one ceremony per human, no dashboard visit per device/agent. |
 | 6 | Outsiders? | **Sponsorship** = one-hop attestation of an outside key; non-transitive, capped per account, consumption sponsor-attributed, sponsor npub carried as provenance. |
-| 7 | Sites viewing? | Ownership via membership (works for agent-built sites) + verified login email satisfies email shares; magic links 24h single-use; viewer cookie 30-day sliding, re-checked per request; 15-min TTL reserved for mutation-grade tokens. |
+| 7 | Sites viewing? | **Revised 2026-09-01:** the Auth Gate — browsers redirect to the deployment's gate, return with a verified-email Vouch, Sites sets its own cookie; actors sign, viewers gate. Magic links and both internal mint endpoints die. See ADR 0028 and the gate section below. |
 | 8 | Brain? | Membership gates personal-brain creation and sponsorability (sponsorship auto-issues the existing `fbit-` invite token); every brain still requires its own grant; ADR-0046 provenance intact. |
 | 9 | Chat? | Enforce signed requests via dual-accept → new-accounts → global; membership-gate room/account creation and blob upload; rate-limit `/sync/*`; key-packages/pairing stay open. |
 | 10 | Edge? | Cloudflare pure L3/4 absorption on all four hostnames, origin locked to CF ingress, zero filtering; optional Turnstile on the two anonymous email-request endpoints. |
@@ -64,8 +64,8 @@ Every concern raised in the team call, and where it landed:
 | The agent must auth as a finite user (Alex) | D5 attestations; hosted agents auto-covered via Project |
 | Sybil + DoS resistance is the hard requirement (Alex) | R1 — the whole design |
 | "One enemy can take us down" (Alex, Skyler) | D10 CF absorption + D9 chat lockdown |
-| Log in once, see it all — including from your phone (Skyler) | D7; the dashboard→site redirect handshake is device-agnostic |
-| Non-Finite friend can view, and the viral "you could edit this" moment (Paul) | View: D7 email shares + magic links. Edit: D6 sponsorship (one attestation) + the product's own collaborator grant |
+| Log in once, see it all — including from your phone (Skyler) | D7 via the Auth Gate: top-level redirect works in any browser, any device |
+| Non-Finite friend can view, and the viral "you could edit this" moment (Paul) | View: D7 gate vouch ("if they have Gmail it's one button"). Edit: D6 sponsorship (one attestation) + the product's own collaborator grant |
 | "Once you're in, npubs can flow" (Skyler) | The layering rule; attestations never touch a browser |
 | nsec as a second factor on the Google auth (Alex) | Same shape: account = entry factor, key signature = action factor |
 | Derived keys from a root key (Paul) | Key Attestations give the identical one-root-many-children shape without HD-derivation machinery — children are ordinary independently-minted keys |
@@ -75,7 +75,43 @@ Every concern raised in the team call, and where it landed:
 ## Layering (the one-sentence version)
 
 Membership is the right to **enter**; each product's grants are the right to
-**act**; the edge absorbs packets and decides nothing.
+**act**; the edge absorbs packets and decides nothing. Sites' auth line,
+refined 2026-09-01: **actors sign, viewers gate.**
+
+## Viewer auth: the Auth Gate (2026-09-01 dialogue)
+
+Paul's "single concept" challenge reframed Sites viewer auth and superseded
+the 2028 email-assertion shape recorded here on 2026-08-31. Everything
+Sites admits is a signature — NIP-98 for actors, a gate Vouch for
+humans-in-browsers — and the browser's only concession is that its vouch
+buys a cookie. The dance: Sites redirects out (top-level, works in any
+browser/phone, no iframe fragility), the human authenticates at the gate,
+the gate redirects back with a signed vouch, Sites verifies against a
+pinned key and sets its own host-scoped cookie. Gate vouches, Sites mints
+its own session.
+
+Decisions from that dialogue:
+
+- The vouch names a **verified email attribute**; Sites compares it to its
+  own share rows and consults nothing else (no Core, no WorkOS at runtime —
+  verification is offline against the pinned key).
+- The gate is a **contract, not a host**: per-deployment `gate_origin` +
+  `gate_public_key` config; Finite's hosted gate runs AuthKit/Google today;
+  a self-hoster points products at their own gate. Self-hostability was the
+  deciding criterion for one-Finite-gate over per-product OIDC (swap =
+  config, not code; the vouch format is ours, implemented once).
+- Vouches are short-lived, single-use, bound to the output origin, and
+  versioned — an npub claim can arrive later without Sites changing.
+- **Not building this now** — direction recorded only. When built, the
+  negative-diff inventory is in Sites ADR 0028 (viewing mailer, both
+  internal mint endpoints, native-session route, hosted-device
+  `authorizeViewerSession`, RFC 0001).
+- R8 (new): products must stay self-hostable; identity plumbing swaps by
+  configuration, and no product learns a vendor's name.
+- Open from the dialogue: routing CLI actor email proofs through the gate
+  eventually (device-flow); whether the hosted gate initially lives as a
+  route on the dashboard app (where AuthKit already lives) with its own
+  key so it can be lifted out cleanly later.
 
 ## Open items
 
@@ -92,7 +128,9 @@ Membership is the right to **enter**; each product's grants are the right to
   1. Repo goes private (Alex had this staged before the fire; removes the
      read-the-source attack vector Alex and Skyler flagged) + CF absorption
      + origin locks (R7, zero product change)
-  2. Core resolver + dashboard linking ceremony + sites viewer rules (R4)
+  2. Core resolver + dashboard linking ceremony + Sites Auth Gate and vouch
+     verification, deleting the viewing mailer and both internal mint
+     endpoints (R4, R8)
   3. Sites mutation gates + brain creation gate (R1)
   4. Chat dual-accept window, then enforcement flip (R1, R6)
 - The Hermes bridge stays loopback-bound and out of scope.

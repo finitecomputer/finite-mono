@@ -68,6 +68,11 @@ that boundary.
 
 ## Consequences
 
+- Amendment (2026-09-01): viewer authentication for Sites is the Auth Gate
+  (Sites ADR 0028) — a gate vouch naming a verified email — not membership
+  resolution. Membership remains the actor/entry concern (mutations,
+  registration); the "ownership via membership" viewer rule is deferred
+  until vouches can name npubs.
 - Three products gain a runtime dependency on Core, bounded to one cache
   shape with fail-closed-for-unknowns-only semantics. New-principal growth
   halts during a Core outage; ongoing traffic does not.
