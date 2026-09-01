@@ -128,6 +128,60 @@ the artifact-capability column: drain new Kata creation before the
 Core/Runner generation switch, register the new digest through that
 generation, update the pin, then clear the drain.
 
+### 2(e) Reconcile stale Runner Finite Private overrides
+
+*(Folded from the former `runner-finite-private-route.md`, 2026-09-01.)*
+
+The shared Kata Runner role owns the Finite Private launch route and model in
+`infra/nixos/modules/kata-runner-host.nix`. `/etc/finite/runner.env` loads
+after that shared file so credentials, drain state, the promoted Runtime
+Artifact pin, and bounded incident overrides stay operator-owned. **Never
+copy `FC_RUNNER_FINITE_PRIVATE_BASE_URL` or `FC_RUNNER_FINITE_PRIVATE_MODEL`
+into the operator file** — a stale copy wins over the shared role and can
+send a new Agent launch to a retired endpoint (the `kimi-k2-6` /
+`deepseek-v4-flash-0731` pair, removed by PR #773's helper
+`scripts/reconcile-runner-finite-private-env`).
+
+The helper recognizes only that exact stale pair; it is read-only by
+default, `--apply` removes only those two lines while preserving the file's
+other bytes and metadata, creates the hard-link rollback copy
+`/etc/finite/runner.env.pre-glm53-route` before the atomic replace, and
+fails closed on duplicate/partial/custom/symlinked/already-backed-up input.
+It never prints values from the file. Preconditions: reviewed source rev,
+`scripts/finite-status --json` captured before the change, explicit
+Production Deploy authorization, and no other operator editing the file
+(the helper takes its per-file reconciliation lock).
+
+1. Read-only preflight on both active Runner hosts
+   (`root@207.188.7.157`, `root@152.236.34.15`):
+
+   ```bash
+   scripts/finite-status --json > finite-status-before-runner-route.json
+   for host in root@207.188.7.157 root@152.236.34.15; do
+     ssh -o BatchMode=yes "$host" \
+       'bash -s -- --check /etc/finite/runner.env' \
+       < scripts/reconcile-runner-finite-private-env
+   done
+   ```
+
+   Expect `needs-migration` (known stale pair) or `clean`; any refusal is a
+   stop condition.
+2. Apply the guarded change with the same loop using `-- --apply`.
+   **TODO: this two-host Production Deploy has not been exercised;** the
+   first authorized run must retain both helper results and confirm
+   `migrated` with the expected rollback path. No service restart should be
+   required — verify that expectation, don't assume it.
+3. **Verify:** re-run `--check` (require `clean` on both hosts), re-run
+   `scripts/finite-status --json`, and require the effective Finite Private
+   route/model green plus one fresh-Agent launch reaching chat readiness on
+   GLM without manual Runtime repair.
+4. **Rollback** is host-local: restore the exact pre-change inode from
+   `/etc/finite/runner.env.pre-glm53-route` (stop if the copy is missing or
+   not a regular non-symlink file; the rollback path is synthetic-tested but
+   not yet exercised live — retain before/after status output). Keep the
+   copy until the verify evidence and one fresh-Agent launch are accepted.
+
+
 ### 2(d) Serial existing-Agent upgrade (§4a)
 
 Promotion changes only future launches. Existing compute moves only through
