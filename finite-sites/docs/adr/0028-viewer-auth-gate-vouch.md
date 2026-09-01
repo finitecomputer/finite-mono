@@ -28,6 +28,33 @@ product learns a vendor's name. This swappability is the reason to prefer
 one Finite gate contract over per-product OIDC (chosen 2026-09-01 with
 self-hosting as the deciding criterion).
 
+The gate is deployed as its **own daemon from day one** (decision
+2026-09-01): redirect, IdP callback, vouch mint, nothing else — own keypair,
+own hostname, own deploy cadence, beside the identity directory whose job it
+echoes (identity verifies names; the gate verifies humans-at-a-browser).
+Not a dashboard route ("extract it later" is how a standard becomes five
+ways) and not inside finite-identityd (which just paid to have no session
+state).
+
+Anti-five-ways rules, recorded in advance:
+
+- **The verifier crate eats the pile.** Vouch verification is born in one
+  small pure crate that speaks both statement kinds — "this key makes this
+  HTTP request" (NIP-98) and "the gate authenticated this human, for this
+  origin, just now" — with one freshness/audience/replay policy table.
+  Products' private NIP-98 copies (five, already disagreeing on skew and
+  URL policy) migrate to it as fast-follow pure-deletion PRs. The vouch is
+  not a sixth verifier; it is the reason the other five become one.
+- **A way of doing auth exists only if it is the unique way for a kind of
+  participant.** Browsers cannot hold keys (physics), so they gate; actors
+  hold keys, so they sign; static content cannot challenge per request, so
+  viewers carry sessions. Magic links do not survive "some users lack
+  Google" — that is a gate backend feature (AuthKit email OTP), not a
+  participant kind.
+- **Atomicity.** The doors the gate replaces (viewing magic links, both
+  internal mint endpoints, native-session exchange) are deleted in the same
+  slice that opens the gate; a standard with roommates is not a standard.
+
 The Vouch:
 
 - names a **verified email attribute** (decision 2026-09-01) — Sites

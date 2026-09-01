@@ -102,6 +102,19 @@ Decisions from that dialogue:
   config, not code; the vouch format is ours, implemented once).
 - Vouches are short-lived, single-use, bound to the output origin, and
   versioned — an npub claim can arrive later without Sites changing.
+- The gate is its **own daemon from day one** — own keypair, own hostname,
+  own deploy cadence, deployed beside the identity directory (identity
+  verifies names; the gate verifies humans-at-a-browser). Not a dashboard
+  route, not inside finite-identityd; "extract it later" is how a standard
+  becomes five ways.
+- **Pair with the NIP-98 consolidation**: the vouch verifier is born in one
+  small pure crate that speaks both statement kinds (NIP-98 request
+  signatures and gate vouches) with one policy table; the five private
+  NIP-98 copies around the repo migrate to it as fast-follow pure-deletion
+  PRs. The addition must eat the pile, not join it.
+- Kill criterion, recorded in advance: a way of doing auth exists only if
+  it is the unique way for a kind of participant. The doors the gate
+  replaces die in the same slice that opens it.
 - **Not building this now** — direction recorded only. When built, the
   negative-diff inventory is in Sites ADR 0028 (viewing mailer, both
   internal mint endpoints, native-session route, hosted-device
@@ -109,9 +122,7 @@ Decisions from that dialogue:
 - R8 (new): products must stay self-hostable; identity plumbing swaps by
   configuration, and no product learns a vendor's name.
 - Open from the dialogue: routing CLI actor email proofs through the gate
-  eventually (device-flow); whether the hosted gate initially lives as a
-  route on the dashboard app (where AuthKit already lives) with its own
-  key so it can be lifted out cleanly later.
+  eventually (device-flow).
 
 ## Open items
 
