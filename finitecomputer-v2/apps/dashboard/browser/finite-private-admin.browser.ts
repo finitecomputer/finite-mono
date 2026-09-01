@@ -16,7 +16,7 @@ const ADMIN_ACCESS_TOKEN = [
   "browser-signature",
 ].join(".");
 
-test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 }, async () => {
+test("admins issue Standard Launch Codes; legacy Confidential batches still list", { timeout: 120_000 }, async () => {
   const core = await startFakeCore();
   const dashboardPort = await freePort();
   const dashboard = startDashboard(dashboardPort, core.url);
@@ -97,21 +97,16 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await page.getByLabel("Exact code count").fill("1");
     await page.getByLabel("Expiry (hours)").fill("24");
     assert.equal(await page.getByLabel("Hosting tier").textContent(), "Standard");
+    // Confidential issuance is fail-closed while the lane has no deployed
+    // runner: the form offers Standard only, matching Core's rejection.
+    await page.getByLabel("Hosting tier").click();
+    assert.equal(await page.getByRole("option", { name: "Confidential" }).count(), 0);
+    await page.getByRole("option", { name: "Standard" }).click();
     await page.getByRole("button", { name: "Issue codes" }).click();
     await page.getByLabel("Issued Launch Codes").waitFor({ state: "visible" });
     await waitFor(() => core.state.issuancePosts.length === 1);
     assert.equal(core.state.issuancePosts[0]?.hostingTier, "standard");
     await page.getByText(/Browser default batch · Standard · expires/u).waitFor({ state: "visible" });
-
-    await page.getByLabel("Batch name").fill("Browser confidential batch");
-    await page.getByLabel("Hosting tier").click();
-    await page.getByRole("option", { name: "Confidential" }).click();
-    await page.getByRole("button", { name: "Issue codes" }).click();
-    await waitFor(() => core.state.issuancePosts.length === 2);
-    assert.equal(core.state.issuancePosts[1]?.hostingTier, "confidential");
-    await page.getByText(/Browser confidential batch · Confidential · expires/u).waitFor({
-      state: "visible",
-    });
 
     await context.close();
   } finally {

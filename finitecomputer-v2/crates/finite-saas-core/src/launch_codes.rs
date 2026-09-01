@@ -103,6 +103,13 @@ pub(crate) fn prepare_launch_code_batch(
     if input.code_count == 0 || input.code_count > MAX_LAUNCH_CODE_BATCH_SIZE {
         return Err(CoreError::InvalidLaunchCodeBatchSize);
     }
+    // Fail-closed: the confidential lane has no deployed runner, so a
+    // confidential code would only mint onboarding requests nothing can
+    // satisfy. Issue standard codes until the lane returns; pre-existing
+    // confidential rows keep parsing for reads and revocation.
+    if matches!(input.hosting_tier, Some(HostingTier::Confidential)) {
+        return Err(CoreError::HostingTierUnavailable);
+    }
 
     let actor = input.created_by_workos_user_id.trim();
     if actor.is_empty() {
@@ -224,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn issuance_persists_explicit_confidential_hosting_tier() {
-        let prepared = prepare_launch_code_batch(IssueLaunchCodeBatchInput {
+    fn issuance_rejects_confidential_hosting_tier() {
+        let error = prepare_launch_code_batch(IssueLaunchCodeBatchInput {
             name: "Confidential canary".to_string(),
             code_count: 1,
             expires_in_hours: Some(24),
@@ -233,8 +240,9 @@ mod tests {
             created_by_workos_user_id: "user_operator".to_string(),
             now: Some("2026-07-10T12:00:00Z".to_string()),
         })
-        .expect("prepare confidential batch");
-        assert_eq!(prepared.batch.hosting_tier, Some(HostingTier::Confidential));
+        .err()
+        .expect("confidential issuance must fail closed");
+        assert!(matches!(error, CoreError::HostingTierUnavailable));
     }
 
     #[test]

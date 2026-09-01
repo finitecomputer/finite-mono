@@ -290,26 +290,34 @@ pub struct RuntimePlacement {
 }
 
 impl RuntimePlacement {
-    pub const fn for_hosting_tier(tier: HostingTier) -> Self {
+    /// Current placement policy for NEW placements. The confidential lane is
+    /// fail-closed while it has no deployed runner: no runner can advertise
+    /// `phala`, so minting a new confidential placement would only create
+    /// onboarding requests nothing can satisfy. The tier returns as a
+    /// rented-compute lane later; legacy confidential rows keep parsing via
+    /// [`RuntimePlacement::from_legacy_runner_class`].
+    pub const fn for_hosting_tier(tier: HostingTier) -> Option<Self> {
         match tier {
-            HostingTier::Standard => Self {
+            HostingTier::Standard => Some(Self {
                 runner_class: RunnerClass::Kata,
                 runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
-            },
-            HostingTier::Confidential => Self {
-                runner_class: RunnerClass::Phala,
-                runtime_resource_class: RuntimeResourceClass::Vcpu2Memory4Gib,
-            },
+            }),
+            HostingTier::Confidential => None,
         }
     }
 
     /// Compatibility bridge for proven Kata/Phala rows written before the
     /// placement columns existed. Other experimental adapters have no durable
     /// resource-class fact, so callers must leave the expand fields null.
+    /// Phala stays here for legacy row parsing only —
+    /// [`RuntimePlacement::for_hosting_tier`] no longer produces it.
     pub const fn from_legacy_runner_class(runner_class: RunnerClass) -> Option<Self> {
         match runner_class {
-            RunnerClass::Kata => Some(Self::for_hosting_tier(HostingTier::Standard)),
-            RunnerClass::Phala => Some(Self::for_hosting_tier(HostingTier::Confidential)),
+            RunnerClass::Kata => Self::for_hosting_tier(HostingTier::Standard),
+            RunnerClass::Phala => Some(Self {
+                runner_class: RunnerClass::Phala,
+                runtime_resource_class: RuntimeResourceClass::Vcpu2Memory4Gib,
+            }),
             RunnerClass::LocalDocker | RunnerClass::AppleContainer | RunnerClass::Enclavia => None,
         }
     }
@@ -707,6 +715,8 @@ pub enum CoreError {
     MissingHostingTier,
     #[error("selected hosting tier is not authorized by this account or Launch Code")]
     HostingTierNotAuthorized,
+    #[error("confidential hosting is not currently available")]
+    HostingTierUnavailable,
     #[error("launch code is required")]
     MissingLaunchCode,
     #[error("launch code is invalid")]
@@ -4402,6 +4412,30 @@ mod tests {
             .to_string()
     }
 
+    /// Seed one unredeemed confidential launch-code batch exactly as the
+    /// pre-fail-closed Core wrote it. Issuance rejects the tier now, so a
+    /// staged legacy row is the only way a confidential code can exist; tests
+    /// use it to prove those rows still parse but cannot mint new work.
+    async fn seed_legacy_confidential_launch_code(db: &TestDb) -> String {
+        let plaintext = "finite_legacy_confidential_code".to_string();
+        let code_hash = launch_codes::hash_launch_code(&plaintext).unwrap();
+        db.exec(
+            "INSERT INTO launch_code_batches \
+               (id, name, hosting_tier, code_count, expires_at, created_by_workos_user_id, created_at)
+             VALUES ('legacy-confidential-batch', 'Legacy confidential batch', 'confidential', 1, \
+                     '2026-09-30T00:00:00Z'::timestamptz, 'workos-test-operator', \
+                     '2026-08-31T00:00:00Z'::timestamptz)",
+        )
+        .await;
+        db.exec(&format!(
+            "INSERT INTO launch_codes (id, batch_id, code_hash, created_at) \
+             VALUES ('legacy-confidential-code', 'legacy-confidential-batch', '{code_hash}', \
+                     '2026-08-31T00:00:00Z'::timestamptz)"
+        ))
+        .await;
+        plaintext
+    }
+
     /// LEGACY-ROW CONTRACT. The existing-host import bridge is deleted, but
     /// production may still hold rows from its 2026-07 near-ship test run.
     /// This test plants those rows the way the bridge left them (raw SQL —
@@ -4551,7 +4585,7 @@ mod tests {
             assert_eq!(first.project.hosting_tier, Some(HostingTier::Standard));
             assert_eq!(
                 first.project.placement,
-                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+                RuntimePlacement::for_hosting_tier(HostingTier::Standard)
             );
             assert_eq!(first.request.runner_class, RunnerClass::Kata);
             assert_eq!(first.request.hosting_tier, Some(HostingTier::Standard));
@@ -4571,12 +4605,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confidential_launch_code_resolves_phala_placement_inside_core() {
+    async fn legacy_confidential_launch_code_fails_closed_at_redeem() {
         with_isolated_postgres(|db| async move {
-            let launch_code = issue_launch_code(&db, Some(HostingTier::Confidential)).await;
+            let launch_code = seed_legacy_confidential_launch_code(&db).await;
             promote_runtime_artifact(&db).await;
 
-            let requested = db
+            // No runner can advertise `phala`, so redeeming a pre-existing
+            // unredeemed confidential code must fail closed before any row is
+            // written — no user, project, or AgentCreationRequest is minted.
+            let error = db
                 .request_agent_creation(RequestAgentCreationInput {
                     verified_email: "confidential@finite.vip".to_string(),
                     workos_user_id: "user_workos_confidential".to_string(),
@@ -4586,74 +4623,58 @@ mod tests {
                     now: Some(NOW.to_string()),
                 })
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert!(matches!(error, CoreError::HostingTierUnavailable));
+            assert!(db.all_users().await.is_empty());
+            assert!(db.all_projects().await.is_empty());
+            assert!(db.all_agent_creation_requests().await.is_empty());
+            let seeded = db
+                .query_json(
+                    "SELECT to_jsonb(t) FROM launch_codes t \
+                     WHERE t.id = 'legacy-confidential-code'",
+                    &[],
+                )
+                .await;
+            assert_eq!(seeded.len(), 1);
+            assert!(seeded[0]["redeemed_customer_org_id"].is_null());
+            assert!(seeded[0]["redemption_idempotency_key"].is_null());
 
+            // The legacy row itself still parses: the batch reads back through
+            // the store with its confidential tier intact (schema compat).
+            let batches = db.store.list_launch_code_batches().await.unwrap();
+            assert_eq!(batches.len(), 1);
             assert_eq!(
-                requested.project.hosting_tier,
+                batches[0].batch.hosting_tier,
                 Some(HostingTier::Confidential)
             );
-            assert_eq!(
-                requested.project.placement,
-                Some(RuntimePlacement::for_hosting_tier(
-                    HostingTier::Confidential
-                ))
-            );
-            assert_eq!(requested.request.runner_class, RunnerClass::Phala);
-
-            let lease = db
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "phala-runner".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "phala-lease".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(RunnerLeaseCapacity {
-                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                            RuntimeCapabilitiesV1 {
-                                restart: true,
-                                stop: true,
-                                ..RuntimeCapabilitiesV1::default()
-                            },
-                        )),
-                        ..phala_runner_capacity(0)
-                    }),
-                    now: Some(LATER.to_string()),
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            let error = db
-                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                    request_id: lease.request.id,
-                    runner_id: "phala-runner".to_string(),
-                    lease_token: "phala-lease".to_string(),
-                    source_host_id: "phala-host".to_string(),
-                    source_machine_id: "phala-cvm".to_string(),
-                    runtime_artifact_id: Some("artifact-v1".to_string()),
-                    state_schema_version: Some("db-v1".to_string()),
-                    provider_runtime_handle: None,
-                    contact_endpoint: None,
-                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                        RuntimeCapabilitiesV1 {
-                            restart: true,
-                            runtime_upgrade: true,
-                            stop: true,
-                            ..RuntimeCapabilitiesV1::default()
-                        },
-                    )),
-                    display_name: None,
-                    hostname: None,
-                    runtime_host: None,
-                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                    active_inference_profile: None,
-                    hermes_available: None,
-                    published_app_urls: Vec::new(),
-                    now: Some("2026-05-25T13:01:00Z".to_string()),
-                })
-                .await
-                .unwrap_err();
-            assert!(matches!(error, CoreError::RuntimeCapabilitiesNotAuthorized));
         })
         .await;
+    }
+
+    #[test]
+    fn legacy_confidential_placement_rows_still_parse() {
+        // Schema-compat guarantee: confidential tier strings and the Phala
+        // placement they used to resolve to keep parsing, even though
+        // `for_hosting_tier` no longer produces new confidential placements.
+        assert_eq!(
+            parse_hosting_tier("confidential"),
+            Some(HostingTier::Confidential)
+        );
+        assert_eq!(
+            serde_json::to_value(HostingTier::Confidential).unwrap(),
+            serde_json::Value::String("confidential".to_string())
+        );
+        assert_eq!(
+            RuntimePlacement::from_legacy_runner_class(RunnerClass::Phala),
+            Some(RuntimePlacement {
+                runner_class: RunnerClass::Phala,
+                runtime_resource_class: RuntimeResourceClass::Vcpu2Memory4Gib,
+            })
+        );
+        assert_eq!(
+            RuntimePlacement::for_hosting_tier(HostingTier::Confidential),
+            None
+        );
     }
 
     #[tokio::test]
@@ -4715,7 +4736,7 @@ mod tests {
                         now: Some(NOW.to_string()),
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: Some(
                             "https://chat.finite.computer/v1/blobs/profile".to_string(),
@@ -4955,7 +4976,8 @@ mod tests {
                     runner_id: "runner-a".to_string(),
                     lease_token: "token-a".to_string(),
                     correlation_id: "provider-correlation-1".to_string(),
-                    placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
+                    placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard)
+                        .expect("standard tier placement"),
                     transition: ProviderOperationTransition::CorrelationReserved,
                 })
                 .await
@@ -5054,7 +5076,8 @@ mod tests {
                  WHERE id = '{request_id}'"
             ))
             .await;
-            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard)
+                .expect("standard tier placement");
             let input = |runner: &str,
                          token: &str,
                          correlation: &str,
@@ -5497,16 +5520,16 @@ mod tests {
             assert!(
                 validate_runtime_capabilities_policy(
                     Some(&recover),
-                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+                    RuntimePlacement::for_hosting_tier(HostingTier::Standard)
                 )
                 .is_ok()
             );
             assert!(matches!(
                 validate_runtime_capabilities_policy(
                     Some(&recover),
-                    Some(RuntimePlacement::for_hosting_tier(
-                        HostingTier::Confidential
-                    ))
+                    // Legacy confidential placement: the only Phala placement
+                    // still constructible, kept for row-compat policy checks.
+                    RuntimePlacement::from_legacy_runner_class(RunnerClass::Phala)
                 ),
                 Err(CoreError::RuntimeCapabilitiesNotAuthorized)
             ));
@@ -5519,7 +5542,7 @@ mod tests {
             assert!(matches!(
                 validate_runtime_capabilities_artifact_policy(
                     Some(&recover),
-                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                     &legacy_artifact,
                 ),
                 Err(CoreError::RuntimeCapabilitiesNotAuthorized)
@@ -5531,7 +5554,7 @@ mod tests {
             assert!(
                 validate_runtime_capabilities_artifact_policy(
                     Some(&recover),
-                    Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                     &capable_artifact,
                 )
                 .is_ok()
@@ -8713,7 +8736,7 @@ mod tests {
 
         let new_project = Project {
             hosting_tier: Some(HostingTier::Standard),
-            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+            placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
             ..old_project
         };
         #[derive(Deserialize)]
@@ -8752,7 +8775,7 @@ mod tests {
         assert!(old_runtime.provider_runtime_handle_history.is_empty());
 
         let new_runtime = AgentRuntime {
-            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+            placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
             provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
                 ProviderRuntimeHandleV1 {
                     runner_class: RunnerClass::Kata,
@@ -10037,7 +10060,7 @@ mod tests {
                         now: Some(NOW.to_string()),
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,

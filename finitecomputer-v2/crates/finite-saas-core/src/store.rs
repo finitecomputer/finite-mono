@@ -35,7 +35,7 @@ use crate::{
     RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
     ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RunnerClass, RuntimeArtifact,
     RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
     RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
     RuntimeControlRequestStatus, RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement,
@@ -1092,9 +1092,18 @@ where
     {
         return Err(CoreError::HostingTierNotAuthorized);
     }
+    // Fail-closed placement for the confidential lane: no deployed runner can
+    // advertise `phala`, so no new AgentCreationRequest may carry a Phala
+    // placement — not from the tier on the Launch Code/billing account, and
+    // not from an operator-configured `FC_CORE_AGENT_CREATION_PLACEMENT_JSON`.
+    // This rejects before any row is written, so a pre-existing unredeemed
+    // confidential code is left untouched for the lane's eventual return.
+    // Legacy confidential rows keep parsing; they just cannot mint new work.
     let placement = configuration
         .placement
-        .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
+        .or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier))
+        .filter(|placement| placement.runner_class != RunnerClass::Phala)
+        .ok_or(CoreError::HostingTierUnavailable)?;
     if client
         .query_opt(
             "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
@@ -9872,9 +9881,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(
-                            HostingTier::Standard,
-                        )),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,
@@ -10235,7 +10242,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,
@@ -10425,7 +10432,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard)
+                .expect("standard tier placement");
             let input = |runner: &str,
                          token: &str,
                          correlation: &str,
@@ -13215,7 +13223,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,

@@ -394,6 +394,10 @@ export type LaunchCodeHostingTier = "standard" | "confidential";
  * Validate the intentionally small operator form before it reaches Core. Core
  * repeats these checks; this keeps accidental blank, indefinite, or oversized
  * issuance out of the normal UI path.
+ *
+ * Issuance is standard-only while the confidential lane has no deployed
+ * runner (Core rejects the tier server-side too); `launchCodeHostingTier`
+ * below still parses `confidential` so pre-existing batch rows keep listing.
  */
 export function launchCodeBatchFormInput(formData: FormData): LaunchCodeBatchFormInput {
   const name = String(formData.get("name") ?? "").trim();
@@ -410,6 +414,9 @@ export function launchCodeBatchFormInput(formData: FormData): LaunchCodeBatchFor
     ? boundedWholeNumber(expiryValue, 1, 720, "Expiry hours")
     : undefined;
   const hostingTier = launchCodeHostingTier(formData.get("hostingTier"));
+  if (hostingTier === "confidential") {
+    throw new Error("Confidential hosting is not currently available. Issue Standard codes.");
+  }
   return { name, codeCount, expiresInHours, hostingTier };
 }
 

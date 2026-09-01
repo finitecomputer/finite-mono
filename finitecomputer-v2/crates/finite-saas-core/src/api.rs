@@ -2445,6 +2445,7 @@ impl From<CoreError> for ApiError {
             | CoreError::InvalidLaunchCodeBatchName
             | CoreError::InvalidLaunchCodeBatchSize
             | CoreError::InvalidLaunchCodeBatchExpiry
+            | CoreError::HostingTierUnavailable
             | CoreError::MissingStripeCustomerId
             | CoreError::MissingStripeSubscriptionId
             | CoreError::InvalidBillingSubscriptionStatus
@@ -5688,6 +5689,55 @@ mod tests {
                 let (status, _) = send_json(&app, method, &uri, &ordinary_user, body).await;
                 assert_eq!(status, StatusCode::FORBIDDEN);
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn launch_code_admin_api_rejects_confidential_issuance() {
+        with_isolated_postgres(|db| async move {
+            let app = admin_router(db.store.clone());
+            let operator = vec![(
+                "authorization".to_string(),
+                format!(
+                    "Bearer {}",
+                    access_token_with_subject(
+                        "workos_operator_subject",
+                        "admin@finite.vip",
+                        true,
+                        Some(OPERATOR_ORG_ID),
+                    )
+                ),
+            )];
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/admin/launch-code-batches",
+                &operator,
+                Some(serde_json::json!({
+                    "name": "Confidential canary",
+                    "codeCount": 1,
+                    "expiresInHours": 24,
+                    "hostingTier": "confidential"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().is_some_and(|message| {
+                message.contains("confidential hosting is not currently available")
+            }));
+
+            // Nothing was persisted: the operator can retry with standard.
+            let (status, listed) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/admin/launch-code-batches",
+                &operator,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(listed.as_array().unwrap().len(), 0);
         })
         .await;
     }

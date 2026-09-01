@@ -264,8 +264,9 @@ export function AdminLaunchCodeBatchIssueForm() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              {/* Confidential returns with the rented-compute lane; Core
+                  rejects confidential issuance until then. */}
               <SelectItem value="standard">Standard</SelectItem>
-              <SelectItem value="confidential">Confidential</SelectItem>
             </SelectContent>
           </Select>
         </div>

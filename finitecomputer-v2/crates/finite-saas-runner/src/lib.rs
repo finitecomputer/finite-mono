@@ -3711,7 +3711,8 @@ mod tests {
         lease.request.runner_class = RunnerClass::Kata;
         let RuntimeSpecEnvelope::V1(spec) = lease.request.runtime_spec.as_mut().unwrap();
         spec.placement =
-            RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Standard);
+            RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Standard)
+                .expect("standard tier placement");
         lease.request.placement = Some(spec.placement);
         lease.project.placement = Some(spec.placement);
         let mut runner = AgentCreationRunner::new(
