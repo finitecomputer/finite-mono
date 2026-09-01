@@ -57,7 +57,14 @@ in
 
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box
     # (finitesitesd owns 8787). See modules/finitechat-server.nix.
+    #
+    # `log` enables access logging to the default logger (stderr ->
+    # journald): it is the read-only evidence source for the sync-rate
+    # livelock probe in scripts/finite-status (2026-08-29 chat-plane
+    # outage; POST /sync/group fetch storms were invisible without it).
+    # journald retention already bounds the volume; no new disk path.
     virtualHosts."chat.finite.computer".extraConfig = ''
+      log
       reverse_proxy 127.0.0.1:8788 {
         # finitechat-server closes idle HTTP/1.1 connections before Caddy's
         # two-minute default. Retire pooled connections first so POSTs never
