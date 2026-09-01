@@ -718,6 +718,5 @@ true:
 - [Runtime recovery and observability plan](../../finitecomputer-v2/docs/runtime-recovery-and-observability-plan.md)
 - [Hermes Runtime test matrix](../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md)
 - [Stripe billing runbook](../../infra/runbooks/stripe-billing.md)
-- [Finite stack deployment](../../finitecomputer-v2/docs/finite-stack-deployment.md)
 - [Pairing and SaaS postmortem](../../finitecomputer-v2/docs/postmortem-pairing-and-saas-2026-07-06.md)
 - [Infrastructure contract](../../infra/README.md)

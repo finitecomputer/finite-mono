@@ -4,9 +4,6 @@
   finitecomputer and what must be cut.
 - [Service dependencies](service-dependencies.md): separate repos and services
   that v2 deploys or integrates.
-- [Finite stack deployment lanes](finite-stack-deployment.md): v2-owned deploy
-  authority for Core/dashboard, hosted Finite Chat, runtime, and coordinated
-  releases.
 - [Hermes runtime test matrix](hermes-runtime-test-matrix.md): local,
   Docker, Kata, and Phala proof ladder for the real hosted-agent runtime.
 - [Runtime control contract](runtime-control-contract.md): generic
@@ -27,3 +24,5 @@
 - [Stripe billing runbook](../../infra/runbooks/stripe-billing.md): live Stripe
   readiness, webhook/Core reconciliation, dunning, cancellation/refund, and
   secret rotation.
+- [Current infrastructure](../../infra/README.md): deployed host roles,
+  production boundaries, and current deploy/runbook ownership.

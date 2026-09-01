@@ -33,9 +33,7 @@ separate data-preserving cleanup of stranded Waffle. It explicitly excluded
 Upgrade Canary 0715 and Waffle Prime.
 
 PR [#110](https://github.com/finitecomputer/finite-mono/pull/110) remains the
-post-mortem context for fail-closed rollout and recoverability. The concise
-follow-up checklist is
-[`platform-reliability-checklist-2026-07-21.md`](platform-reliability-checklist-2026-07-21.md).
+post-mortem context for fail-closed rollout and recoverability.
 
 ## Live session checklist
 
