@@ -15,6 +15,16 @@ pub use billing::{
     parse_billing_subscription_status,
 };
 
+// The runtime environment key contract (reserved keys, secret shape, key
+// shape) is shared with finite-saas-runner through finite-saas-runtime-contract
+// so Core's validation and the runner's launch check can never drift apart.
+mod runtime_env_contract;
+pub use runtime_env_contract::{
+    MAX_RUNTIME_ENVIRONMENT_KEY_BYTES, RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+    RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS, reserved_runtime_environment_key,
+    retired_specialization_environment_key, secret_runtime_environment_key,
+    valid_runtime_environment_key,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2738,9 +2748,9 @@ pub(crate) fn runtime_spec_secret_references(
     let mut references = vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()];
 
     for reference in configured_references {
-        if !runtime_spec_environment_key_is_valid(reference)
-            || runtime_spec_reserved_environment_key(reference)
-            || !runtime_spec_secret_environment_key(reference)
+        if !valid_runtime_environment_key(reference)
+            || reserved_runtime_environment_key(reference)
+            || !secret_runtime_environment_key(reference)
             || !seen.insert(reference.clone())
         {
             return Err(CoreError::RuntimeSpecMismatch);
@@ -2908,11 +2918,11 @@ fn validate_runtime_spec_v1(spec: &RuntimeSpecV1, artifact: &RuntimeArtifact) ->
 
     let mut references = BTreeSet::new();
     for reference in &spec.secret_references {
-        if !runtime_spec_environment_key_is_valid(reference)
+        if !valid_runtime_environment_key(reference)
             || spec.environment.contains_key(reference)
             || !references.insert(reference)
             || (reference != FINITE_PRIVATE_SECRET_REFERENCE
-                && !runtime_spec_secret_environment_key(reference))
+                && !secret_runtime_environment_key(reference))
         {
             return Err(CoreError::RuntimeSpecMismatch);
         }
@@ -2928,9 +2938,9 @@ pub(crate) fn validate_runtime_spec_environment(
 ) -> CoreResult<()> {
     let mut total_environment_bytes = 0usize;
     for (key, value) in environment {
-        if !runtime_spec_environment_key_is_valid(key)
-            || runtime_spec_reserved_environment_key(key)
-            || runtime_spec_secret_environment_key(key)
+        if !valid_runtime_environment_key(key)
+            || reserved_runtime_environment_key(key)
+            || secret_runtime_environment_key(key)
             || value.is_empty()
             || value.len() > 4 * 1024
             || value.contains('\0')
@@ -2945,55 +2955,6 @@ pub(crate) fn validate_runtime_spec_environment(
         return Err(CoreError::RuntimeSpecMismatch);
     }
     Ok(())
-}
-
-fn runtime_spec_environment_key_is_valid(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 128
-        && key.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
-        })
-}
-
-fn runtime_spec_reserved_environment_key(key: &str) -> bool {
-    matches!(
-        key,
-        "FINITE_SERVER_URL"
-            | "FINITECHAT_SERVER_URL"
-            | "FINITECHAT_HOME"
-            | "FINITE_HOME"
-            | "HERMES_HOME"
-            | "FINITECHAT_WORKSPACE"
-            | "FINITE_AGENT_HTTP_HOST"
-            | "FINITE_AGENT_HTTP_PORT"
-            | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
-            | "FINITE_AGENT_ID"
-            | "FINITE_AGENT_NAME"
-            | "FINITECHAT_HERMES_AGENT_NAME"
-            | "FINITECHAT_HERMES_ROOM_NAME"
-            | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
-            | "FINITECHAT_HERMES_INBOUND_STREAM"
-            | "FINITECHAT_ALLOW_ALL_USERS"
-            | "FINITE_ALLOW_ALL_USERS"
-            | "GATEWAY_ALLOW_ALL_USERS"
-            | "FINITE_DEFAULT_INFERENCE_PROFILE"
-            | "FINITE_PRIVATE_MODEL"
-            | "FINITE_PRIVATE_BASE_URL"
-            | "FINITE_PRIVATE_API_KEY"
-            | "FINITECHAT_HERMES_MODEL"
-            | "FINITECHAT_HERMES_PROVIDER"
-            | "FINITECHAT_HERMES_BASE_URL"
-            | "FINITECHAT_HERMES_API_MODE"
-            | "FINITE_AGENT_BOOT_INTENT_JSON"
-            | "FINITE_AGENT_STATE_ROOT"
-            | "OPENAI_API_KEY"
-    )
-}
-
-fn runtime_spec_secret_environment_key(key: &str) -> bool {
-    ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
-        .iter()
-        .any(|part| key.split('_').any(|segment| segment == *part))
 }
 
 fn normalize_idempotency_key(value: &str) -> Option<String> {
@@ -3820,6 +3781,44 @@ mod tests {
                 );
             })+
         };
+    }
+
+    /// Core and the runner must reject exactly the same environment keys.
+    /// Before the shared contract, six drifted keys passed this validation
+    /// and then bricked every runner launch with "owned by the Runtime
+    /// contract". Iterating the contract's own lists through Core's
+    /// validation entry point proves Core consumes the single source.
+    #[test]
+    fn runtime_spec_environment_rejects_every_contract_reserved_key() {
+        let benign = BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "http://127.0.0.1:18789".to_string(),
+        )]);
+        validate_runtime_spec_environment(&benign)
+            .expect("benign environment key must stay configurable");
+
+        for key in [
+            RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+            RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let environment = BTreeMap::from([(key.to_string(), "value".to_string())]);
+            assert!(
+                validate_runtime_spec_environment(&environment).is_err(),
+                "Core accepted reserved runtime environment key {key}"
+            );
+        }
+    }
+
+    /// Secret-shaped keys must be configured as secret references; inline
+    /// values are rejected here, on the same heuristic the runner applies.
+    #[test]
+    fn runtime_spec_environment_rejects_secret_shaped_keys() {
+        let environment =
+            BTreeMap::from([("FINITE_AGENT_LAUNCH_TOKEN".to_string(), "value".to_string())]);
+        assert!(validate_runtime_spec_environment(&environment).is_err());
     }
 
     /// TIMESTAMPTZ stores six fractional digits, so any stamp Core generates
