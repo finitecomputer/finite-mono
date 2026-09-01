@@ -74,7 +74,7 @@ if "install" in args:
     raise SystemExit(0)
 
 if "home-channel" in args and "set" in args:
-    home = Path(args[args.index("--home") + 1])
+    home = Path(args[args.index("--agent-home") + 1])
     room_id = args[args.index("--room-id") + 1]
     conversation_id = None
     if "--conversation-id" in args:
@@ -91,7 +91,7 @@ if "home-channel" in args and "set" in args:
     raise SystemExit(0)
 
 if "recover" in args:
-    home = Path(args[args.index("--home") + 1])
+    home = Path(args[args.index("--agent-home") + 1])
     running_path = home / "hermes-running.json"
     running = json.loads(running_path.read_text(encoding="utf-8"))
     recovered = len(running.get("messages", []))

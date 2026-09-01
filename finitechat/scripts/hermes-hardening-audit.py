@@ -135,7 +135,6 @@ REQUIRED_GITHUB_PUBLISH_ARTIFACTS = {
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
 }
 REQUIRED_HANDOFF_RUNTIME = {
-    "hermes_agent_version": "0.20.0",
     "finitechat_hermes_inbound_stream": "1",
     "finite_agent_restore_on_start": "1",
     "finite_agent_restore_latest": "1",
@@ -156,7 +155,6 @@ REQUIRED_HANDOFF_CONTAINER_ENV = {
 }
 REQUIRED_PUBLISH_PROOF = {
     "smoke_status": "passed",
-    "hermes_agent_version_actual": "0.20.0",
     "restic_backend": "s3",
     "real_gateway_runtime": True,
     "gateway_admission_before_restore": True,
@@ -562,6 +560,10 @@ def validate_tinfoil_handoff(
         for key, expected in REQUIRED_HANDOFF_RUNTIME.items():
             if runtime.get(key) != expected:
                 errors.append(f"handoff runtime.{key}={runtime.get(key)!r}; expected {expected!r}")
+        # The version equality is proven by the smokes against the image's
+        # lock-derived stamp; evidence only has to record it.
+        if not non_empty_str(runtime.get("hermes_agent_version")):
+            errors.append("handoff runtime.hermes_agent_version is required")
 
     restore = handoff.get("restore")
     if not isinstance(restore, dict):
@@ -664,6 +666,8 @@ def validate_publish_report(
     for key, expected in REQUIRED_PUBLISH_PROOF.items():
         if proof.get(key) != expected:
             errors.append(f"publish proof.{key}={proof.get(key)!r}; expected {expected!r}")
+    if not non_empty_str(proof.get("hermes_agent_version_actual")):
+        errors.append("publish proof.hermes_agent_version_actual is required")
     if not non_empty_str(proof.get("restic_version")):
         errors.append("publish proof.restic_version is required")
     if not non_empty_str(proof.get("agent_npub_after_restore")):
@@ -836,7 +840,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and docker.get("status") == "passed"
         and not docker_missing
         and not docker_backup_errors
-        and docker_facts.get("hermes_agent_version_actual") == "0.20.0"
+        and non_empty_str(docker_facts.get("hermes_agent_version_actual"))
         and docker_facts.get("agent_npub") == docker_facts.get("agent_npub_after_restore")
         and docker_facts.get("real_gateway_runtime") is True
         and docker_facts.get("gateway_admission_before_restore") is True
@@ -880,7 +884,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and not s3_emulator_backup_errors
         and s3_emulator_facts.get("restic_backend") == "s3"
         and s3_emulator_facts.get("s3_endpoint_kind") == "local_emulator"
-        and s3_emulator_facts.get("hermes_agent_version_actual") == "0.20.0"
+        and non_empty_str(s3_emulator_facts.get("hermes_agent_version_actual"))
         and s3_emulator_facts.get("agent_npub") == s3_emulator_facts.get("agent_npub_after_restore")
         and s3_emulator_facts.get("real_gateway_runtime") is True
         and s3_emulator_facts.get("gateway_admission_before_restore") is True

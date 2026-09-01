@@ -437,7 +437,7 @@ def _apply_home_channel_plan(
         command = [
             str(finitechat_bin),
             "hermes",
-            "--home",
+            "--agent-home",
             str(agent_home),
             "home-channel",
             "set",
@@ -474,7 +474,7 @@ def _recover_interrupted_turns(
         [
             str(finitechat_bin),
             "hermes",
-            "--home",
+            "--agent-home",
             str(agent_home),
             "recover",
             "--json",
@@ -782,7 +782,7 @@ def recover_known_good_boot(config_path: Path) -> int:
                 [
                     str(finitechat_bin),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(agent_home),
                     "install",
                     "--plugins-dir",

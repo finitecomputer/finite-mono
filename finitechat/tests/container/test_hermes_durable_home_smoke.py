@@ -104,7 +104,8 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
         self.assertNotIn("wait_fresh_invite", script)
         self.assertNotIn("docker_user_hermes", script)
         self.assertNotIn('args=["join"', script)
-        self.assertIn('FINITE_HERMES_AGENT_VERSION: "0.20.0"', workflow)
+        # Hermes version facts are flake.lock-derived; never a literal here.
+        self.assertNotIn("0.20.0", workflow)
         self.assertIn("default: true", workflow)
         self.assertIn("scripts/hermes-durable-home-docker-smoke.py", workflow)
 

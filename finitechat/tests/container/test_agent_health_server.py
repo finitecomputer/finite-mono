@@ -211,7 +211,7 @@ class AgentHealthServerTest(unittest.TestCase):
 
     def test_runtime_startup_never_calls_deleted_invite_cli(self) -> None:
         gateway = GATEWAY.read_text(encoding="utf-8")
-        self.assertNotIn(' hermes --home "$agent_home" invite', gateway)
+        self.assertNotIn(' hermes --agent-home "$agent_home" invite', gateway)
         self.assertNotIn("current-invite.json", gateway)
         self.assertIn("deleted invite-session protocol", gateway)
 

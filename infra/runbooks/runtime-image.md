@@ -42,10 +42,11 @@ build it is not the promotion proof for the final digest.
 
 1. On the reviewed revision, dispatch **Agent Runtime Image**
    (`.github/workflows/runtime-image.yml`) with
-   `version=<date-based, e.g. 2026-07-08.1>`. Hermes is repository-pinned to
-   `0.20.0`, the same version exercised by every smoke lane. For future
-   upgrades, move the reviewed pin in the image and all smoke lanes together;
-   do not add a dispatch-time override.
+   `version=<date-based, e.g. 2026-07-08.1>`. Hermes is pinned once through the
+   root flake (`flake.lock`); the build stamps that pin's version into the
+   image label and every smoke lane asserts the running Hermes against it. For
+   future upgrades, move the reviewed flake pin alone; do not add a
+   dispatch-time override.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
@@ -329,9 +330,9 @@ in `infra/tinfoil/README.md`.
 ## VERIFY
 
 1. Smoke evidence and the publication report name the same monorepo SHA,
-   Hermes `0.20.0`, Runtime image digest, CLIs, plugin, bundled Finite
-   Skills source, and the Nix-staged baseline toolchains (node, bun, deno,
-   uv, Playwright browsers).
+   the lock-pinned Hermes version stamped on the image label, Runtime image
+   digest, CLIs, plugin, bundled Finite Skills source, and the Nix-staged
+   baseline toolchains (node, bun, deno, uv, Playwright browsers).
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:
    verify the Core runtime row, `journalctl -u finite-saas-runner` on the

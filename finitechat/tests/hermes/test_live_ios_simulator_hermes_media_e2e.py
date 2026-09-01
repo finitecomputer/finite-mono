@@ -255,7 +255,7 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
             [
                 str(FINITECHAT_BIN),
                 "hermes",
-                "--home",
+                "--agent-home",
                 str(agent_home),
                 "init",
                 "--server",

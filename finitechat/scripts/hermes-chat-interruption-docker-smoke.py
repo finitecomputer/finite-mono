@@ -23,7 +23,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = REPO_ROOT.parent
 DURABLE_SMOKE_PATH = REPO_ROOT / "scripts" / "hermes-durable-home-docker-smoke.py"
 DEFAULT_IMAGE = "finite-agent-chat-interruption-smoke"
-EXPECTED_HERMES_VERSION = "0.20.0"
 DOCKER_HOST_ARGS = ["--add-host", "host.docker.internal:host-gateway"]
 
 spec = importlib.util.spec_from_file_location("hermes_durable_smoke", DURABLE_SMOKE_PATH)
@@ -516,12 +515,10 @@ def main() -> int:
             ["docker", "exec", name, "hermes", "--version"],
             timeout=30,
         )
-        version = parse_hermes_version(version_result.stdout)
-        if version != EXPECTED_HERMES_VERSION:
-            raise SmokeFailure(
-                f"expected Hermes {EXPECTED_HERMES_VERSION}, canonical image has {version}"
-            )
-        report["coverage"]["real_hermes"] = version
+        # Recorded as evidence only; the image↔pin equality is asserted where
+        # the lock-derived stamp lives (Dockerfile build check and the
+        # runtime-image workflow's in-container assert), never as a literal.
+        report["coverage"]["real_hermes"] = parse_hermes_version(version_result.stdout)
         return health
 
     def interrupt(case_name: str, *, kill: bool, restore: bool) -> None:

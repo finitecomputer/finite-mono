@@ -28,7 +28,8 @@ RUN cargo build --locked --release \
       --package finite-brain-cli
 
 FROM python:3.13-slim-trixie
-ARG HERMES_AGENT_VERSION=0.20.0
+# No default: build_runtime_image.py stamps this from the flake.lock pin.
+ARG HERMES_AGENT_VERSION
 ARG HERMES_AGENT_STORE_PATH
 ARG HERMES_AGENT_PYTHON_PATH
 ARG HERMES_AGENT_NIX_ATTR

@@ -27,7 +27,6 @@ from scripts.hermes_nix_runtime import (  # noqa: E402  (needs the sys.path shim
 )
 
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
-DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 DEFAULT_IMAGE_ENGINE = "docker"
 IMAGE_ENGINES = ("docker", "depot", "apple-container")
 
@@ -251,13 +250,6 @@ def parse_args() -> argparse.Namespace:
         help=f"image reference to build, default: {DEFAULT_IMAGE_REF}",
     )
     parser.add_argument(
-        "--hermes-agent-version",
-        default=os.environ.get(
-            "FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION
-        ),
-        help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
-    )
-    parser.add_argument(
         "--context-dir",
         type=Path,
         help="optional persistent staged image build context",
@@ -298,11 +290,8 @@ def build_image(
         context,
         system=nix_system_for_platform(platform),
     )
-    if hermes_runtime.version != args.hermes_agent_version:
-        raise SystemExit(
-            "Hermes Nix runtime version mismatch: "
-            f"expected {args.hermes_agent_version}, got {hermes_runtime.version}"
-        )
+    # hermes_runtime.version is evaluated from the flake.lock pin and is the
+    # only Hermes version input; it is stamped into the image build-args.
     print(
         "Staged "
         f"{hermes_runtime.attr} + {hermes_runtime.toolchain_attr} "
@@ -328,10 +317,7 @@ def build_image(
             str(dockerfile),
             "--tag",
             args.image_ref,
-            *image_build_args(
-                hermes_runtime,
-                hermes_agent_version=args.hermes_agent_version,
-            ),
+            *image_build_args(hermes_runtime),
             "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",
             "--build-arg",
@@ -395,6 +381,7 @@ def build_image(
     if depot_build is not None:
         image_metadata["depot_build"] = depot_build
     image_metadata["hermes_nix_runtime"] = {
+        "version": hermes_runtime.version,
         "attr": hermes_runtime.attr,
         "python_attr": hermes_runtime.python_attr,
         "toolchain_attr": hermes_runtime.toolchain_attr,
@@ -429,11 +416,6 @@ def main() -> int:
     if not image_ref:
         raise SystemExit("--image-ref must not be empty")
     args.image_ref = image_ref
-    if args.hermes_agent_version != DEFAULT_HERMES_AGENT_VERSION:
-        raise SystemExit(
-            "--hermes-agent-version is release-pinned to "
-            f"{DEFAULT_HERMES_AGENT_VERSION}, got {args.hermes_agent_version}"
-        )
     if args.save and args.engine != "depot":
         raise SystemExit("--save is supported only with --engine depot")
     if args.save != bool(args.metadata_file):
@@ -470,7 +452,6 @@ def main() -> int:
         "image": args.image_ref,
         "engine": args.engine,
         "mono_sha": mono_sha,
-        "hermes_agent_version": args.hermes_agent_version,
         "pushed": bool(args.push),
         "platform": platform,
         "source": source_facts,
