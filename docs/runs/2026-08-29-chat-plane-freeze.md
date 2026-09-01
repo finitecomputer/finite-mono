@@ -2,7 +2,8 @@
 
 Status: **CLOSED (recovered 2026-08-29)**. This is the incident record; the
 repair procedure it forced into existence is now a runbook:
-[`infra/runbooks/chat-quarantine-repair.md`](../../infra/runbooks/chat-quarantine-repair.md).
+[`infra/runbooks/recovery.md`](../../infra/runbooks/recovery.md) §4a
+("Chat quarantine repair").
 All times UTC.
 
 ## Summary
