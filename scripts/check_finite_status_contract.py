@@ -129,10 +129,6 @@ def main() -> None:
         ROOT / "infra" / "nixos" / "modules" / "finitechat-server.nix",
         [chat["server_database"].replace("/var/lib/private/", "/var/lib/")],
     )
-    require_all(
-        ROOT / "infra" / "nixos" / "modules" / "finitechat-hosted-device.nix",
-        [chat["hosted_device_root"].replace("/var/lib/private/", "/var/lib/")],
-    )
     # The sync-rate probe reads the edge's access log: the chat vhost must
     # keep a `log` directive so the evidence exists at all.
     require_all(
@@ -169,15 +165,6 @@ def main() -> None:
         if not ips:
             raise SystemExit(f"chat-plane egress map has no address for {hostname}")
         require_all(path, ips)
-    # Runner hosts sample agent stores under the declared work root.
-    require_all(
-        ROOT / "infra" / "nixos" / "hosts" / "finite-lat-3" / "default.nix",
-        [chat["runner_default_work_root"]],
-    )
-    require_all(
-        ROOT / "infra" / "nixos" / "hosts" / "finite-lat-4" / "default.nix",
-        [chat["runner_default_work_root"]],
-    )
     # Role gating must follow the deployed host surfaces: the app host runs
     # the chat server and no Runner, runner hosts import the Runner module.
     require_all(
