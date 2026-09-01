@@ -45,7 +45,7 @@ use finitechat_proto::{
     RuntimeStateProjectionError, RuntimeStateSnapshotV1, StagedWelcomeV1, UnreadPolicy,
     WelcomeState,
 };
-use finitechat_server::{HttpServerState, ServerHttpError, http_router};
+use finitechat_server::{DurableStoreError, HttpServerState, ServerHttpError, http_router};
 use finitechat_transport::engine::KeyPackage;
 use finitechat_transport::transport::{
     Timestamp, TransportEnvelope, TransportMessage, TransportSource,
@@ -6991,8 +6991,51 @@ async fn sqlite_state_snapshot_boots_without_full_history_replay() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// The legacy uncompressed snapshot table is no longer minted by the store's
+// DDL; tests that reproduce a database written by pre-v2 builds recreate it
+// exactly as those builds left it behind.
+const LEGACY_SNAPSHOT_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS http_state_snapshots (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_op_seq INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL
+)";
+
+fn legacy_snapshot_table_exists(db_path: &std::path::Path) -> bool {
+    let conn = Connection::open(db_path).expect("open raw");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'http_state_snapshots'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count legacy tables");
+    count == 1
+}
+
 #[tokio::test]
-async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
+async fn sqlite_fresh_database_never_mints_legacy_snapshot_table() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+
+    let state = persistent_state(&db_path);
+    drop(state);
+
+    assert!(!legacy_snapshot_table_exists(&db_path));
+    let conn = Connection::open(&db_path).expect("open raw");
+    let v2_tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'http_state_snapshots_v2'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count v2 tables");
+    assert_eq!(v2_tables, 1, "the v2 snapshot table must still be minted");
+}
+
+#[tokio::test]
+async fn sqlite_legacy_snapshot_row_without_v2_successor_fails_boot_closed() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
     let alice = DeviceRef::new("alice", "alice-laptop");
@@ -7034,10 +7077,13 @@ async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
     drop(state);
 
     // Rewrite the snapshot into the legacy uncompressed table, exactly as a
-    // pre-v2 build persisted it, and remove the v2 row so boot must fall
-    // back.
-    {
-        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+    // pre-v2 build persisted it, remove the v2 row, and compact the op log
+    // to that row's horizon (the old cross-generation MIN() prune would
+    // have done the same). This build cannot read the v1 row, so replaying
+    // from op zero would hit a pruned log and silently discard history:
+    // boot must fail closed instead.
+    let legacy_seq = {
+        let conn = Connection::open(&db_path).expect("open raw");
         let (seq, compressed): (i64, Vec<u8>) = conn
             .query_row(
                 "SELECT last_op_seq, snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
@@ -7046,19 +7092,113 @@ async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
             )
             .expect("v2 snapshot row");
         let json = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
+        conn.execute_batch(LEGACY_SNAPSHOT_TABLE_DDL)
+            .expect("recreate legacy table");
         conn.execute(
             "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
              VALUES (1, ?1, ?2)",
-            rusqlite::params![seq, String::from_utf8(json).expect("snapshot utf8")],
+            params![seq, String::from_utf8(json).expect("snapshot utf8")],
         )
         .expect("write legacy row");
         conn.execute("DELETE FROM http_state_snapshots_v2", [])
             .expect("remove v2 row");
         conn.execute(
             "DELETE FROM http_delivery_ops WHERE seq <= ?1",
-            rusqlite::params![seq],
+            params![seq],
         )
         .expect("compact prefix");
+        seq
+    };
+    assert!(legacy_seq > 0);
+    assert!(last_seq > 0);
+
+    let error = HttpServerState::from_sqlite_path(&db_path)
+        .expect_err("a v1 row with no v2 successor must fail boot closed");
+    assert!(matches!(
+        error,
+        DurableStoreError::LegacySnapshotWithoutV2Successor { last_op_seq }
+            if last_op_seq == legacy_seq
+    ));
+    assert!(
+        error.to_string().contains("http_state_snapshots"),
+        "the refusal must name the offending table: {error}"
+    );
+
+    // Failing closed mutates nothing: the legacy row and the empty v2 table
+    // survive the refusal exactly as the failed boot found them.
+    let conn = Connection::open(&db_path).expect("open raw");
+    let surviving_legacy_seq: i64 = conn
+        .query_row(
+            "SELECT last_op_seq FROM http_state_snapshots WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy row survives the refusal");
+    assert_eq!(surviving_legacy_seq, legacy_seq);
+    let v2_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM http_state_snapshots_v2", [], |row| {
+            row.get(0)
+        })
+        .expect("count v2 rows");
+    assert_eq!(v2_rows, 0);
+}
+
+#[tokio::test]
+async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-stale-legacy-corpse".to_owned();
+    let mls_group_id = "mls-stale-legacy-corpse".to_owned();
+
+    // The lat2 shape after this change deploys: a live v2 snapshot next to
+    // a months-stale v1 corpse row no build has written since v2 landed.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut last_seq = 0;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("stale corpse message {index}").as_bytes(),
+            &format!("stale-corpse-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("snapshot");
+    drop(app);
+    drop(state);
+
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(LEGACY_SNAPSHOT_TABLE_DDL)
+            .expect("recreate legacy table");
+        // The payload is never read again; even garbage in the corpse row
+        // must not disturb a boot that has a v2 snapshot to read.
+        conn.execute(
+            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
+             VALUES (1, 1, '{\"stale\":\"corpse\"}')",
+            [],
+        )
+        .expect("write stale legacy row");
     }
 
     let app = persistent_app(&db_path);
@@ -7077,6 +7217,16 @@ async fn sqlite_legacy_uncompressed_snapshot_still_boots() {
     let page: HttpSyncPage = read_json(response).await;
     assert_eq!(page.entries.len(), last_seq as usize);
     assert_eq!(page.next_after_seq, last_seq);
+
+    // The corpse row is inert, not cleaned up: dropping it is a deliberate
+    // operator step, not a boot side effect.
+    let conn = Connection::open(&db_path).expect("open raw");
+    let legacy_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM http_state_snapshots", [], |row| {
+            row.get(0)
+        })
+        .expect("count legacy rows");
+    assert_eq!(legacy_rows, 1);
 }
 
 #[tokio::test]
@@ -7164,6 +7314,117 @@ async fn sqlite_snapshot_save_prunes_ops_covered_by_previous_snapshot() {
     assert!(second_snapshot_seq > first_snapshot_seq);
     assert_eq!(min_op_seq.expect("tail ops remain"), first_snapshot_seq + 1);
 
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 0,
+            limit: 50,
+            requester: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    assert_eq!(page.entries.len(), last_seq as usize);
+    assert_eq!(page.next_after_seq, last_seq);
+}
+
+#[tokio::test]
+async fn sqlite_snapshot_prune_ignores_stale_legacy_snapshot_horizon() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-prune-legacy".to_owned();
+    let mls_group_id = "mls-prune-legacy".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut last_seq = 0;
+    for index in 0..2 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("prune legacy message {index}").as_bytes(),
+            &format!("prune-legacy-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("first snapshot");
+
+    // A months-stale v1 corpse row at an ancient watermark — the exact
+    // mixed-watermark shape that muddied the 2026-08-29 freeze forensics.
+    // The old cross-generation MIN() prune would pin the op log to this
+    // row's horizon forever; the v2 snapshot must be the only horizon.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.execute_batch(LEGACY_SNAPSHOT_TABLE_DDL)
+            .expect("recreate legacy table");
+        conn.execute(
+            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
+             VALUES (1, 1, '{\"stale\":\"corpse\"}')",
+            [],
+        )
+        .expect("write stale legacy row");
+    }
+    let first_snapshot_seq: i64 = {
+        let conn = Connection::open(&db_path).expect("open raw");
+        conn.query_row(
+            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("v2 snapshot row")
+    };
+    assert!(first_snapshot_seq > 1, "the v2 watermark must be ahead");
+
+    for index in 2..4 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("prune legacy message {index}").as_bytes(),
+            &format!("prune-legacy-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        last_seq = accepted.seq;
+    }
+    state.snapshot_now().expect("second snapshot");
+    drop(app);
+    drop(state);
+
+    let conn = Connection::open(&db_path).expect("open raw");
+    let min_op_seq: i64 = conn
+        .query_row("SELECT MIN(seq) FROM http_delivery_ops", [], |row| {
+            row.get(0)
+        })
+        .expect("min op seq");
+    assert_eq!(min_op_seq, first_snapshot_seq + 1);
+
+    // The pruned store still boots and serves the full visible history.
     let app = persistent_app(&db_path);
     let response = post_json(
         app.clone(),
