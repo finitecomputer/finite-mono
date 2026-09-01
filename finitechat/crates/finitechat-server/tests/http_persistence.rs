@@ -3,8 +3,8 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::http::{Method, Request, Response, StatusCode};
 use finitechat_blob::BlobDescriptor;
 use finitechat_delivery::{
-    HTTP_SERVER_SOURCE, HttpClaimedKeyPackage, HttpCommitAdmission, HttpDeliveryPlane,
-    HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishReceipt, HttpPublishTarget,
+    HTTP_SERVER_SOURCE, HttpClaimedKeyPackage, HttpCommitAdmission,
+    HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishTarget,
     HttpSyncPage, MAX_HTTP_ID_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
@@ -54,7 +54,7 @@ use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use futures_util::StreamExt;
 use nostr::event::FinalizeEvent;
 use nostr::{EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp as NostrTimestamp};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -2448,11 +2448,10 @@ async fn sqlite_submit_commit_replay_repairs_projection_after_partial_durable_pu
         .envelope
         .message_id()
         .expect("commit envelope message id");
-    let commit_publish = commit_publish_request_for_test(&request, &message_id);
 
     let app = persistent_app(&db_path);
     let response = post_json(
-        app,
+        app.clone(),
         "/account-rooms/bootstrap",
         &BootstrapAccountRoomRequest {
             room_id: room_id.clone(),
@@ -2464,13 +2463,19 @@ async fn sqlite_submit_commit_replay_repairs_projection_after_partial_durable_pu
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Model a process interruption after the commit publish/idempotency rows are
-    // durable but before the finite projection writes run.
-    insert_durable_commit_publish_without_projection(&db_path, &commit_publish, 1);
+    // Model the normalized crash window: the commit transaction (delivery
+    // entry + idempotency + directory rows) is durable, but the
+    // room-membership projection rides the checkpoint cadence and has not
+    // caught up — exactly the shape every boot derives from.
+    publish_and_claim_key_package_for_add(&app, &request).await;
+    let response = post_json(app.clone(), "/commits", &request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let durable: CommitAccepted = read_json(response).await;
+    assert_eq!(durable.seq, 1);
 
-    // Boot reconciliation now repairs the missing projection/directory rows
-    // from the replayed op log before any request runs (the frozen-table
-    // incident fix), so the directory already reflects the durable commit.
+    // Boot derivation repairs the projection from the delivery-entry tail
+    // before any request runs (the frozen-table incident fix), so the
+    // directory already reflects the durable commit.
     let app = persistent_app(&db_path);
     let response = post_json(
         app.clone(),
@@ -2496,7 +2501,7 @@ async fn sqlite_submit_commit_replay_repairs_projection_after_partial_durable_pu
     let response = post_json(app.clone(), "/commits", &request).await;
     assert_eq!(response.status(), StatusCode::OK);
     let accepted: CommitAccepted = read_json(response).await;
-    assert_eq!(accepted.seq, 1);
+    assert_eq!(accepted.seq, durable.seq);
     assert_eq!(accepted.message_id, message_id);
     assert_eq!(accepted.released_welcomes, vec![welcome_id.clone()]);
 
@@ -6882,115 +6887,6 @@ async fn sqlite_bootstrap_rejects_unsupported_protocol_version_and_defaults_to_v
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn sqlite_state_snapshot_boots_without_full_history_replay() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-laptop");
-    let room_id = "room-snapshot".to_owned();
-    let mls_group_id = "mls-snapshot".to_owned();
-
-    let state = persistent_state(&db_path);
-    let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut last_seq = 0;
-    for index in 0..5 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("snapshot message {index}").as_bytes(),
-            &format!("snapshot-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-
-    state.snapshot_now().expect("snapshot");
-
-    // Two more events form the tail the snapshot does not cover.
-    for index in 5..7 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("snapshot message {index}").as_bytes(),
-            &format!("snapshot-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    drop(app);
-    drop(state);
-
-    // Prove the snapshot is authoritative for its prefix: delete every
-    // operation the snapshot covers (a preview of horizon compaction) and
-    // the reopened server must still serve the complete ordered log.
-    {
-        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
-        let snapshot_seq: i64 = conn
-            .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("snapshot row");
-        assert!(snapshot_seq > 0);
-        conn.execute(
-            "DELETE FROM http_delivery_ops WHERE seq <= ?1",
-            rusqlite::params![snapshot_seq],
-        )
-        .expect("compact prefix");
-    }
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/sync/group",
-        &GroupSyncRequest {
-            group_id: group_id(&room_id),
-            after_seq: 0,
-            limit: 50,
-            requester: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: HttpSyncPage = read_json(response).await;
-    assert_eq!(page.entries.len(), last_seq as usize);
-    assert_eq!(page.next_after_seq, last_seq);
-
-    // Idempotent replay of a pre-snapshot event still works.
-    let replay = append_application_request(
-        &room_id,
-        &mls_group_id,
-        &alice,
-        0,
-        b"snapshot message 0",
-        "snapshot-msg-0",
-    );
-    let response = post_json(app.clone(), "/events", &typed_event_request(&replay)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
 // The legacy uncompressed snapshot table is no longer minted by the store's
 // DDL; tests that reproduce a database written by pre-v2 builds recreate it
 // exactly as those builds left it behind.
@@ -7000,38 +6896,34 @@ const LEGACY_SNAPSHOT_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS http_state_s
     snapshot_json TEXT NOT NULL
 )";
 
-fn legacy_snapshot_table_exists(db_path: &std::path::Path) -> bool {
-    let conn = Connection::open(db_path).expect("open raw");
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'http_state_snapshots'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("count legacy tables");
-    count == 1
-}
-
 #[tokio::test]
-async fn sqlite_fresh_database_never_mints_legacy_snapshot_table() {
+async fn sqlite_fresh_database_never_mints_legacy_tables() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
 
     let state = persistent_state(&db_path);
     drop(state);
 
-    assert!(!legacy_snapshot_table_exists(&db_path));
+    // Single-deploy gate: a fresh database must not create ANY legacy engine
+    // table — their existence is what tells the next boot to run the fold.
     let conn = Connection::open(&db_path).expect("open raw");
-    let v2_tables: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'http_state_snapshots_v2'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("count v2 tables");
-    assert_eq!(v2_tables, 1, "the v2 snapshot table must still be minted");
+    for table in [
+        "http_state_snapshots",
+        "http_state_snapshots_v2",
+        "http_delivery_ops",
+        "http_room_memberships",
+        "http_account_rooms",
+    ] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .expect("count legacy tables");
+        assert_eq!(count, 0, "a fresh database must not mint {table}");
+    }
 }
 
 #[tokio::test]
@@ -7044,20 +6936,7 @@ async fn sqlite_legacy_snapshot_row_without_v2_successor_fails_boot_closed() {
 
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut last_seq = 0;
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
     for index in 0..3 {
         let request = append_application_request(
             &room_id,
@@ -7069,19 +6948,19 @@ async fn sqlite_legacy_snapshot_row_without_v2_successor_fails_boot_closed() {
         );
         let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
     }
-    state.snapshot_now().expect("snapshot");
     drop(app);
     drop(state);
 
-    // Rewrite the snapshot into the legacy uncompressed table, exactly as a
-    // pre-v2 build persisted it, remove the v2 row, and compact the op log
-    // to that row's horizon (the old cross-generation MIN() prune would
-    // have done the same). This build cannot read the v1 row, so replaying
-    // from op zero would hit a pruned log and silently discard history:
-    // boot must fail closed instead.
+    // Fabricate the pre-cutover shape with a live v2 snapshot...
+    defold_into_legacy_shape(&db_path, Some(2));
+
+    // ...then rewrite the snapshot into the legacy uncompressed table,
+    // exactly as a pre-v2 build persisted it, and remove the v2 row (the
+    // op-log prefix is already pruned below the horizon, as the old
+    // cross-generation MIN() prune would have left it). The fold's reader
+    // cannot interpret the v1 row: replaying from what remains of the log
+    // could silently discard history, so the boot must fail closed.
     let legacy_seq = {
         let conn = Connection::open(&db_path).expect("open raw");
         let (seq, compressed): (i64, Vec<u8>) = conn
@@ -7102,15 +6981,9 @@ async fn sqlite_legacy_snapshot_row_without_v2_successor_fails_boot_closed() {
         .expect("write legacy row");
         conn.execute("DELETE FROM http_state_snapshots_v2", [])
             .expect("remove v2 row");
-        conn.execute(
-            "DELETE FROM http_delivery_ops WHERE seq <= ?1",
-            params![seq],
-        )
-        .expect("compact prefix");
         seq
     };
     assert!(legacy_seq > 0);
-    assert!(last_seq > 0);
 
     let error = HttpServerState::from_sqlite_path(&db_path)
         .expect_err("a v1 row with no v2 successor must fail boot closed");
@@ -7151,23 +7024,11 @@ async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
     let room_id = "room-stale-legacy-corpse".to_owned();
     let mls_group_id = "mls-stale-legacy-corpse".to_owned();
 
-    // The lat2 shape after this change deploys: a live v2 snapshot next to
-    // a months-stale v1 corpse row no build has written since v2 landed.
+    // The lat2 shape at the cutover: a live v2 snapshot next to a
+    // months-stale v1 corpse row no build has written since v2 landed.
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
     let mut last_seq = 0;
     for index in 0..3 {
         let request = append_application_request(
@@ -7183,25 +7044,36 @@ async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
         let accepted: EventAccepted = read_json(response).await;
         last_seq = accepted.seq;
     }
-    state.snapshot_now().expect("snapshot");
     drop(app);
     drop(state);
 
+    defold_into_legacy_shape(&db_path, Some(2));
     {
         let conn = Connection::open(&db_path).expect("open raw");
         conn.execute_batch(LEGACY_SNAPSHOT_TABLE_DDL)
             .expect("recreate legacy table");
-        // The payload is never read again; even garbage in the corpse row
-        // must not disturb a boot that has a v2 snapshot to read.
+        // The corpse row carries a bogus, HIGHER watermark than the v2
+        // snapshot — the shape that misled forensics on 2026-08-29 and that
+        // #779 pinned as inert while v2 exists. The payload is never read
+        // again; even garbage at a misleading watermark must not disturb a
+        // fold that has a v2 snapshot to read.
+        let v2_seq: i64 = conn
+            .query_row(
+                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v2 snapshot row");
         conn.execute(
             "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
-             VALUES (1, 1, '{\"stale\":\"corpse\"}')",
-            [],
+             VALUES (1, ?1, '{\"stale\":\"corpse\"}')",
+            rusqlite::params![v2_seq + 500],
         )
         .expect("write stale legacy row");
     }
 
-    let app = persistent_app(&db_path);
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
     let response = post_json(
         app.clone(),
         "/sync/group",
@@ -7227,340 +7099,6 @@ async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
         })
         .expect("count legacy rows");
     assert_eq!(legacy_rows, 1);
-}
-
-#[tokio::test]
-async fn sqlite_boot_prefers_v2_snapshot_over_stale_legacy_row() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-laptop");
-    let room_id = "room-stale-legacy-row".to_owned();
-    let mls_group_id = "mls-stale-legacy-row".to_owned();
-
-    let state = persistent_state(&db_path);
-    let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut last_seq = 0;
-    for index in 0..3 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("stale legacy row message {index}").as_bytes(),
-            &format!("stale-legacy-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    state.snapshot_now().expect("v2 snapshot");
-    drop(app);
-    drop(state);
-
-    // Leave a stale v1 row behind, exactly as any database last
-    // snapshot-written by a pre-v2 build carries it — but with a bogus,
-    // HIGHER watermark, the shape that misled forensics on 2026-08-29:
-    // the dead table looks authoritative to a human diffing watermarks.
-    // Boot must ignore it while the v2 row exists, regardless of the
-    // claimed v1 seq.
-    let (v2_seq, compressed): (i64, Vec<u8>) = {
-        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
-        conn.query_row(
-            "SELECT last_op_seq, snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("v2 snapshot row")
-    };
-    let fake_v1_seq = v2_seq + 500;
-    {
-        let json = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
-        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
-        conn.execute(
-            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
-             VALUES (1, ?1, ?2)",
-            rusqlite::params![fake_v1_seq, String::from_utf8(json).expect("snapshot utf8")],
-        )
-        .expect("write stale legacy row");
-    }
-
-    // Boot prefers v2: the served head is the v2 snapshot's state, and the
-    // bogus v1 watermark never feeds boot or seq assignment.
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/sync/group",
-        &GroupSyncRequest {
-            group_id: group_id(&room_id),
-            after_seq: 0,
-            limit: 50,
-            requester: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: HttpSyncPage = read_json(response).await;
-    assert_eq!(page.entries.len(), last_seq as usize);
-    assert_eq!(page.next_after_seq, last_seq);
-
-    let request = append_application_request(
-        &room_id,
-        &mls_group_id,
-        &alice,
-        0,
-        b"continues from the v2 head".as_ref(),
-        "stale-legacy-msg-continuation",
-    );
-    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let accepted: EventAccepted = read_json(response).await;
-    assert_eq!(accepted.seq, last_seq + 1);
-
-    // And nothing writes the legacy row: v1 stays byte-identical, pinning
-    // "write-dead in code" alongside the boot-preference contract.
-    let (v1_seq_now, v1_json_now): (i64, String) = {
-        let conn = rusqlite::Connection::open(&db_path).expect("open raw");
-        conn.query_row(
-            "SELECT last_op_seq, snapshot_json FROM http_state_snapshots WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("stale legacy row survives untouched")
-    };
-    assert_eq!(v1_seq_now, fake_v1_seq);
-    let expected_json = {
-        let json = zstd::decode_all(compressed.as_slice()).expect("decompress again");
-        String::from_utf8(json).expect("snapshot utf8")
-    };
-    assert_eq!(v1_json_now, expected_json);
-}
-
-#[tokio::test]
-async fn sqlite_snapshot_save_prunes_ops_covered_by_previous_snapshot() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-laptop");
-    let room_id = "room-prune".to_owned();
-    let mls_group_id = "mls-prune".to_owned();
-
-    let state = persistent_state(&db_path);
-    let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut last_seq = 0;
-    for index in 0..2 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("prune message {index}").as_bytes(),
-            &format!("prune-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    state.snapshot_now().expect("first snapshot");
-
-    let query_seqs = |db_path: &std::path::Path| {
-        let conn = rusqlite::Connection::open(db_path).expect("open raw");
-        let snapshot_seq: i64 = conn
-            .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("v2 snapshot row");
-        let min_op_seq: Option<i64> = conn
-            .query_row("SELECT MIN(seq) FROM http_delivery_ops", [], |row| {
-                row.get(0)
-            })
-            .expect("min op seq");
-        (snapshot_seq, min_op_seq)
-    };
-
-    // The first snapshot has no predecessor, so the full op log survives it.
-    let (first_snapshot_seq, min_op_seq) = query_seqs(&db_path);
-    assert!(first_snapshot_seq > 0);
-    assert_eq!(min_op_seq, Some(1));
-
-    for index in 2..4 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("prune message {index}").as_bytes(),
-            &format!("prune-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    state.snapshot_now().expect("second snapshot");
-    drop(app);
-    drop(state);
-
-    // The second snapshot prunes exactly the ops its predecessor covered.
-    let (second_snapshot_seq, min_op_seq) = query_seqs(&db_path);
-    assert!(second_snapshot_seq > first_snapshot_seq);
-    assert_eq!(min_op_seq.expect("tail ops remain"), first_snapshot_seq + 1);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/sync/group",
-        &GroupSyncRequest {
-            group_id: group_id(&room_id),
-            after_seq: 0,
-            limit: 50,
-            requester: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: HttpSyncPage = read_json(response).await;
-    assert_eq!(page.entries.len(), last_seq as usize);
-    assert_eq!(page.next_after_seq, last_seq);
-}
-
-#[tokio::test]
-async fn sqlite_snapshot_prune_ignores_stale_legacy_snapshot_horizon() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-laptop");
-    let room_id = "room-prune-legacy".to_owned();
-    let mls_group_id = "mls-prune-legacy".to_owned();
-
-    let state = persistent_state(&db_path);
-    let app = http_router(state.clone());
-    let response = post_json(
-        app.clone(),
-        "/account-rooms/bootstrap",
-        &BootstrapAccountRoomRequest {
-            room_id: room_id.clone(),
-            mls_group_id: mls_group_id.clone(),
-            creator: alice.clone(),
-            protocol: RoomProtocol::default(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut last_seq = 0;
-    for index in 0..2 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("prune legacy message {index}").as_bytes(),
-            &format!("prune-legacy-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    state.snapshot_now().expect("first snapshot");
-
-    // A months-stale v1 corpse row at an ancient watermark — the exact
-    // mixed-watermark shape that muddied the 2026-08-29 freeze forensics.
-    // The old cross-generation MIN() prune would pin the op log to this
-    // row's horizon forever; the v2 snapshot must be the only horizon.
-    {
-        let conn = Connection::open(&db_path).expect("open raw");
-        conn.execute_batch(LEGACY_SNAPSHOT_TABLE_DDL)
-            .expect("recreate legacy table");
-        conn.execute(
-            "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
-             VALUES (1, 1, '{\"stale\":\"corpse\"}')",
-            [],
-        )
-        .expect("write stale legacy row");
-    }
-    let first_snapshot_seq: i64 = {
-        let conn = Connection::open(&db_path).expect("open raw");
-        conn.query_row(
-            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("v2 snapshot row")
-    };
-    assert!(first_snapshot_seq > 1, "the v2 watermark must be ahead");
-
-    for index in 2..4 {
-        let request = append_application_request(
-            &room_id,
-            &mls_group_id,
-            &alice,
-            0,
-            format!("prune legacy message {index}").as_bytes(),
-            &format!("prune-legacy-msg-{index}"),
-        );
-        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let accepted: EventAccepted = read_json(response).await;
-        last_seq = accepted.seq;
-    }
-    state.snapshot_now().expect("second snapshot");
-    drop(app);
-    drop(state);
-
-    let conn = Connection::open(&db_path).expect("open raw");
-    let min_op_seq: i64 = conn
-        .query_row("SELECT MIN(seq) FROM http_delivery_ops", [], |row| {
-            row.get(0)
-        })
-        .expect("min op seq");
-    assert_eq!(min_op_seq, first_snapshot_seq + 1);
-
-    // The pruned store still boots and serves the full visible history.
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/sync/group",
-        &GroupSyncRequest {
-            group_id: group_id(&room_id),
-            after_seq: 0,
-            limit: 50,
-            requester: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: HttpSyncPage = read_json(response).await;
-    assert_eq!(page.entries.len(), last_seq as usize);
-    assert_eq!(page.next_after_seq, last_seq);
 }
 
 #[tokio::test]
@@ -8189,6 +7727,10 @@ async fn assert_submit_commit_had_no_side_effects(app: &Router, room_id: &str, a
     assert!(page.entries.is_empty());
 }
 
+/// Crash points across the normalized commit transaction's durable legs.
+/// The legacy per-commit room-membership upsert has no normalized
+/// equivalent (the projection rides the checkpoint cadence), so that crash
+/// point retired with the engine.
 #[derive(Clone, Copy, Debug)]
 enum HttpSubmitCommitCrashPoint {
     CommitDeliveryOperation,
@@ -8196,18 +7738,16 @@ enum HttpSubmitCommitCrashPoint {
     WelcomeDeliveryOperation,
     WelcomeIdempotencyRecord,
     AccountRoomProjection,
-    RoomMembershipProjection,
     KeyPackageConsumedProjection,
 }
 
 impl HttpSubmitCommitCrashPoint {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::CommitDeliveryOperation,
         Self::CommitIdempotencyRecord,
         Self::WelcomeDeliveryOperation,
         Self::WelcomeIdempotencyRecord,
         Self::AccountRoomProjection,
-        Self::RoomMembershipProjection,
         Self::KeyPackageConsumedProjection,
     ];
 
@@ -8216,9 +7756,8 @@ impl HttpSubmitCommitCrashPoint {
             Self::CommitDeliveryOperation => {
                 r#"
                 CREATE TRIGGER finitechat_http_test_crash_after_commit_delivery
-                AFTER INSERT ON http_delivery_ops
-                WHEN NEW.kind = 'publish_message'
-                  AND NEW.body_json LIKE '%http-crash-matrix-commit%'
+                AFTER INSERT ON delivery_entries
+                WHEN CAST(NEW.payload AS TEXT) LIKE '%http-crash-matrix-commit%'
                 BEGIN
                   SELECT RAISE(ROLLBACK, 'finitechat http test crash after commit delivery');
                 END;
@@ -8237,9 +7776,8 @@ impl HttpSubmitCommitCrashPoint {
             Self::WelcomeDeliveryOperation => {
                 r#"
                 CREATE TRIGGER finitechat_http_test_crash_after_welcome_delivery
-                AFTER INSERT ON http_delivery_ops
-                WHEN NEW.kind = 'publish_message'
-                  AND NEW.body_json LIKE '%welcome-http-crash-tablet%'
+                AFTER INSERT ON delivery_entries
+                WHEN CAST(NEW.payload AS TEXT) LIKE '%welcome-http-crash-tablet%'
                 BEGIN
                   SELECT RAISE(ROLLBACK, 'finitechat http test crash after welcome delivery');
                 END;
@@ -8258,22 +7796,18 @@ impl HttpSubmitCommitCrashPoint {
             Self::AccountRoomProjection => {
                 r#"
                 CREATE TRIGGER finitechat_http_test_crash_after_account_room_projection
-                AFTER UPDATE OF record_json ON http_account_rooms
+                AFTER UPDATE OF record_json ON account_room_directory
                 WHEN NEW.room_id = 'room-http-crash-matrix'
                   AND NEW.record_json LIKE '%alice-tablet%'
                 BEGIN
                   SELECT RAISE(ROLLBACK, 'finitechat http test crash after account-room projection');
                 END;
-                "#
-            }
-            Self::RoomMembershipProjection => {
-                r#"
-                CREATE TRIGGER finitechat_http_test_crash_after_room_membership_projection
-                AFTER UPDATE OF projection_json ON http_room_memberships
+                CREATE TRIGGER finitechat_http_test_crash_after_account_room_projection_insert
+                AFTER INSERT ON account_room_directory
                 WHEN NEW.room_id = 'room-http-crash-matrix'
-                  AND NEW.projection_json LIKE '%alice-tablet%'
+                  AND NEW.record_json LIKE '%alice-tablet%'
                 BEGIN
-                  SELECT RAISE(ROLLBACK, 'finitechat http test crash after room-membership projection');
+                  SELECT RAISE(ROLLBACK, 'finitechat http test crash after account-room projection');
                 END;
                 "#
             }
@@ -8310,26 +7844,28 @@ fn clear_http_submit_commit_crash_triggers(db_path: &std::path::Path) {
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_welcome_delivery;
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_welcome_idempotency;
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_account_room_projection;
-        DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_room_membership_projection;
+        DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_account_room_projection_insert;
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_key_package_consumed;
         "#,
     )
     .expect("clear HTTP commit crash triggers");
 }
 
+/// Crash points across the normalized event transaction's durable legs.
+/// The legacy per-event room-membership upsert has no normalized equivalent
+/// (the projection rides the checkpoint cadence), so that crash point
+/// retired with the engine.
 #[derive(Clone, Copy, Debug)]
 enum HttpApplicationEventCrashPoint {
     EventDeliveryOperation,
     EventIdempotencyRecord,
-    RoomMembershipProjection,
     ApplicationEffectProjection,
 }
 
 impl HttpApplicationEventCrashPoint {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 3] = [
         Self::EventDeliveryOperation,
         Self::EventIdempotencyRecord,
-        Self::RoomMembershipProjection,
         Self::ApplicationEffectProjection,
     ];
 
@@ -8338,9 +7874,8 @@ impl HttpApplicationEventCrashPoint {
             Self::EventDeliveryOperation => {
                 r#"
                 CREATE TRIGGER finitechat_http_test_crash_after_application_event_delivery
-                AFTER INSERT ON http_delivery_ops
-                WHEN NEW.kind = 'publish_message'
-                  AND NEW.body_json LIKE '%application-effect-crash%'
+                AFTER INSERT ON delivery_entries
+                WHEN CAST(NEW.payload AS TEXT) LIKE '%application-effect-crash%'
                 BEGIN
                   SELECT RAISE(ROLLBACK, 'finitechat http test crash after application-event delivery');
                 END;
@@ -8353,17 +7888,6 @@ impl HttpApplicationEventCrashPoint {
                 WHEN NEW.idempotency_key = 'event:room-application-effect-crash:application-effect-crash'
                 BEGIN
                   SELECT RAISE(ROLLBACK, 'finitechat http test crash after application-event idempotency');
-                END;
-                "#
-            }
-            Self::RoomMembershipProjection => {
-                r#"
-                CREATE TRIGGER finitechat_http_test_crash_after_application_event_room_membership
-                AFTER UPDATE OF projection_json ON http_room_memberships
-                WHEN NEW.room_id = 'room-application-effect-crash'
-                  AND NEW.projection_json LIKE '%"last_seq":1%'
-                BEGIN
-                  SELECT RAISE(ROLLBACK, 'finitechat http test crash after application-event room membership');
                 END;
                 "#
             }
@@ -8397,7 +7921,6 @@ fn clear_http_application_event_crash_triggers(db_path: &std::path::Path) {
         r#"
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_application_event_delivery;
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_application_event_idempotency;
-        DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_application_event_room_membership;
         DROP TRIGGER IF EXISTS finitechat_http_test_crash_after_application_effect_projection;
         "#,
     )
@@ -8545,98 +8068,6 @@ fn account_room_device_active(page: &ListAccountRoomDirectoryResponse, device: &
         .unwrap_or_else(|| panic!("missing account room device: {device:?}"))["active"]
         .as_bool()
         .expect("active flag")
-}
-
-fn commit_publish_request_for_test(
-    request: &SubmitCommitRequest,
-    message_id: &str,
-) -> PublishMessageRequest {
-    let transport_group_id = request.room_id.as_bytes().to_vec();
-    let entry = finitechat_proto::RoomLogEntry {
-        room_id: request.room_id.clone(),
-        seq: 0,
-        message_id: message_id.to_owned(),
-        sender: request.sender.clone(),
-        kind: LogEntryKind::Commit,
-        epoch: request.expected_epoch,
-        envelope: request.envelope.clone(),
-        idempotency_key: request.idempotency_key.clone(),
-        timestamp_unix_seconds: 0,
-    };
-    let payload = serde_json::to_vec(&FiniteAccountRoomCommitProjection {
-        entry,
-        membership_delta: request.membership_delta.clone(),
-    })
-    .expect("commit projection payload");
-
-    PublishMessageRequest {
-        target: group_target(
-            group_id(&request.room_id),
-            transport_group_id.clone(),
-            Some(HttpCommitAdmission {
-                source_epoch: EpochId(request.expected_epoch),
-            }),
-        ),
-        message: TransportMessage {
-            id: id(message_id),
-            payload,
-            timestamp: Timestamp(0),
-            causal_deps: Vec::new(),
-            source: TransportSource(HTTP_SERVER_SOURCE.to_owned()),
-            envelope: TransportEnvelope::GroupMessage { transport_group_id },
-        },
-        idempotency_key: Some(format!(
-            "commit:{}:{}",
-            request.room_id, request.idempotency_key
-        )),
-    }
-}
-
-fn insert_durable_commit_publish_without_projection(
-    db_path: &std::path::Path,
-    request: &PublishMessageRequest,
-    seq: u64,
-) {
-    let operation_json = serde_json::to_string(&serde_json::json!({
-        "PublishMessage": {
-            "target": &request.target,
-            "message": &request.message,
-            "idempotency_key": &request.idempotency_key,
-        }
-    }))
-    .expect("persisted operation json");
-    let fingerprint_json = serde_json::to_string(&serde_json::json!({
-        "target": &request.target,
-        "message": &request.message,
-    }))
-    .expect("publish fingerprint json");
-    let receipt_json = serde_json::to_string(&HttpPublishReceipt {
-        message_id: request.message.id.clone(),
-        plane: HttpDeliveryPlane::Group,
-        seq,
-        duplicate: false,
-    })
-    .expect("publish receipt json");
-    let idempotency_key = request
-        .idempotency_key
-        .as_deref()
-        .expect("commit publish idempotency key");
-
-    let conn = Connection::open(db_path).expect("sqlite connection");
-    conn.execute(
-        "INSERT INTO http_delivery_ops (kind, body_json) VALUES (?1, ?2)",
-        params!["publish_message", operation_json],
-    )
-    .expect("insert durable publish operation");
-    conn.execute(
-        "INSERT INTO http_publish_idempotency (
-            idempotency_key,
-            fingerprint_json,
-            receipt_json
-        ) VALUES (?1, ?2, ?3)",
-        params![idempotency_key, fingerprint_json, receipt_json],
-    )
-    .expect("insert durable publish idempotency");
 }
 
 fn append_application_request(
@@ -9119,7 +8550,8 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
     let room_id = "room-frozen-projection-boot".to_owned();
     let mls_group_id = "mls-frozen-projection-boot".to_owned();
 
-    // Era 1 (pre-freeze): one event, then a state snapshot at op seq N.
+    // Era 1 (pre-freeze): bootstrap + one event. The frozen row knows only
+    // alice at this head.
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
     bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
@@ -9133,31 +8565,13 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
     );
     let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
     assert_eq!(response.status(), StatusCode::OK);
-    state.snapshot_now().expect("era-1 snapshot");
-
-    let (frozen_projection_json, snapshot_op_seq) = {
-        let conn = Connection::open(&db_path).expect("open raw");
-        let frozen: String = conn
-            .query_row(
-                "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
-                params![room_id],
-                |row| row.get(0),
-            )
-            .expect("frozen-era projection row");
-        let snapshot_seq: i64 = conn
-            .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("era-1 snapshot row");
-        (frozen, snapshot_seq)
-    };
+    let frozen_projection_json: String =
+        read_normalized_checkpoint(&db_path)["rooms"][room_id.as_str()].to_string();
 
     // Era 2 (the frozen window): a membership commit adds bob (epoch 0 -> 1),
     // bob claims+acks the Welcome (his interval activates), and bob chats at
-    // epoch 1. The op log and the live service advance; the durable
-    // projection table, in production, did not follow.
+    // epoch 1. The delivery log advances; in production the durable
+    // projection table did not follow.
     add_device_to_room(
         &app,
         &room_id,
@@ -9186,9 +8600,10 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
     drop(app);
     drop(state);
 
-    // Freeze the durable projection at its era-1 value, exactly as the lat2
-    // store looks after the 2026-08-27 deploy: op log (and snapshot replay)
-    // run ahead while http_room_memberships lags behind.
+    // Fabricate the legacy shape, then freeze the durable projection at its
+    // era-1 value, exactly as the lat2 store looked after the 2026-08-27
+    // deploy: op log runs ahead while http_room_memberships lags behind.
+    defold_into_legacy_shape(&db_path, None);
     {
         let conn = Connection::open(&db_path).expect("open raw");
         conn.execute(
@@ -9198,11 +8613,12 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
         .expect("freeze projection row");
     }
 
-    // Era 3: the 06:22 boot from snapshot + op tail + stale table.
+    // The cutover boot: the fold's reader boots from the op log, reconciles
+    // the frozen row, and the normalized engine serves.
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
 
-    // Sanity: the replayed service still serves the tail above the frozen
+    // Sanity: the replayed log still serves the tail above the frozen
     // projection's last_seq (clients' cursors are already at the head).
     let response = post_json(
         app.clone(),
@@ -9276,7 +8692,9 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
     let waited: SyncWaitResponse = read_json(response).await;
     assert!(waited.woke, "hints must advance for ahead clients");
 
-    // Durable: the room projection row unfreezes past its era-1 value.
+    // Durable: the reconciliation inside the fold's reader unfroze the
+    // legacy membership row past its era-1 value, and the normalized
+    // checkpoint carries the repaired projection.
     {
         let conn = Connection::open(&db_path).expect("open raw");
         let projection_json: String = conn
@@ -9295,20 +8713,15 @@ async fn sqlite_boot_from_frozen_room_projection_serves_and_persists_new_publish
             "projection row must persist past the frozen last_seq"
         );
     }
-
-    // Durable: the state snapshot persists past its era-1 last_op_seq.
-    state.snapshot_now().expect("post-boot snapshot");
-    {
-        let conn = Connection::open(&db_path).expect("open raw");
-        let snapshot_seq: i64 = conn
-            .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("post-boot snapshot row");
-        assert!(snapshot_seq > snapshot_op_seq);
-    }
+    state.snapshot_now().expect("post-boot checkpoint");
+    let checkpoint = read_normalized_checkpoint(&db_path);
+    assert!(
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("checkpoint head")
+            >= accepted.seq,
+        "the normalized checkpoint must carry the repaired head"
+    );
 }
 
 #[tokio::test]
@@ -9320,23 +8733,15 @@ async fn sqlite_boot_from_frozen_projection_serves_devices_added_in_frozen_windo
     let room_id = "room-frozen-added-device".to_owned();
     let mls_group_id = "mls-frozen-added-device".to_owned();
 
-    // Era 1: bootstrap + snapshot; the frozen row knows only alice.
+    // Era 1: bootstrap; the frozen row knows only alice.
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
     bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
-    state.snapshot_now().expect("era-1 snapshot");
-    let frozen_projection_json: String = {
-        let conn = Connection::open(&db_path).expect("open raw");
-        conn.query_row(
-            "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
-            params![room_id],
-            |row| row.get(0),
-        )
-        .expect("frozen-era projection row")
-    };
+    let frozen_projection_json: String =
+        read_normalized_checkpoint(&db_path)["rooms"][room_id.as_str()].to_string();
 
     // Era 2 (frozen window): bob joins (Welcome claimed+acked) and sends; the
-    // table never learns.
+    // legacy membership table never learns.
     add_device_to_room(
         &app,
         &room_id,
@@ -9361,6 +8766,7 @@ async fn sqlite_boot_from_frozen_projection_serves_devices_added_in_frozen_windo
     drop(app);
     drop(state);
 
+    defold_into_legacy_shape(&db_path, None);
     {
         let conn = Connection::open(&db_path).expect("open raw");
         conn.execute(
@@ -9420,70 +8826,110 @@ async fn sqlite_boot_from_frozen_projection_serves_devices_added_in_frozen_windo
 async fn sqlite_snapshot_cadence_counts_ops_from_every_delivery_path() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-cadence".to_owned();
+    let mls_group_id = "mls-cadence".to_owned();
 
-    // Key-package traffic only: no typed commits, no events. On the frozen
-    // build this appends thousands of ops without one snapshot attempt.
+    // The 2026-08-27..29 freeze happened because only some paths counted
+    // toward the snapshot cadence. On the normalized engine the cadence
+    // refreshes the room-state checkpoint, so drive the room's tail with
+    // typed events (the path whose state the checkpoint carries) and also
+    // raw delivery-contract publishes, then prove the background interval
+    // catches the checkpoint up WITHOUT a restart.
     let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+
     let interval_ops = 4_096usize;
-    let total_ops = interval_ops + 64;
-    for index in 0..total_ops {
-        let publication = key_package_publication(
-            &format!("cadence-kp-{index}"),
-            member(&format!("cadence-owner-{index}")),
-            format!("cadence key package {index}").as_bytes(),
-        );
-        state
-            .publish_key_package(publication)
-            .expect("key package publication");
+    let baseline: u64 = read_normalized_checkpoint(&db_path)["rooms"][room_id.as_str()]["last_seq"]
+        .as_u64()
+        .unwrap_or(0);
+    let mut head = 0u64;
+    // Raw publishes grow the route tail but not the projection watermark;
+    // the checkpoint's `last_seq` tracks typed events, so keep the typed
+    // head separately for the catch-up assertion.
+    let mut typed_head = 0u64;
+    for index in 0..interval_ops {
+        if index % 2 == 0 {
+            let request = append_application_request(
+                &room_id,
+                &mls_group_id,
+                &alice,
+                0,
+                format!("cadence event {index}").as_bytes(),
+                &format!("cadence-event-{index}"),
+            );
+            let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let accepted: EventAccepted = read_json(response).await;
+            head = accepted.seq;
+            typed_head = accepted.seq;
+        } else {
+            // Raw delivery-contract publish: grows the route tail without a
+            // typed projection update — the op class the frozen build
+            // missed.
+            state
+                .publish_message(PublishMessageRequest {
+                    target: group_target(group_id(&room_id), room_id.as_bytes().to_vec(), None),
+                    message: group_message(
+                        &format!("cadence-raw-{index}"),
+                        room_id.as_bytes().to_vec(),
+                        format!("cadence raw body {index}").as_bytes(),
+                    ),
+                    idempotency_key: None,
+                })
+                .expect("raw group publish");
+            head += 1;
+        }
     }
 
-    // The interval trigger runs on its own background thread; wait for the
-    // durable row to appear with a head past the interval boundary.
+    // The interval trigger runs on its own background thread and fires when
+    // the counted ops cross the interval (the HTTP routes count one op per
+    // accepted typed request on top of the state-layer count, so the fire
+    // lands mid-loop). Wait for the durable checkpoint to move past its
+    // bootstrap-era baseline without any restart.
+    assert!(baseline < typed_head);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut snapshot_seq = None;
+    let mut caught_up = false;
     while std::time::Instant::now() < deadline {
-        let conn = Connection::open(&db_path).expect("open raw");
-        let row: Option<i64> = conn
-            .query_row(
-                "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("snapshot row query");
-        if let Some(seq) = row {
-            snapshot_seq = Some(seq);
+        let checkpoint = read_normalized_checkpoint(&db_path);
+        let stored = checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .unwrap_or(0);
+        if stored > baseline {
+            caught_up = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let snapshot_seq = snapshot_seq.expect("key-package-only ops must trip the snapshot interval");
-    assert!(snapshot_seq >= interval_ops as i64);
+    assert!(
+        caught_up,
+        "the cadence must refresh the checkpoint within {interval_ops} ops \
+         without a restart (baseline {baseline}, typed head {typed_head}, head {head})"
+    );
 
-    // Persisting keeps advancing across a restart from the fresh snapshot:
-    // more ops, then the next snapshot must move past the previous one.
-    drop(state);
-    let state = persistent_state(&db_path);
-    for index in 0..4 {
-        let publication = key_package_publication(
-            &format!("cadence-restart-kp-{index}"),
-            member(&format!("cadence-restart-owner-{index}")),
-            format!("restart key package {index}").as_bytes(),
-        );
-        state
-            .publish_key_package(publication)
-            .expect("post-restart publication");
-    }
-    state.snapshot_now().expect("post-restart snapshot");
-    let conn = Connection::open(&db_path).expect("open raw");
-    let restarted_seq: i64 = conn
-        .query_row(
-            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("restarted snapshot row");
-    assert!(restarted_seq > snapshot_seq);
+    // More ops after the interval: the counter keeps counting from the
+    // refresh, and an explicit snapshot_now persists the current map.
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"post-interval event",
+        "cadence-post-interval",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: EventAccepted = read_json(response).await;
+    state.snapshot_now().expect("post-interval checkpoint");
+    let checkpoint = read_normalized_checkpoint(&db_path);
+    assert_eq!(
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("checkpoint head"),
+        accepted.seq,
+        "an explicit checkpoint persists the live head"
+    );
 }
 
 #[tokio::test]
@@ -9507,15 +8953,13 @@ async fn sqlite_readiness_probes_concurrent_with_publishes_do_not_stall_persiste
     );
     let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
     assert_eq!(response.status(), StatusCode::OK);
-    state.snapshot_now().expect("baseline snapshot");
-    let conn = Connection::open(&db_path).expect("open raw");
-    let baseline_seq: i64 = conn
-        .query_row(
-            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("baseline snapshot row");
+    state.snapshot_now().expect("baseline checkpoint");
+    let baseline_seq: i64 = {
+        let checkpoint = read_normalized_checkpoint(&db_path);
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_i64()
+            .expect("baseline checkpoint head")
+    };
 
     // Interleave public readiness probes (the semantic-serving readiness
     // path from 2026-08-26, which writes through the shared SQLite
@@ -9558,15 +9002,13 @@ async fn sqlite_readiness_probes_concurrent_with_publishes_do_not_stall_persiste
     }
     probes.await.expect("probe loop");
 
-    state.snapshot_now().expect("post-probe snapshot");
-    let conn = Connection::open(&db_path).expect("open raw");
-    let final_seq: i64 = conn
-        .query_row(
-            "SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("final snapshot row");
+    state.snapshot_now().expect("post-probe checkpoint");
+    let final_seq: i64 = {
+        let checkpoint = read_normalized_checkpoint(&db_path);
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_i64()
+            .expect("final checkpoint head")
+    };
     assert!(final_seq > baseline_seq);
 
     // And the served log is intact above the baseline cursor.
@@ -9605,8 +9047,8 @@ async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically
     let room_id = "room-reconcile-atomic".to_owned();
     let mls_group_id = "mls-reconcile-atomic".to_owned();
 
-    // Era 1 (pre-freeze): bootstrap, one event, snapshot; capture the
-    // frozen projection row.
+    // Era 1 (pre-freeze): bootstrap + one event; capture the frozen
+    // projection.
     let state = persistent_state(&db_path);
     let app = http_router(state.clone());
     bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
@@ -9620,19 +9062,11 @@ async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically
     );
     let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
     assert_eq!(response.status(), StatusCode::OK);
-    state.snapshot_now().expect("era-1 snapshot");
-    let frozen_projection_json: String = {
-        let conn = Connection::open(&db_path).expect("open raw");
-        conn.query_row(
-            "SELECT projection_json FROM http_room_memberships WHERE room_id = ?1",
-            params![room_id],
-            |row| row.get(0),
-        )
-        .expect("frozen-era projection row")
-    };
+    let frozen_projection_json: String =
+        read_normalized_checkpoint(&db_path)["rooms"][room_id.as_str()].to_string();
 
     // Era 2 (the frozen window): bob joins (Welcome claimed+acked) and
-    // sends; then the membership table is frozen at its era-1 value.
+    // sends; then the legacy membership table is frozen at its era-1 value.
     let add_accepted = add_device_to_room(
         &app,
         &room_id,
@@ -9656,6 +9090,8 @@ async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically
     let pre_boot_head: EventAccepted = read_json(response).await;
     drop(app);
     drop(state);
+
+    defold_into_legacy_shape(&db_path, None);
     {
         let conn = Connection::open(&db_path).expect("open raw");
         conn.execute(
@@ -9766,7 +9202,12 @@ async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically
         assert_ne!(membership_json, frozen_projection_json);
         let repaired: serde_json::Value =
             serde_json::from_str(&membership_json).expect("repaired projection json");
-        assert!(repaired["last_seq"].as_u64().expect("last_seq") > pre_boot_head.seq);
+        // The legacy tables freeze at fold time: the reconciliation brought
+        // the row to the log head the fold consumed.
+        assert_eq!(
+            repaired["last_seq"].as_u64().expect("last_seq"),
+            pre_boot_head.seq
+        );
         let directory_json: String = conn
             .query_row(
                 "SELECT record_json FROM http_account_rooms WHERE account_id = 'bob' AND room_id = ?1",
@@ -9783,5 +9224,1488 @@ async fn sqlite_boot_reconciliation_persists_membership_and_directory_atomically
             record["last_seq"].as_u64().expect("directory last_seq"),
             add_accepted.seq
         );
+    }
+    // The live head (past the frozen window) lands in the normalized
+    // checkpoint — the structure the next boot derives from.
+    state.snapshot_now().expect("post-repair checkpoint");
+    let checkpoint = read_normalized_checkpoint(&db_path);
+    assert!(
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("checkpoint head")
+            > pre_boot_head.seq,
+        "the live head must persist past the pre-boot head"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Chat store swap (PR 1): the normalized-engine cutover, single deploy.
+//
+// There is no engine flag: the deploy IS the flip. A durable boot either
+// folds a pre-cutover (op-log) database — marker-gated, see the reader in
+// `src/cutover.rs` — or starts fresh on the normalized tables. These tests
+// prove that contract end to end on real SQLite files:
+//
+// * `defold_into_legacy_shape` fabricates pre-cutover databases for the
+//   tests: it serves an era through the normalized engine, then rewrites
+//   the file into the exact legacy shape (op log, v2 snapshot with a pruned
+//   prefix, projection rows, directory rows) and empties the normalized
+//   tables. The legacy SERVING engine is gone, so the fixture factory is
+//   the only writer of legacy tables left in the tree — test code, not
+//   product code.
+// * The fold tests prove full-history survival, the frozen-#770-shape
+//   repair inside the fold's reader, and the single-path steady boot.
+// * The fail-closed tests prove divergence blocks (checkpoint ahead of the
+//   entries, undecodable checkpoint, v1 snapshot without a v2 successor).
+// * The replay-diff proves fold(de-fold(N)) == N on the synthetic
+//   4,200-op fixture, and — with REPLAY_DIFF_DB=/path/to/copy — runs the
+//   same diff against a production database copy.
+// ---------------------------------------------------------------------------
+
+/// Byte-copy a database (and its WAL sidecars) to another path. The source
+/// must not have live writers when this runs.
+fn copy_database(source: &std::path::Path, target: &std::path::Path) {
+    std::fs::copy(source, target).expect("copy database file");
+    for sidecar in ["-wal", "-shm"] {
+        let from = source.with_file_name(format!(
+            "{}{sidecar}",
+            source.file_name().expect("db file name").to_string_lossy()
+        ));
+        if from.exists() {
+            let to = target.with_file_name(format!(
+                "{}{sidecar}",
+                target.file_name().expect("db file name").to_string_lossy()
+            ));
+            std::fs::copy(from, to).expect("copy database sidecar");
+        }
+    }
+}
+
+fn read_normalized_checkpoint(path: &std::path::Path) -> serde_json::Value {
+    let conn = Connection::open(path).expect("open normalized db");
+    let compressed: Vec<u8> = conn
+        .query_row(
+            "SELECT state_zstd FROM room_state_checkpoint WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("checkpoint row");
+    let plain = zstd::decode_all(compressed.as_slice()).expect("decompress checkpoint");
+    serde_json::from_slice(&plain).expect("checkpoint json")
+}
+
+fn write_normalized_checkpoint(path: &std::path::Path, checkpoint: &serde_json::Value) {
+    let plain = serde_json::to_vec(checkpoint).expect("checkpoint json");
+    let compressed = zstd::encode_all(plain.as_slice(), 3).expect("compress checkpoint");
+    let conn = Connection::open(path).expect("open normalized db");
+    conn.execute(
+        "UPDATE room_state_checkpoint SET state_zstd = ?1 WHERE id = 1",
+        params![compressed],
+    )
+    .expect("tamper checkpoint");
+}
+
+async fn sync_all_group_entries(app: &Router, room: &str) -> Vec<(u64, String, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let mut after_seq = 0;
+    loop {
+        let response = post_json(
+            app.clone(),
+            "/sync/group",
+            &GroupSyncRequest {
+                group_id: group_id(room),
+                after_seq,
+                limit: 100,
+                requester: None,
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: HttpSyncPage = read_json(response).await;
+        for entry in &page.entries {
+            entries.push((
+                entry.seq,
+                String::from_utf8(entry.message.id.as_slice().to_vec()).expect("id"),
+                entry.message.payload.clone(),
+            ));
+        }
+        if !page.has_more || page.entries.is_empty() {
+            return entries;
+        }
+        after_seq = page.next_after_seq;
+    }
+}
+
+async fn sync_all_inbox_entries(app: &Router, recipient: &MemberId) -> Vec<(u64, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let mut after_seq = 0;
+    loop {
+        let response = post_json(
+            app.clone(),
+            "/sync/inbox",
+            &InboxSyncRequest {
+                recipient: recipient.clone(),
+                after_seq,
+                limit: 100,
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: HttpSyncPage = read_json(response).await;
+        for entry in &page.entries {
+            entries.push((entry.seq, entry.message.payload.clone()));
+        }
+        if !page.has_more || page.entries.is_empty() {
+            return entries;
+        }
+        after_seq = page.next_after_seq;
+    }
+}
+
+/// One delivery entry read back from `delivery_entries`, with everything
+/// the de-fold needs to rebuild its legacy op row.
+struct DefoldEntry {
+    /// (plane, route key) of the owning route.
+    plane: String,
+    route_key: Vec<u8>,
+    seq: u64,
+    message: TransportMessage,
+}
+
+/// Rewrite a normalized-served database into the exact shape a pre-cutover
+/// (legacy op-log) build would have left behind, then EMPTY the normalized
+/// tables: the next boot sees no fold marker and legacy tables present, so
+/// the fold runs. This is test fixture fabrication — the legacy serving
+/// engine that once wrote these tables is deleted.
+///
+/// `prefix_in_snapshot` folds that many leading ops into a v2 snapshot
+/// (pruning them from the replayed log, exactly like the legacy snapshot
+/// writer did); `None` leaves a never-snapshotted full op log.
+///
+/// Fidelity notes, so the round-trip stays honest:
+/// * Delivery entries become `publish_message` ops in per-route seq order
+///   (any interleaving preserving per-route order replays to the same
+///   queues); commit admissions ride the op targets from
+///   `group_commit_epochs`.
+/// * KeyPackages are seeded directly into the snapshot's service (they are
+///   not re-derived as publish ops), and the snapshot's inventory section
+///   carries the current shared-table rows verbatim — the fold re-seeds
+///   that table from the replay, so it must round-trip byte-equal.
+/// * The membership/directory rows are copied from the checkpoint and the
+///   normalized directory table unchanged.
+fn defold_into_legacy_shape(path: &std::path::Path, prefix_in_snapshot: Option<usize>) -> usize {
+    let conn = Connection::open(path).expect("open normalized db");
+
+    // 1. Read every route's entries (per-route seq order).
+    let mut statement = conn
+        .prepare(
+            "SELECT r.plane, r.route_key, e.seq, e.message_id, e.payload, e.ts,
+                    e.causal_deps_json, e.source, e.envelope_kind, e.envelope_ref
+             FROM delivery_entries e
+             JOIN delivery_routes r ON r.route_id = e.route_id
+             ORDER BY r.plane ASC, r.route_key ASC, e.seq ASC",
+        )
+        .expect("prepare entry read");
+    let rows = statement
+        .query_map([], |row| {
+            Ok(DefoldEntry {
+                plane: row.get(0)?,
+                route_key: row.get(1)?,
+                seq: u64::try_from(row.get::<_, i64>(2)?).expect("seq"),
+                message: TransportMessage {
+                    id: MessageId::new(row.get::<_, Vec<u8>>(3)?),
+                    payload: row.get::<_, Vec<u8>>(4)?,
+                    timestamp: Timestamp(u64::try_from(row.get::<_, i64>(5)?).expect("ts")),
+                    causal_deps: serde_json::from_str(&row.get::<_, String>(6)?)
+                        .expect("causal deps"),
+                    source: TransportSource(row.get::<_, String>(7)?),
+                    envelope: match row.get::<_, i64>(8)? {
+                        0 => TransportEnvelope::GroupMessage {
+                            transport_group_id: row.get::<_, Vec<u8>>(9)?,
+                        },
+                        _ => TransportEnvelope::Welcome {
+                            recipient: MemberId::new(row.get::<_, Vec<u8>>(9)?),
+                        },
+                    },
+                },
+            })
+        })
+        .expect("entry rows");
+    let entries = rows.collect::<Result<Vec<_>, _>>().expect("entries");
+    let total_ops = entries.len();
+
+    // 2. Commit admissions per (route, seq).
+    let mut admissions: std::collections::BTreeMap<(String, Vec<u8>, u64), u64> =
+        std::collections::BTreeMap::new();
+    {
+        let mut statement = conn
+            .prepare(
+                "SELECT r.plane, r.route_key, e.seq, k.source_epoch
+                 FROM group_commit_epochs k
+                 JOIN delivery_routes r ON r.route_id = k.route_id
+                 JOIN delivery_entries e ON e.route_id = k.route_id AND e.seq = k.seq",
+            )
+            .expect("prepare epoch read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        u64::try_from(row.get::<_, i64>(2)?).expect("seq"),
+                    ),
+                    u64::try_from(row.get::<_, i64>(3)?).expect("epoch"),
+                ))
+            })
+            .expect("epoch rows");
+        for row in rows {
+            let ((plane, route_key, seq), epoch) = row.expect("epoch row");
+            admissions.insert((plane, route_key, seq), epoch);
+        }
+    }
+
+    // 3. Rebuild the target of each entry from its envelope (+ admission).
+    let target_of = |entry: &DefoldEntry| -> HttpPublishTarget {
+        let admission = admissions
+            .get(&(entry.plane.clone(), entry.route_key.clone(), entry.seq))
+            .map(|source_epoch| HttpCommitAdmission {
+                source_epoch: EpochId(*source_epoch),
+            });
+        match &entry.message.envelope {
+            TransportEnvelope::GroupMessage { transport_group_id } => HttpPublishTarget::Group {
+                group_id: GroupId::new(entry.route_key.clone()),
+                transport_group_id: transport_group_id.clone(),
+                commit_admission: admission,
+            },
+            TransportEnvelope::Welcome { recipient } => HttpPublishTarget::Inbox {
+                recipient: recipient.clone(),
+            },
+        }
+    };
+
+    // 4. Shared-table rows that must survive the fold byte-equal: the
+    //    inventory triples (the fold re-seeds the table from the replayed
+    //    state, so the snapshot carries them verbatim) and the revoked set.
+    let inventory_rows: Vec<(String, String, String)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT key_package_id_json, owner_json, state_json
+                 FROM http_key_package_inventory",
+            )
+            .expect("prepare inventory read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .expect("inventory rows");
+        rows.collect::<Result<Vec<_>, _>>().expect("inventory")
+    };
+    let revoked_devices: Vec<String> = {
+        let mut statement = conn
+            .prepare("SELECT device_key FROM revoked_devices ORDER BY device_key ASC")
+            .expect("prepare revoked read");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("revoked rows");
+        rows.collect::<Result<Vec<_>, _>>().expect("revoked")
+    };
+    let key_packages: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT key_package_id, owner, key_package_bytes
+                 FROM sql_key_packages
+                 ORDER BY key_package_id ASC",
+            )
+            .expect("prepare kp read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .expect("kp rows");
+        rows.collect::<Result<Vec<_>, _>>().expect("kp")
+    };
+
+    // 5. Replay the prefix through a real HttpDeliveryService — the same
+    //    RAM core the legacy engine snapshotted — and publish the core
+    //    KeyPackages into it (their ops are not re-derived; see doc).
+    let prefix_len = prefix_in_snapshot.unwrap_or(0).min(total_ops);
+    let mut service = finitechat_delivery::HttpDeliveryService::with_limits(
+        finitechat_server::finite_delivery_limits(),
+    );
+    for entry in &entries[..prefix_len] {
+        service
+            .publish(target_of(entry), entry.message.clone())
+            .expect("prefix replay publish");
+    }
+    for (key_package_id, owner, bytes) in &key_packages {
+        service
+            .publish_key_package(HttpKeyPackagePublication {
+                key_package_id: HttpKeyPackageId::new(key_package_id.clone()),
+                owner: MemberId::new(owner.clone()),
+                key_package: KeyPackage::new(bytes.clone()),
+            })
+            .expect("prefix key package");
+    }
+
+    // 6. Write the legacy tables.
+    conn.execute_batch(
+        "CREATE TABLE http_delivery_ops (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            body_json TEXT NOT NULL
+        );
+        CREATE TABLE http_state_snapshots_v2 (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_op_seq INTEGER NOT NULL,
+            snapshot_zstd BLOB NOT NULL
+        );
+        CREATE TABLE http_account_rooms (
+            account_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            PRIMARY KEY(account_id, room_id)
+        );
+        CREATE TABLE http_room_memberships (
+            room_id TEXT PRIMARY KEY,
+            projection_json TEXT NOT NULL
+        );",
+    )
+    .expect("create legacy tables");
+
+    for entry in &entries {
+        let target = target_of(entry);
+        let body = serde_json::json!({
+            "PublishMessage": {
+                "target": target,
+                "message": entry.message,
+            }
+        });
+        conn.execute(
+            "INSERT INTO http_delivery_ops (kind, body_json) VALUES ('publish_message', ?1)",
+            params![body.to_string()],
+        )
+        .expect("write op row");
+    }
+
+    if prefix_len > 0 {
+        // The snapshot document mirrors the legacy DurableStateSnapshot:
+        // the replayed service, the current inventory rows (so the fold's
+        // re-seed round-trips), and the revoked set. Inventory records keep
+        // their stored JSON verbatim; the fields the table does not carry
+        // (payload bytes, finite metadata) are exactly what the serving
+        // engine re-synthesizes as empty when it loads the table.
+        let inventory_json: Vec<serde_json::Value> = inventory_rows
+            .iter()
+            .map(|(key_package_id, owner, state)| {
+                serde_json::json!({
+                    "key_package_id": serde_json::from_str::<serde_json::Value>(key_package_id)
+                        .expect("stored id json"),
+                    "owner": serde_json::from_str::<serde_json::Value>(owner)
+                        .expect("stored owner json"),
+                    "key_package": {"bytes": []},
+                    "state": serde_json::from_str::<serde_json::Value>(state)
+                        .expect("stored state json"),
+                    "finite_metadata": null,
+                })
+            })
+            .collect();
+        let snapshot = serde_json::json!({
+            "service": service,
+            "key_package_inventory": inventory_json,
+            "revoked_devices": revoked_devices,
+        });
+        let compressed =
+            zstd::encode_all(snapshot.to_string().as_bytes(), 3).expect("compress snapshot");
+        conn.execute(
+            "INSERT INTO http_state_snapshots_v2 (id, last_op_seq, snapshot_zstd)
+             VALUES (1, ?1, ?2)",
+            params![prefix_len as i64, compressed],
+        )
+        .expect("write v2 snapshot");
+        // The legacy writer pruned the covered prefix.
+        conn.execute(
+            "DELETE FROM http_delivery_ops WHERE seq <= ?1",
+            params![prefix_len as i64],
+        )
+        .expect("prune covered prefix");
+    }
+
+    // Memberships + directory: copied verbatim from the normalized homes.
+    let checkpoint = read_normalized_checkpoint(path);
+    let rooms = checkpoint["rooms"].as_object().expect("checkpoint rooms");
+    for (room_id, projection) in rooms {
+        conn.execute(
+            "INSERT INTO http_room_memberships (room_id, projection_json) VALUES (?1, ?2)",
+            params![room_id, projection.to_string()],
+        )
+        .expect("write membership row");
+    }
+    {
+        let mut statement = conn
+            .prepare("SELECT account_id, room_id, record_json FROM account_room_directory")
+            .expect("prepare directory read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .expect("directory rows");
+        for row in rows {
+            let (account_id, room_id, record_json) = row.expect("directory row");
+            conn.execute(
+                "INSERT INTO http_account_rooms (account_id, room_id, record_json)
+                 VALUES (?1, ?2, ?3)",
+                params![account_id, room_id, record_json],
+            )
+            .expect("write directory row");
+        }
+    }
+
+    // 7. Empty the normalized tables and clear the fold marker: the file
+    //    now looks exactly like a pre-cutover database.
+    conn.execute_batch(
+        "DELETE FROM delivery_entries;
+         DELETE FROM group_commit_epochs;
+         DELETE FROM delivery_routes;
+         DELETE FROM sql_key_packages;
+         DELETE FROM account_room_directory;
+         DELETE FROM revoked_devices;
+         DELETE FROM room_state_checkpoint;
+         DELETE FROM server_meta WHERE key = 'op_log_fold_complete';",
+    )
+    .expect("clear normalized tables");
+    total_ops
+}
+
+/// Boot the normalized engine on a fabricated legacy database (running the
+/// one-time fold), then prove the full history, the membership projection,
+/// the directory, the KeyPackage inventory, revocation, seq continuation,
+/// and the frozen legacy tables — then boot again to prove the
+/// steady-state single load path.
+#[tokio::test]
+async fn chat_store_swap_fold_serves_full_legacy_history_on_the_normalized_engine() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let carol = DeviceRef::new("carol", "carol-tablet");
+    let room_id = "room-cutover-fold".to_owned();
+    let mls_group_id = "mls-cutover-fold".to_owned();
+
+    // The pre-cutover era, served by the (only) engine: bootstrap, chat, a
+    // membership commit with a claimed + acked Welcome, more chat, then a
+    // second membership commit.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("pre-snapshot message {index}").as_bytes(),
+            &format!("pre-snapshot-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let add_bob = add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-cutover-fold-1",
+        "commit-cutover-fold-1",
+    )
+    .await;
+    for index in 0..2 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &bob,
+            1,
+            format!("post-add message {index}").as_bytes(),
+            &format!("post-add-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    state.snapshot_now().expect("cutover-era checkpoint");
+    drop(app);
+    drop(state);
+    let legacy_entry_count =
+        sync_all_group_entries(&http_router(persistent_state(&db_path)), &room_id)
+            .await
+            .len();
+    // Fabricate the legacy shape with a snapshot covering all but the last
+    // two entries: the fold must transplant the snapshot base and replay the
+    // pruned tail.
+    let total_ops = defold_into_legacy_shape(&db_path, Some(legacy_entry_count - 2));
+    assert!(
+        total_ops > legacy_entry_count,
+        "the fixture must include at least one inbox welcome op ({total_ops} ops)"
+    );
+
+    // Cutover boot: the fold runs inside this boot and the normalized
+    // engine serves.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+
+    // Full history survived the fold: every legacy entry, same order.
+    let entries = sync_all_group_entries(&app, &room_id).await;
+    assert_eq!(entries.len(), legacy_entry_count);
+    let add_carol = add_device_to_room_at_epoch(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &carol,
+        1,
+        "welcome-cutover-fold-2",
+        "commit-cutover-fold-2",
+    )
+    .await;
+    assert_eq!(
+        entries.last().expect("head entry").0 + 1,
+        add_carol.seq,
+        "seq assignment continues from the folded head"
+    );
+    // The first three entries predate the v2 snapshot horizon: their op-log
+    // rows were pruned, so they could only have come through the fold's
+    // snapshot transplant.
+    let prefix_payload = String::from_utf8_lossy(&entries[2].2).to_string();
+    assert!(
+        prefix_payload.contains("pre-snapshot-msg-2"),
+        "the pruned prefix must survive via the snapshot transplant"
+    );
+
+    // The membership projection survived: bob (added at the commit) sees the
+    // commit and everything after, but not the pre-add entries.
+    let response = post_json(
+        app.clone(),
+        "/sync/group",
+        &GroupSyncRequest {
+            group_id: group_id(&room_id),
+            after_seq: 0,
+            limit: 100,
+            requester: Some(member_for_device(&bob)),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: HttpSyncPage = read_json(response).await;
+    let bob_first = page.entries.first().expect("bob sees his commit").seq;
+    assert_eq!(bob_first, add_bob.seq);
+
+    // The account-room directory survived with both devices activated.
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/list",
+        &ListAccountRoomDirectoryRequest {
+            account_id: "alice".to_owned(),
+            after_room_id: None,
+            limit: 10,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: ListAccountRoomDirectoryResponse = read_json(response).await;
+    assert_eq!(listed.rooms.len(), 1);
+    assert_eq!(
+        listed.rooms[0]["current_epoch"].as_u64().expect("epoch"),
+        2,
+        "both add commits advanced the directory epoch"
+    );
+    // The directory is account-scoped: each member's own record must exist
+    // with that account's device active (the claimed-and-acked welcomes).
+    for (account_id, device_id) in [
+        ("alice", "alice-laptop"),
+        ("bob", "bob-phone"),
+        ("carol", "carol-tablet"),
+    ] {
+        let response = post_json(
+            app.clone(),
+            "/account-rooms/list",
+            &ListAccountRoomDirectoryRequest {
+                account_id: account_id.to_owned(),
+                after_room_id: None,
+                limit: 10,
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "directory for {account_id}"
+        );
+        let listed: ListAccountRoomDirectoryResponse = read_json(response).await;
+        assert_eq!(listed.rooms.len(), 1, "{account_id} still lists the room");
+        let devices = listed.rooms[0]["devices"].as_array().expect("devices");
+        assert!(
+            devices.iter().any(|device| {
+                device["device"]["device_id"] == device_id
+                    && device["active"].as_bool().unwrap_or(false)
+            }),
+            "{account_id}/{device_id} must be active after the fold"
+        );
+    }
+
+    // Seq assignment continues from the folded head and the room accepts a
+    // current-epoch publish.
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &carol,
+        2,
+        b"post-fold message",
+        "post-fold-msg",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the normalized engine must accept current-epoch publishes after the fold"
+    );
+    let accepted: EventAccepted = read_json(response).await;
+    assert_eq!(accepted.seq, add_carol.seq + 1);
+
+    // The legacy tables are frozen: no op-log rows appear for normalized
+    // writes.
+    let ops_after_fold = {
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.query_row("SELECT COUNT(*) FROM http_delivery_ops", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("op count")
+    };
+
+    drop(app);
+    drop(state);
+
+    // Steady-state boot: checkpoint + delivery-entry tail replay (the fold
+    // marker prevents a re-fold). The post-fold entry must be there and the
+    // next seq continues.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let entries = sync_all_group_entries(&app, &room_id).await;
+    assert_eq!(entries.len(), legacy_entry_count + 2);
+    assert_eq!(entries.last().expect("head").0, add_carol.seq + 1);
+    let ops_after_restart = {
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.query_row("SELECT COUNT(*) FROM http_delivery_ops", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("op count")
+    };
+    assert_eq!(
+        ops_after_fold, ops_after_restart,
+        "the normalized engine never appends to the legacy op log"
+    );
+    assert!(ops_after_restart > 0, "the legacy era wrote ops");
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn add_device_to_room_at_epoch(
+    app: &Router,
+    room_id: &str,
+    mls_group_id: &str,
+    sender: &DeviceRef,
+    added: &DeviceRef,
+    epoch: u64,
+    welcome_id: &str,
+    idempotency_key: &str,
+) -> CommitAccepted {
+    let request = submit_add_device_request_at_epoch_with_ids(
+        room_id,
+        mls_group_id,
+        sender,
+        added,
+        epoch,
+        welcome_id,
+        idempotency_key,
+    );
+    publish_and_claim_key_package_for_add(app, &request).await;
+    let response = post_json(app.clone(), "/commits", &request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: CommitAccepted = read_json(response).await;
+    let response = post_json(
+        app.clone(),
+        "/welcomes/claim",
+        &ClaimWelcomesRequest {
+            recipient: member_for_device(added),
+            limit: 10,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = post_json(
+        app.clone(),
+        "/welcomes/ack",
+        &AckWelcomeRequest {
+            message_id: id(welcome_id),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    accepted
+}
+
+/// A checkpoint that merely lags (the crash window between an accepted
+/// publish and the cadence refresh) is absorbed safely: boot replays the
+/// delivery-entry tails and converges. This is the safe direction of the
+/// #770 invariant — a stale checkpoint can never serve stale state.
+#[tokio::test]
+async fn chat_store_swap_boot_absorbs_a_stale_checkpoint_by_replaying_entry_tails() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-phone");
+    let room_id = "room-stale-checkpoint".to_owned();
+    let mls_group_id = "mls-stale-checkpoint".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let add_bob = add_device_to_room(
+        &app,
+        &room_id,
+        &mls_group_id,
+        &alice,
+        &bob,
+        "welcome-stale-checkpoint",
+        "commit-stale-checkpoint",
+    )
+    .await;
+
+    // Advance the entries far past the checkpoint WITHOUT letting the
+    // cadence refresh it (the cadence is thousands of ops; a handful of
+    // publishes never triggers it). This is the synthetic freeze: the
+    // durable room structure stays at its last value while the delivery
+    // log runs ahead — exactly the 2026-08-29 lat2 shape.
+    let mut head = add_bob.seq;
+    for index in 0..5 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &bob,
+            1,
+            format!("frozen-window message {index}").as_bytes(),
+            &format!("frozen-window-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted: EventAccepted = read_json(response).await;
+        head = accepted.seq;
+    }
+    drop(app);
+    drop(state);
+    {
+        let checkpoint = read_normalized_checkpoint(&db_path);
+        let stored_head = checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("checkpoint last_seq");
+        assert!(
+            stored_head < head,
+            "checkpoint must lag the entries for this test (stored {stored_head}, head {head})"
+        );
+    }
+
+    // Boot: the tails replay, the projection converges to the entry head,
+    // and the boot persists the refreshed checkpoint.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let entries = sync_all_group_entries(&app, room_id.as_str()).await;
+    assert_eq!(entries.last().expect("head").0, head);
+    drop(app);
+    drop(state);
+    let checkpoint = read_normalized_checkpoint(&db_path);
+    assert_eq!(
+        checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("refreshed"),
+        head,
+        "boot must persist the converged checkpoint"
+    );
+}
+
+/// A checkpoint that claims history the delivery entries do not hold fails
+/// boot closed. Divergence is impossible-or-blocking, never absorbable —
+/// the #770 fault-injection carried forward.
+#[tokio::test]
+async fn chat_store_swap_boot_fails_closed_when_the_checkpoint_is_ahead_of_the_entries() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-checkpoint-ahead".to_owned();
+    let mls_group_id = "mls-checkpoint-ahead".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    let request = append_application_request(
+        &room_id,
+        &mls_group_id,
+        &alice,
+        0,
+        b"checkpoint-ahead message",
+        "checkpoint-ahead-msg",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(app);
+    drop(state);
+    drop(persistent_state(&db_path));
+
+    // Freeze the checkpoint AHEAD of the route head: claim the room saw
+    // five more entries than the delivery log holds.
+    {
+        let mut checkpoint = read_normalized_checkpoint(&db_path);
+        let stored = checkpoint["rooms"][room_id.as_str()]["last_seq"]
+            .as_u64()
+            .expect("checkpoint last_seq") as i64;
+        checkpoint["rooms"][room_id.as_str()]["last_seq"] = serde_json::json!(stored + 5);
+        write_normalized_checkpoint(&db_path, &checkpoint);
+    }
+
+    let error = HttpServerState::from_sqlite_path(&db_path)
+        .expect_err("boot must refuse a checkpoint ahead of the entries");
+    assert!(
+        matches!(error, DurableStoreError::CheckpointDivergence { .. }),
+        "expected CheckpointDivergence, got {error:?}"
+    );
+}
+
+/// An undecodable checkpoint is corruption, not an empty one: boot refuses
+/// rather than silently re-deriving from nothing.
+#[tokio::test]
+async fn chat_store_swap_boot_fails_closed_on_an_undecodable_checkpoint() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-checkpoint-corrupt".to_owned();
+    let mls_group_id = "mls-checkpoint-corrupt".to_owned();
+
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    drop(app);
+    drop(state);
+    drop(persistent_state(&db_path));
+
+    {
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute(
+            "UPDATE room_state_checkpoint SET state_zstd = ?1 WHERE id = 1",
+            params![b"not-zstd-at-all".to_vec()],
+        )
+        .expect("corrupt checkpoint");
+    }
+
+    let error = HttpServerState::from_sqlite_path(&db_path)
+        .expect_err("boot must refuse an undecodable checkpoint");
+    // Fail-closed is the contract; the corrupt blob surfaces as a Json/Io
+    // decode failure inside the checkpoint load.
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("Io") || rendered.contains("Sqlite") || rendered.contains("Json"),
+        "unexpected error for a corrupt checkpoint: {rendered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Replay-diff: fold fidelity.
+//
+// Synthetic mode (CI): serve the 4,200-op mixed fixture through the
+// normalized engine, fabricate the legacy shape from it, then fold a copy
+// and diff every observable — fold(de-fold(N)) must equal N. Byte-equal or
+// it does not ship.
+//
+// Set REPLAY_DIFF_DB=/path/to/database-copy to run the same proof against a
+// production database copy (never the live file): there the legacy shape is
+// real, so the diff proves the fold's output against the legacy tables
+// themselves — the checkpoint must equal the (reconciled) projection rows,
+// the directory must be row-for-row equal, and the folded entries must
+// equal an INDEPENDENT replay of the v2 snapshot + op tail rebuilt in this
+// test from the public delivery contract.
+// ---------------------------------------------------------------------------
+
+struct ReplayDiffCoverage {
+    rooms: usize,
+    room_entries: usize,
+    inbox_recipients: usize,
+    inbox_entries: usize,
+    inventory_owners: usize,
+    directory_rows: usize,
+}
+
+async fn build_replay_diff_fixture(path: &std::path::Path) {
+    let rooms = [
+        (
+            "diff-room-alpha".to_owned(),
+            "diff-mls-alpha".to_owned(),
+            DeviceRef::new("alpha", "alpha-laptop"),
+        ),
+        (
+            "diff-room-beta".to_owned(),
+            "diff-mls-beta".to_owned(),
+            DeviceRef::new("beta", "beta-laptop"),
+        ),
+        (
+            "diff-room-gamma".to_owned(),
+            "diff-mls-gamma".to_owned(),
+            DeviceRef::new("gamma", "gamma-laptop"),
+        ),
+    ];
+    let mut epochs = [0u64, 0, 0];
+    let mut added_devices: Vec<DeviceRef> = Vec::new();
+
+    let state = persistent_state(path);
+    let app = http_router(state.clone());
+    for (room_id, mls_group_id, creator) in &rooms {
+        bootstrap_room(&app, room_id, mls_group_id, creator).await;
+    }
+
+    const OPS: usize = 4_200;
+    for index in 0..OPS {
+        let room = index % rooms.len();
+        let (room_id, mls_group_id, creator) = &rooms[room];
+        if index % 90 == 40 {
+            // Membership commit: publish + claim a KeyPackage, commit the
+            // add, then claim + ack the Welcome.
+            let device = DeviceRef::new(format!("member-{index}"), format!("member-{index}-phone"));
+            let epoch = epochs[room];
+            add_device_to_room_at_epoch(
+                &app,
+                room_id,
+                mls_group_id,
+                creator,
+                &device,
+                epoch,
+                &format!("welcome-diff-{index}"),
+                &format!("commit-diff-{index}"),
+            )
+            .await;
+            epochs[room] += 1;
+            added_devices.push(device);
+        } else if index % 140 == 70 {
+            // KeyPackage churn + revocation for a device that never joins a
+            // room.
+            let device = DeviceRef::new(format!("churn-{index}"), format!("churn-{index}-laptop"));
+            publish_key_package_for_device(&app, &device, &format!("kp-churn-{index}")).await;
+            revoke_device(&app, &device).await;
+        } else if index % 11 == 3 {
+            // Raw delivery-contract group publish (below the typed layer).
+            let request = PublishMessageRequest {
+                target: group_target(group_id(room_id), room_id.as_bytes().to_vec(), None),
+                message: group_message(
+                    &format!("raw-group-{index}"),
+                    room_id.as_bytes().to_vec(),
+                    format!("raw group body {index}").as_bytes(),
+                ),
+                idempotency_key: None,
+            };
+            state.publish_message(request).expect("raw group publish");
+        } else if index % 11 == 8 {
+            // Raw inbox publish to a member that received a Welcome.
+            let Some(recipient) = added_devices.last() else {
+                continue;
+            };
+            let member = member_for_device(recipient);
+            let request = PublishMessageRequest {
+                target: HttpPublishTarget::Inbox {
+                    recipient: member.clone(),
+                },
+                message: welcome_message(
+                    &format!("raw-inbox-{index}"),
+                    member,
+                    format!("raw inbox body {index}").as_bytes(),
+                ),
+                idempotency_key: None,
+            };
+            state.publish_message(request).expect("raw inbox publish");
+        } else if index % 6 == 5 {
+            // Unclaimed KeyPackage inventory churn.
+            let device = DeviceRef::new(format!("stock-{index}"), format!("stock-{index}-tablet"));
+            publish_key_package_for_device(&app, &device, &format!("kp-stock-{index}")).await;
+        } else {
+            // Typed application event from the (never-removed) creator.
+            let request = append_application_request(
+                room_id,
+                mls_group_id,
+                creator,
+                epochs[room],
+                format!("diff message {index}").as_bytes(),
+                &format!("diff-msg-{index}"),
+            );
+            let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "fixture event {index} in {room_id} at epoch {}",
+                epochs[room]
+            );
+        }
+    }
+    // Persist the live room map so the de-fold fabricates membership rows
+    // at the serving head (the legacy live path upserted per commit; a
+    // stale checkpoint would fabricate the frozen-#770 shape instead).
+    state.snapshot_now().expect("fixture checkpoint");
+    drop(app);
+    drop(state);
+}
+
+async fn publish_key_package_for_device(app: &Router, device: &DeviceRef, id: &str) {
+    let upload = UploadKeyPackageRequest {
+        key_package_id: id.to_owned(),
+        owner: device.clone(),
+        key_package_ref: format!("ref-{id}"),
+        key_package_hash: format!("hash-{id}"),
+        key_package_payload: format!("payload-{id}").into_bytes(),
+    };
+    let publication = HttpKeyPackagePublication {
+        key_package_id: HttpKeyPackageId::new(id.as_bytes().to_vec()),
+        owner: member_for_device(&upload.owner),
+        key_package: KeyPackage::new(serde_json::to_vec(&upload).expect("upload json")),
+    };
+    let response = post_json(app.clone(), "/key-packages", &publication).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn read_legacy_room_projections(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let conn = Connection::open(path).expect("open legacy copy");
+    let mut statement = conn
+        .prepare("SELECT room_id, projection_json FROM http_room_memberships ORDER BY room_id")
+        .expect("prepare membership read");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("membership rows");
+    let mut rooms = std::collections::BTreeMap::new();
+    for row in rows {
+        let (room_id, json) = row.expect("row");
+        rooms.insert(
+            room_id,
+            serde_json::from_str(&json).expect("projection json"),
+        );
+    }
+    rooms
+}
+
+fn read_directory_rows(
+    path: &std::path::Path,
+    table: &str,
+) -> std::collections::BTreeMap<(String, String), serde_json::Value> {
+    let conn = Connection::open(path).expect("open copy");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT account_id, room_id, record_json FROM {table} ORDER BY account_id, room_id"
+        ))
+        .expect("prepare directory read");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("directory rows");
+    let mut directory = std::collections::BTreeMap::new();
+    for row in rows {
+        let (account_id, room_id, json) = row.expect("row");
+        directory.insert(
+            (account_id, room_id),
+            serde_json::from_str(&json).expect("directory record json"),
+        );
+    }
+    directory
+}
+
+fn read_inventory_owners(path: &std::path::Path) -> Vec<MemberId> {
+    let conn = Connection::open(path).expect("open copy");
+    let mut statement = conn
+        .prepare("SELECT owner_json FROM http_key_package_inventory")
+        .expect("prepare inventory owners");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("inventory owner rows");
+    let mut owners = Vec::new();
+    for row in rows {
+        owners.push(serde_json::from_str(&row.expect("row")).expect("owner json"));
+    }
+    owners
+}
+
+fn read_welcome_recipients(path: &std::path::Path) -> Vec<MemberId> {
+    let conn = Connection::open(path).expect("open copy");
+    let mut statement = conn
+        .prepare("SELECT recipient_json FROM http_welcome_claims")
+        .expect("prepare welcome recipients");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("welcome recipient rows");
+    let mut recipients = Vec::new();
+    for row in rows {
+        recipients.push(serde_json::from_str(&row.expect("row")).expect("recipient json"));
+    }
+    recipients
+}
+
+/// Independently rebuild the pre-cutover delivery state from the legacy
+/// tables using ONLY the public delivery contract: decode the v2 snapshot's
+/// service, replay the op tail into it, and return its route snapshots.
+/// This is a second implementation of the reader in `src/cutover.rs` — the
+/// replay-diff's ground truth.
+fn independent_legacy_replay(
+    path: &std::path::Path,
+) -> Vec<finitechat_delivery::HttpRouteSnapshot> {
+    let conn = Connection::open(path).expect("open legacy copy");
+    let horizon: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT last_op_seq FROM http_state_snapshots_v2 WHERE id = 1), 0)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("snapshot horizon");
+    let mut service = if horizon > 0 {
+        let compressed: Vec<u8> = conn
+            .query_row(
+                "SELECT snapshot_zstd FROM http_state_snapshots_v2 WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("snapshot blob");
+        let plain = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
+        let document: serde_json::Value = serde_json::from_slice(&plain).expect("snapshot json");
+        serde_json::from_value(document["service"].clone()).expect("snapshot service")
+    } else {
+        finitechat_delivery::HttpDeliveryService::with_limits(
+            finitechat_server::finite_delivery_limits(),
+        )
+    };
+    let mut statement = conn
+        .prepare("SELECT body_json FROM http_delivery_ops WHERE seq > ?1 ORDER BY seq ASC")
+        .expect("prepare op read");
+    let rows = statement
+        .query_map(params![horizon], |row| row.get::<_, String>(0))
+        .expect("op rows");
+    for row in rows {
+        let body: serde_json::Value = serde_json::from_str(&row.expect("op row")).expect("op json");
+        let Some(variant) = body
+            .as_object()
+            .and_then(|object| object.keys().next().cloned())
+        else {
+            continue;
+        };
+        if variant != "PublishMessage" {
+            // KeyPackage/revocation ops do not move delivery queues.
+            continue;
+        }
+        let target: HttpPublishTarget =
+            serde_json::from_value(body["PublishMessage"]["target"].clone()).expect("op target");
+        let message: TransportMessage =
+            serde_json::from_value(body["PublishMessage"]["message"].clone()).expect("op message");
+        service.publish(target, message).expect("replay publish");
+    }
+    service.route_snapshots()
+}
+
+#[tokio::test]
+async fn chat_store_swap_replay_diff_fold_is_the_identity_on_the_legacy_shape() {
+    let temp = TempDir::new().expect("tempdir");
+    let production_copy = std::env::var("REPLAY_DIFF_DB")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let (source_path, synthetic) = match &production_copy {
+        Some(value) => {
+            eprintln!("replay-diff: production copy mode ({})", value.display());
+            (value.clone(), false)
+        }
+        None => {
+            eprintln!("replay-diff: synthetic fixture mode");
+            let fixture = temp.path().join("fixture.sqlite3");
+            build_replay_diff_fixture(&fixture).await;
+            (fixture, true)
+        }
+    };
+
+    // In synthetic mode the source is a normalized database: fabricate the
+    // legacy shape on a copy first, with the last ~1/14th of the ops as the
+    // pruned-tail (mirroring the old fixture's periodic snapshots).
+    let legacy_path = temp.path().join("legacy-shape.sqlite3");
+    copy_database(&source_path, &legacy_path);
+    if synthetic {
+        let total_entries: i64 = {
+            let conn = Connection::open(&legacy_path).expect("open fixture");
+            conn.query_row("SELECT COUNT(*) FROM delivery_entries", [], |row| {
+                row.get(0)
+            })
+            .expect("entry count")
+        };
+        defold_into_legacy_shape(&legacy_path, Some((total_entries as usize) * 13 / 14));
+    }
+
+    // The independent ground truth from the legacy shape, computed BEFORE
+    // the fold mutates anything (the fold's reader persists its #770
+    // reconciliation into the legacy tables).
+    let ground_truth_routes = independent_legacy_replay(&legacy_path);
+
+    // Fold a copy and serve it.
+    let normalized_path = temp.path().join("folded.sqlite3");
+    copy_database(&legacy_path, &normalized_path);
+    let state = persistent_state(&normalized_path);
+    let app = http_router(state.clone());
+
+    // 1. Room-membership projections: the legacy tables' post-reconciliation
+    //    rows vs the normalized checkpoint. Same room set, and every
+    //    projection (intervals, epochs, heads, admins, departed) equal as
+    //    JSON documents.
+    let legacy_rooms = read_legacy_room_projections(&legacy_path);
+    let normalized_checkpoint = read_normalized_checkpoint(&normalized_path);
+    let normalized_rooms_value = normalized_checkpoint
+        .get("rooms")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let normalized_rooms = normalized_rooms_value
+        .as_object()
+        .expect("checkpoint rooms object");
+    let legacy_room_ids: std::collections::BTreeSet<&String> = legacy_rooms.keys().collect();
+    let normalized_room_ids: std::collections::BTreeSet<&String> =
+        normalized_rooms.keys().collect();
+    assert_eq!(
+        legacy_room_ids, normalized_room_ids,
+        "room projection sets differ between the legacy tables and the fold"
+    );
+    for (room_id, legacy_projection) in &legacy_rooms {
+        assert_eq!(
+            Some(legacy_projection),
+            normalized_rooms.get(room_id),
+            "room {room_id} membership projection differs after the fold"
+        );
+    }
+
+    // 2. Per-account directory: identical rows.
+    let legacy_directory = read_directory_rows(&legacy_path, "http_account_rooms");
+    let normalized_directory = read_directory_rows(&normalized_path, "account_room_directory");
+    assert_eq!(
+        legacy_directory, normalized_directory,
+        "account-room directory differs after the fold"
+    );
+
+    // 3. Delivery entries: the folded routes must equal the independent
+    //    replay byte-for-byte (seq, message id, payload).
+    let folded_routes = {
+        let conn = Connection::open(&normalized_path).expect("open folded copy");
+        let mut statement = conn
+            .prepare(
+                "SELECT r.plane, r.route_key, e.seq, e.message_id, e.payload
+                 FROM delivery_entries e
+                 JOIN delivery_routes r ON r.route_id = e.route_id
+                 ORDER BY r.plane ASC, r.route_key ASC, e.seq ASC",
+            )
+            .expect("prepare folded entry read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    u64::try_from(row.get::<_, i64>(2)?).expect("seq"),
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })
+            .expect("folded entry rows");
+        rows.collect::<Result<Vec<_>, _>>().expect("folded entries")
+    };
+    let mut folded_index = 0usize;
+    let mut room_entries_total = 0usize;
+    for route in &ground_truth_routes {
+        let plane = match route.plane {
+            finitechat_delivery::HttpDeliveryPlane::Group => "group",
+            finitechat_delivery::HttpDeliveryPlane::Inbox => "inbox",
+        };
+        let mut folded_for_route = Vec::new();
+        while folded_index < folded_routes.len()
+            && folded_routes[folded_index].0 == plane
+            && folded_routes[folded_index].1 == route.route_key
+        {
+            folded_for_route.push(folded_routes[folded_index].clone());
+            folded_index += 1;
+        }
+        assert_eq!(
+            folded_for_route.len(),
+            route.entries.len(),
+            "entry count for {plane} route {:?} differs after the fold",
+            route.route_key
+        );
+        for (folded, queued) in folded_for_route.iter().zip(&route.entries) {
+            assert_eq!(folded.2, queued.seq, "seq differs on {plane} route");
+            assert_eq!(
+                folded.3,
+                queued.message.id.as_slice(),
+                "message id differs on {plane} route at seq {}",
+                queued.seq
+            );
+            assert_eq!(
+                folded.4, queued.message.payload,
+                "payload differs on {plane} route at seq {}",
+                queued.seq
+            );
+        }
+        if plane == "group" {
+            room_entries_total += route.entries.len();
+        }
+    }
+    assert_eq!(
+        folded_index,
+        folded_routes.len(),
+        "every folded entry must be matched by an independently replayed route"
+    );
+
+    // 4. Inbox observability through the serving contract: every recipient
+    //    with a durable welcome claim sees the same inbox the independent
+    //    replay holds.
+    let mut recipients = read_welcome_recipients(&legacy_path);
+    recipients.sort_by(|left, right| left.as_slice().cmp(right.as_slice()));
+    recipients.dedup();
+    let mut inbox_recipients = 0usize;
+    let mut inbox_entries_total = 0usize;
+    for recipient in &recipients {
+        let served = sync_all_inbox_entries(&app, recipient).await;
+        let truth = ground_truth_routes
+            .iter()
+            .find(|route| {
+                route.plane == finitechat_delivery::HttpDeliveryPlane::Inbox
+                    && route.route_key == recipient.as_slice()
+            })
+            .map(|route| {
+                route
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.seq, entry.message.payload.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            served,
+            truth,
+            "inbox for {:?} differs after the fold",
+            recipient.as_slice()
+        );
+        inbox_recipients += 1;
+        inbox_entries_total += served.len();
+    }
+
+    // 5. KeyPackage state: per-owner inventory counts through the public
+    //    contract. In synthetic mode the fold must reproduce the fixture's
+    //    pre-defold counts exactly (the snapshot carried them verbatim); on
+    //    a production copy the pre-fold cache may legitimately lag what the
+    //    replay re-seeds, so only the coverage count is asserted below.
+    let expected_inventory_counts = if synthetic {
+        let conn = Connection::open(&source_path).expect("open source fixture");
+        let mut statement = conn
+            .prepare(
+                "SELECT owner_json,
+                        SUM(CASE WHEN state_json LIKE '%Available%' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN state_json LIKE '%Claimed%' THEN 1 ELSE 0 END)
+                 FROM http_key_package_inventory GROUP BY owner_json",
+            )
+            .expect("prepare fixture inventory read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("fixture inventory rows");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("fixture inventory")
+            .into_iter()
+            .map(|(owner, available, claimed)| (owner, (available as u32, claimed as u32)))
+            .collect::<std::collections::HashMap<String, (u32, u32)>>()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let mut owners = read_inventory_owners(&legacy_path);
+    owners.sort_by(|left, right| left.as_slice().cmp(right.as_slice()));
+    owners.dedup();
+    for owner in &owners {
+        let response = post_json(
+            app.clone(),
+            "/key-packages/inventory",
+            &KeyPackageInventoryRequest {
+                owner: owner.clone(),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let inventory: HttpKeyPackageInventory = read_json(response).await;
+        if synthetic {
+            let owner_key = serde_json::to_string(owner).expect("owner json");
+            let expected = expected_inventory_counts
+                .get(&owner_key)
+                .copied()
+                .unwrap_or((0, 0));
+            assert_eq!(
+                (inventory.available, inventory.claimed),
+                expected,
+                "inventory for owner {:?} differs after the fold",
+                owner.as_slice()
+            );
+        }
+    }
+
+    let coverage = ReplayDiffCoverage {
+        rooms: legacy_rooms.len(),
+        room_entries: room_entries_total,
+        inbox_recipients,
+        inbox_entries: inbox_entries_total,
+        inventory_owners: owners.len(),
+        directory_rows: legacy_directory.len(),
+    };
+    eprintln!(
+        "replay-diff: {} rooms, {} room entries, {} inbox recipients ({} entries), \
+         {} inventory owners, {} directory rows — all observables equal",
+        coverage.rooms,
+        coverage.room_entries,
+        coverage.inbox_recipients,
+        coverage.inbox_entries,
+        coverage.inventory_owners,
+        coverage.directory_rows
+    );
+    // The synthetic fixture must actually exercise the shapes it exists for.
+    if synthetic {
+        assert!(
+            coverage.room_entries > 3_000,
+            "fixture must build thousands of ops"
+        );
+        assert!(coverage.rooms >= 3);
+        assert!(coverage.directory_rows > 30);
+    } else {
+        // The verified production replay-diff (lat2 copy, 2026-08-31). If
+        // these move, the fold changed — that is a review-level event.
+        assert_eq!(coverage.rooms, 290, "rooms");
+        assert_eq!(coverage.room_entries, 214_794, "room entries");
+        assert_eq!(coverage.directory_rows, 545, "directory rows");
+        assert_eq!(coverage.inventory_owners, 495, "inventory owners");
     }
 }

@@ -5,6 +5,22 @@
 //! admission, and the KeyPackage lifecycle. The richer finite-metadata
 //! columns (leases, device bindings, inventory counters) arrive in a later
 //! PR when the server-side inventory merges in.
+//!
+//! The cutover schema (PR 1 of the chat store swap) adds the engine's own
+//! durable homes for the state the legacy engine kept in
+//! `http_state_snapshots_v2` / `http_room_memberships` /
+//! `http_account_rooms`: `revoked_devices` (current state), and
+//! `account_room_directory` (current state, also derived in-transaction with
+//! commits). Room-membership projections live in exactly ONE durable
+//! structure, `room_state_checkpoint` — a boot memo of the derivation
+//! (per-room `last_seq` watermarks inside the snapshot) that is re-derived
+//! from `delivery_entries` tails at every boot and never trusted as
+//! authority on its own: a checkpoint that lags simply replays more entries,
+//! and one that disagrees with the entries fails boot closed.
+//!
+//! `server_meta` carries `op_log_fold_complete` once the one-time
+//! op-log fold (`crate::cutover`) has populated these tables from the legacy
+//! engine's state.
 
 use rusqlite::Connection;
 
@@ -54,6 +70,19 @@ pub(crate) fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_sql_kp_owner_state
             ON sql_key_packages(owner, state, key_package_id);
+        CREATE TABLE IF NOT EXISTS revoked_devices (
+            device_key TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS account_room_directory (
+            account_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            PRIMARY KEY(account_id, room_id)
+        );
+        CREATE TABLE IF NOT EXISTS room_state_checkpoint (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            state_zstd BLOB NOT NULL
+        );
         ",
     )?;
     conn.execute(
@@ -63,3 +92,9 @@ pub(crate) fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     Ok(())
 }
+
+/// `server_meta` key set by the one-time op-log fold (see `crate::cutover`).
+/// Its presence means the normalized tables are authoritative and the legacy
+/// tables (`http_delivery_ops`, `http_state_snapshots_v2`,
+/// `http_room_memberships`, `http_account_rooms`) are frozen migration input.
+pub(crate) const FOLD_COMPLETE_KEY: &str = "op_log_fold_complete";

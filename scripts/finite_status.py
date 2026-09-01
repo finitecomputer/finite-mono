@@ -23,6 +23,14 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Chat store swap (PR 1, 2026-08-31): the normalized engine is the only
+# engine; the first boot on a pre-cutover database runs the one-time op-log
+# fold. While the transitional reader/fold code is still compiled, every
+# status run shows the rollback window. PR 2 (cleanup/chat-store-delete-old)
+# deletes this constant and its line.
+CHAT_ENGINE_ROLLOUT_WINDOW_SINCE = "2026-08-31"
+CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-09-25"
+
 # Every operational name lives here. The contract test keeps entries that are
 # owned by Nix aligned with their declaring modules.
 CONTRACT: dict[str, Any] = {
@@ -1555,6 +1563,17 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         ),
         "exit_code": 0,
         "sections": sections,
+        # Informational tripwire, not a health verdict: it must never gate
+        # the exit code, only be impossible to miss while the window is open.
+        "chat_engine_rollback_window": {
+            "open_since": CHAT_ENGINE_ROLLOUT_WINDOW_SINCE,
+            "deletion_deadline": CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE,
+            "note": (
+                "normalized chat engine is the only engine; the first boot folds "
+                "pre-cutover databases; there is no engine flag, so rollback means "
+                "restoring the pre-fold backup and reverting the deploy"
+            ),
+        },
     }
     report["exit_code"] = report_exit_code(report)
     return report
@@ -1583,6 +1602,10 @@ def render_human(report: dict[str, Any]) -> str:
     lines = [
         f"Finite platform status — {report['generated_at']}",
         f"Overall {badge(report['overall_status'])}; exit {report['exit_code']}",
+        f"[AMBER] chat engine rollback window open "
+        f"(since {CHAT_ENGINE_ROLLOUT_WINDOW_SINCE}); rollback = restore pre-fold "
+        f"backup + revert deploy; reader/fold deletion PR due by "
+        f"{CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE}",
         "",
     ]
 

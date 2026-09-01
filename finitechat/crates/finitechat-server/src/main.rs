@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(path) = options.sqlite_path else {
                 return Err("snapshot requires --sqlite PATH".into());
             };
-            // Boot (snapshot + op-log tail replay) and write a fresh durable
-            // snapshot, so an operator can compact a stopped server's store
+            // Boot and write a fresh room-state checkpoint, so an operator
+            // can compact a stopped server's boot tail.
             // without waiting for the op-interval trigger.
             let state = finitechat_server::HttpServerState::from_sqlite_path(&path)?;
             state
@@ -57,7 +57,12 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             create_sqlite_parent_dir(&path)?;
             HttpServerState::from_sqlite_path(path)?
         }
-        None => HttpServerState::default(),
+        None => {
+            // In-memory servers have no durable state to roll back, but the
+            // banner keeps the transitional window visible on every boot.
+            finitechat_server::print_engine_rollout_banner();
+            HttpServerState::new()
+        }
     };
     if let Some(public_url) = public_url {
         state = state.with_public_url(public_url)?;
