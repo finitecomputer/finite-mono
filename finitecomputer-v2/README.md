@@ -102,9 +102,9 @@ compatibility targets.
 ## First Cleanup Targets
 
 See [docs/carry-over-manifest.md](docs/carry-over-manifest.md).
-See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) for the
-current deploy ownership split, and
-[docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
+See [../infra/README.md](../infra/README.md) and
+[../infra/runbooks/](../infra/runbooks/) for the current deploy ownership split,
+and [docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
 Hermes local/Docker/Kata/Phala proof ladder.
 
 ## Local SaaS
@@ -170,6 +170,7 @@ FC_RUNNER_CLASS=enclavia
 FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<enclave-uuid>
 ```
 
-See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) and
+See [docs/runner-contract-v1.md](docs/runner-contract-v1.md),
+[docs/runtime-control-contract.md](docs/runtime-control-contract.md), and
 [../infra/hosts/lat1/systemd/runner.env.example](../infra/hosts/lat1/systemd/runner.env.example)
-for the live runner env, provider CLI prerequisites, and acceptance criteria.
+for the live runner env, provider prerequisites, and acceptance criteria.

@@ -87,9 +87,9 @@ The pairing is stronger than a bare Markdown link:
 - Synthesized wiki Pages cite the Source Note, keeping opaque or unavailable
   blobs out of the primary reasoning surface.
 
-That extends the Source Note decision already present in [ADR
-0008](../adr/0008-store-assets-with-markdown-source-notes.md) while reversing
-only its earlier choice to place bytes inline in Folder Objects.
+That extends the Source Note decision captured in [ADR
+0044](../adr/0044-keep-bulk-asset-bytes-out-of-folder-objects.md), which keeps
+bulk asset bytes out of Folder Objects.
 
 ## Design implication
 
