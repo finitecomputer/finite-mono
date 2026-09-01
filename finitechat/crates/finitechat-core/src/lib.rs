@@ -326,6 +326,17 @@ pub struct OutboundDelivery {
     pub server_delivery: OutboundServerDeliveryState,
 }
 
+/// One room's durable sync cursor as surfaced to status probes: the last
+/// server seq this device has applied durably. This is the authoritative
+/// per-room resume point — NOT `client_app_events` max-seq, which is a
+/// different quantity and can diverge from it — so diagnostics read the
+/// cursor instead of guessing from the event log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRoomSyncCursor {
+    pub room_id: String,
+    pub last_applied_seq: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppOutboxDebugRow {
     pub room_id: String,
@@ -1012,6 +1023,9 @@ enum AppRuntimeCommand {
     RecentBridgeEvents {
         limit: u32,
         response: mpsc::SyncSender<Result<Vec<AppBridgeAppliedEvent>, FiniteChatCoreError>>,
+    },
+    RoomSyncCursors {
+        response: mpsc::SyncSender<Result<Vec<AppRoomSyncCursor>, FiniteChatCoreError>>,
     },
     SendRuntimeEvent {
         room_id: String,
@@ -2116,6 +2130,25 @@ impl FiniteChatRuntime {
             })?
     }
 
+    /// The device's durable per-room sync cursors (room id + last applied
+    /// seq), read through the runtime actor so a probe can never race a
+    /// concurrent apply. Pure read: no sync, no network, no state change.
+    pub fn room_sync_cursors(&self) -> Result<Vec<AppRoomSyncCursor>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::RoomSyncCursors {
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before reading room cursors".to_owned(),
+            })?
+    }
+
     #[cfg(test)]
     fn test_outbox(&self) -> Result<Vec<StoredOutboundMessage>, FiniteChatCoreError> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
@@ -2296,6 +2329,9 @@ fn spawn_app_runtime_worker(
                 }
                 AppRuntimeCommand::RecentBridgeEvents { limit, response } => {
                     let _ = response.send(state.recent_bridge_events(limit));
+                }
+                AppRuntimeCommand::RoomSyncCursors { response } => {
+                    let _ = response.send(Ok(state.room_sync_cursors()));
                 }
                 AppRuntimeCommand::SendRuntimeEvent {
                     room_id,
@@ -3261,6 +3297,20 @@ impl AppRuntimeState {
                     .collect()
             })
             .map_err(store_error)
+    }
+
+    /// Durable per-room cursors straight off the device's room state, in the
+    /// store's deterministic room order. Serves `room_sync_cursors` probes.
+    fn room_sync_cursors(&self) -> Vec<AppRoomSyncCursor> {
+        self.core
+            .device
+            .room_sync_cursors()
+            .into_iter()
+            .map(|cursor| AppRoomSyncCursor {
+                room_id: cursor.room_id,
+                last_applied_seq: cursor.after_seq,
+            })
+            .collect()
     }
 
     fn agent_bridge_apply_sync_hint(
@@ -17509,6 +17559,89 @@ mod tests {
                 .after_seq
                 > heartbeat_before_seq,
             "heartbeat reconciliation advances the durable room cursor"
+        );
+    }
+
+    #[test]
+    fn room_sync_cursors_read_surfaces_durable_room_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let runtime = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("creator").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "creator".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        // A device with no rooms reports no cursors; the read itself is a
+        // pure actor round-trip with no sync and no network.
+        assert!(runtime.room_sync_cursors().unwrap().is_empty());
+
+        let room_id = runtime
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Cursor room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .expect("created room is selected");
+        let cursors = runtime.room_sync_cursors().unwrap();
+        let cursor = cursors
+            .iter()
+            .find(|cursor| cursor.room_id == room_id)
+            .expect("the created room's durable cursor is exposed to probes");
+
+        runtime
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: room_id.clone(),
+                text: "advances the durable cursor".to_owned(),
+                metadata_json: None,
+            })
+            .unwrap();
+        let advanced = runtime
+            .room_sync_cursors()
+            .unwrap()
+            .into_iter()
+            .find(|cursor| cursor.room_id == room_id)
+            .expect("cursor survives the send");
+        assert!(
+            advanced.last_applied_seq > cursor.last_applied_seq,
+            "a successful send applies its entry and advances the exposed durable cursor"
+        );
+    }
+
+    #[test]
+    fn room_sync_cursors_read_works_against_an_unreachable_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("offline").to_string_lossy().into_owned(),
+            server_url: unavailable_http_server_url(),
+            device_id: "offline".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        // The read must never depend on the outbound link: during an
+        // outage it is the one surface that still tells the truth.
+        assert_eq!(runtime.room_sync_cursors().unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn app_room_sync_cursor_serializes_as_flat_room_and_seq() {
+        let cursor = AppRoomSyncCursor {
+            room_id: "room-cursor-shape".to_owned(),
+            last_applied_seq: 41,
+        };
+        let json = serde_json::to_value(&cursor).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "room_id": "room-cursor-shape", "last_applied_seq": 41 })
+        );
+        assert_eq!(
+            serde_json::from_value::<AppRoomSyncCursor>(json).unwrap(),
+            cursor
         );
     }
 

@@ -40,9 +40,9 @@ use finitechat_client::{
     StoredAppMessage, StoredAppRoom, StoredAppRoomState, WelcomeAdmissionPolicy,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
-    AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions,
-    OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppRoomSyncCursor,
+    AppSentMessage, AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
+    OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
@@ -410,6 +410,7 @@ struct HermesServiceState {
     running_lock: Arc<Mutex<()>>,
     bridge_updates: Arc<(Mutex<u64>, Condvar)>,
     joined_account_ids: Arc<Mutex<Vec<String>>>,
+    server_stream: ServerStreamMonitor,
 }
 
 #[derive(Debug, Serialize)]
@@ -506,6 +507,7 @@ async fn prepare_hermes_service(
         running_lock: Arc::new(Mutex::new(())),
         bridge_updates: Arc::new((Mutex::new(0), Condvar::new())),
         joined_account_ids: Arc::new(Mutex::new(Vec::new())),
+        server_stream: ServerStreamMonitor::default(),
     };
     start_resident_bridge_sync(state.clone())?;
     let started = HermesServiceStarted {
@@ -557,6 +559,125 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .with_state(state)
 }
 
+/// Outbound link state for the sidecar's server sync, as the resident sync
+/// loop knows it. This is deliberately NOT the local hermes<->sidecar
+/// bridge that `hermes-bridge-status.json` describes (127.0.0.1 adapter to
+/// this service); it is this process's outbound connection to the Finite
+/// chat server — the two links fail independently and were conflated
+/// during the 2026-08-29 incident.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerStreamStatus {
+    /// `connecting` until the first cycle completes, then `connected` after
+    /// a successful cycle (stream open + hint/heartbeat applied, or a full
+    /// poll) and `reconnecting` after a failed one.
+    state: &'static str,
+    /// Unix ms when the outbound link of the last successful cycle was
+    /// established (cycle start: the sync stream is opened, or the poll
+    /// request sent, first thing inside each cycle).
+    last_established_unix_ms: Option<u64>,
+    /// Bounded error of the most recent failed cycle, with its timestamp.
+    last_error: Option<String>,
+    last_error_unix_ms: Option<u64>,
+}
+
+impl Default for ServerStreamStatus {
+    fn default() -> Self {
+        Self {
+            state: "connecting",
+            last_established_unix_ms: None,
+            last_error: None,
+            last_error_unix_ms: None,
+        }
+    }
+}
+
+/// Shared slot written only by the resident sync loop and read by
+/// `/readyz`. A poisoned lock reads as the last known state rather than
+/// failing the probe: the loop is the writer, so poison means the loop
+/// panicked mid-write, and the last durable value is still the best truth
+/// available.
+#[derive(Clone, Default)]
+struct ServerStreamMonitor(Arc<Mutex<ServerStreamStatus>>);
+
+impl ServerStreamMonitor {
+    fn record_established(&self, established_unix_ms: u64) {
+        if let Ok(mut status) = self.0.lock() {
+            status.state = "connected";
+            status.last_established_unix_ms = Some(established_unix_ms);
+            status.last_error = None;
+            status.last_error_unix_ms = None;
+        }
+    }
+
+    fn record_failure(&self, failed_unix_ms: u64, error: &FiniteChatCoreError) {
+        if let Ok(mut status) = self.0.lock() {
+            status.state = "reconnecting";
+            status.last_error = Some(bounded_error_summary(error));
+            status.last_error_unix_ms = Some(failed_unix_ms);
+        }
+    }
+
+    fn snapshot(&self) -> ServerStreamStatus {
+        match self.0.lock() {
+            Ok(status) => status.clone(),
+            // A panicked writer leaves the last written value in place;
+            // that is still the best truth available to the probe.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+/// Keep the surfaced error small: transport errors can embed whole HTTP
+/// bodies, and this string rides every `/readyz` response.
+const SERVER_STREAM_ERROR_SUMMARY_CHARS: usize = 240;
+
+fn bounded_error_summary(error: &FiniteChatCoreError) -> String {
+    let mut summary = error.to_string();
+    if summary.chars().count() > SERVER_STREAM_ERROR_SUMMARY_CHARS {
+        summary = summary
+            .chars()
+            .take(SERVER_STREAM_ERROR_SUMMARY_CHARS)
+            .collect();
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn server_stream_status_json(status: &ServerStreamStatus) -> Value {
+    json!({
+        "state": status.state,
+        "last_established_unix_ms": status.last_established_unix_ms,
+        "last_error": status.last_error,
+        "last_error_unix_ms": status.last_error_unix_ms,
+    })
+}
+
+/// How many per-room durable cursors `/readyz` reports. The cursor list is
+/// a diagnostic bound, not a directory: enough to spot a frozen or diverged
+/// room at a glance (tonight's incident needed a dedicated diagnostic tool
+/// to see even one) while keeping the probe response small on homes with
+/// many rooms.
+const READYZ_ROOM_CURSOR_LIMIT: usize = 32;
+
+fn room_cursors_summary_json(cursors: &[AppRoomSyncCursor]) -> Value {
+    let total = cursors.len();
+    json!({
+        // The durable resume point per room — deliberately NOT derived from
+        // client_app_events max-seq, which diverged from the real cursor by
+        // 10 seq on one agent during the 2026-08-29 incident.
+        "rooms": cursors
+            .iter()
+            .take(READYZ_ROOM_CURSOR_LIMIT)
+            .map(|cursor| json!({
+                "room_id": cursor.room_id,
+                "last_applied_seq": cursor.last_applied_seq,
+            }))
+            .collect::<Vec<_>>(),
+        "total": total,
+        "truncated": total > READYZ_ROOM_CURSOR_LIMIT,
+    })
+}
+
 fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError> {
     std::thread::Builder::new()
         .name("finitechat-resident-sync".to_owned())
@@ -564,6 +685,7 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
             let mut retry_millis = 250u64;
             let mut sync_immediately = true;
             loop {
+                let cycle_started_unix_ms = now_ms();
                 let result = if sync_immediately {
                     state.runtime.agent_bridge_poll_once()
                 } else {
@@ -573,6 +695,9 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                 };
                 match result {
                     Ok(bridge) => {
+                        state
+                            .server_stream
+                            .record_established(cycle_started_unix_ms);
                         retry_millis = 250;
                         sync_immediately = false;
                         let has_updates = bridge_sync_has_updates(&bridge);
@@ -587,7 +712,8 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                             signal_bridge_update(&state);
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        state.server_stream.record_failure(now_ms(), &error);
                         std::thread::sleep(Duration::from_millis(retry_millis));
                         retry_millis = (retry_millis.saturating_mul(2)).min(5_000);
                         sync_immediately = true;
@@ -665,6 +791,10 @@ async fn hermes_service_readyz(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let app = state.runtime.state().map_err(map_core_hermes_error)?;
+        let room_cursors = state
+            .runtime
+            .room_sync_cursors()
+            .map_err(map_core_hermes_error)?;
         Ok(json!({
             "status": "ready",
             // The runtime's own status line names quarantined rooms (e.g.
@@ -672,6 +802,12 @@ async fn hermes_service_readyz(
             // quarantined room is visible in the readiness probe without a
             // new file or route.
             "runtime_status": app.status,
+            // The sidecar's OUTBOUND link to the chat server, maintained by
+            // the resident sync loop. Distinct from the local
+            // hermes<->sidecar bridge that hermes-bridge-status.json
+            // describes; the two fail independently.
+            "server_stream": server_stream_status_json(&state.server_stream.snapshot()),
+            "room_cursors": room_cursors_summary_json(&room_cursors),
             "service": "finitechat-hermes",
             "version": env!("CARGO_PKG_VERSION"),
             "agent_home": state.agent_home.display().to_string(),
@@ -4457,6 +4593,103 @@ mod tests {
                 plaintext: b"event".to_vec(),
             }],
         }));
+    }
+
+    #[test]
+    fn server_stream_monitor_tracks_outage_and_recovery() {
+        let monitor = ServerStreamMonitor::default();
+
+        // Before the first resident cycle completes the link is honestly
+        // "connecting" — never a pretend "connected".
+        let initial = monitor.snapshot();
+        assert_eq!(initial.state, "connecting");
+        assert_eq!(initial.last_established_unix_ms, None);
+        assert_eq!(
+            server_stream_status_json(&initial),
+            serde_json::json!({
+                "state": "connecting",
+                "last_established_unix_ms": null,
+                "last_error": null,
+                "last_error_unix_ms": null,
+            })
+        );
+
+        monitor.record_established(1_000);
+        let connected = monitor.snapshot();
+        assert_eq!(connected.state, "connected");
+        assert_eq!(connected.last_established_unix_ms, Some(1_000));
+        assert_eq!(connected.last_error, None);
+
+        monitor.record_failure(
+            2_000,
+            &FiniteChatCoreError::Delivery {
+                reason: "sync stream read failed".to_owned(),
+            },
+        );
+        let reconnecting = monitor.snapshot();
+        assert_eq!(reconnecting.state, "reconnecting");
+        assert_eq!(reconnecting.last_established_unix_ms, Some(1_000));
+        assert_eq!(
+            reconnecting.last_error.as_deref(),
+            Some("delivery error: sync stream read failed")
+        );
+        assert_eq!(reconnecting.last_error_unix_ms, Some(2_000));
+
+        // Recovery moves the establishment watermark forward and clears the
+        // stale failure.
+        monitor.record_established(3_000);
+        let recovered = monitor.snapshot();
+        assert_eq!(recovered.state, "connected");
+        assert_eq!(recovered.last_established_unix_ms, Some(3_000));
+        assert_eq!(recovered.last_error, None);
+        assert_eq!(recovered.last_error_unix_ms, None);
+    }
+
+    #[test]
+    fn bounded_error_summary_keeps_transport_bodies_small() {
+        let long_body = "x".repeat(10_000);
+        let summary = bounded_error_summary(&FiniteChatCoreError::Delivery { reason: long_body });
+        assert_eq!(
+            summary.chars().count(),
+            SERVER_STREAM_ERROR_SUMMARY_CHARS + 3
+        );
+        assert!(summary.ends_with("..."));
+
+        let short = bounded_error_summary(&FiniteChatCoreError::Delivery {
+            reason: "boom".to_owned(),
+        });
+        assert_eq!(short, "delivery error: boom");
+    }
+
+    #[test]
+    fn room_cursors_summary_is_bounded_and_flags_truncation() {
+        let cursors = (0..(READYZ_ROOM_CURSOR_LIMIT + 8))
+            .map(|index| AppRoomSyncCursor {
+                room_id: format!("room-{index:03}"),
+                last_applied_seq: index as u64,
+            })
+            .collect::<Vec<_>>();
+        let summary = room_cursors_summary_json(&cursors);
+
+        assert_eq!(
+            summary["total"],
+            serde_json::json!(READYZ_ROOM_CURSOR_LIMIT + 8)
+        );
+        assert_eq!(summary["truncated"], serde_json::json!(true));
+        let rooms = summary["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), READYZ_ROOM_CURSOR_LIMIT);
+        // Deterministic first-rooms slice, not an arbitrary sample.
+        assert_eq!(rooms[0]["room_id"], serde_json::json!("room-000"));
+        assert_eq!(rooms[0]["last_applied_seq"], serde_json::json!(0));
+        assert_eq!(
+            rooms[READYZ_ROOM_CURSOR_LIMIT - 1]["room_id"],
+            serde_json::json!(format!("room-{:03}", READYZ_ROOM_CURSOR_LIMIT - 1))
+        );
+
+        let small = room_cursors_summary_json(&cursors[..3]);
+        assert_eq!(small["total"], serde_json::json!(3));
+        assert_eq!(small["truncated"], serde_json::json!(false));
+        assert_eq!(small["rooms"].as_array().unwrap().len(), 3);
     }
 
     #[test]
