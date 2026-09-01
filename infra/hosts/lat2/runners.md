@@ -3,8 +3,9 @@
 > **DECOMMISSION TARGET.** Docker/image CI moved to Depot, production Nix
 > closure builds moved to the Depot-backed `Lat1 NixOS Closure` workflow, and
 > no current workflow should select a lat2 runner. Keep this file only as
-> inventory for removing old registrations during
-> [`decommission-lat2.md`](../../runbooks/decommission-lat2.md).
+> inventory for removing old registrations during the Gate E cleanup of
+> [`lat2-replacement-cutover.md`](../../runbooks/lat2-replacement-cutover.md)
+> (the former decommission runbook was retired 2026-08-29).
 
 Captured 2026-07-08. The authoritative registration state is GitHub Settings
 -> Actions -> Runners for each repository, not this dated file. Before

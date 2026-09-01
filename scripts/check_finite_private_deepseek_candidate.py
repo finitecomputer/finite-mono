@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 from pathlib import Path
 
@@ -10,6 +11,10 @@ OFF_CANDIDATE = Path(
     "infra/tinfoil/confidential-kimi-k2-6/"
     "tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml"
 )
+# The DeepSeek update runbook was retired 2026-08-29 (runbook consolidation);
+# the executed record lives in infra/deployment-changelog.md and the
+# candidate's anti-drift pin lives in infra/tinfoil/model-inventory.md.
+INVENTORY = Path("infra/tinfoil/model-inventory.md")
 MODEL_REPO = (
     'repo: "deepseek-ai/DeepSeek-V4-Flash-0731@'
     '7872f01b1d1fe23eabc4c98b48bffcef5a386062"'
@@ -132,6 +137,17 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         return [f"missing DeepSeek candidate: {error.filename}"]
 
     violations.extend(_validate_one(off_text, release_ready=release_ready))
+
+    candidate_sha256 = hashlib.sha256(off_text.encode()).hexdigest()
+    try:
+        inventory_text = (root / INVENTORY).read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        violations.append(f"missing model inventory: {error.filename}")
+    else:
+        if candidate_sha256 not in inventory_text:
+            violations.append(
+                "model-inventory.md does not pin the checked-in candidate SHA-256"
+            )
     return violations
 
 

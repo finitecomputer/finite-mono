@@ -10,8 +10,9 @@ Postgres, chat, sites, search, one Caddy edge). This tree IS lat1's current
 config; copying and directly switching to the exact CI-built closure artifact
 is the deploy.
 The historical cutover and its hard-won gotchas (single-disk/no-mdadm, disks
-by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`; its
-destructive procedure is paused and is not current recovery authority. Brain is
+by-id, WAN-by-MAC) are in
+[`../runbooks/incident.md`](../runbooks/incident.md) §5; there is no current
+bare-metal recovery authority for lat1. Brain is
 served under the WorkOS-protected dashboard origin. The Hosted Web Chat
 offsite-health jobs and first archive now pass; its complete empty-target
 restore and the complete Agent/host Recovery Set remain unproved. Its snapshot
@@ -99,20 +100,21 @@ that built and drove the install from `finite-lat-2` have been removed in the
 hard cut. A future recovery-proved bare-metal procedure must consume a
 `lat1-nixos-closure-REV` artifact, prove the complete Recovery Set, and replace
 this historical section before any destructive reinstall is considered
-repeatable. Until then, start an incident with `infra/runbooks/break-glass.md`
-and preserve state.
+repeatable. Until then, start with
+[`../runbooks/incident.md`](../runbooks/incident.md) and preserve state.
 
 Do not run Nix evaluation, `nix build`, `nixos-rebuild`, or `nixos-anywhere`
 for the production closure on macOS. Nix would inherit `/etc/nix/machines` or
 the operator's personal builder settings. The historical transcript below used
 lat2 as the x86_64 Linux builder/driver; that path is no longer supported. The
 current routine deploy path is the CI-built closure artifact documented in
-`infra/runbooks/deploy-core.md`.
+[`../runbooks/release.md`](../runbooks/release.md) §4.
 
 ### Every deploy after that
 
 The protected CD path is the `main` to `production` pull request described in
-[`../runbooks/production-cd.md`](../runbooks/production-cd.md). That workflow
+[ADR 0006](../../docs/adr/0006-production-deploys-use-a-protected-production-branch.md),
+summarized in [`../runbooks/release.md`](../runbooks/release.md) §4. That workflow
 builds the same `lat1-nixos-closure-REV` metadata artifact, publishes the exact
 closure to the `finite` Cachix cache, and, once `mutation_enabled` is
 explicitly enabled, deploys it after GitHub production environment approval.
@@ -217,7 +219,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
 | `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
-| `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-1-litestream` bucket at Latitude.sh object storage (chi region — nearest to lat1); store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
+| `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-2-litestream` bucket at Latitude.sh object storage (chi region); store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`../runbooks/recovery.md`). |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
 The machine-readable, values-free file inventory is
@@ -236,7 +238,7 @@ password matches `FC_CORE_DATABASE_URL`; those require an encrypted custody
 record and an isolated restore/authentication drill. Do not add values,
 fingerprints, or password-derived hashes to the public contract.
 The complete custody and operator-copy gate is
-[`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
+[`../runbooks/recovery.md`](../runbooks/recovery.md) §1.
 
 The current monitoring MVP still uses host-local env files rather than SOPS.
 NixOS activation runs the narrow monitoring preflight automatically when Alloy
@@ -359,6 +361,6 @@ by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
   existing Kata runner with a dedicated Cloud Hypervisor profile (1 vCPU,
   512 MiB). This is separate from the QEMU 4-vCPU/8-GiB profile used by hosted
   Agent Runtimes on the same containerd host. Production activation must follow
-  `runbooks/deploy-sites.md`, including the coordinated v3 snapshot and a
+  [`runbooks/release.md`](../runbooks/release.md) §3 and §5, including the coordinated v3 snapshot and a
   named disposable state-survival canary.
 - Dead-man's-switch ping (`modules/monitoring.nix`).

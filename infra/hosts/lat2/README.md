@@ -4,10 +4,11 @@
 > consolidation cutover **migrated finitesitesd (sites) and the
 > finite-core-tunnel to lat1**; those services are **DISABLED** here. Docker
 > and image CI moved to Depot. Lat1 NixOS closure builds moved to the
-> `Lat1 NixOS Closure` CI artifact workflow. Remaining private historical or
-> legacy archive data must be moved off-box through
-> [`decommission-lat2.md`](../../runbooks/decommission-lat2.md), then runner
-> registrations, credentials, and local data are removed. The Services / Ports
+> `Lat1 NixOS Closure` CI artifact workflow. The former decommission plan was
+> superseded by the emergency cutover (ADR 0007): the box is wiped as Gate A
+> of [`lat2-replacement-cutover.md`](../../runbooks/lat2-replacement-cutover.md),
+> whose Gate E cleanup removes runner registrations, credentials, and local
+> data. The Services / Ports
 > / Secrets tables below are the **pre-cutover** capture; the
 > sites/tunnel rows are historical. (The finite-search rows were removed when
 > the self-hosted search stack was retired 2026-08-29; see git history.)

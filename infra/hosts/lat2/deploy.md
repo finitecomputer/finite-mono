@@ -3,7 +3,7 @@
 > **SUPERSEDED 2026-07-09 — DO NOT RUN.** Sites and its edge moved to
 > `finite-lat-1`; `finite-lat-2` is now a decommission target with historical
 > service captures. Current Sites deployment
-> authority is [`infra/runbooks/deploy-sites.md`](../../runbooks/deploy-sites.md).
+> authority is [`infra/runbooks/release.md`](../../runbooks/release.md).
 > Everything below is historical evidence of the former build-on-box flow,
 > including sections labelled “today” or “target.” Do not restart services,
 > install binaries, copy Caddy configuration, or delete captured paths on lat2.

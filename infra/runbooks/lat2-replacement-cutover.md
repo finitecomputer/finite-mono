@@ -102,7 +102,7 @@ and `litestream-latitude.env` from escrow):
 2. **Chat + Brain** (authoritative source: litestream restore from
    `finite-lat-1-litestream` using the banked Latitude object-storage
    credential; the drilled procedure lives in
-   [`litestream-chat-replication.md`](litestream-chat-replication.md)):
+   [`recovery.md`](recovery.md)):
 
    ```sh
    # TODO(prove): scratch restore config pointing at the lat1 bucket +

@@ -6,9 +6,10 @@ materializes only compatible state into active target paths. No owner decides
 the fate of individual files. Old machine identity, credentials, gateway
 ownership, and process state remain present in the sealed snapshot but inert.
 
-Use [the runbook](../../infra/runbooks/legacy-hermes-box1-to-lat3.md) for the
-operator procedure. `scripts/legacy-hermes-migration` is the executable
-contract.
+`scripts/legacy-hermes-migration` is the executable contract. The operator
+runbook drafted for its first exercise was retired 2026-08-29 (never
+executed; the tools, sources, and contract tests remain the capability). A
+first exercise writes a fresh run doc rather than reviving the draft.
 
 ## Identity boundary
 

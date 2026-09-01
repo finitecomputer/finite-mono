@@ -32,8 +32,10 @@ Do not restore the historical URL. The served model is `glm-5-3-flash`
 (hyphenated). `deepseek-v4-flash-0731`, `glm-5-2`, and dotted `glm-5.3-flash`
 remain limiter aliases while older Agent Runtime images drain.
 
-The staged custom-domain procedure is
-[`infra/runbooks/finite-private-routing-migration.md`](../../infra/runbooks/finite-private-routing-migration.md).
+The preferred custom-domain plan (`inference.finite.computer`) remains parked;
+the issued-reader convergence onto `finite-private` is tracked as a
+deployment-queue row in
+[`infra/deployment-queue.md`](../../infra/deployment-queue.md).
 
 ## Core Continuity Boundary
 

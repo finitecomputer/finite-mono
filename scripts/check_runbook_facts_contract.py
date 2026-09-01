@@ -46,7 +46,7 @@ BRAIN_SCHEMA = (
     ROOT / "finite-brain" / "crates" / "finite-brain-store" / "src" / "schema.rs"
 )
 
-# Units break-glass.md references deliberately that belonged to the pre-NixOS
+# Units incident.md references deliberately that belonged to the pre-NixOS
 # hosts; they are not defined anywhere in this repo.
 LEGACY_UNITS = {
     "k3s",

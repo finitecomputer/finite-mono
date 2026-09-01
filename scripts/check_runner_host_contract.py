@@ -56,7 +56,7 @@ CANONICAL_FINITE_PRIVATE_BASE_URL = (
 CANONICAL_FINITE_PRIVATE_MODEL = "glm-5-3-flash"
 
 # The promoted Runtime artifact is an operator-managed pin in runner.env
-# (infra/runbooks/runtime-image.md). A rendered default was only ever a stale
+# (infra/runbooks/release.md). A rendered default was only ever a stale
 # shadow of it, so the shared env must not carry one.
 OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
 NIX_OWNED_FINITE_PRIVATE_KEYS = {

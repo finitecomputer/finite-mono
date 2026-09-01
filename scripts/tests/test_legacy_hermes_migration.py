@@ -17,8 +17,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "scripts" / "legacy_hermes_migration.py"
-RUNBOOK = ROOT / "infra" / "runbooks" / "legacy-hermes-box1-to-lat3.md"
-SOURCE_LAUNCHER = ROOT / "scripts" / "legacy-hermes-source"
 sys.path.insert(0, str(MODULE.parent))
 SPEC = importlib.util.spec_from_file_location("legacy_hermes_migration", MODULE)
 assert SPEC is not None and SPEC.loader is not None
@@ -584,44 +582,6 @@ class LegacyHermesMigrationTests(unittest.TestCase):
             "source Hermes version must be 0.14.0",
         ):
             migration.create_manifest(self.bundle, unsupported)
-
-    def test_runbook_mounts_the_reviewed_tool_by_hash_into_existing_image(self) -> None:
-        runbook = RUNBOOK.read_text(encoding="utf-8")
-
-        self.assertIn("MIGRATION_TOOL_ARCHIVE", runbook)
-        self.assertIn("MIGRATION_TOOL_SHA256", runbook)
-        self.assertIn("sha256sum --check", runbook)
-        self.assertIn("archive --format=tar", runbook)
-        self.assertIn("legacy_hermes_contract.py", runbook)
-        self.assertIn("legacy_hermes_source.py", runbook)
-        self.assertIn("legacy_hermes_target.py", runbook)
-        self.assertIn("source-volume-inventory", runbook)
-        self.assertIn("source-sites-inventory", runbook)
-        self.assertIn("source-integrations-inventory", runbook)
-        self.assertIn("--source-volume-inventory-sha256", runbook)
-        self.assertIn("readOnlyRootFilesystem == true", runbook)
-        self.assertIn("source-home.tar", runbook)
-        self.assertIn("unknown safe paths default to `preserve`", runbook)
-        self.assertIn("zero structurally blocked entries", runbook)
-        self.assertNotIn("Austin explicitly chooses", runbook)
-        self.assertNotIn("owner decisions", runbook)
-        self.assertIn("dst=/opt/migration,ro", runbook)
-        install_section = runbook.split(
-            "### 7. Install offline into the exact target", maxsplit=1
-        )[1].split("### 8. Restart and verify", maxsplit=1)[0]
-        self.assertIn(
-            "--tmpfs '/tmp:rw,nosuid,nodev,noexec,size=4294967296'",
-            install_section,
-        )
-        self.assertIn("TARGET_RUNTIME_IMAGE", runbook)
-        self.assertNotIn("MIGRATION_IMAGE", runbook)
-        self.assertNotIn("Publish and prove the migration image", runbook)
-        self.assertNotIn("legacy-hermes-source-export", runbook)
-        self.assertNotIn("legacy-hermes-source-memory", runbook)
-
-        launcher = SOURCE_LAUNCHER.read_text(encoding="utf-8")
-        self.assertIn("source-sites-inventory", launcher)
-        self.assertIn("source-integrations-inventory", launcher)
 
     def test_source_volume_inventory_preserves_unknown_safe_data_automatically(
         self,

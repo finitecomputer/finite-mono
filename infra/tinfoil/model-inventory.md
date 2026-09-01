@@ -53,7 +53,17 @@ container identity is `finite-private`. The preferred custom route remains
 `inference.finite.computer` and is still unattached. The historical
 `kimi-k2-6` generated route is retired; the CPU compatibility bridge was
 deleted rather than iterated. Issued Runtime readers still need a follow-up
-onto `finite-private`. See
-[`finite-private-routing-migration.md`](../runbooks/finite-private-routing-migration.md)
-and
-[`finite-private-glm-5.3-flash-production-cutover.md`](../runbooks/finite-private-glm-5.3-flash-production-cutover.md).
+onto `finite-private` — tracked as a row in
+[`../deployment-queue.md`](../deployment-queue.md). The executed GLM cutover
+record lives in
+[`docs/runs/glm-5-3-flash-production-cutover-ledger.md`](../../docs/runs/glm-5-3-flash-production-cutover-ledger.md).
+
+## Archived DeepSeek candidate pin
+
+The archived DeepSeek 128/2048 scheduler candidate
+(`infra/tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`,
+rollback evidence only) is pinned at SHA-256
+`22a3b8030aeb2a47dab8547690cf125880f630d3163bcb713534fb43bffa8907`.
+The repository contract
+(`scripts/check_finite_private_deepseek_candidate.py`) fails if the
+checked-in candidate drifts from that pin.

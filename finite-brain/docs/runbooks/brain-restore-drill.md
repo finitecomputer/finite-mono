@@ -27,7 +27,7 @@ covers.
 1. **Restore the database onto an empty target.**
 
    ```sh
-   # On the brain host (see infra/runbooks/litestream-chat-replication.md
+   # On the brain host (see infra/runbooks/recovery.md
    # for the replica configuration this reads from):
    sudo systemctl stop finite-brain
    litestream restore -o /var/lib/finite-brain/finite-brain.sqlite3 \
