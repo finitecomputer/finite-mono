@@ -52,6 +52,26 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-08-29 — Agent Runtime `2026-08-29.5`: quarantine livelock fix (#776)
+
+- Published from the #776 merge:
+  `ghcr.io/finitecomputer/agent-runtime:2026-08-29.5@sha256:9bc3dd9257a504079ddf3d3136f858586ae7e6c89cde460dd98369e9d153621e`
+  ([run 33280150379](https://github.com/finitecomputer/finite-mono/actions/runs/33280150379)).
+  Core registration, promotion, and the fleet roll follow
+  [`runbooks/release.md`](runbooks/release.md) §2(c).
+- Per-room exponential backoff (1s doubling to a 60s cap) on quarantined-room
+  hint fetches, wait-plan exclusion for backed-off rooms, and the first real
+  quarantine visibility: a single-line stderr report naming room,
+  `rejected_after_seq`, and error class, plus an additive `/readyz`
+  `runtime_status`. Stops the post-unfreeze livelock measured tonight (one
+  agent at 25.3 fetches/s, ~160k fetches, ~50 GB egress; five agents ~90
+  fetches/s aggregate).
+- Per-agent state repair is separate tooling and was exercised tonight for
+  five agents per
+  [`runbooks/recovery.md`](runbooks/recovery.md) §4a (chat quarantine repair)
+  (20 skips total, ~2,800 held messages released; incident record:
+  [`docs/runs/2026-08-29-chat-plane-freeze.md`](../docs/runs/2026-08-29-chat-plane-freeze.md)).
+
 ### 2026-08-29 — Chat-server unfreeze (#770) deployed; Agent Runtime `2026-08-29.4` promoted; lat4 rolled
 
 - Chat-authz stack merged 21:28Z (#710, #711, #712; NIP-98 auth included but off).
