@@ -1570,10 +1570,49 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertTrue(all("http_" in sql for sql in queries))
 
     def test_collect_chat_server_state_marks_missing_database(self) -> None:
+        # Applicability is a role fact, not a filesystem fact: only runner-
+        # role hosts read not-applicable (review #802, round two).
         with mock.patch.object(finite_status.Path, "exists", return_value=False):
             raw = finite_status.collect_chat_server_state("finite-lat-3")
         self.assertFalse(raw["applicable"])
-        self.assertEqual(raw["reason"], "chat server database not present on this host")
+        self.assertIn("runner-role host", raw["reason"])
+
+        # On the app-role host a missing database is an evidence failure:
+        # the probe stays applicable and fails closed to unknown.
+        with mock.patch.object(finite_status.Path, "exists", return_value=False):
+            raw = finite_status.collect_chat_server_state("finite-lat-2")
+        self.assertTrue(raw["applicable"])
+        self.assertEqual(len(raw["errors"]), 1)
+        self.assertIn("chat server database not present", raw["errors"][0])
+        self.assertIn(
+            finite_status.CONTRACT["chat_plane"]["server_database"], raw["errors"][0]
+        )
+
+        # Unprofiled hosts (dev machines) fail closed the same way.
+        with mock.patch.object(finite_status.Path, "exists", return_value=False):
+            raw = finite_status.collect_chat_server_state("dev-laptop")
+        self.assertTrue(raw["applicable"])
+        self.assertEqual(len(raw["errors"]), 1)
+
+    def test_watermark_missing_database_on_app_host_reads_unknown(self) -> None:
+        # finite-lat-2 with a missing/moved/unreadable server database must
+        # score unknown with a reason, never green/not-applicable.
+        database = finite_status.CONTRACT["chat_plane"]["server_database"]
+        raw = self.chat_raw(
+            server={
+                "applicable": True,
+                "database": database,
+                "errors": [f"chat server database not present on this host: {database}"],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        watermark = report["server_watermark"]
+        self.assertEqual(watermark["status"], "unknown")
+        self.assertNotEqual(watermark.get("state"), "not-applicable")
+        self.assertIn("not present", watermark["errors"][0])
+        self.assertEqual(report["status"], "unknown")
 
     def test_scratch_copy_sqlite_copies_sidecars_and_cleans_up(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

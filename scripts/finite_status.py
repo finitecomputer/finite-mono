@@ -1045,13 +1045,28 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     """
     contract = CONTRACT["chat_plane"]
     database = Path(contract["server_database"])
+    roles = host_roles(hostname)
     raw: dict[str, Any] = {
         "database": str(database),
-        "applicable": database.exists(),
+        "applicable": True,
         "errors": [],
     }
-    if not raw["applicable"]:
-        raw["reason"] = "chat server database not present on this host"
+    if roles is not None and "app" not in roles:
+        # Runner-role hosts never carry the chat server database; that is a
+        # role fact, not an evidence failure, so the probe is not-applicable.
+        raw["applicable"] = False
+        raw["reason"] = (
+            "chat server database is not on this runner-role host "
+            f"(roles: {', '.join(roles)})"
+        )
+        return raw
+    if not database.exists():
+        # App-role (or unprofiled) hosts are expected to carry this database:
+        # a missing/moved path is an evidence failure and must stay unknown,
+        # never silently not-applicable/green.
+        raw["errors"].append(
+            f"chat server database not present on this host: {database}"
+        )
         return raw
     try:
         with scratch_copy_sqlite(database) as scratch:
