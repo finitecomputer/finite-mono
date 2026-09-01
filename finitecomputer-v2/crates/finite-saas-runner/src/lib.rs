@@ -17,7 +17,7 @@ use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
 // The runtime environment key contract (reserved keys, secret shape, key
 // shape) is shared with finite-saas-core through finite-saas-runtime-contract
 // so this crate's launch checks can never drift from Core's validation.
-use finite_saas_runtime_contract::{
+use finite_saas_core::{
     reserved_runtime_environment_key, retired_specialization_environment_key,
     secret_runtime_environment_key, valid_runtime_environment_key,
 };
@@ -5559,8 +5559,8 @@ mod tests {
             .expect("benign environment key must stay configurable");
 
         for key in [
-            finite_saas_runtime_contract::RESERVED_RUNTIME_ENVIRONMENT_KEYS,
-            finite_saas_runtime_contract::RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
+            finite_saas_core::RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+            finite_saas_core::RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
         ]
         .into_iter()
         .flatten()

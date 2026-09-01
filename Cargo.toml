@@ -15,7 +15,6 @@ members = [
     "finitecomputer-v2/crates/finite-saas-core",
     "finitecomputer-v2/crates/finite-saas-local",
     "finitecomputer-v2/crates/finite-saas-runner",
-    "finitecomputer-v2/crates/finite-saas-runtime-contract",
     "finitecomputer-v2/crates/finite-specialization-worker",
     "finitechat/crates/finitechat-blob",
     "finitechat/crates/finitechat-cli",

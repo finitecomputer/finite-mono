@@ -18,8 +18,12 @@ pub use billing::{
 // The runtime environment key contract (reserved keys, secret shape, key
 // shape) is shared with finite-saas-runner through finite-saas-runtime-contract
 // so Core's validation and the runner's launch check can never drift apart.
-use finite_saas_runtime_contract::{
-    reserved_runtime_environment_key, secret_runtime_environment_key, valid_runtime_environment_key,
+mod runtime_env_contract;
+pub use runtime_env_contract::{
+    MAX_RUNTIME_ENVIRONMENT_KEY_BYTES, RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+    RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS, reserved_runtime_environment_key,
+    retired_specialization_environment_key, secret_runtime_environment_key,
+    valid_runtime_environment_key,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3794,8 +3798,8 @@ mod tests {
             .expect("benign environment key must stay configurable");
 
         for key in [
-            finite_saas_runtime_contract::RESERVED_RUNTIME_ENVIRONMENT_KEYS,
-            finite_saas_runtime_contract::RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
+            RESERVED_RUNTIME_ENVIRONMENT_KEYS,
+            RETIRED_SPECIALIZATION_ENVIRONMENT_KEYS,
         ]
         .into_iter()
         .flatten()
