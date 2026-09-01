@@ -12,7 +12,6 @@ and infrastructure definition in one tree.
 | `finite-brain/` | fbrain CLI + FiniteBrain server |
 | `finite-identity/`, `finite-nostr/` | active shared identity/protocol crates |
 | `finite-skills/` | sole authored managed-skills baseline; immutable revisions hot-activate in compatible runtimes |
-| `finite-specialization/` | Hermes capability vocabulary and safe specialization config examples |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
 | `docs/` | doctrine, ADRs, run records, postmortems, audits |

@@ -37,14 +37,15 @@ Platform Channel:
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
 
-AEON specialization is retired. Runner no longer injects
+AEON specialization is removed, not just retired. Runner no longer injects
 `FINITE_SPECIALIZATION_BUNDLE` / `FINITE_SPECIALIZATION_WORKER_API_KEY`, and
-Kata upgrade/recovery drop leftover copies. `finite-agentd` ignores leftover
-copies of those variables, does not activate or probe `auxiliary.vision`, and
-answers retired specialization commands with the generic unsupported-command
-error. Status still includes a `specialization` object so mixed-version
-readers keep working; it is always `desired=false` / `effective=false`.
-Persisted Hermes `auxiliary.vision` rows are left alone.
+`finite-agentd` carries no specialization writer machinery. Leftover copies of
+those variables in container environment are ignored: the daemon does not
+activate or probe `auxiliary.vision`, and the retired
+`agent.specialization.aeon.reconcile` command falls through to the generic
+unsupported-command error. Status still includes a `specialization` object so
+mixed-version readers keep working; it is always `desired=false` /
+`effective=false`. Persisted Hermes `auxiliary.vision` rows are left alone.
 
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill

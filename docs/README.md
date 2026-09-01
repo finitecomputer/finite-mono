@@ -61,7 +61,6 @@ Docs copied with each source repo remain inside their owning folders for now:
 - [`finite-brain/docs`](../finite-brain/docs)
 - [`finite-skills/skills`](../finite-skills/skills)
 - [`finite-skills/docs`](../finite-skills/docs)
-- [`finite-specialization/docs`](../finite-specialization/docs)
 
 Some imported repos also have root-level source repo docs:
 
@@ -72,7 +71,6 @@ Some imported repos also have root-level source repo docs:
 - [`finite-brain/README.md`](../finite-brain/README.md)
 - [`finite-brain/development.md`](../finite-brain/development.md)
 - [`finite-skills/README.md`](../finite-skills/README.md)
-- [`finite-specialization/README.md`](../finite-specialization/README.md)
 
 Treat repo-local docs as owner-scoped background. Prefer current root docs,
 component `CONTEXT.md`, ADRs, and runbooks over historical plans or imported

@@ -628,7 +628,6 @@ jobs:
             ".#packages.x86_64-linux.finitechat-server"
             ".#packages.x86_64-linux.finitechat-hosted-device"
             ".#packages.x86_64-linux.finite-agentd"
-            ".#packages.x86_64-linux.finite-specialization-worker"
             ".#packages.x86_64-linux.finitesitesd"
             ".#packages.x86_64-linux.finite-brain"
             ".#packages.x86_64-linux.finite-identity"
@@ -673,8 +672,8 @@ jobs:
 
           artifact_count="$(wc -l < "$CARGO_ARTIFACT_OUTPUTS" | tr -d '[:space:]')"
           package_count="$(wc -l < "$PACKAGE_OUTPUTS" | tr -d '[:space:]')"
-          if [[ "$artifact_count" -ne 9 ]]; then
-            echo "::error::expected 9 distinct Cargo dependency artifacts for the scoped packages; got $artifact_count"
+          if [[ "$artifact_count" -ne 8 ]]; then
+            echo "::error::expected 8 distinct Cargo dependency artifacts for the scoped packages; got $artifact_count"
             exit 1
           fi
           {
