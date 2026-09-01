@@ -9917,6 +9917,146 @@ async fn chat_store_swap_fold_serves_full_legacy_history_on_the_normalized_engin
     assert!(ops_after_restart > 0, "the legacy era wrote ops");
 }
 
+/// Review #799 blocking case: a KeyPackage published AFTER the legacy v2
+/// snapshot horizon exists only as a `PublishKeyPackage` op in the tail —
+/// the fold's service rebuild does not replay those ops, so its payload
+/// bytes live nowhere but the replayed wrapper inventory. The fold must
+/// still give it a durable `sql_key_packages` row: after the cutover boot
+/// and a restart, an account-scoped claim returns the ORIGINAL bytes and
+/// account-scoped availability answers from them.
+#[tokio::test]
+async fn chat_store_swap_fold_preserves_a_post_snapshot_key_package_payload() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-kp-tail".to_owned();
+    let mls_group_id = "mls-kp-tail".to_owned();
+
+    // The legacy era: enough history that the fabricated snapshot covers a
+    // strict prefix of the op log.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("kp-tail message {index}").as_bytes(),
+            &format!("kp-tail-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    drop(app);
+    drop(state);
+
+    // Snapshot at N: the fabricated legacy shape keeps the first two ops in
+    // the v2 snapshot and prunes them from the log; the rest is the tail.
+    let total_ops = defold_into_legacy_shape(&db_path, Some(2));
+    assert!(total_ops > 2, "the fixture must have a post-snapshot tail");
+
+    // A KeyPackage published after the horizon, appended straight to the
+    // legacy op log exactly as the legacy engine would have. The payload is
+    // an UploadKeyPackageRequest, so the fold can re-derive the finite
+    // (account-scoped) metadata from the bytes.
+    let account_id = String::from_utf8(vec![b'a'; 64]).expect("account id");
+    let other_account_id = String::from_utf8(vec![b'b'; 64]).expect("other account id");
+    let device = DeviceRef::new(account_id.clone(), "phone");
+    let publication = finite_key_package_publication(
+        &device,
+        "kp-post-snapshot-tail",
+        "ref-post-snapshot",
+        "hash-post-snapshot",
+        b"post-snapshot key package payload",
+    );
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let body = serde_json::json!({
+            "PublishKeyPackage": { "publication": publication }
+        });
+        conn.execute(
+            "INSERT INTO http_delivery_ops (kind, body_json) VALUES ('publish_key_package', ?1)",
+            params![body.to_string()],
+        )
+        .expect("append post-snapshot publish op");
+    }
+
+    // Cutover boot: the fold runs here.
+    drop(persistent_state(&db_path));
+
+    // The durable payload row exists with the original bytes.
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT key_package_bytes FROM sql_key_packages WHERE key_package_id = ?1",
+                params![publication.key_package_id.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("post-snapshot key package must have a durable payload row");
+        assert_eq!(bytes, publication.key_package.bytes());
+    }
+
+    // Restart: the steady-state load path (shared inventory triples enriched
+    // from sql_key_packages) must serve the same package.
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+
+    // Account-scoped availability answers from the folded payload: the
+    // publishing account is available, an account with no package is not.
+    let response = post_json(
+        app.clone(),
+        "/key-packages/availability",
+        &GetKeyPackageAvailabilityRequest {
+            account_ids: vec![account_id.clone(), other_account_id.clone()],
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let availability: GetKeyPackageAvailabilityResponse = read_json(response).await;
+    assert_eq!(
+        availability
+            .accounts
+            .into_iter()
+            .map(|entry| (entry.account_id, entry.available))
+            .collect::<Vec<_>>(),
+        vec![(account_id.clone(), true), (other_account_id, false)]
+    );
+
+    // The claim returns the ORIGINAL bytes.
+    let response = post_json(
+        app.clone(),
+        "/key-packages/claim-account",
+        &ClaimKeyPackageForAccountRequest {
+            account_id: account_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed: Option<HttpClaimedKeyPackage> = read_json(response).await;
+    let claimed = claimed.expect("the post-snapshot key package survives the fold");
+    assert_eq!(claimed.key_package_id, publication.key_package_id);
+    assert_eq!(claimed.owner, member_for_device(&device));
+    assert_eq!(claimed.key_package.bytes(), publication.key_package.bytes());
+
+    // A further restart does not resurrect the consumed package.
+    drop(app);
+    drop(state);
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let response = post_json(
+        app,
+        "/key-packages/claim-account",
+        &ClaimKeyPackageForAccountRequest { account_id },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed: Option<HttpClaimedKeyPackage> = read_json(response).await;
+    assert_eq!(claimed, None);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn add_device_to_room_at_epoch(
     app: &Router,

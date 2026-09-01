@@ -753,6 +753,12 @@ fn fold_seed_in_one_transaction(
                 )?;
                 report.routes += 1;
             }
+            let mut folded_key_package_ids: BTreeSet<Vec<u8>> = seed
+                .key_packages
+                .iter()
+                .map(|key_package| key_package.key_package_id.as_slice().to_vec())
+                .collect();
+            report.key_packages = folded_key_package_ids.len();
             for key_package in &seed.key_packages {
                 let source_json = key_package
                     .key_package
@@ -777,7 +783,26 @@ fn fold_seed_in_one_transaction(
                         },
                     ],
                 )?;
+            }
+            // The service rebuild does NOT replay `PublishKeyPackage` ops
+            // (the core store holds no wrapper lease state), so the snapshots
+            // above only cover packages that predate the legacy v2 snapshot
+            // horizon. Packages published AFTER that horizon exist only in
+            // the replayed wrapper inventory — with their payload bytes. Give
+            // every such record a durable payload row too, or the re-seeded
+            // inventory row would be an id/owner/state triple with no bytes:
+            // the normalized boot would enrich it to an empty payload and a
+            // claim could return empty bytes (review #799). Records already
+            // folded from the service snapshots keep their row untouched —
+            // for overlapping ids both views carry the same publication
+            // bytes, and the wrapper state stays authoritative in the shared
+            // inventory table.
+            for record in &seed.inventory {
+                if !folded_key_package_ids.insert(record.key_package_id.as_slice().to_vec()) {
+                    continue;
+                }
                 report.key_packages += 1;
+                crate::store::metadata::upsert_key_package_payload(tx, record)?;
             }
             for (account_id, rooms) in &seed.directory {
                 for (room_id, record) in rooms {
@@ -851,6 +876,38 @@ fn assert_fold(
             return Err(DurableStoreError::FoldAssertionFailed {
                 details: format!(
                     "row count mismatch folding into {table}: expected {expected}, found {actual}"
+                ),
+            });
+        }
+    }
+
+    // Every re-seeded inventory row must have a durable payload home in
+    // `sql_key_packages`, and wherever the replay carries payload bytes they
+    // must be the stored bytes. An inventory row without a payload row is
+    // exactly the empty-claim class this cutover exists to close, so a
+    // mismatch aborts the whole fold (review #799).
+    for record in &seed.inventory {
+        let stored: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT key_package_bytes FROM sql_key_packages WHERE key_package_id = ?1",
+                params![record.key_package_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored_bytes) = stored else {
+            return Err(DurableStoreError::FoldAssertionFailed {
+                details: format!(
+                    "key package {:?} re-seed into the inventory has no durable payload row",
+                    record.key_package_id
+                ),
+            });
+        };
+        let replayed_bytes = record.key_package.bytes();
+        if !replayed_bytes.is_empty() && stored_bytes != replayed_bytes {
+            return Err(DurableStoreError::FoldAssertionFailed {
+                details: format!(
+                    "key package {:?} payload differs from the replayed publication bytes",
+                    record.key_package_id
                 ),
             });
         }
