@@ -55,21 +55,22 @@ gateway:
 Then `hermes gateway start` makes the Agent Principal reachable. The dashboard
 Hosted Web Device, Electron, or a native client starts the room independently.
 
-## Native Hermes specialization profiles
+## Native Hermes capability profiles
 
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
-tools. Specializations are runtime configuration behind Hermes's existing
-tools. For example, an `auxiliary.vision` profile can route Hermes's built-in
-`vision_analyze` and `video_analyze` tools to the AEON worker while the main
-model remains responsible for deciding whether those tools are useful.
+tools. Auxiliary capabilities are runtime configuration behind Hermes's
+existing tools. For example, an `auxiliary.vision` profile can route Hermes's
+built-in `vision_analyze` and `video_analyze` tools to a dedicated
+OpenAI-compatible vision endpoint while the main model remains responsible
+for deciding whether those tools are useful.
 
 ```yaml
 auxiliary:
   vision:
     base_url: https://inference.example/v1
-    api_key: ${AEON_API_KEY}
-    model: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
+    api_key: ${VISION_API_KEY}
+    model: vision-capable-model-name
     timeout: 120
 platform_toolsets:
   finitechat:
@@ -83,7 +84,7 @@ catalog rather than extend it. Runtime admission should verify that the
 installed Hermes catalog actually contains `video_analyze`, since older Hermes
 images may not provide the native tool.
 
-The same rule applies to other specialization families: prefer a model or
+The same rule applies to other capability families: prefer a model or
 provider profile behind a Hermes-native capability. Add a new generic Hermes
 capability only when Hermes has no suitable surface; do not add product- or
 model-named tools to this transport plugin. Semantic audio interpretation is

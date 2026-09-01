@@ -63,7 +63,7 @@ in
       ExecStart = "${finitePackages.finite-saas-runner}/bin/finite-saas-runner serve";
 
       # Operator-created root:root 0600. It contains only this worker's
-      # route-scoped Core token, Phala API key, and specialization credential.
+      # route-scoped Core token and Phala API key.
       EnvironmentFile = [ "/etc/finite/phala-runner.env" ];
       LoadCredential = "runtime-secrets.env:/etc/finite/runtime-secrets.env";
 

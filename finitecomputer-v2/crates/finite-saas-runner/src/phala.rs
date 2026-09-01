@@ -3151,7 +3151,6 @@ mod tests {
         assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
         assert!(!compose.contains("fixture-plaintext-inference-key"));
         assert!(!compose.contains("fixture-plaintext-provider-key"));
-        assert!(!compose.contains("fixture-plaintext-specialization-key"));
         assert!(!compose.contains(FIXTURE_API_KEY));
         assert_eq!(
             phala_cvm_name_for_request_id(&lease.request.id),
@@ -3655,7 +3654,7 @@ mod tests {
         let mut journal = FakeProviderOperationJournal::default();
         let options = RuntimeLaunchOptions {
             secret_environment: BTreeMap::from([(
-                "FINITE_SPECIALIZATION_WORKER_API_KEY".to_string(),
+                "FAL_KEY".to_string(),
                 "never-send-this-plaintext".to_string(),
             )]),
             ..RuntimeLaunchOptions::default()
