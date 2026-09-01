@@ -58,7 +58,8 @@ any Agent Runner) and the `wg-finite` overlay hub at `10.254.3.1`.
 - **While Ubuntu (pre-Gate C):** `ssh finite-lat-2` (user `ubuntu`). Do not
   build or deploy from here; there is no supported lat2 fallback for CI,
   Nix builds, or deploys. `/tmp` is a 94G tmpfs — never park a backup there
-  (`infra/hosts/lat2/backups.md`).
+  and use the current service backup runbooks instead of the deleted
+  historical lat2 backup proposal.
 - **While NixOS (post-Gate C):** `ssh root@64.34.80.19` (the SSH host key
   changes at reinstall; expect a known_hosts break). Declarative like lat1:
   fix forward in `infra/nixos/hosts/finite-lat-2/` and redeploy via

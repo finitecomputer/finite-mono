@@ -27,11 +27,12 @@ PRECONDITIONS:
 
 ## What to keep
 
-Most historical lat2 service configuration is already preserved in git under
-`infra/hosts/lat2/`: dated systemd unit captures, Caddy config, service notes,
-search notes, backup notes, and runner inventory. Do not re-copy those files
-from the host unless a fresh read-only drift check finds a difference worth
-reviewing.
+The current tree keeps the lat2 host summary and runner-removal inventory under
+`infra/hosts/lat2/`. The pre-cutover systemd/Caddy capture, old deploy note,
+and proposed backup timer were removed from the active tree; use git history
+only if forensic reconstruction needs them. Do not re-copy deleted host-capture
+files from the machine unless a fresh read-only drift check finds a difference
+worth reviewing.
 
 Candidates for a private off-host archive:
 

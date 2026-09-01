@@ -161,8 +161,8 @@ registry, blob, and git repository state.
 Runbook and deploy files:
 
 - `../infra/runbooks/deploy-sites.md`
-- `infra/hosts/lat2/` (mono root — unit files, Caddyfile, and env example;
-  historical capture moved from `deploy/finite-lat-2/`)
+- `../infra/nixos/modules/finitesitesd.nix` for the current systemd service
+  definition
 - `docs/technical-debt-ledger.md`
 
 Important production rule: use `fsite` for agent-facing publishing and editor
