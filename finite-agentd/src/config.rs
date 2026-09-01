@@ -320,74 +320,6 @@ impl ConfigManager {
         })
     }
 
-    pub fn reconcile_aeon_specialization(
-        &self,
-        desired: &AeonSpecializationDesiredStateV1,
-        activate: impl FnOnce() -> Result<(), AgentdError>,
-    ) -> Result<SpecializationReconcileResultV1, AgentdError> {
-        validate_aeon_desired_state(desired)?;
-        let (before_bytes, mut document) = self.load_document()?;
-        let current = value_at_path(&document, VISION_CONFIG_PATH)
-            .cloned()
-            .unwrap_or(Value::Null);
-        let target = aeon_specialization_target(desired, &current)?;
-        let result = || SpecializationReconcileResultV1 {
-            proposal_id: desired.proposal_id.clone(),
-            applied: current != target,
-            already_applied: current == target,
-            effective_matches_desired: false,
-            model_alias: desired.model_alias.clone(),
-            worker_base_url: desired.worker_base_url.clone(),
-            capabilities: desired.capabilities.clone(),
-            prompt_versions: desired.prompt_versions.clone(),
-            normalization_limits: desired.normalization_limits.clone(),
-        };
-        if current == target {
-            return Ok(result());
-        }
-        if let Some(history) = self.ledger.config_history(&desired.proposal_id)? {
-            return Err(AgentdError::ConfigConflict(format!(
-                "specialization proposal {} was already applied to {}",
-                history.proposal_id, history.path
-            )));
-        }
-
-        let offer = HermesConfigOfferV1 {
-            proposal_id: desired.proposal_id.clone(),
-            path: VISION_CONFIG_PATH.to_owned(),
-            policy: ConfigOfferPolicyV1::ReplaceWithConfirmation,
-            approved: true,
-            value: target.clone(),
-        };
-        validate_offer(&offer)?;
-        set_value_at_path(&mut document, VISION_CONFIG_PATH, target.clone())?;
-        let rendered = serde_yaml::to_string(&document)?;
-        self.atomic_write(rendered.as_bytes())?;
-        if let Err(error) = activate() {
-            self.atomic_write(&before_bytes)?;
-            return Err(error);
-        }
-        let effective = self.current_value(VISION_CONFIG_PATH)?;
-        if effective != target {
-            self.atomic_write(&before_bytes)?;
-            return Err(AgentdError::Config(
-                "Hermes specialization read-back did not match desired state; previous bytes were restored"
-                    .to_owned(),
-            ));
-        }
-        let applied_hash = value_hash(&target)?;
-        if let Err(error) = self.ledger.record_config_apply(
-            &desired.proposal_id,
-            VISION_CONFIG_PATH,
-            &before_bytes,
-            &applied_hash,
-        ) {
-            self.atomic_write(&before_bytes)?;
-            return Err(error);
-        }
-        Ok(result())
-    }
-
     pub fn activate_aeon_specialization_if_unset(
         &self,
         desired: &AeonSpecializationDesiredStateV1,
@@ -468,42 +400,6 @@ impl ConfigManager {
             }
         }
         Ok(startup_specialization_result(desired, true))
-    }
-
-    pub fn aeon_specialization_matches(
-        &self,
-        desired: &AeonSpecializationDesiredStateV1,
-    ) -> Result<bool, AgentdError> {
-        validate_aeon_desired_state(desired)?;
-        let current = self.current_value(VISION_CONFIG_PATH)?;
-        let expected_state = json!({
-            "capabilities": desired.capabilities,
-            "prompt_versions": desired.prompt_versions,
-            "normalization_limits": desired.normalization_limits,
-        });
-        let credential_matches =
-            current
-                .get("api_key")
-                .and_then(Value::as_str)
-                .is_some_and(|value| {
-                    desired
-                        .worker_api_key
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|expected| !expected.is_empty())
-                        .map(|expected| value == expected)
-                        .unwrap_or_else(|| !value.trim().is_empty())
-                });
-        Ok(
-            current.get("provider").and_then(Value::as_str) == Some("custom")
-                && current.get("model").and_then(Value::as_str)
-                    == Some(desired.model_alias.as_str())
-                && current.get("base_url").and_then(Value::as_str)
-                    == Some(desired.worker_base_url.as_str())
-                && current.get("api_mode").and_then(Value::as_str) == Some("chat_completions")
-                && credential_matches
-                && current.pointer("/extra_body/finite_specialization") == Some(&expected_state),
-        )
     }
 
     pub fn startup_aeon_specialization_matches(
@@ -614,27 +510,6 @@ fn finitechat_video_toolset_is_enabled(document: &Value) -> bool {
                 .iter()
                 .any(|toolset| toolset.as_str() == Some("video"))
         })
-}
-
-fn aeon_specialization_target(
-    desired: &AeonSpecializationDesiredStateV1,
-    current: &Value,
-) -> Result<Value, AgentdError> {
-    let mut target = aeon_specialization_provider_target(desired, current)?;
-    target
-        .as_object_mut()
-        .expect("provider target is an object")
-        .insert(
-            "extra_body".to_owned(),
-            json!({
-                "finite_specialization": {
-                    "capabilities": desired.capabilities,
-                    "prompt_versions": desired.prompt_versions,
-                    "normalization_limits": desired.normalization_limits,
-                }
-            }),
-        );
-    Ok(target)
 }
 
 fn aeon_specialization_provider_target(
@@ -1103,52 +978,6 @@ mod tests {
     }
 
     #[test]
-    fn aeon_specialization_replaces_only_vision_and_preserves_worker_credential() {
-        let (directory, manager) = manager();
-        let original = "model:\n  default: main-model\n  provider: custom\ngateway:\n  platforms:\n    telegram:\n      enabled: true\nauxiliary:\n  vision:\n    provider: custom\n    model: qwopus-old\n    base_url: http://old-worker/v1\n    api_key: worker-secret\n";
-        fs::write(manager.path(), original).unwrap();
-        let desired = AeonSpecializationDesiredStateV1::canonical("aeon-reconcile-1");
-
-        let result = manager
-            .reconcile_aeon_specialization(&desired, || Ok(()))
-            .unwrap();
-
-        assert!(result.applied);
-        assert!(!result.effective_matches_desired);
-        assert!(manager.aeon_specialization_matches(&desired).unwrap());
-        assert!(result.capabilities.image);
-        assert!(result.capabilities.audio);
-        assert!(result.capabilities.video);
-        let document: Value = serde_yaml::from_slice(&fs::read(manager.path()).unwrap()).unwrap();
-        assert_eq!(document["model"]["default"], "main-model");
-        assert_eq!(
-            document["gateway"]["platforms"]["telegram"]["enabled"],
-            true
-        );
-        assert_eq!(
-            document["auxiliary"]["vision"]["model"],
-            DEFAULT_AEON_SPECIALIZATION_MODEL
-        );
-        assert_eq!(
-            document["auxiliary"]["vision"]["base_url"],
-            DEFAULT_AEON_SPECIALIZATION_WORKER_URL
-        );
-        assert_eq!(document["auxiliary"]["vision"]["api_key"], "worker-secret");
-        assert_eq!(
-            document["auxiliary"]["vision"]["extra_body"]["finite_specialization"]["capabilities"],
-            json!({ "image": true, "audio": true, "video": true })
-        );
-
-        let after_first_apply = fs::read(manager.path()).unwrap();
-        let repeated = manager
-            .reconcile_aeon_specialization(&desired, || Ok(()))
-            .unwrap();
-        assert!(repeated.already_applied);
-        assert_eq!(fs::read(manager.path()).unwrap(), after_first_apply);
-        drop(directory);
-    }
-
-    #[test]
     fn aeon_specialization_allows_only_current_and_rollback_models() {
         let mut rollback = AeonSpecializationDesiredStateV1::canonical("rollback-gemma12");
         rollback.model_alias = AEON_SPECIALIZATION_ROLLBACK_MODEL.to_owned();
@@ -1287,57 +1116,6 @@ mod tests {
         assert_eq!(
             manager.current_value(VISION_CONFIG_PATH).unwrap()["api_key"],
             "worker-secret-two"
-        );
-    }
-
-    #[test]
-    fn aeon_image_capability_can_be_disabled_independently() {
-        let (_directory, manager) = manager();
-        fs::write(
-            manager.path(),
-            "auxiliary:\n  vision:\n    provider: custom\n    api_key: worker-secret\n",
-        )
-        .unwrap();
-        let mut desired = AeonSpecializationDesiredStateV1::canonical("aeon-image-disabled");
-        desired.capabilities.image = false;
-
-        manager
-            .reconcile_aeon_specialization(&desired, || Ok(()))
-            .unwrap();
-
-        assert!(manager.aeon_specialization_matches(&desired).unwrap());
-        let effective = manager.current_value(VISION_CONFIG_PATH).unwrap();
-        assert_eq!(
-            effective.pointer("/extra_body/finite_specialization/capabilities/image"),
-            Some(&Value::Bool(false))
-        );
-    }
-
-    #[test]
-    fn aeon_specialization_activation_failure_restores_exact_previous_bytes() {
-        let (_directory, manager) = manager();
-        fs::write(
-            manager.path(),
-            "model: anthropic/claude\nauxiliary:\n  vision:\n    provider: custom\n    model: qwopus-old\n    api_key: worker-secret\n",
-        )
-        .unwrap();
-        let before = fs::read(manager.path()).unwrap();
-        let desired = AeonSpecializationDesiredStateV1::canonical("aeon-reconcile-fails");
-
-        let error = manager
-            .reconcile_aeon_specialization(&desired, || {
-                Err(AgentdError::Supervisor("Hermes reload failed".to_owned()))
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, AgentdError::Supervisor(_)));
-        assert_eq!(fs::read(manager.path()).unwrap(), before);
-        assert!(
-            manager
-                .ledger
-                .config_history("aeon-reconcile-fails")
-                .unwrap()
-                .is_none()
         );
     }
 }

@@ -129,11 +129,6 @@ impl BridgeClient {
         self.post("/v1/agentd/state", &delivery).await.map(|_| ())
     }
 
-    pub async fn recover_chat(&self) -> Result<Value, AgentdError> {
-        self.post("/v1/hermes/recover", &serde_json::json!({}))
-            .await
-    }
-
     async fn post(
         &self,
         path: &str,

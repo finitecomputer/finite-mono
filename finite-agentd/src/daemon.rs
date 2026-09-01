@@ -31,8 +31,6 @@ use crate::transport::BridgeClient;
 const STATUS_SCHEMA: &str = "finite.agent.status.v1";
 const STATUS_REQUEST_SCHEMA: &str = "finite.agent.status.request.v1";
 const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
-const CONFIG_OFFER_SCHEMA: &str = "finite.hermes.config.offer.v1";
-const CONFIG_ROLLBACK_SCHEMA: &str = "finite.hermes.config.rollback.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
@@ -433,15 +431,6 @@ impl CommandExecutor {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(json!({ "connected": true }))
             }
-            "agent.hermes.restart" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.supervisor.restart_hermes().await?;
-                Ok(json!({ "restart": "requested" }))
-            }
-            "agent.chat.recover" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.bridge.recover_chat().await
-            }
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(serde_json::to_value(self.connection_manager.status()?)?)
@@ -452,9 +441,6 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_plan(&request.request_id, body)?;
                 self.apply_inference_plan(plan).await
-            }
-            "agent.specialization.aeon.reconcile" => {
-                Err(AgentdError::UnsupportedCommand(request.command.clone()))
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;
@@ -500,39 +486,6 @@ impl CommandExecutor {
                     .await
                     .map_err(|error| AgentdError::Config(error.to_string()))??;
                 Ok(json!({ "connected": false }))
-            }
-            "agent.hermes.config.preview" => {
-                let offer = parse_body::<HermesConfigOfferV1>(request, CONFIG_OFFER_SCHEMA)?;
-                Ok(serde_json::to_value(self.config_manager.preview(&offer)?)?)
-            }
-            "agent.hermes.config.apply" => {
-                let offer = parse_body::<HermesConfigOfferV1>(request, CONFIG_OFFER_SCHEMA)?;
-                let manager = self.config_manager.clone();
-                let hermes_home = self.hermes_home.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    manager.apply(&offer, || validate_hermes_config(&hermes_home))
-                })
-                .await
-                .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if result.restart_required {
-                    self.supervisor.restart_hermes().await?;
-                }
-                Ok(serde_json::to_value(result)?)
-            }
-            "agent.hermes.config.rollback" => {
-                let rollback =
-                    parse_body::<HermesConfigRollbackV1>(request, CONFIG_ROLLBACK_SCHEMA)?;
-                let manager = self.config_manager.clone();
-                let hermes_home = self.hermes_home.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-                })
-                .await
-                .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if result.restart_required {
-                    self.supervisor.restart_hermes().await?;
-                }
-                Ok(serde_json::to_value(result)?)
             }
             command => Err(AgentdError::UnsupportedCommand(command.to_owned())),
         }
@@ -1098,8 +1051,7 @@ mod tests {
         assert_eq!(json["specialization"]["effective"], false);
         assert!(json["specialization"]["bundle_id"].is_null());
         assert_eq!(
-            AgentdError::UnsupportedCommand("agent.specialization.aeon.reconcile".to_owned())
-                .public_code(),
+            AgentdError::UnsupportedCommand("agent.retired.command".to_owned()).public_code(),
             "unsupported_command"
         );
     }
