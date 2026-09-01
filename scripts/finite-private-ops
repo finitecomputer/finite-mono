@@ -20,7 +20,7 @@ LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256"
 
 usage() {
   cat >&2 <<'EOF'
-usage: infra/runbooks/finite-private-ops.sh COMMAND [ARGS]
+usage: scripts/finite-private-ops COMMAND [ARGS]
 
 Read-only commands:
   status              Print Tinfoil container status JSON.

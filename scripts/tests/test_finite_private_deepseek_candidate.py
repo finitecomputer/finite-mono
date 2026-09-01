@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from scripts.check_finite_private_deepseek_candidate import (
+    INVENTORY,
     OFF_CANDIDATE,
     VLLM_IMAGE_PATTERN,
     check_repository,
@@ -14,12 +15,22 @@ from scripts.check_finite_private_deepseek_candidate import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def temporary_candidate(text: str) -> tempfile.TemporaryDirectory[str]:
+def temporary_candidate(
+    text: str, *, inventory_text: str | None = None
+) -> tempfile.TemporaryDirectory[str]:
     temporary_directory = tempfile.TemporaryDirectory()
     root = Path(temporary_directory.name)
     target = root / OFF_CANDIDATE
     target.parent.mkdir(parents=True)
     target.write_text(text, encoding="utf-8")
+    inventory = root / INVENTORY
+    inventory.parent.mkdir(parents=True, exist_ok=True)
+    inventory.write_text(
+        inventory_text
+        if inventory_text is not None
+        else (ROOT / INVENTORY).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     return temporary_directory
 
 
@@ -68,6 +79,38 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
         with temporary_candidate(text) as temporary_directory:
             violations = check_repository(Path(temporary_directory))
         self.assertTrue(any('"glm-5-2"' in item for item in violations), violations)
+
+    def test_candidate_drift_from_the_inventory_pin_is_rejected(self) -> None:
+        text = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8") + "\n# drift\n"
+        with temporary_candidate(text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any(
+                "does not pin the checked-in candidate SHA-256" in item
+                for item in violations
+            ),
+            violations,
+        )
+
+    def test_missing_inventory_pin_is_rejected(self) -> None:
+        text = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
+        inventory = (
+            (ROOT / INVENTORY)
+            .read_text(encoding="utf-8")
+            .replace(
+                "22a3b8030aeb2a47dab8547690cf125880f630d3163bcb713534fb43bffa8907",
+                "0" * 64,
+            )
+        )
+        with temporary_candidate(text, inventory_text=inventory) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any(
+                "does not pin the checked-in candidate SHA-256" in item
+                for item in violations
+            ),
+            violations,
+        )
 
 
 if __name__ == "__main__":

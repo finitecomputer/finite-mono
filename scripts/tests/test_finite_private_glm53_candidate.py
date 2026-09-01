@@ -7,7 +7,6 @@ from pathlib import Path
 from scripts.check_finite_private_glm53_candidate import (
     BRIDGE_CANDIDATE,
     MAIN_CANDIDATE,
-    RUNBOOK,
     check_repository,
 )
 
@@ -19,7 +18,6 @@ def temporary_repository(
     *,
     main_text: str | None = None,
     bridge_text: str | None = None,
-    runbook_text: str | None = None,
 ) -> tempfile.TemporaryDirectory[str]:
     temporary_directory = tempfile.TemporaryDirectory()
     root = Path(temporary_directory.name)
@@ -35,12 +33,6 @@ def temporary_repository(
             bridge_text
             if bridge_text is not None
             else (ROOT / BRIDGE_CANDIDATE).read_text(encoding="utf-8"),
-        ),
-        (
-            RUNBOOK,
-            runbook_text
-            if runbook_text is not None
-            else (ROOT / RUNBOOK).read_text(encoding="utf-8"),
         ),
     ):
         target = root / relative
@@ -123,26 +115,6 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
         self.assertEqual(
             sum('lacks required anchor: - "/*"' in item for item in violations),
             2,
-            violations,
-        )
-
-    def test_runbook_requires_capacity_rollback_and_mixed_version_proof(self) -> None:
-        text = (ROOT / RUNBOOK).read_text(encoding="utf-8")
-        for anchor in (
-            "120/120",
-            "FINITE_PRIVATE_ROLLBACK_TAG",
-            "deepseek-v4-flash-0731",
-        ):
-            text = text.replace(anchor, "REMOVED")
-        with temporary_repository(runbook_text=text) as temporary_directory:
-            violations = check_repository(Path(temporary_directory))
-        self.assertTrue(any("120/120" in item for item in violations), violations)
-        self.assertTrue(
-            any("FINITE_PRIVATE_ROLLBACK_TAG" in item for item in violations),
-            violations,
-        )
-        self.assertTrue(
-            any("deepseek-v4-flash-0731" in item for item in violations),
             violations,
         )
 

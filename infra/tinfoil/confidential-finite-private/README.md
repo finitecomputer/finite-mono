@@ -23,4 +23,6 @@ The external Tinfoil container is `finite-private`
 (`v2026-08-28-glm-5-3-flash-4`). The historical `kimi-k2-6` hostname is
 retired; the CPU-only compatibility bridge was deleted rather than
 iterated. Issued Runtime readers still need a follow-up onto this route.
-Replace procedure: `../../runbooks/finite-private-glm-5.3-flash-production-cutover.md`.
+Replace/rollback runs through `scripts/finite-private-ops`; the executed
+cutover record and rollback contract live in
+[`docs/runs/glm-5-3-flash-production-cutover-ledger.md`](../../../docs/runs/glm-5-3-flash-production-cutover-ledger.md).

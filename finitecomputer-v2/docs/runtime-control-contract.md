@@ -230,7 +230,7 @@ rollback boundary and must not be started concurrently. This contract does not
 delete source state, select a winner after both copies have changed, restore an
 off-host Recovery Set, or make relocation a fleet scheduler. The exact operator
 procedure is
-[`infra/runbooks/runtime-cold-relocation.md`](../../infra/runbooks/runtime-cold-relocation.md).
+[`infra/runbooks/recovery.md`](../../infra/runbooks/recovery.md).
 
 ### Runtime Retirement
 

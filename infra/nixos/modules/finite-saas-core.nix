@@ -43,7 +43,7 @@ in
       FC_CORE_BIND = "127.0.0.1:4200";
       # Parser/schema compatibility has been live since 2026-07-10. The
       # required active-operation preflight was clean before first use; see
-      # the rollback-rescue procedure in infra/runbooks/runtime-image.md.
+      # the rollback-rescue procedure in infra/runbooks/release.md.
       FC_CORE_ENABLE_RUNTIME_UPGRADES = "true";
       # Independent default-off kill switch for new owner retirement requests.
       # In-flight same-ID retirement completion routes remain available.

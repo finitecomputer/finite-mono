@@ -14,7 +14,11 @@ BRIDGE_CANDIDATE = Path(
     "infra/tinfoil/confidential-kimi-k2-6/"
     "tinfoil-config.compatibility-bridge.candidate.yml"
 )
-RUNBOOK = Path("infra/runbooks/finite-private-glm-5.3-flash-production-cutover.md")
+# The GLM cutover runbook was retired 2026-08-29 (runbook consolidation). The
+# acceptance thresholds live in scripts/check_finite_private_glm53_{capacity,
+# protocol,quality}.py and the executed record in
+# docs/runs/glm-5-3-flash-production-cutover-ledger.md; this checker keeps
+# validating the checked-in candidate configs only.
 
 CHECKPOINT = 'repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"'
 MODEL_ALIASES = (
@@ -253,52 +257,12 @@ def _check_bridge(text: str) -> list[str]:
     return violations
 
 
-def _check_runbook(text: str) -> list[str]:
-    return _require(
-        text,
-        (
-            "2026-08-28 02:30 America/Chicago",
-            "05:30 America/Chicago",
-            "preparation only",
-            "scripts/finite-status --json",
-            "### Resume rules",
-            "FINITE_PRIVATE_ROLLBACK_TAG",
-            "FINITE_PRIVATE_ROLLBACK_CONTAINER_ID",
-            "--replace",
-            "finite-private.finite.containers.tinfoil.dev",
-            "kimi-k2-6.finite.containers.tinfoil.dev",
-            "glm-5-3-flash",
-            "deepseek-v4-flash-0731",
-            "glm-5-2",
-            "120/120",
-            "scripts/check_finite_private_glm53_quality.py",
-            "scripts/check_finite_private_glm53_protocol.py",
-            "scripts/prepare_glm53_blind_comparison.py",
-            "p50 decode",
-            "p10 decode",
-            "2,400 aggregate output tokens/second",
-            "p95 TTFT",
-            "35-minute soak",
-            "clear_thinking=true",
-            "360,000-token",
-            "Account enrollment",
-            "existing internal canary",
-            "Two reviewers independently score",
-            "settlement-status",
-            "rollback immediately",
-            "Do not migrate durable Runtime configurations",
-        ),
-        "GLM cutover runbook",
-    )
-
-
 def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
     texts: dict[Path, str] = {}
     violations: list[str] = []
     for relative, label in (
         (MAIN_CANDIDATE, "GLM candidate"),
         (BRIDGE_CANDIDATE, "compatibility bridge"),
-        (RUNBOOK, "GLM cutover runbook"),
     ):
         try:
             texts[relative] = (root / relative).read_text(encoding="utf-8")
@@ -308,7 +272,6 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
         return violations
     violations.extend(_check_main(texts[MAIN_CANDIDATE], release_ready=release_ready))
     violations.extend(_check_bridge(texts[BRIDGE_CANDIDATE]))
-    violations.extend(_check_runbook(texts[RUNBOOK]))
     return violations
 
 

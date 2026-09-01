@@ -17,7 +17,7 @@ derived search index as backup material.
 
 Recovery execution is platform-runbook work, not an `fbrain` action. In a
 Finite Mono checkout, follow the authoritative
-`infra/runbooks/hosted-web-chat-recovery.md` for evidence gathering, snapshot
+`infra/runbooks/recovery.md` for evidence gathering, snapshot
 boundaries, synthetic restore, and rollback. In a managed runtime without that
 runbook, stop and escalate to the platform operator. Production repair remains
 read-only until the user explicitly authorizes the named mutation.

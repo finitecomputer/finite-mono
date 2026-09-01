@@ -140,7 +140,7 @@ identity file `/data/.finite-filesystem-identity` matches
      `FC_RUNNER_RUNTIME_ARTIFACT_ID` read from lat3's
      `/etc/finite/runner.env`.
    - `/etc/finite/identity-operator.env` (0600) — the replaceable operator
-     token per `infra/runbooks/identity-authority.md`.
+     token per `infra/runbooks/recovery.md`.
    - `/etc/finite/runtime-secrets.env` (0600) — direct copy of lat3's.
    - `/etc/finite/wireguard-private-key` (0600) — the private half of the
      keypair whose public key is already registered on the lat2 hub.
@@ -315,7 +315,7 @@ Inbound archives (provenance in `docs/runs/lat4-provisioning-prep.md` §7):
    Runtimes absent from it stay untouched on their existing binding.
 8. Per-Runtime exact relocation — no bulk binding change. For each record,
    one Runtime (or small batch) at a time, follow
-   `infra/runbooks/runtime-cold-relocation.md` STEPS with the
+   `infra/runbooks/recovery.md` §5 exact relocation with the
    absent-compute variant:
 
    - Run the bounded absence probe on lat1 (rescue mode: container and

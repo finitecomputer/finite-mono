@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OPS = ROOT / "infra/runbooks/finite-private-ops.sh"
+OPS = ROOT / "scripts/finite-private-ops"
 
 
 class MockFinitePrivateHandler(BaseHTTPRequestHandler):

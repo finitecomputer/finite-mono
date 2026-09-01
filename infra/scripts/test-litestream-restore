@@ -2,7 +2,7 @@
 # Synthetic, fully offline litestream replicate -> restore -> integrity drill.
 #
 # Proves the exact toolchain (litestream 0.5) and command shapes the DR
-# runbook relies on (infra/runbooks/litestream-chat-replication.md), using a
+# runbook relies on (infra/runbooks/recovery.md), using a
 # `file` replica so CI needs no bucket, credentials, or network. The drill
 # asserts CONTINUOUS capture: rows inserted after the replicator started must
 # be present in the restored copy, not just the initial snapshot.

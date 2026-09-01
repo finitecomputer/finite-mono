@@ -29,7 +29,9 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             check=False,
         )
 
-    def run_install(self, artifact_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_install(
+        self, artifact_dir: Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(INSTALL), str(artifact_dir), *args],
             cwd=ROOT,
@@ -45,7 +47,9 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact manifest is missing", result.stderr)
         with tempfile.TemporaryDirectory() as temp:
-            result = self.run_install(Path(temp), "root@152.236.34.15", "--validate-only")
+            result = self.run_install(
+                Path(temp), "root@152.236.34.15", "--validate-only"
+            )
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact manifest is missing", result.stderr)
 
@@ -73,7 +77,7 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         # closed if the captured flag regresses.
         ids = ROOT / "infra/nixos/hosts/finite-lat-4/storage-ids.nix"
         source = BUILD.read_text(encoding="utf-8")
-        self.assertIn('grep -q \'^  captured = true;$\'', source)
+        self.assertIn("grep -q '^  captured = true;$'", source)
         self.assertIn("captured = false", source)
         self.assertTrue(ids.exists())
         ids_text = ids.read_text(encoding="utf-8")
@@ -142,7 +146,10 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             "cache": "nix-cache",
         }
         cases = [
-            ("system", "/nix/store/" + "b" * 32 + "-nixos-system-finite-lat-1-26.05.test"),
+            (
+                "system",
+                "/nix/store/" + "b" * 32 + "-nixos-system-finite-lat-1-26.05.test",
+            ),
             ("disko", "/nix/store/" + "c" * 32 + "-something-else"),
             ("kexec", "/nix/store/" + "d" * 32 + "-disko"),
         ]
@@ -151,7 +158,9 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
                 artifact = Path(temp)
                 payload = {
                     **base,
-                    "system": "/nix/store/" + "b" * 32 + "-nixos-system-finite-lat-4-26.05.test",
+                    "system": "/nix/store/"
+                    + "b" * 32
+                    + "-nixos-system-finite-lat-4-26.05.test",
                     "disko": "/nix/store/" + "c" * 32 + "-disko",
                     "kexec": "/nix/store/" + "d" * 32 + "-kexec-tarball",
                     key: value,
@@ -172,7 +181,7 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             mutation,
         )
         self.assertIn("previous_system", source)
-        self.assertIn("switch-to-configuration\" switch", source)
+        self.assertIn('switch-to-configuration" switch', source)
         self.assertIn("rollback", source)
         self.assertIn("systemctl start finite-saas-runner.timer", source)
 
@@ -180,7 +189,7 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         source = DEPLOY.read_text(encoding="utf-8")
         success = source.index('echo "==> DEPLOYED system=')
         self.assertIn(
-            'else\n  systemctl stop finite-saas-runner.timer',
+            "else\n  systemctl stop finite-saas-runner.timer",
             source[:success],
         )
 
@@ -194,16 +203,18 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
             source,
         )
 
-    def test_install_helper_realizes_from_cache_and_drives_pinned_nixos_anywhere(self) -> None:
+    def test_install_helper_realizes_from_cache_and_drives_pinned_nixos_anywhere(
+        self,
+    ) -> None:
         source = INSTALL.read_text(encoding="utf-8")
         # The artifact cache is unsigned; the installer must read it with
         # the explicit --no-check-sigs path like every deploy-cache consumer.
         self.assertIn("--no-check-sigs", source)
-        self.assertIn('nix copy --no-check-sigs --option builders \'\'', source)
+        self.assertIn("nix copy --no-check-sigs --option builders ''", source)
         self.assertIn('--from "file://$CACHE_DIR"', source)
         self.assertIn('"$SYSTEM" "$DISKO" "$KEXEC"', source)
-        self.assertIn("--store-paths \"$SYSTEM\" \"$DISKO\"", source)
-        self.assertIn("--kexec \"$KEXEC\"", source)
+        self.assertIn('--store-paths "$SYSTEM" "$DISKO"', source)
+        self.assertIn('--kexec "$KEXEC"', source)
         self.assertIn("--build-on local", source)
         self.assertIn("packages.x86_64-linux.finite-lat-4-nixos-anywhere", source)
         # Substitution from the artifact cache only: no build invocation.
@@ -251,6 +262,7 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
     def test_runbook_gate_a_cross_checks_committed_storage_ids(self) -> None:
         # The capture only proves the identities if Gate A says to compare
         # the emitted by-id names against the committed storage-ids file.
+        # This test is deleted together with the runbook when Gate F closes.
         runbook = (ROOT / "infra/runbooks/lat4-nixos-runner-install.md").read_text(
             encoding="utf-8"
         )
@@ -272,9 +284,9 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         self.assertIn("runtime_relocation.v1", runbook)
         self.assertIn("migrated-runtimes.manifest", runbook)
         self.assertNotRegex(runbook, r"UPDATE\s+\w+.*SET.*source_host_id")
-        self.assertNotIn("bulk binding change", runbook.replace(
-            "no bulk binding change", ""
-        ))
+        self.assertNotIn(
+            "bulk binding change", runbook.replace("no bulk binding change", "")
+        )
 
 
 if __name__ == "__main__":

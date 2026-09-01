@@ -158,7 +158,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_runbook_markdown_runs_nix_checks(self) -> None:
         self.assertEqual(
-            selected("infra/runbooks/deploy-core.md"),
+            selected("infra/runbooks/release.md"),
             {"run_nix_checks"},
         )
 

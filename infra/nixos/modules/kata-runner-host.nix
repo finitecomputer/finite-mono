@@ -31,7 +31,7 @@ let
     FC_RUNNER_CLASS = "kata";
     # FC_RUNNER_RUNTIME_ARTIFACT_ID is deliberately absent. The promoted
     # Runtime artifact is an operator-managed pin in /etc/finite/runner.env on
-    # each host (infra/runbooks/runtime-image.md); a literal here was only ever
+    # each host (infra/runbooks/release.md); a literal here was only ever
     # a stale shadow of it. The runner fails closed at start without it
     # ("FC_RUNNER_RUNTIME_ARTIFACT_ID is required"), and
     # scripts/check_runner_host_contract.py rejects any attempt to render it.

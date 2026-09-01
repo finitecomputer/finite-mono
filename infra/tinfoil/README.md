@@ -31,10 +31,12 @@ The current model/container/alias map and retired lab state are recorded in
    legacy-parity import. Build a fresh digest from the exact merged SHA.
 3. Update the digest pin in `confidential-finite-private`'s config; its measured
    release workflow produces the new enclave release.
-4. Follow `infra/runbooks/finite-private-limiter-mono-switch.md`. The ops
-   wrapper now lives at `infra/runbooks/finite-private-ops.sh` and requires an
-   exact approved tag in `FINITE_PRIVATE_RELAUNCH_APPROVED` before it will run
-   the mutating relaunch command. Expect about 35 minutes of downtime.
+4. Use the executable ops wrapper `scripts/finite-private-ops` for the
+   relaunch: it requires an exact approved tag in
+   `FINITE_PRIVATE_RELAUNCH_APPROVED` before it will run the mutating
+   relaunch command. Expect about 35 minutes of downtime. (The former
+   limiter-switch runbook was retired 2026-08-29; the executed switches are
+   recorded in [`../deployment-changelog.md`](../deployment-changelog.md).)
 
 Do not revert `FINITE_ADMISSION_MODE=allowlist` while `FINITE_USAGE_API_URL`
 (`https://finite.computer` in the measured config) is the public HTML outage

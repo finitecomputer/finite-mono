@@ -4,10 +4,11 @@
 > `finite-lat-1` on 2026-07-09, and lat2 is now a decommission target with
 > historical service captures.
 > Do not move old Sites files, install or enable these timers, or use `/data`
-> as a Finite recovery target. Current backup and restore procedures live under
-> [`infra/runbooks/`](../../runbooks/). To remove historical data from the
-> machine before repurpose, use
-> [`decommission-lat2.md`](../../runbooks/decommission-lat2.md).
+> as a Finite recovery target. Current backup and restore procedures live in
+> [`infra/runbooks/recovery.md`](../../runbooks/recovery.md). The former
+> decommission runbook was retired 2026-08-29; repurpose/removal now runs
+> through the emergency cutover gates
+> ([`lat2-replacement-cutover.md`](../../runbooks/lat2-replacement-cutover.md)).
 
 ## Current reality (captured 2026-07-08) — GAP
 

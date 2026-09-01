@@ -7,7 +7,7 @@
 #
 # Bootstrap note: ensureUsers cannot set passwords, and ensureDBOwnership
 # only works when db name == role name (ours differ). At cutover, before
-# restoring the dump (infra/runbooks/postgres-backup-restore.md):
+# restoring the dump (infra/runbooks/recovery.md):
 #   sudo -u postgres psql -c "ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';"
 #   sudo -u postgres psql -c "ALTER DATABASE finite_core OWNER TO finite;"
 # using the POSTGRES_PASSWORD from old lat1's k8s Secret finite-computer-secrets.

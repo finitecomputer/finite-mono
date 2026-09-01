@@ -2,7 +2,7 @@
 # storage (Latitude.sh). DR-only restore lane: seconds-of-writes RPO with a
 # documented manual `litestream restore`, NOT a warm standby. A restored copy
 # must never run alongside the live server (single-writer doctrine,
-# infra/runbooks/deploy-finitechat-server.md).
+# infra/runbooks/incident.md).
 #
 # Why this exists: the deploy-triggered Recovery Snapshot is stop-the-world
 # (its 15-minute timer was removed 2026-07-14 because the fence broke live
