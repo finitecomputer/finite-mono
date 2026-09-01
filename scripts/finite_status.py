@@ -102,16 +102,17 @@ CONTRACT: dict[str, Any] = {
     },
     # Chat-plane incident probes (2026-08-27..29 outage: a server-side
     # projection freeze plus an agent-side quarantine livelock both sat green
-    # under every existing section). All three probes are host-local and
+    # under every existing section). Both probes are host-local and
     # read-only; each names its evidence and degrades to unknown, never to a
-    # guessed green or red.
+    # guessed green or red. (The 2026-09-01 live run deleted the third probe,
+    # the client cursor-lag detector: agent stores live only on runner hosts
+    # while server room heads live only on the app host, so no single host
+    # can ever run the comparison; see the PR that removed it.)
     "chat_plane": {
         # App host (ADR 0007): finitechat-server SQLite via DynamicUser
         # StateDirectory (modules/finitechat-server.nix, litestream config in
         # hosts/finite-lat-2/default.nix).
         "server_database": "/var/lib/private/finite-chat/data/server.sqlite3",
-        "hosted_device_root": "/var/lib/private/finitechat-hosted-device",
-        "hosted_device_store_glob": "users/*/chat/client.sqlite3",
         # finitechat-server writes a durable-state snapshot every
         # SNAPSHOT_INTERVAL_OPS accepted operations
         # (finitechat/crates/finitechat-server/src/lib.rs). The freeze detector
@@ -137,20 +138,6 @@ CONTRACT: dict[str, Any] = {
             "207.188.7.157": "finite-lat-3",
             "152.236.34.15": "finite-lat-4",
         },
-        # Agent cursor-vs-head blindness detector: bounded sample (a full
-        # sweep of every runtime store is too slow for a status command).
-        # `MAX(seq) FROM client_app_events` is a durable-cursor PROXY: only
-        # decrypted app events land there, so membership/key-package ops keep
-        # a modest standing lag; the red line is a large lag combined with a
-        # store that has not been written for the staleness window (the
-        # freeze signature: the head advances while the store stands still).
-        "cursor_sample_per_source": 3,
-        "cursor_rooms_per_store": 5,
-        "cursor_lag_red_ops": 256,
-        "cursor_store_stale_seconds": 600,
-        "runner_work_root_variable": "FC_RUNNER_WORK_ROOT",
-        "runner_default_work_root": "/data/finite-saas-runner",
-        "agent_store_suffix": "agent/client.sqlite3",
     },
     "hosts": {
         "finite-lat-1": {
@@ -928,15 +915,6 @@ def collect_lifecycle_probe(
     return raw
 
 
-def sanitize_sandbox_name(value: str) -> str:
-    """Mirror finite-saas-runner's sandbox-name sanitization (lib.rs)."""
-    result = "".join(
-        character if re.match(r"[A-Za-z0-9_-]", character) else "-"
-        for character in value
-    )
-    return result[:63].strip("-")
-
-
 # Scratch-copy ceiling for the SQLite probes: a status command must stay
 # fast; a store beyond this size refuses (unknown) instead of stalling.
 SCRATCH_COPY_MAX_BYTES = 16 * (1 << 30)
@@ -983,13 +961,36 @@ def scratch_copy_sqlite(database: Path) -> Iterator[Path]:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def sqlite3_command() -> str:
+    """Locate the sqlite3 CLI robustly.
+
+    Production hosts carry sqlite3 only under /nix/store, and a non-login
+    ssh session does not inherit the profile PATH (the 2026-09-01 live run
+    hit exactly that). Fall back to the newest nix store sqlite bin; a host
+    with neither yields a clear CollectionError so the probe degrades to
+    unknown instead of crashing.
+    """
+    found = shutil.which("sqlite3")
+    if found:
+        return found
+    # Newest-first: prefer the currently-linked version.
+    candidates = sorted(
+        glob.glob("/nix/store/*-sqlite-*-bin/bin/sqlite3"), reverse=True
+    )
+    if candidates:
+        return candidates[0]
+    raise CollectionError(
+        "sqlite3 CLI not found on PATH or under /nix/store/*-sqlite-*-bin"
+    )
+
+
 def sqlite_json_query(
     database: Path, sql: str, timeout: int = 15
 ) -> list[dict[str, Any]]:
     """Run one read-only SQLite query on a scratch copy; -json rows back."""
     result = run_read_only(
         [
-            "sqlite3",
+            sqlite3_command(),
             "-safe",
             "-readonly",
             "-batch",
@@ -1040,8 +1041,7 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     `http_state_snapshots_v2.last_op_seq` is the replay watermark: a server
     that keeps accepting ops while its watermark stands still is exactly the
     2026-08-27..29 projection freeze, so both numbers are recorded side by
-    side. Room heads (`http_room_memberships.projection_json` -> $.last_seq)
-    feed the cursor-vs-head probe.
+    side.
     """
     contract = CONTRACT["chat_plane"]
     database = Path(contract["server_database"])
@@ -1078,17 +1078,6 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
                 "SELECT COALESCE(last_op_seq, 0) AS watermark"
                 " FROM http_state_snapshots_v2 WHERE id = 1;",
             )
-            rows = sqlite_json_query(
-                scratch,
-                "SELECT room_id AS room_id,"
-                " CAST(json_extract(projection_json, '$.last_seq') AS INTEGER)"
-                " AS last_seq FROM http_room_memberships ORDER BY room_id;",
-            )
-            raw["room_heads"] = {
-                row["room_id"]: int(row["last_seq"])
-                for row in rows
-                if row.get("last_seq") is not None
-            }
     except CollectionError as error:
         raw["errors"].append(str(error))
     return raw
@@ -1233,152 +1222,6 @@ def collect_sync_fetch_rate(now: datetime) -> dict[str, Any]:
     return raw
 
 
-def store_freshness(database: Path) -> float | None:
-    """Seconds since the newest write to the store (db or WAL sidecar)."""
-    newest: float | None = None
-    for suffix in ("", "-wal"):
-        try:
-            mtime = os.path.getmtime(f"{database}{suffix}")
-        except OSError:
-            continue
-        newest = mtime if newest is None else max(newest, mtime)
-    return None if newest is None else max(0.0, time.time() - newest)
-
-
-def collect_local_client_stores(
-    runtimes: list[dict[str, Any]], hostname: str
-) -> dict[str, Any]:
-    """Bounded sample of this host's chat client stores (the cursor side).
-
-    Two local sources, both read-only: the hosted-device per-user stores on
-    the app host, and the Kata /data volumes of this host's active runtimes
-    on a Runner host (`<work_root>/kata/<sandbox>/agent/client.sqlite3` is
-    bind-mounted as /data/agent, where FINITECHAT_HOME points). The sample is
-    bounded per source; a full sweep is too slow for a status command.
-    """
-    contract = CONTRACT["chat_plane"]
-    raw: dict[str, Any] = {"stores": [], "skipped": [], "errors": []}
-
-    hosted_root = Path(contract["hosted_device_root"])
-    hosted_stores = sorted(
-        hosted_root.glob(contract["hosted_device_store_glob"]),
-        key=lambda path: store_freshness(path) or 0,
-    )
-    for store in hosted_stores[: contract["cursor_sample_per_source"]]:
-        raw["stores"].append(
-            {
-                "kind": "hosted-device",
-                "label": store.parent.parent.name,
-                "path": str(store),
-            }
-        )
-
-    work_root = runner_work_root()
-    if work_root is None:
-        raw["runner_work_root"] = None
-    else:
-        raw["runner_work_root"] = str(work_root)
-        candidates = sorted(
-            (
-                row
-                for row in runtimes
-                if row.get("source_host_id") == hostname
-                and row.get("link_state") == "active"
-                and row.get("source_machine_id")
-            ),
-            key=lambda row: row["agent_runtime_id"],
-        )
-        for row in candidates[: contract["cursor_sample_per_source"]]:
-            machine = sanitize_sandbox_name(row["source_machine_id"])
-            store = (
-                work_root / "kata" / machine.lower() / contract["agent_store_suffix"]
-            )
-            if store.is_file():
-                raw["stores"].append(
-                    {
-                        "kind": "agent",
-                        "label": row.get("agent_name") or row["agent_runtime_id"],
-                        "agent_runtime_id": row["agent_runtime_id"],
-                        "path": str(store),
-                    }
-                )
-            else:
-                raw["skipped"].append(
-                    {
-                        "agent_runtime_id": row["agent_runtime_id"],
-                        "reason": f"no client store at {store}",
-                    }
-                )
-
-    for store in raw["stores"]:
-        database = Path(store["path"])
-        store["age_seconds"] = store_freshness(database)
-        try:
-            with scratch_copy_sqlite(database) as scratch:
-                rows = sqlite_json_query(
-                    scratch,
-                    "SELECT room_id AS room_id, MAX(seq) AS max_seq"
-                    " FROM client_app_events GROUP BY room_id"
-                    " ORDER BY room_id"
-                    f" LIMIT {int(contract['cursor_rooms_per_store'])};",
-                )
-                store["rooms"] = {row["room_id"]: int(row["max_seq"]) for row in rows}
-        except CollectionError as error:
-            store["error"] = str(error)
-    return raw
-
-
-def runner_work_root() -> Path | None:
-    """Resolve this host's Runner work root without trusting a hardcoded box.
-
-    The runner declares FC_RUNNER_WORK_ROOT in its systemd unit environment
-    (modules/kata-runner-host.nix); the environment files may override. The
-    contract default is the last resort and is pinned to the Nix host configs
-    by the contract check.
-    """
-    contract = CONTRACT["chat_plane"]
-    variable = contract["runner_work_root_variable"]
-    candidates: list[str] = []
-    try:
-        properties = systemd_properties_single(
-            CONTRACT["runner"]["service"], "Environment"
-        )
-        for assignment in properties:
-            for token in shlex.split(assignment):
-                if token.startswith(f"{variable}="):
-                    candidates.append(token.split("=", 1)[1])
-    except CollectionError:
-        pass
-    for path_key in ("shared_environment_file", "environment_file"):
-        try:
-            values = read_environment_values(
-                Path(CONTRACT["runner"][path_key]), {variable}
-            )
-        except CollectionError:
-            continue
-        if values.get(variable):
-            candidates.append(values[variable])
-    candidates.append(contract["runner_default_work_root"])
-    for candidate in candidates:
-        if candidate:
-            return Path(candidate)
-    return None
-
-
-def systemd_properties_single(unit: str, name: str) -> list[str]:
-    result = run_read_only(
-        ["systemctl", "show", "--no-pager", f"--property={name}", unit]
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or f"exit {result.returncode}"
-        raise CollectionError(f"cannot observe {unit}: {detail}")
-    return [
-        line.split("=", 1)[1]
-        for line in result.stdout.splitlines()
-        if line.startswith(f"{name}=")
-    ]
-
-
 def host_roles(hostname: str) -> list[str] | None:
     """Contract roles for this host; None when the host has no profile.
 
@@ -1392,9 +1235,7 @@ def host_roles(hostname: str) -> list[str] | None:
     return list(profile.get("roles", ["app", "runner"]))
 
 
-def collect_chat_plane(
-    hostname: str, runtimes: list[dict[str, Any]], now: datetime
-) -> dict[str, Any]:
+def collect_chat_plane(hostname: str, now: datetime) -> dict[str, Any]:
     """Collect every chat-plane incident probe for this host.
 
     Probes are role-gated like host health (ADR 0007): the chat edge and the
@@ -1416,7 +1257,6 @@ def collect_chat_plane(
     return {
         "server": collect_chat_server_state(hostname),
         "sync_rate": sync_rate,
-        "client_stores": collect_local_client_stores(runtimes, hostname),
     }
 
 
@@ -2113,9 +1953,9 @@ def build_chat_plane(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any
     """Score the chat-plane incident probes collected for this host.
 
     Every probe names its evidence. Where the evidence source is not on this
-    host (server database / chat edge on the app host, agent stores on a
-    Runner host) the probe reads not-applicable rather than guessing; where
-    evidence exists but cannot be compared, it reads unknown — unknown is a
+    host (server database / chat edge live on the app host) the probe reads
+    not-applicable rather than guessing; where evidence should exist but
+    cannot be read, it reads unknown — unknown is a
     displayed state, never hidden, and never silently green.
     """
     if raw is None:
@@ -2199,123 +2039,11 @@ def build_chat_plane(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any
         }
     statuses.append(sync["status"])
 
-    stores_raw = dict(raw.get("client_stores") or {})
-    room_heads = (
-        server.get("room_heads")
-        if server.get("applicable") and not server.get("errors")
-        else None
-    )
-    stores: list[dict[str, Any]] = []
-    flagged_rooms: list[dict[str, Any]] = []
-    lag_red = int(contract["cursor_lag_red_ops"])
-    stale_after = int(contract["cursor_store_stale_seconds"])
-    for store in stores_raw.get("stores", []):
-        rooms: list[dict[str, Any]] = []
-        store_flagged: list[dict[str, Any]] = []
-        for room_id, cursor in (store.get("rooms") or {}).items():
-            room: dict[str, Any] = {
-                "room_id": short_room_id(room_id),
-                "cursor_max_seq": cursor,
-            }
-            if room_heads is not None and room_id in room_heads:
-                head_seq = int(room_heads[room_id])
-                lag = head_seq - int(cursor)
-                room["head_seq"] = head_seq
-                room["lag_ops"] = lag
-                age = store.get("age_seconds")
-                frozen = lag > lag_red and age is not None and float(age) > stale_after
-                room["flagged"] = frozen
-                if frozen:
-                    entry = {
-                        **room,
-                        "kind": store["kind"],
-                        "label": store["label"],
-                        "store_age_seconds": int(age),
-                    }
-                    store_flagged.append(entry)
-                    flagged_rooms.append(entry)
-            rooms.append(room)
-        stores.append(
-            {
-                "kind": store["kind"],
-                "label": store["label"],
-                "agent_runtime_id": store.get("agent_runtime_id"),
-                "age_seconds": (
-                    int(store["age_seconds"])
-                    if store.get("age_seconds") is not None
-                    else None
-                ),
-                "rooms": rooms,
-                "error": store.get("error"),
-                "flagged": store_flagged,
-            }
-        )
-
-    cursors: dict[str, Any]
-    if not stores and not stores_raw.get("skipped"):
-        cursors = {
-            "status": "green",
-            "applicable": False,
-            "state": "not-applicable",
-            "reason": "no chat client stores on this host",
-            "evidence_note": CURSOR_EVIDENCE_NOTE,
-        }
-    elif stores and room_heads is None:
-        cursors = {
-            "status": "unknown",
-            "applicable": True,
-            "reason": (
-                "server room heads unavailable on this host; run on the app"
-                " host for the head-vs-cursor comparison"
-            ),
-            "evidence_note": CURSOR_EVIDENCE_NOTE,
-            "stores": stores,
-            "skipped": stores_raw.get("skipped", []),
-        }
-    else:
-        errored = [store for store in stores if store.get("error")]
-        skipped = stores_raw.get("skipped", [])
-        # Fail-closed: an active runtime whose local store cannot be found is
-        # actionable evidence, never a clean green cursor probe.
-        cursors = {
-            "status": combine_status(
-                ["red"]
-                if flagged_rooms
-                else (["unknown"] if (errored or skipped) else ["green"])
-            ),
-            "applicable": True,
-            "lag_red_ops": lag_red,
-            "store_stale_seconds": stale_after,
-            "evidence_note": CURSOR_EVIDENCE_NOTE,
-            "stores": stores,
-            "skipped": stores_raw.get("skipped", []),
-            "flagged_rooms": flagged_rooms,
-        }
-    statuses.append(cursors["status"])
-
     return {
         "status": combine_status(statuses),
         "server_watermark": watermark,
         "sync_fetch_rate": sync,
-        "agent_cursors": cursors,
     }
-
-
-def short_room_id(room_id: str) -> str:
-    """Purpose-scoped display form: ids stay evidence, not chatter."""
-    return room_id if len(room_id) <= 12 else f"{room_id[:12]}…"
-
-
-# `MAX(seq) FROM client_app_events` is a durable-cursor PROXY, not the cursor:
-# only decrypted application events land in that table, so membership and
-# key-package operations keep a modest standing lag against the server head
-# even on a healthy device. The freeze line is therefore lag beyond
-# cursor_lag_red_ops AND a store untouched for cursor_store_stale_seconds.
-CURSOR_EVIDENCE_NOTE = (
-    "client_app_events MAX(seq) can lag the true durable cursor; only a lag"
-    " beyond cursor_lag_red_ops combined with a stale store is the freeze"
-    " signature"
-)
 
 
 def report_exit_code(report: dict[str, Any]) -> int:
@@ -2566,7 +2294,7 @@ def render_human(report: dict[str, Any]) -> str:
 
     chat = sections["chat_plane"]
     lines.append(f"Chat plane {badge(chat['status'])}")
-    if not {"server_watermark", "sync_fetch_rate", "agent_cursors"} <= chat.keys():
+    if not {"server_watermark", "sync_fetch_rate"} <= chat.keys():
         # Error-only section: no chat-plane evidence was collected at all.
         lines.append(f"  {chat.get('error', 'chat-plane evidence unavailable')}")
         lines.extend(
@@ -2577,7 +2305,10 @@ def render_human(report: dict[str, Any]) -> str:
         )
         return "\n".join(lines)
     watermark = chat["server_watermark"]
-    if watermark.get("applicable"):
+    # Applicable-but-errored probes (e.g. the sqlite3 CLI missing from a
+    # non-login ssh PATH) carry no numbers: render unknown-with-reason,
+    # never a traceback (2026-09-01 live-run crash).
+    if watermark.get("applicable") and "ops_head" in watermark:
         lines.append(
             f"  server watermark: ops head {watermark['ops_head']}; "
             f"snapshot {watermark['snapshot_watermark']}; "
@@ -2612,45 +2343,6 @@ def render_human(report: dict[str, Any]) -> str:
         detail = sync.get("errors") or ["sync-rate evidence unavailable"]
         lines.append(f"  sync fetch rate {badge(sync['status'])}: {detail[0]}")
 
-    cursors = chat["agent_cursors"]
-    if cursors.get("applicable"):
-        stores = cursors.get("stores", [])
-        flagged = cursors.get("flagged_rooms", [])
-        lines.append(
-            f"  client cursors: {len(stores)} store(s) sampled; "
-            f"{len(flagged)} frozen room(s) {badge(cursors['status'])}"
-        )
-        if cursors.get("reason"):
-            lines.append(f"    {cursors['reason']}")
-        for room in flagged[:5]:
-            lines.append(
-                f"    FROZEN {room['kind']} {room['label']}: room {room['room_id']} "
-                f"head {room['head_seq']} vs cursor {room['cursor_max_seq']} "
-                f"(lag {room['lag_ops']}); store idle {human_age(room['store_age_seconds'])}"
-            )
-        for store in stores:
-            if store.get("error"):
-                lines.append(f"    {store['kind']} {store['label']}: {store['error']}")
-            elif not flagged:
-                rooms = ", ".join(
-                    f"{room['room_id']}@{room['cursor_max_seq']}"
-                    for room in store["rooms"]
-                )
-                suffix = f"; {rooms}" if rooms else ""
-                lines.append(
-                    f"    {store['kind']} {store['label']}: store idle "
-                    f"{human_age(store.get('age_seconds'))}{suffix}"
-                )
-        for entry in cursors.get("skipped", []):
-            lines.append(
-                f"    SKIPPED agent {entry.get('agent_runtime_id')}: "
-                f"{entry.get('reason', 'client store not found')}"
-            )
-    elif cursors.get("state") == "not-applicable":
-        lines.append(f"  client cursors: not applicable ({cursors['reason']})")
-    else:
-        detail = cursors.get("reason") or cursors.get("error") or "unavailable"
-        lines.append(f"  client cursors {badge(cursors['status'])}: {detail}")
     lines.extend(
         [
             "",
@@ -2674,9 +2366,7 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     raw["lifecycle_probe"] = collect_lifecycle_probe(
         raw.get("core", {}).get("runtimes", []), hostname
     )
-    raw["chat_plane"] = collect_chat_plane(
-        hostname, raw.get("core", {}).get("runtimes", []), now
-    )
+    raw["chat_plane"] = collect_chat_plane(hostname, now)
     return raw, now
 
 

@@ -907,7 +907,6 @@ class FiniteStatusTests(unittest.TestCase):
         *,
         server: dict[str, object] | None = None,
         sync_rate: dict[str, object] | None = None,
-        client_stores: dict[str, object] | None = None,
     ) -> dict[str, object]:
         return {
             "server": server
@@ -916,7 +915,6 @@ class FiniteStatusTests(unittest.TestCase):
                 "applicable": True,
                 "ops_head": 206563,
                 "snapshot_watermark": 204801,
-                "room_heads": {"room-a": 206500, "room-b": 206100},
                 "errors": [],
             },
             "sync_rate": sync_rate
@@ -937,21 +935,6 @@ class FiniteStatusTests(unittest.TestCase):
                 ],
                 "errors": [],
             },
-            "client_stores": client_stores
-            if client_stores is not None
-            else {
-                "stores": [
-                    {
-                        "kind": "hosted-device",
-                        "label": "users-3f2a",
-                        "path": "/var/lib/private/finitechat-hosted-device/users/3f2a/chat/client.sqlite3",
-                        "age_seconds": 30,
-                        "rooms": {"room-a": 206400, "room-b": 206050},
-                    }
-                ],
-                "skipped": [],
-                "errors": [],
-            },
         }
 
     def test_watermark_gap_beyond_two_intervals_is_red_with_numbers(self) -> None:
@@ -962,7 +945,6 @@ class FiniteStatusTests(unittest.TestCase):
                 "applicable": True,
                 "ops_head": 206563,
                 "snapshot_watermark": 198000,
-                "room_heads": {},
                 "errors": [],
             }
         )
@@ -1263,153 +1245,30 @@ class FiniteStatusTests(unittest.TestCase):
             run.assert_not_called()
             self.assertTrue(glob_call.call_args.args[0].endswith("access*.log"))
 
-    def test_cursor_probe_flags_head_ahead_plus_stale_store(self) -> None:
-        # Freeze signature: the server head advances while the client store
-        # stands still (Aug 27-29 blindness).
-        raw = self.chat_raw(
-            client_stores={
-                "stores": [
-                    {
-                        "kind": "hosted-device",
-                        "label": "users-3f2a",
-                        "path": "/var/lib/private/finitechat-hosted-device/users/3f2a/chat/client.sqlite3",
-                        "age_seconds": 2700,
-                        "rooms": {"room-a": 195000},
-                    }
-                ],
-                "skipped": [],
-                "errors": [],
-            }
-        )
-        report = finite_status.build_chat_plane(
-            raw, finite_status.parse_time(raw_sync_since())
-        )
-        cursors = report["agent_cursors"]
-        self.assertEqual(cursors["status"], "red")
-        self.assertEqual(len(cursors["flagged_rooms"]), 1)
-        flagged = cursors["flagged_rooms"][0]
-        self.assertEqual(flagged["room_id"], "room-a")
-        self.assertEqual(flagged["lag_ops"], 206500 - 195000)
-        self.assertEqual(flagged["store_age_seconds"], 2700)
-        output = finite_status.render_human(
-            {
-                "generated_at": "2026-08-29T23:00:00Z",
-                "exit_code": 1,
-                "overall_status": "red",
-                "sections": {
-                    name: {"status": "green"}
-                    for name in (
-                        "fleet_convergence",
-                        "host_health",
-                        "recovery_boundary",
-                        "rollout_state",
-                    )
-                }
-                | {"chat_plane": report},
-            }
-        )
-        self.assertIn(
-            "FROZEN hosted-device users-3f2a: room room-a head 206500", output
-        )
-        self.assertIn("store idle 45m", output)
-
-    def test_cursor_probe_tolerates_standing_lag_when_store_is_fresh(self) -> None:
-        # client_app_events lags the true cursor by design (membership and
-        # key-package ops never land there); a fresh store means the client
-        # is alive and converging, not frozen.
-        raw = self.chat_raw(
-            client_stores={
-                "stores": [
-                    {
-                        "kind": "hosted-device",
-                        "label": "users-3f2a",
-                        "path": "/store",
-                        "age_seconds": 30,
-                        "rooms": {"room-a": 206490},
-                    }
-                ],
-                "skipped": [],
-                "errors": [],
-            }
-        )
-        report = finite_status.build_chat_plane(
-            raw, finite_status.parse_time(raw_sync_since())
-        )
-        self.assertEqual(report["agent_cursors"]["status"], "green")
-        self.assertIn(
-            "client_app_events MAX(seq) can lag",
-            report["agent_cursors"]["evidence_note"],
-        )
-
-    def test_cursor_probe_unknown_without_server_heads_on_a_runner_host(self) -> None:
+    def test_watermark_errored_probe_renders_unknown_never_crashes(self) -> None:
+        # 2026-09-01 live-run crash: an applicable-but-errored watermark
+        # (the sqlite3 CLI missing from the non-login ssh PATH) carries no
+        # ops_head; the human render must degrade to unknown-with-reason
+        # instead of raising KeyError. Generalized fail-closed contract:
+        # missing evidence scores unknown, never green, never a crash.
         raw = self.chat_raw(
             server={
-                "applicable": False,
-                "reason": "chat server database not present on this host",
-            },
-            client_stores={
-                "runner_work_root": "/data/finite-saas-runner",
-                "stores": [
-                    {
-                        "kind": "agent",
-                        "label": "Lat3 Agent 01",
-                        "agent_runtime_id": "runtime-lat3-01",
-                        "path": "/data/finite-saas-runner/kata/machine-01/agent/client.sqlite3",
-                        "age_seconds": 12,
-                        "rooms": {"room-a": 206400},
-                    }
+                "applicable": True,
+                "database": "/var/lib/private/finite-chat/data/server.sqlite3",
+                "errors": [
+                    "sqlite3 CLI not found on PATH or under"
+                    " /nix/store/*-sqlite-*-bin"
                 ],
-                "skipped": [],
-                "errors": [],
-            },
-        )
-        report = finite_status.build_chat_plane(
-            raw, finite_status.parse_time(raw_sync_since())
-        )
-        cursors = report["agent_cursors"]
-        self.assertEqual(cursors["status"], "unknown")
-        self.assertIn("app host", cursors["reason"])
-        # The agent-side evidence is still displayed, not hidden.
-        self.assertEqual(cursors["stores"][0]["rooms"][0]["cursor_max_seq"], 206400)
-
-    def test_cursor_probe_not_applicable_without_local_stores(self) -> None:
-        raw = self.chat_raw(client_stores={"stores": [], "skipped": [], "errors": []})
-        report = finite_status.build_chat_plane(
-            raw, finite_status.parse_time(raw_sync_since())
-        )
-        self.assertEqual(report["agent_cursors"]["status"], "green")
-        self.assertEqual(report["agent_cursors"]["state"], "not-applicable")
-
-    def test_cursor_probe_skipped_active_runtime_is_unknown_not_green(self) -> None:
-        # Fail-closed: an active runtime whose local store cannot be found is
-        # actionable evidence, never a clean cursor probe (review on #802).
-        raw = self.chat_raw(
-            client_stores={
-                "runner_work_root": "/data/finite-saas-runner",
-                "stores": [],
-                "skipped": [
-                    {
-                        "agent_runtime_id": "runtime-lat3-07",
-                        "reason": (
-                            "no client store at"
-                            " /data/finite-saas-runner/kata/machine-07"
-                            "/agent/client.sqlite3"
-                        ),
-                    }
-                ],
-                "errors": [],
             }
         )
         report = finite_status.build_chat_plane(
             raw, finite_status.parse_time(raw_sync_since())
         )
-        cursors = report["agent_cursors"]
-        self.assertEqual(cursors["status"], "unknown")
-        self.assertEqual(cursors["skipped"][0]["agent_runtime_id"], "runtime-lat3-07")
+        self.assertEqual(report["server_watermark"]["status"], "unknown")
         self.assertEqual(report["status"], "unknown")
         output = finite_status.render_human(
             {
-                "generated_at": "2026-08-29T23:00:00Z",
+                "generated_at": "2026-09-01T00:00:00Z",
                 "exit_code": 2,
                 "overall_status": "unknown",
                 "sections": {
@@ -1424,38 +1283,33 @@ class FiniteStatusTests(unittest.TestCase):
                 | {"chat_plane": report},
             }
         )
-        self.assertIn("SKIPPED agent runtime-lat3-07", output)
-        self.assertIn("no client store at", output)
+        self.assertIn("server watermark [UNKNOWN]", output)
+        self.assertIn("sqlite3 CLI not found", output)
 
-    def test_cursor_probe_skipped_runtime_poisons_otherwise_green_sample(self) -> None:
-        raw = self.chat_raw(
-            client_stores={
-                "stores": [
-                    {
-                        "kind": "agent",
-                        "label": "Lat3 Agent 01",
-                        "agent_runtime_id": "runtime-lat3-01",
-                        "path": "/data/finite-saas-runner/kata/machine-01/agent/client.sqlite3",
-                        "age_seconds": 12,
-                        "rooms": {"room-a": 206490},
-                    }
+    def test_sqlite3_command_falls_back_to_the_nix_store(self) -> None:
+        # Production hosts carry sqlite3 only under /nix/store and a
+        # non-login ssh session inherits no profile PATH: locate it there
+        # (newest first) or fail closed with a clear reason, never crash.
+        nix_sqlite = "/nix/store/abc123-sqlite-3.51.2-bin/bin/sqlite3"
+        with (
+            mock.patch.object(finite_status.shutil, "which", return_value=None),
+            mock.patch.object(
+                finite_status.glob,
+                "glob",
+                return_value=[
+                    "/nix/store/000-sqlite-3.40.0-bin/bin/sqlite3",
+                    nix_sqlite,
                 ],
-                "skipped": [
-                    {
-                        "agent_runtime_id": "runtime-lat3-07",
-                        "reason": (
-                            "no client store at /data/finite-saas-runner"
-                            "/kata/machine-07/agent/client.sqlite3"
-                        ),
-                    }
-                ],
-                "errors": [],
-            }
-        )
-        report = finite_status.build_chat_plane(
-            raw, finite_status.parse_time(raw_sync_since())
-        )
-        self.assertEqual(report["agent_cursors"]["status"], "unknown")
+            ) as glob_call,
+        ):
+            self.assertEqual(finite_status.sqlite3_command(), nix_sqlite)
+        glob_call.assert_called_once_with("/nix/store/*-sqlite-*-bin/bin/sqlite3")
+        with (
+            mock.patch.object(finite_status.shutil, "which", return_value=None),
+            mock.patch.object(finite_status.glob, "glob", return_value=[]),
+        ):
+            with self.assertRaises(finite_status.CollectionError):
+                finite_status.sqlite3_command()
 
     def test_sync_rate_not_applicable_on_runner_role_host(self) -> None:
         # Runner hosts run no chat edge; the probe reads not-applicable
@@ -1502,10 +1356,8 @@ class FiniteStatusTests(unittest.TestCase):
             finite_status,
             "collect_chat_server_state",
             return_value={"applicable": False},
-        ), mock.patch.object(
-            finite_status, "collect_local_client_stores", return_value={}
         ):
-            collected = finite_status.collect_chat_plane("finite-lat-3", [], now)
+            collected = finite_status.collect_chat_plane("finite-lat-3", now)
         sync.assert_not_called()
         self.assertFalse(collected["sync_rate"]["applicable"])
         self.assertIn("runner-role host", collected["sync_rate"]["reason"])
@@ -1516,13 +1368,11 @@ class FiniteStatusTests(unittest.TestCase):
             finite_status,
             "collect_chat_server_state",
             return_value={"applicable": True},
-        ), mock.patch.object(
-            finite_status, "collect_local_client_stores", return_value={}
         ):
             # App-role host (finite-lat-2) and unprofiled hosts keep
             # collecting; the probe itself degrades to unknown with reasons.
             for hostname in ("finite-lat-2", "dev-laptop"):
-                collected = finite_status.collect_chat_plane(hostname, [], now)
+                collected = finite_status.collect_chat_plane(hostname, now)
                 sync.assert_called()
                 self.assertNotIn("applicable", collected["sync_rate"])
 
@@ -1537,19 +1387,10 @@ class FiniteStatusTests(unittest.TestCase):
                 return 204801
             raise AssertionError(f"unexpected int query {sql}")
 
-        def fake_rows(database, sql, timeout=15):
-            queries.append(sql)
-            if "http_room_memberships" in sql:
-                return [{"room_id": "room-a", "last_seq": 206500}]
-            raise AssertionError(f"unexpected row query {sql}")
-
         with (
             mock.patch.object(finite_status.Path, "exists", return_value=True),
             mock.patch.object(finite_status, "scratch_copy_sqlite") as scratch,
             mock.patch.object(finite_status, "sqlite_int_query", side_effect=fake_int),
-            mock.patch.object(
-                finite_status, "sqlite_json_query", side_effect=fake_rows
-            ),
         ):
             scratch.return_value.__enter__ = mock.MagicMock(
                 return_value=Path("/tmp/scratch/scratch.sqlite3")
@@ -1560,7 +1401,6 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertTrue(raw["applicable"])
         self.assertEqual(raw["ops_head"], 206563)
         self.assertEqual(raw["snapshot_watermark"], 204801)
-        self.assertEqual(raw["room_heads"], {"room-a": 206500})
         self.assertEqual(raw["errors"], [])
         scratch.assert_called_once()
         live = scratch.call_args.args[0]
@@ -1665,81 +1505,13 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(rows, [{"room_id": "room-a", "last_seq": 206500}])
         command = run.call_args.args[0]
         self.assertEqual(
-            command[:6],
-            ["sqlite3", "-safe", "-readonly", "-batch", "-init", "/dev/null"],
+            command[1:6],
+            ["-safe", "-readonly", "-batch", "-init", "/dev/null"],
         )
+        self.assertEqual(command[0], finite_status.sqlite3_command())
         self.assertNotIn(
             str(finite_status.CONTRACT["chat_plane"]["server_database"]), command
         )
-
-    def test_collect_local_client_stores_bounds_the_sample(self) -> None:
-        runtimes = [
-            {
-                "source_host_id": "finite-lat-3",
-                "agent_runtime_id": f"runtime-{index:02d}",
-                "project_id": f"project-{index:02d}",
-                "source_machine_id": f"Machine {index:02d}?",
-                "agent_name": f"Agent {index:02d}",
-                "version_label": "v2",
-                "link_state": "active" if index <= 4 else "inactive",
-            }
-            for index in range(1, 6)
-        ]
-        with (
-            mock.patch.object(finite_status.Path, "glob", return_value=[]),
-            mock.patch.object(
-                finite_status,
-                "runner_work_root",
-                return_value=Path("/data/finite-saas-runner"),
-            ),
-            mock.patch.object(finite_status.Path, "is_file", return_value=True),
-            mock.patch.object(finite_status, "store_freshness", return_value=10.0),
-            mock.patch.object(
-                finite_status,
-                "sqlite_json_query",
-                return_value=[{"room_id": "room-a", "max_seq": 5}],
-            ) as query,
-            mock.patch.object(finite_status, "scratch_copy_sqlite") as scratch,
-        ):
-            scratch.return_value.__enter__ = mock.MagicMock(
-                return_value=Path("/tmp/scratch/scratch.sqlite3")
-            )
-            scratch.return_value.__exit__ = mock.MagicMock(return_value=False)
-            raw = finite_status.collect_local_client_stores(runtimes, "finite-lat-3")
-
-        self.assertEqual(len(raw["stores"]), 3)
-        # Sandbox names mirror the runner's sanitization (lowercased).
-        self.assertEqual(
-            raw["stores"][0]["path"],
-            "/data/finite-saas-runner/kata/machine-01/agent/client.sqlite3",
-        )
-        self.assertEqual(raw["skipped"], [])
-        self.assertEqual(query.call_count, 3)
-        self.assertEqual(raw["stores"][0]["rooms"], {"room-a": 5})
-
-    def test_collect_local_client_stores_records_missing_agent_stores(self) -> None:
-        runtimes = [
-            {
-                "source_host_id": "finite-lat-4",
-                "agent_runtime_id": "runtime-01",
-                "source_machine_id": "machine-01",
-                "agent_name": "Agent 01",
-                "link_state": "active",
-            }
-        ]
-        with (
-            mock.patch.object(finite_status.Path, "glob", return_value=[]),
-            mock.patch.object(
-                finite_status,
-                "runner_work_root",
-                return_value=Path("/data/finite-saas-runner"),
-            ),
-            mock.patch.object(finite_status.Path, "is_file", return_value=False),
-        ):
-            raw = finite_status.collect_local_client_stores(runtimes, "finite-lat-4")
-        self.assertEqual(raw["stores"], [])
-        self.assertEqual(len(raw["skipped"]), 1)
-        self.assertIn("no client store at", raw["skipped"][0]["reason"])
 
     def test_runner_host_health_is_not_scored_against_app_services(self) -> None:
         raw = finite_status.load_fixture(FIXTURE)
