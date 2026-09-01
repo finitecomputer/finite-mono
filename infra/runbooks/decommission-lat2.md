@@ -186,14 +186,16 @@ Candidates for a private off-host archive:
 
 7. Stop and remove old services.
 
-   After archives and runner removal are verified, stop and disable stale
-   services so a reboot cannot resurrect anything before the wipe:
+   The selective pre-wipe service-disable list was removed with the historical
+   lat2 unit captures. Under ADR 0007, the owner-approved path is the Gate A
+   wipe/reinstall in `lat2-replacement-cutover.md`; do not preserve old Ubuntu
+   services as fallback authority. Runner registrations still need explicit
+   removal before any host reuse:
 
    ```sh
    ssh finite-lat-2 '
      set -eu
      sudo systemctl disable --now "actions.runner.*" || true
-     sudo systemctl disable --now finite-saas-sites caddy finite-core-tunnel finite-saas-runner.timer finite-saas-runner.service || true
      sudo rm -rf /srv/github-runner
    '
    ```
