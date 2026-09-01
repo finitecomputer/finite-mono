@@ -80,6 +80,7 @@ in
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix
     ../../modules/finitesitesd.nix
+    ../../modules/finite-gated.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
     ../../modules/caddy.nix

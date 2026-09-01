@@ -404,7 +404,7 @@ authenticate with their own Local Identity Key and run `fsite auth git PROJECT
 Output visibility controls who can view the served website:
 
 ```sh
-fsite project share PROJECT site --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT site --shared --add-email viewer@example.com --output json
 fsite project share PROJECT site --add-nip05 my-agent@finite.vip --output json
 fsite project share PROJECT site --add-npub npub1... --output json
 fsite project share PROJECT site --remove-npub npub1... --output json

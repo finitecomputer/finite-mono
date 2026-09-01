@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   localOutputsEnabled,
   parseSitePreviewTarget,
-  parseViewerSessionResponse,
   readBoundedSitePreviewUrl,
   SitePreviewError,
   sitesUpstreamOrigin,
@@ -66,28 +65,14 @@ test("Sites upstream is a bare server-only HTTP origin", () => {
   assert.equal(sitesUpstreamOrigin("file:///tmp/sites"), null);
 });
 
-test("viewer-session responses stay on the requested output and preserve return path", () => {
+test("preview targets keep the exact original URL for the plain-output handoff", () => {
+  // The dashboard no longer mints site sessions: it validates the target and
+  // hands back the plain output URL. The Auth Gate redirect plus the user's
+  // WorkOS/AuthKit SSO makes private-output viewing silent in the browser.
   const target = parseSitePreviewTarget("https://hello.finite.chat/gallery?view=one#photo");
-  const token = "ab".repeat(32);
-  const redeemUrl = `https://hello.finite.chat/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
-  assert.equal(parseViewerSessionResponse({ redeem_url: redeemUrl }, target), redeemUrl);
-  const nativeRedeemUrl = `https://hello.finite.chat/_finite/auth?native_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
-  assert.equal(
-    parseViewerSessionResponse({ redeem_url: nativeRedeemUrl }, target),
-    nativeRedeemUrl
-  );
-
-  for (const value of [
-    `https://evil.example/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`,
-    `https://hello.finite.chat/_finite/auth?token=${token}`,
-    `https://hello.finite.chat/_finite/auth?token=${token}&return_to=%2Fother`,
-    `https://hello.finite.chat/_finite/auth?token=short&return_to=%2Fgallery%3Fview%3Done%23photo`,
-  ]) {
-    assert.throws(
-      () => parseViewerSessionResponse({ redeem_url: value }, target),
-      /Site previews aren't available/u
-    );
-  }
+  assert.equal(target.originalUrl, "https://hello.finite.chat/gallery?view=one#photo");
+  assert.equal(target.outputUrl, "https://hello.finite.chat/");
+  assert.equal(target.returnTo, "/gallery?view=one#photo");
 });
 
 test("site preview requests enforce the real streamed body size", async () => {

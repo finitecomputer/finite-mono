@@ -1,7 +1,7 @@
 //! Outbound mail for Finite Sites. Two implementations behind one trait:
 //!
-//! - `DevMailer`: writes each magic-link email to a file under `DATA/outbox/`
-//!   and logs the link. Selected with `--mailer dev`. Local development only;
+//! - `DevMailer`: writes each email to a file under `DATA/outbox/` and logs
+//!   the token. Selected with `--mailer dev`. Local development only;
 //!   omitting `--mailer` is an error, not an implicit DevMailer.
 //! - `HttpMailer`: sends through the shared `finite-mail` Resend transport.
 //!   Selected with `--mailer resend`; the API key comes from the
@@ -9,6 +9,10 @@
 //!   file, never in argv.
 //!
 //! Message text lives here (service-owned); delivery lives in `finite-mail`.
+//! Site viewing no longer sends mail: viewers authenticate through the Auth
+//! Gate. The remaining mail is the CLI actor path (email login tokens,
+//! project collaborator invites) plus access-request and first-publication
+//! notifications.
 
 use std::path::PathBuf;
 
@@ -36,9 +40,7 @@ impl MailerKind {
 }
 
 pub trait Mailer: Send + Sync {
-    fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError>;
     fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError>;
-    fn send_viewer_invite(&self, invite: &ViewerInvite<'_>) -> Result<(), MailerError>;
     fn send_project_collaborator_invite(
         &self,
         invite: &ProjectCollaboratorInvite<'_>,
@@ -53,13 +55,6 @@ pub trait Mailer: Send + Sync {
         site_name: &str,
         site_url: &str,
     ) -> Result<(), MailerError>;
-}
-
-pub struct ViewerInvite<'a> {
-    pub email: &'a str,
-    pub site_name: &'a str,
-    pub site_url: &'a str,
-    pub login_url: &'a str,
 }
 
 pub struct ProjectCollaboratorInvite<'a> {
@@ -82,18 +77,6 @@ pub struct SiteAccessRequestEmail<'a> {
 
 /// Message text is shared by every mailer so dev output matches what real
 /// recipients see.
-fn login_link_subject(site_name: &str) -> String {
-    format!("Your link to {site_name}")
-}
-
-fn login_link_text(site_name: &str, url: &str) -> String {
-    format!(
-        "Open this link to view {site_name}:\n\n{url}\n\n\
-         The link can be reused and expires in 15 minutes. If you did not \
-         request it, you can ignore this email.\n"
-    )
-}
-
 fn email_login_subject() -> &'static str {
     "Your Finite Sites email login"
 }
@@ -104,29 +87,6 @@ fn email_login_text(email: &str, token: &str) -> String {
          fsite auth redeem {email} {token}\n\n\
          The token works once and expires in 15 minutes. If you did not \
          request it, you can ignore this email.\n"
-    )
-}
-
-fn viewer_invite_subject(site_name: &str) -> String {
-    format!("You've been invited to view {site_name}")
-}
-
-fn viewer_invite_text(invite: &ViewerInvite<'_>) -> String {
-    format!(
-        "{site_name} has been shared with you.\n\n\
-         To view it, open this sign-in link:\n\n{login_url}\n\n\
-         After signing in, you can view the site here:\n\n{site_url}\n\n\
-         The sign-in link can be reused and expires in 15 minutes. If it expires, \
-         open the site URL and request a fresh link for {email}.\n\n\
-         For your agent\n\n\
-         If you use an agent with this site, ask it to read this email. The canonical \
-         site URL is:\n\n{site_url}\n\n\
-         Agent instructions:\n\n{llms_url}\n",
-        site_name = invite.site_name,
-        login_url = invite.login_url,
-        site_url = invite.site_url,
-        llms_url = output_url(invite.site_url, "/llms.txt"),
-        email = invite.email,
     )
 }
 
@@ -203,10 +163,6 @@ fn first_publication_text(site_url: &str) -> String {
     )
 }
 
-fn output_url(base_url: &str, path: &str) -> String {
-    format!("{}{}", base_url.trim_end_matches('/'), path)
-}
-
 fn api_prefix(api_url: &str) -> String {
     if api_url == "https://api.finite.chat" {
         String::new()
@@ -230,22 +186,6 @@ impl DevMailer {
 }
 
 impl Mailer for DevMailer {
-    fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError> {
-        let path = self.outbox.write(
-            &TextEmail {
-                to: email,
-                subject: &login_link_subject(site_name),
-                text: &login_link_text(site_name, url),
-            },
-            "",
-        )?;
-        eprintln!(
-            "dev-mail: login link for {email} -> {url} (written to {})",
-            path.display()
-        );
-        Ok(())
-    }
-
     fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
         let path = self.outbox.write(
             &TextEmail {
@@ -259,18 +199,6 @@ impl Mailer for DevMailer {
             "dev-mail: email login token for {email} -> {token} (written to {})",
             path.display()
         );
-        Ok(())
-    }
-
-    fn send_viewer_invite(&self, invite: &ViewerInvite<'_>) -> Result<(), MailerError> {
-        self.outbox.write(
-            &TextEmail {
-                to: invite.email,
-                subject: &viewer_invite_subject(invite.site_name),
-                text: &viewer_invite_text(invite),
-            },
-            "viewer-invite",
-        )?;
         Ok(())
     }
 
@@ -337,27 +265,11 @@ impl HttpMailer {
 }
 
 impl Mailer for HttpMailer {
-    fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError> {
-        self.resend.send_text_email(&TextEmail {
-            to: email,
-            subject: &login_link_subject(site_name),
-            text: &login_link_text(site_name, url),
-        })
-    }
-
     fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
         self.resend.send_text_email(&TextEmail {
             to: email,
             subject: email_login_subject(),
             text: &email_login_text(email, token),
-        })
-    }
-
-    fn send_viewer_invite(&self, invite: &ViewerInvite<'_>) -> Result<(), MailerError> {
-        self.resend.send_text_email(&TextEmail {
-            to: invite.email,
-            subject: &viewer_invite_subject(invite.site_name),
-            text: &viewer_invite_text(invite),
         })
     }
 
@@ -412,55 +324,26 @@ mod tests {
     }
 
     #[test]
-    fn dev_mailer_writes_login_link_envelope() {
+    fn dev_mailer_writes_email_login_envelope() {
         let dir = tempfile::tempdir().unwrap();
         let mailer = DevMailer::new(dir.path().to_path_buf()).unwrap();
         mailer
-            .send_login_link(
-                "friend@example.com",
-                "hello",
-                "https://hello.finite.chat/_finite/auth?token=abc",
-            )
+            .send_email_login_token("friend@example.com", "0123abcd")
             .unwrap();
         let mut entries = std::fs::read_dir(dir.path()).unwrap();
         let path = entries.next().unwrap().unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(name.ends_with("-friend_example_com.txt"), "{name}");
+        assert!(name.ends_with("-email-login.txt"), "{name}");
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.starts_with("To: friend@example.com\nSubject: Your link to hello\n\n"));
-        assert!(contents.contains("token=abc"));
+        assert!(
+            contents
+                .starts_with("To: friend@example.com\nSubject: Your Finite Sites email login\n\n")
+        );
+        assert!(contents.contains("0123abcd"));
     }
 
     #[test]
-    fn viewer_invite_leads_with_human_action_then_agent_handoff() {
-        let viewer = viewer_invite_text(&ViewerInvite {
-            email: "friend@example.com",
-            site_name: "hello",
-            site_url: "https://hello.finite.chat/",
-            login_url: "https://hello.finite.chat/_finite/auth?token=abc",
-        });
-        assert_eq!(
-            viewer,
-            "hello has been shared with you.\n\n\
-To view it, open this sign-in link:\n\n\
-https://hello.finite.chat/_finite/auth?token=abc\n\n\
-After signing in, you can view the site here:\n\n\
-https://hello.finite.chat/\n\n\
-The sign-in link can be reused and expires in 15 minutes. If it expires, \
-open the site URL and request a fresh link for friend@example.com.\n\n\
-For your agent\n\n\
-If you use an agent with this site, ask it to read this email. The canonical \
-site URL is:\n\n\
-https://hello.finite.chat/\n\n\
-Agent instructions:\n\n\
-https://hello.finite.chat/llms.txt\n"
-        );
-
-        let agent_section = viewer.find("For your agent").unwrap();
-        assert!(viewer.find("To view it, open this sign-in link:").unwrap() < agent_section);
-        assert!(viewer.contains("ask it to read this email"));
-        assert!(viewer.contains("https://hello.finite.chat/llms.txt"));
-
+    fn project_collaborator_invite_leads_with_agent_handoff() {
         let outputs = vec![ProjectOutputSummary {
             output_id: "mockup".to_string(),
             kind: "site".to_string(),

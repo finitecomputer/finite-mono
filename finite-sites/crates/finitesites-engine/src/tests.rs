@@ -7,7 +7,7 @@ use finitesites_proto::dto::{
     HostedRequesterAssertionRequest, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest,
     SharingRequest,
 };
-use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
+use finitesites_proto::limits::MAX_SHARES_PER_SITE;
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::{
     ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
@@ -646,7 +646,7 @@ fn registered_native_can_link_email_and_inherit_editor_grant() {
 #[test]
 fn authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_link() {
     let mut fx = fixture();
-    let published = publish_project_site(&mut fx.engine, "mailbox-owned", "mailbox-owned", false);
+    publish_project_site(&mut fx.engine, "mailbox-owned", "mailbox-owned", false);
     fx.engine
         .store_mut()
         .link_email_to_native_principal("paul@finite.vip", OWNER, NOW + 1)
@@ -672,22 +672,6 @@ fn authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_l
     fx.engine
         .set_project_output_sharing(OTHER_OWNER, "mailbox-owned", "site", &sharing, NOW + 3)
         .unwrap();
-    let site = fx
-        .engine
-        .output_by_site_id(&published.site_id)
-        .unwrap()
-        .unwrap();
-    let viewer_cookie = fx
-        .engine
-        .native_viewer_session(&site, OTHER_OWNER, "mailbox-owner-proof", NOW + 3)
-        .unwrap();
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&viewer_cookie), NOW + 3)
-            .unwrap(),
-        ViewAccess::Allowed
-    );
-
     fx.engine
         .revoke_sites_authorized_key(
             "paul@finite.vip",
@@ -700,12 +684,6 @@ fn authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_l
             .project_status(OTHER_OWNER, "mailbox-owned", remote("mailbox-owned")),
         Err(EngineError::ProjectNotFound)
     ));
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&viewer_cookie), NOW + 4)
-            .unwrap(),
-        ViewAccess::NeedsLogin
-    );
     assert!(
         fx.engine
             .project_status(OWNER, "mailbox-owned", remote("mailbox-owned"))
@@ -1511,13 +1489,12 @@ fn shared_site_full_magic_link_flow() {
         fx.engine.view_access(&site, None, NOW).unwrap(),
         ViewAccess::NeedsLogin
     );
-    let stranger_link = fx
+    // A gate vouch for an unshared mailbox still proves the mailbox, so the
+    // cookie mints — but share rows gate the actual view.
+    let stranger_cookie = fx
         .engine
-        .request_login("hello", "stranger@example.com", NOW)
-        .unwrap()
-        .expect("share status is disclosed only after mailbox verification");
-    let stranger_token = stranger_link.url.split("token=").nth(1).unwrap();
-    let (_, stranger_cookie) = fx.engine.redeem_login(stranger_token, NOW + 1).unwrap();
+        .mint_email_viewer_cookie(&site, "stranger@example.com", NOW)
+        .unwrap();
     assert_eq!(
         fx.engine
             .view_access(&site, Some(&stranger_cookie), NOW + 2)
@@ -1525,30 +1502,13 @@ fn shared_site_full_magic_link_flow() {
         ViewAccess::NeedsLogin
     );
 
-    let link = fx
+    let cookie = fx
         .engine
-        .request_login("hello", "Friend@Example.com", NOW)
-        .unwrap()
+        .mint_email_viewer_cookie(&site, "Friend@Example.com", NOW)
         .unwrap();
-    assert!(
-        link.url
-            .starts_with("http://hello.sites.test/_finite/auth?token=")
-    );
-    let token = link.url.split("token=").nth(1).unwrap().to_string();
-
-    let (login_site, cookie) = fx.engine.redeem_login(&token, NOW + 60).unwrap();
-    assert_eq!(login_site.id, site.id);
     assert_eq!(
         fx.engine
             .view_access(&site, Some(&cookie), NOW + 120)
-            .unwrap(),
-        ViewAccess::Allowed
-    );
-    let (replayed_site, replayed_cookie) = fx.engine.redeem_login(&token, NOW + 61).unwrap();
-    assert_eq!(replayed_site.id, site.id);
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&replayed_cookie), NOW + 121)
             .unwrap(),
         ViewAccess::Allowed
     );
@@ -1627,13 +1587,10 @@ fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
         .unwrap();
     let site = fx.engine.resolve_site("owner-site").unwrap().unwrap();
 
-    let owner_link = fx
+    let owner_cookie = fx
         .engine
-        .request_login_for_site(&site, "owner@example.com", NOW + 4)
-        .unwrap()
+        .mint_email_viewer_cookie(&site, "owner@example.com", NOW + 5)
         .unwrap();
-    let owner_token = owner_link.url.split("token=").nth(1).unwrap();
-    let (_, owner_cookie) = fx.engine.redeem_login(owner_token, NOW + 5).unwrap();
     assert_eq!(
         fx.engine
             .view_access(&site, Some(&owner_cookie), NOW + 6)
@@ -1641,13 +1598,10 @@ fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
         ViewAccess::Allowed
     );
 
-    let requester_link = fx
+    let requester_cookie = fx
         .engine
-        .request_login_for_site(&site, "friend@example.com", NOW + 4)
-        .unwrap()
+        .mint_email_viewer_cookie(&site, "friend@example.com", NOW + 5)
         .unwrap();
-    let requester_token = requester_link.url.split("token=").nth(1).unwrap();
-    let (_, requester_cookie) = fx.engine.redeem_login(requester_token, NOW + 5).unwrap();
     assert_eq!(
         fx.engine
             .view_access(&site, Some(&requester_cookie), NOW + 6)
@@ -1755,7 +1709,7 @@ fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
 }
 
 #[test]
-fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
+fn project_owner_native_share_is_managed_by_sharing_rows() {
     let mut fx = fixture();
     let mut request = project_request("requesting-user", "requesting-user-site", false, false);
     request.requesting_user_npub = Some(OTHER_OWNER.to_string());
@@ -1803,11 +1757,7 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
         ViewAccess::NeedsLogin
     );
 
-    // A valid identity proof is not authority to create a Share.
-    let stranger = fx
-        .engine
-        .native_viewer_session(&site, STRANGER, "stranger-proof", NOW + 2);
-    assert!(matches!(stranger, Err(EngineError::NotAuthorized)));
+    // A stranger principal is still no share: the Share row is the authority.
     assert!(
         fx.engine
             .store_mut()
@@ -1815,39 +1765,6 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
             .unwrap()
             .is_none()
     );
-
-    let cookie = fx
-        .engine
-        .native_viewer_session(&site, OTHER_OWNER, "first-proof", NOW + 2)
-        .unwrap();
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&cookie), NOW + 3)
-            .unwrap(),
-        ViewAccess::Allowed
-    );
-    assert!(matches!(
-        fx.engine
-            .native_viewer_session(&site, OTHER_OWNER, "first-proof", NOW + 3),
-        Err(EngineError::Conflict("native viewer nonce replay"))
-    ));
-
-    let link = fx
-        .engine
-        .request_native_viewer_link(&site, OTHER_OWNER, "hosted-proof", NOW + 4)
-        .unwrap();
-    let token = link.url.split("native_token=").nth(1).unwrap();
-    let (_, hosted_cookie) = fx.engine.redeem_native_viewer_link(token, NOW + 5).unwrap();
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&hosted_cookie), NOW + 6)
-            .unwrap(),
-        ViewAccess::Allowed
-    );
-    assert!(matches!(
-        fx.engine.redeem_native_viewer_link(token, NOW + 6),
-        Err(EngineError::Validation(_))
-    ));
 
     fx.engine
         .set_sharing(
@@ -1864,17 +1781,17 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
             NOW + 7,
         )
         .unwrap();
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&cookie), NOW + 8)
-            .unwrap(),
-        ViewAccess::NeedsLogin
-    );
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&hosted_cookie), NOW + 8)
-            .unwrap(),
-        ViewAccess::NeedsLogin
+    let removed_principal = fx
+        .engine
+        .store_mut()
+        .principal_by_pubkey(OTHER_OWNER)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !fx.engine
+            .store_mut()
+            .is_principal_shared(&site.id, &removed_principal.id)
+            .unwrap()
     );
 
     let malformed = SharingRequest {
@@ -1899,15 +1816,17 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
         )
         .unwrap();
     assert_eq!(restored.shared_npubs.len(), 1);
-    let restored_cookie = fx
+    let restored_principal = fx
         .engine
-        .native_viewer_session(&site, OTHER_OWNER, "restored-proof", NOW + 11)
+        .store_mut()
+        .principal_by_pubkey(OTHER_OWNER)
+        .unwrap()
         .unwrap();
-    assert_eq!(
+    assert!(
         fx.engine
-            .view_access(&site, Some(&restored_cookie), NOW + 12)
-            .unwrap(),
-        ViewAccess::Allowed
+            .store_mut()
+            .is_principal_shared(&site.id, &restored_principal.id)
+            .unwrap()
     );
 }
 
@@ -1958,40 +1877,6 @@ fn public_private_and_unpublished_view_paths() {
         fx.engine.view_access(&public, None, NOW + 4).unwrap(),
         ViewAccess::Allowed
     );
-}
-
-#[test]
-fn login_tokens_expire_and_reject_malformed_values() {
-    let mut fx = fixture();
-    publish_project_site(&mut fx.engine, "hello-project", "hello", false);
-    fx.engine
-        .set_sharing(
-            OWNER,
-            "hello",
-            &SharingRequest {
-                visibility: Some("shared".into()),
-                confirm_public: false,
-                add_emails: vec!["friend@example.com".into()],
-                remove_emails: vec![],
-                add_npubs: vec![],
-                remove_npubs: vec![],
-            },
-            NOW,
-        )
-        .unwrap();
-    let link = fx
-        .engine
-        .request_login("hello", "friend@example.com", NOW)
-        .unwrap()
-        .unwrap();
-    let token = link.url.split("token=").nth(1).unwrap().to_string();
-    let expired = fx
-        .engine
-        .redeem_login(&token, NOW + LOGIN_TOKEN_TTL_SECONDS + 1);
-    assert!(matches!(expired, Err(EngineError::Validation(_))));
-
-    let garbage = fx.engine.redeem_login("zz", NOW);
-    assert!(matches!(garbage, Err(EngineError::Validation(_))));
 }
 
 // ---- listing / status -----------------------------------------------------

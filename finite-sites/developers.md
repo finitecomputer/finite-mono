@@ -27,7 +27,7 @@ Current v1 capabilities:
 - Generated `/llms.txt` for project-backed editable outputs when the project
   did not publish that path itself.
 - Per-output visibility: `private`, `shared`, or `public`.
-- Email magic links for external viewer and collaborator bootstrap.
+- Auth Gate vouches for external viewer sign-in; email magic links for CLI actor bootstrap (fsite auth login).
 - Operator controls for publish grants, output disable/delete, and selected
   public-read Project Repository visibility.
 

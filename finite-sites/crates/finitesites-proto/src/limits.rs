@@ -1,7 +1,12 @@
 //! Explicit limits for every bounded loop, payload, and fanout in the system.
 //!
 //! Limits live in one place so reviews can see the whole bounded surface.
-//! Each limit notes why it has its value.
+//! Each limit notes why it has its value. Auth-statement bounds (NIP-98
+//! skew and header size, vouch TTL) live in the shared `finite-authn`
+//! policy table.
+
+/// Auth-header size bound, re-exported from the shared auth policy crate.
+pub use finite_authn::nip98::MAX_AUTH_HEADER_BYTES;
 
 /// One manifest may not list more than this many files. Generous for static
 /// sites (here.now caps similar flows around the low thousands) while keeping
@@ -37,22 +42,12 @@ pub const MAX_EMAIL_KEYS_PER_EMAIL: u32 = 5;
 /// Emails are bounded at the wire boundary before validation.
 pub const MAX_EMAIL_BYTES: u32 = 254;
 
-/// NIP-98 events older or newer than this many seconds are rejected.
-/// 60s is the spec-suggested window.
-pub const NIP98_MAX_SKEW_SECONDS: u64 = 60;
+/// NIP-98 freshness (skew) policy lives in the shared auth policy crate.
+pub use finite_authn::DEFAULT_NIP98_MAX_SKEW_SECONDS as NIP98_MAX_SKEW_SECONDS;
 
 /// Magic-link tokens expire after 15 minutes: long enough for slow email
 /// delivery, short enough that a leaked link goes stale quickly.
 pub const LOGIN_TOKEN_TTL_SECONDS: u64 = 15 * 60;
-
-/// Keep only a small number of simultaneously redeemable viewer links for
-/// one Site + email pair. Dashboard reloads and a few concurrent tabs remain
-/// usable, while a caller cannot grow durable token state without bound.
-pub const MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL: u32 = 8;
-
-/// Hosted native-session exchanges use the same bounded number of one-use
-/// redirects per Site + Native Principal as the email fallback.
-pub const MAX_ACTIVE_NATIVE_VIEWER_TOKENS_PER_SITE_PRINCIPAL: u32 = 8;
 
 /// Viewer cookies last 7 days, then the viewer re-authenticates.
 pub const VIEWER_COOKIE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -61,24 +56,12 @@ pub const VIEWER_COOKIE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// full manifest: 2k files * ~600 bytes/entry stays under this with slack.
 pub const MAX_API_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
-/// The account-to-Sites viewer-session exchange carries only three bounded
-/// strings and uses a smaller limit than the public control-plane API.
-pub const MAX_VIEWER_SESSION_BODY_BYTES: u64 = 4 * 1024;
-
-/// Direct native viewer auth carries one small signed JSON challenge.
-pub const MAX_NATIVE_VIEWER_AUTH_BODY_BYTES: u64 = 4 * 1024;
-
-pub const MAX_NATIVE_VIEWER_RETURN_TO_BYTES: u32 = 1024;
-pub const MAX_NATIVE_VIEWER_CLIENT_BYTES: u32 = 64;
-pub const MIN_NATIVE_VIEWER_NONCE_BYTES: u32 = 16;
-pub const MAX_NATIVE_VIEWER_NONCE_BYTES: u32 = 128;
-
 /// Canonical output URLs are one origin plus `/`; this leaves ample room for
 /// local ports while preventing an internal caller from sending huge values.
 pub const MAX_OUTPUT_URL_BYTES: u32 = 2 * 1024;
 
-/// Post-redeem navigation stays on the output origin and is intentionally
-/// bounded independently of the request body.
+/// Post-auth navigation stays on the output origin and is bounded before a
+/// redirect or vouch redemption trusts it.
 pub const MAX_VIEWER_RETURN_TO_BYTES: u32 = 1024;
 
 /// Git smart HTTP receives pack files. This is deliberately larger than the
@@ -97,9 +80,6 @@ pub const MAX_GIT_REF_NAME_BYTES: u32 = 256;
 
 /// Sharing mutations may add or remove at most this many emails per request.
 pub const MAX_EMAILS_PER_SHARING_REQUEST: u32 = 20;
-
-/// A claim or auth header is rejected above this size before any parsing.
-pub const MAX_AUTH_HEADER_BYTES: u32 = 8 * 1024;
 
 /// App bundles (tier 2) ship as one tar.gz blob, so they get their own
 /// ceiling instead of MAX_FILE_BYTES. 256 MiB fits a Next.js standalone

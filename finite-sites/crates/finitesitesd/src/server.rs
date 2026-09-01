@@ -20,6 +20,7 @@ use axum::http::header::HOST;
 use axum::response::Response;
 use tower::util::ServiceExt as _;
 
+use finite_authn::ReplayGuard;
 use finitesites_blob::BlobStore;
 use finitesites_engine::Engine;
 
@@ -29,6 +30,16 @@ use crate::mailer::Mailer;
 use crate::{ServeOptions, api, git, sites};
 
 const SERVING_ENGINE_POOL_SIZE: usize = 8;
+
+/// The pinned Auth Gate configuration for viewer redirects. `replay` is the
+/// in-memory single-use guard for redeemed vouches (per the shared
+/// `finite_authn` policy: replay window == TTL + skew, so a restart cannot
+/// revive an acceptable vouch).
+pub struct AuthGateConfig {
+    pub url: String,
+    pub pubkey: String,
+    pub replay: ReplayGuard,
+}
 
 pub struct AppState {
     /// The Engine owns the sole writable registry connection. This mutex
@@ -50,6 +61,12 @@ pub struct AppState {
     pub api_url: String,
     pub git_base_url: String,
     pub viewer_session_service_token: Option<String>,
+    /// Set iff viewer auth redirects to the Finite Auth Gate are configured
+    /// (FINITE_SITES_AUTH_GATE_URL + FINITE_SITES_AUTH_GATE_PUBKEY).
+    pub auth_gate: Option<AuthGateConfig>,
+    /// Canonical scheme for output URLs (from `--site-scheme`), used to
+    /// spell the origin the gate binds vouches to.
+    pub site_url_scheme: String,
     pub base_domain: String,
     pub document_base_domain: String,
     pub data_dir: PathBuf,
@@ -132,6 +149,19 @@ pub fn now_unix() -> u64 {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     assert!(now > 0);
     now as u64
+}
+
+fn build_auth_gate(options: &ServeOptions) -> Option<AuthGateConfig> {
+    let url = options.auth_gate_url.as_ref()?;
+    let pubkey = options
+        .auth_gate_pubkey
+        .as_ref()
+        .expect("gate url and pubkey are validated as a pair");
+    Some(AuthGateConfig {
+        url: url.clone(),
+        pubkey: pubkey.clone(),
+        replay: ReplayGuard::new(&finite_authn::AuthPolicy::default()),
+    })
 }
 
 #[derive(Clone)]
@@ -318,6 +348,8 @@ pub async fn serve_on(
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
         viewer_session_service_token: options.viewer_session_service_token.clone(),
+        auth_gate: build_auth_gate(&options),
+        site_url_scheme: options.site_url_scheme.clone(),
         base_domain: options.base_domain.clone(),
         document_base_domain: options.document_base_domain.clone(),
         data_dir: options.data_dir.clone(),

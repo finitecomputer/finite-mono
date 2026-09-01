@@ -53,25 +53,6 @@ pub struct SitesAuthorizedKeyResponse {
     pub active: bool,
 }
 
-/// Server-to-server request for a viewer session derived from an already
-/// verified account email. This never creates or changes a Site share.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifiedEmailViewerSessionRequest {
-    /// Exact canonical root URL of an existing Site or Document output.
-    pub output_url: String,
-    /// Email verified by the calling account boundary.
-    pub verified_email: String,
-    /// Same-origin path to visit after the magic-link token is redeemed.
-    pub return_to: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifiedEmailViewerSessionResponse {
-    /// Existing reusable Sites magic-link URL. It expires quickly and must
-    /// never be persisted as a durable account credential.
-    pub redeem_url: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRegisterResponse {
     pub pubkey: String,
@@ -137,31 +118,6 @@ pub struct SiteSummary {
     pub shared_emails: Vec<String>,
     #[serde(default)]
     pub shared_npubs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeViewerSessionRequest {
-    pub purpose: String,
-    pub return_to: String,
-    pub client: String,
-    pub nonce: String,
-}
-
-/// Hosted-Web exchange for the same bounded request used directly by native
-/// clients. The signed body remains an exact string so JSON reserialization
-/// cannot change the NIP-98 payload hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeViewerSessionExchangeRequest {
-    pub output_url: String,
-    pub authorization: String,
-    pub signed_body: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NativeViewerSessionExchangeResponse {
-    pub redeem_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -336,16 +336,12 @@ impl Client {
         project_slug: &str,
         output_id: &str,
         request: &SharingRequest,
-        send_invite: bool,
     ) -> Result<ProjectOutputSharingResponse, CliError> {
         let body = serde_json::to_vec(request).expect("request serializes");
         self.request(
             key,
             "POST",
-            &format!(
-                "/api/v1/projects/{project_slug}/outputs/{output_id}/sharing{}",
-                invite_query(send_invite)
-            ),
+            &format!("/api/v1/projects/{project_slug}/outputs/{output_id}/sharing"),
             Some(&body),
         )
     }

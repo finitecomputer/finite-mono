@@ -74,18 +74,19 @@ the public Brain origin to the internal Hosted Device.
 `FC_BRAIN_UPSTREAM_URL`. Logout or session expiry makes this bridge unavailable;
 it never replaces Brain's Nostr authorization or Folder Key Grants.
 
-## Sites account preview boundary
+## Sites preview boundary
 
-Set `FC_SITES_UPSTREAM_URL` to the internal Finite Sites origin and give the
-dashboard and `finitesitesd` the same dedicated
-`FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
-verified account email for Sites' existing one-time viewer link only after
-Core confirms that account can access the selected Agent Runtime. Sites still
-owns the share list and viewer cookie: the exchange never adds a share, and
-removing the email from the output revokes the cookie on the next request.
+Site previews are the plain output URL: the dashboard validates the target
+and opens it, and viewer auth is the Finite Auth Gate (an unauthenticated
+browser hit on a private output is redirected top-level to the gate, and the
+signed-in user's WorkOS/AuthKit SSO makes the round trip silent). The
+dashboard no longer mints or brokers site viewer sessions.
 
-The service token is server-only. It must not use a `NEXT_PUBLIC_` name, enter
-a browser response, or be shared with an Agent Runtime.
+`FC_SITES_UPSTREAM_URL` plus the shared `FINITE_SITES_VIEWER_SESSION_TOKEN`
+remain for the hosted requester-assertion exchange (binding a verified
+account email to an exact agent Project Init). That token is server-only. It
+must not use a `NEXT_PUBLIC_` name, enter a browser response, or be shared
+with an Agent Runtime.
 
 Local `http://*.sites.localhost` previews are disabled by default. Local
 development may set `FC_SITES_ALLOW_LOCAL_OUTPUTS=1`; production ignores that

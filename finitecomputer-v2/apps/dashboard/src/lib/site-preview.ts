@@ -1,15 +1,8 @@
-import { randomUUID } from "node:crypto";
-
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
-import {
-  hostedDeviceConfig,
-  hostedDeviceSitesIdentityProvider,
-} from "@/lib/hosted-web-device";
 
 const MAX_PREVIEW_URL_BYTES = 2 * 1024;
 const MAX_RETURN_TO_BYTES = 1024;
-const SITES_REQUEST_TIMEOUT_MS = 5_000;
 export const MAX_SITE_PREVIEW_REQUEST_BYTES = 4 * 1024;
 const SITE_PREVIEW_BODY_TIMEOUT_MS = 5_000;
 
@@ -106,6 +99,16 @@ async function readSitePreviewChunk(
   }
 }
 
+/**
+ * Resolve a preview URL for a Finite Site output.
+ *
+ * Viewer auth is the Auth Gate: an unauthenticated browser hit on a private
+ * output is redirected (top-level) to the gate, and the dashboard user's
+ * existing WorkOS/AuthKit SSO makes the round trip silent. The dashboard no
+ * longer mints or brokers site sessions — it validates the target and hands
+ * back the plain output URL. Public outputs preview directly, exactly as
+ * before.
+ */
 export async function createSitePreviewSession(machineId: string, rawUrl: unknown) {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
@@ -117,72 +120,7 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   }
 
   const target = parseSitePreviewTarget(rawUrl);
-  const upstream = sitesUpstreamOrigin();
-  const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
-  const device = hostedDeviceConfig();
-  if (!upstream || !serviceToken || !device) {
-    throw new SitePreviewError("Site previews aren't available right now.", 503);
-  }
-
-  const endpointUrl = `${target.outputUrl}_finite/auth/native-session`;
-  const proof = await hostedDeviceSitesIdentityProvider(
-    device,
-    account,
-    {
-      version: "finite-sites-identity-provider-v1",
-      operation: "authorizeViewerSession",
-      input: {
-        url: endpointUrl,
-        returnTo: target.returnTo,
-        client: "finite-dashboard",
-        nonce: randomUUID(),
-      },
-    },
-    new URL(target.outputUrl).origin
-  ).catch(() => {
-    throw new SitePreviewError("Site previews aren't available right now.", 503);
-  });
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SITES_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${upstream}/internal/v1/native-viewer-sessions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${serviceToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        output_url: target.outputUrl,
-        authorization: proof.authorization_header,
-        signed_body: proof.body_json,
-      }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      if (response.status === 403) {
-        // A validated direct URL still gives public outputs and Sites' own
-        // sign-in page a useful preview. It creates no account-backed access.
-        return { url: target.originalUrl, originalUrl: target.originalUrl };
-      }
-      const status = response.status === 401 ? response.status : 502;
-      throw new SitePreviewError(
-        "Site previews aren't available right now.",
-        status
-      );
-    }
-    const payload = (await response.json()) as unknown;
-    return {
-      url: parseViewerSessionResponse(payload, target),
-      originalUrl: target.originalUrl,
-    };
-  } catch (error) {
-    if (error instanceof SitePreviewError) throw error;
-    throw new SitePreviewError("Site previews aren't available right now.", 502);
-  } finally {
-    clearTimeout(timeout);
-  }
+  return { url: target.originalUrl, originalUrl: target.originalUrl };
 }
 
 export function sitesUpstreamOrigin(value = process.env.FC_SITES_UPSTREAM_URL) {
@@ -274,37 +212,3 @@ function oneLabelUnder(hostname: string, baseDomain: string) {
     && label !== "git";
 }
 
-export function parseViewerSessionResponse(payload: unknown, target: SitePreviewTarget) {
-  if (!payload || typeof payload !== "object") {
-    throw new SitePreviewError("Site previews aren't available right now.", 502);
-  }
-  const redeemUrl = (payload as { redeem_url?: unknown }).redeem_url;
-  if (typeof redeemUrl !== "string" || redeemUrl.length > MAX_PREVIEW_URL_BYTES + 1024) {
-    throw new SitePreviewError("Site previews aren't available right now.", 502);
-  }
-
-  let url: URL;
-  try {
-    url = new URL(redeemUrl);
-  } catch {
-    throw new SitePreviewError("Site previews aren't available right now.", 502);
-  }
-  const expectedOrigin = new URL(target.outputUrl).origin;
-  const keys = Array.from(url.searchParams.keys()).sort();
-  const tokenKey = keys.includes("native_token") ? "native_token" : "token";
-  if (
-    url.origin !== expectedOrigin ||
-    url.pathname !== "/_finite/auth" ||
-    url.username ||
-    url.password ||
-    url.hash ||
-    keys.length !== 2 ||
-    !keys.includes("return_to") ||
-    !keys.includes(tokenKey) ||
-    !/^[0-9a-f]{64}$/u.test(url.searchParams.get(tokenKey) ?? "") ||
-    url.searchParams.get("return_to") !== target.returnTo
-  ) {
-    throw new SitePreviewError("Site previews aren't available right now.", 502);
-  }
-  return url.toString();
-}

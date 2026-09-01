@@ -301,29 +301,25 @@ with exactly these meanings.
 - **Share**: one `(Project Output, Principal)` row granting view access to a
   served output. Removing it revokes access on the next request, even for live
   cookies.
-- **Magic Link**: a reusable, 15-minute login token mailed to a shared email.
-  Each redemption sets a Viewer Cookie on the site's own host.
+- **Auth Gate (finite-gated)**: the viewer authentication daemon
+  (`auth.finite.computer` in production). A browser without a session that
+  hits a non-public output is redirected (top-level) to its `/authorize`; the
+  human authenticates there (WorkOS AuthKit; a loudly-labeled fixed-identity
+  confirmation in dev mode) and the gate redirects back with a **Vouch**.
+- **Vouch**: a versioned, short-lived (~60s), origin-bound, single-use
+  statement signed with the gate's key and verified by finitesitesd OFFLINE
+  against the pinned gate public key (`finite-authn` shared policy). It names
+  one verified email for exactly one output origin.
 - **Viewer Cookie**: an HMAC-signed `(Project Output, Principal, expiry)`
   proof, scoped to one Output host. Legacy email cookies retain their existing
   wire shape. A cookie proves a bounded session; the Share table still decides
-  access on every request.
-- **Native Viewer Session**: a bounded NIP-98 proof for one exact Output-host
-  session endpoint, POST body, nonce, client, and same-origin return path. The
-  signer must already have a Native Principal Share. Direct native clients
-  receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
-  the same cookies. Proof never creates a Share.
-- **Verified Email Viewer Session**: a server-to-server exchange that accepts
-  an email already verified by the SaaS account boundary and, only when that
-  email is already on a shared output's Share list, mints the existing
-  reusable Magic Link. It never creates a Share. The browser redeems the link
-  on the output host and ordinary per-request Share checks preserve
-  immediate revocation. Issuance and durable outstanding links are bounded per
-  output/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
-  `Partitioned` cookie carries iframe access.
+  access on every request. The gate never sets this cookie — finitesitesd
+  mints it after verifying a Vouch. The ordinary cookie is top-level
+  `SameSite=Lax`; a distinct `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.
 - **Base Domain**: the wildcard domain under which sites live —
   `sites.localhost` in development, `finite.chat` in production.
 - **Outbox**: the dev mailer's output directory; each would-be email is a
-  text file containing the magic link.
+  text file (CLI actor mail: email login tokens, collaborator invites).

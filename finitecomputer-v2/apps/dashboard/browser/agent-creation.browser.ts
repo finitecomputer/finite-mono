@@ -11,7 +11,6 @@ import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
-const SITES_VIEWER_SESSION_TOKEN = "browser-sites-viewer-session-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
 const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
 const PNG_BYTES = Buffer.from(
@@ -231,13 +230,8 @@ type AgentConnectionsStatus = {
 };
 
 type FakeSitesState = {
-  exchanges: Array<{
-    serviceAuthorization: string | null;
-    outputUrl: string;
-    proofAuthorization: string;
-    signedBody: string;
-  }>;
-  redemptions: number;
+  authNeededRedirects: number;
+  vouchRedemptions: number;
   privateContentRequests: number;
 };
 
@@ -1485,29 +1479,15 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         state: "visible",
         timeout: 15_000,
       });
-      assert(sites.state.exchanges.length >= 1);
-      for (const exchange of sites.state.exchanges) {
-        const signedBody = JSON.parse(exchange.signedBody) as Record<string, unknown>;
-        assert.equal(
-          exchange.serviceAuthorization,
-          `Bearer ${SITES_VIEWER_SESSION_TOKEN}`
-        );
-        assert.equal(exchange.outputUrl, localSiteUrl);
-        assert.equal(exchange.proofAuthorization, "Nostr browser-sites-proof");
-        assert.deepEqual(JSON.parse(exchange.signedBody), {
-          purpose: "finite_site_view_session",
-          return_to: "/",
-          client: "finite-dashboard",
-          nonce: signedBody.nonce,
-        });
-        assert.match(String(signedBody.nonce), /^[0-9a-f-]{36}$/u);
-      }
-      assert.equal(sites.state.redemptions, 1);
-      assert(sites.state.privateContentRequests >= 1);
-      assert.match(
-        (await page.getByLabel("Site preview").locator("iframe").getAttribute("src")) ?? "",
-        /\/_finite\/auth\?native_token=/u
+      // The preview iframe is the plain output URL: the dashboard no longer
+      // mints site sessions, and viewing went through the gate redirect.
+      assert.equal(
+        await page.getByLabel("Site preview").locator("iframe").getAttribute("src"),
+        localSiteUrl
       );
+      assert(sites.state.authNeededRedirects >= 1);
+      assert(sites.state.vouchRedemptions >= 1);
+      assert(sites.state.privateContentRequests >= 1);
       const binding = hostedDevice.state.app.hosted_agent_binding;
       assert(binding);
       binding.associated_room_ids = ["room_browser_legacy"];
@@ -1997,7 +1977,6 @@ function startDashboard(
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
         FC_SITES_UPSTREAM_URL: sitesUrl,
-        FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
         FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
@@ -2027,58 +2006,46 @@ function startDashboard(
 }
 
 async function startFakeSites() {
+  // Fake of the Auth-Gate viewing shape: an unauthenticated browser hit is
+  // redirected (top-level) to the gate, which returns with a
+  // `gate_code` vouch that the site exchanges for its own viewer cookie.
+  // The fake collapses the gate redirect onto this server to stay
+  // self-contained; the contract under test is the redirect + vouch
+  // redemption + cookie shape, not WorkOS itself.
   const state: FakeSitesState = {
-    exchanges: [],
-    redemptions: 0,
+    authNeededRedirects: 0,
+    vouchRedemptions: 0,
     privateContentRequests: 0,
   };
   let siteUrl = "";
-  const token = "cd".repeat(32);
+  const vouch = "ef".repeat(32);
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-    if (
-      request.method === "POST"
-      && requestUrl.pathname === "/internal/v1/native-viewer-sessions"
-    ) {
-      const body = (await readJson(request)) as Record<string, unknown>;
-      const exchange = {
-        serviceAuthorization: singleHeader(request.headers.authorization),
-        outputUrl: String(body.output_url ?? ""),
-        proofAuthorization: String(body.authorization ?? ""),
-        signedBody: String(body.signed_body ?? ""),
-      };
-      state.exchanges.push(exchange);
-      const signedBody = JSON.parse(exchange.signedBody) as Record<string, unknown>;
-      if (
-        exchange.serviceAuthorization !== `Bearer ${SITES_VIEWER_SESSION_TOKEN}`
-        || exchange.outputUrl !== siteUrl
-        || exchange.proofAuthorization !== "Nostr browser-sites-proof"
-        || signedBody.purpose !== "finite_site_view_session"
-        || signedBody.return_to !== "/"
-        || signedBody.client !== "finite-dashboard"
-        || typeof signedBody.nonce !== "string"
-      ) {
-        writeJson(response, 403, { error: "viewer access unavailable" });
-        return;
-      }
-      writeJson(response, 200, {
-        redeem_url: `${siteUrl}_finite/auth?native_token=${token}&return_to=%2F`,
-      });
-      return;
-    }
-
     if (request.method === "GET" && requestUrl.pathname === "/_finite/auth") {
-      if (requestUrl.searchParams.get("native_token") !== token) {
+      if (requestUrl.searchParams.get("gate_code") !== vouch) {
         response.writeHead(400).end();
         return;
       }
-      state.redemptions += 1;
+      state.vouchRedemptions += 1;
       response.writeHead(303, {
         location: requestUrl.searchParams.get("return_to") ?? "/",
         "set-cookie": [
           "finite_site_auth=browser-viewer; Path=/; Max-Age=600; HttpOnly; SameSite=None; Secure",
           "__Host-finite_site_auth_partitioned=browser-viewer; Path=/; Max-Age=600; HttpOnly; SameSite=None; Secure; Partitioned",
         ],
+      });
+      response.end();
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/authorize") {
+      if (requestUrl.searchParams.get("output") !== siteUrl.replace(/\/$/u, "")) {
+        response.writeHead(400).end();
+        return;
+      }
+      state.authNeededRedirects += 1;
+      response.writeHead(303, {
+        location: `${siteUrl.replace(/\/$/u, "")}/_finite/auth?gate_code=${vouch}&return_to=%2F`,
       });
       response.end();
       return;
@@ -2091,8 +2058,11 @@ async function startFakeSites() {
         !cookie.includes("finite_site_auth=browser-viewer")
         && !cookie.includes("__Host-finite_site_auth_partitioned=browser-viewer")
       ) {
-        response.writeHead(401, { "content-type": "text/html; charset=utf-8" });
-        response.end("<!doctype html><h1>Sign in required</h1>");
+        // Auth-needed is a redirect to the gate, never a 401 login page.
+        response.writeHead(303, {
+          location: `${requestUrl.origin}/authorize?output=${encodeURIComponent(requestUrl.origin)}`,
+        });
+        response.end();
         return;
       }
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -2259,8 +2229,7 @@ async function handleHostedDeviceRequest(
     return;
   }
 
-  const isSitesIdentityProvider = path === "/v1/sites/identity-provider";
-  if (!path.startsWith("/v1/app/") && !isSitesIdentityProvider) {
+  if (!path.startsWith("/v1/app/")) {
     writeJson(response, 404, { error: "not found" });
     return;
   }
@@ -2282,29 +2251,6 @@ async function handleHostedDeviceRequest(
 
   if (state.unavailable) {
     writeJson(response, 503, { error: "hosted chat is temporarily unavailable" });
-    return;
-  }
-
-  if (request.method === "POST" && isSitesIdentityProvider) {
-    const body = (await readJson(request)) as Record<string, unknown>;
-    const input = body.input as Record<string, unknown> | undefined;
-    const url = String(input?.url ?? "");
-    const origin = singleHeader(request.headers["x-finite-sites-public-origin"]);
-    assert.equal(body.version, "finite-sites-identity-provider-v1");
-    assert.equal(body.operation, "authorizeViewerSession");
-    assert.equal(input?.returnTo, "/");
-    assert.equal(input?.client, "finite-dashboard");
-    assert.match(String(input?.nonce ?? ""), /^[0-9a-f-]{36}$/u);
-    assert.equal(url, `${origin}/_finite/auth/native-session`);
-    writeJson(response, 200, {
-      body_json: JSON.stringify({
-        purpose: "finite_site_view_session",
-        return_to: input?.returnTo,
-        client: input?.client,
-        nonce: input?.nonce,
-      }),
-      authorization_header: "Nostr browser-sites-proof",
-    });
     return;
   }
 

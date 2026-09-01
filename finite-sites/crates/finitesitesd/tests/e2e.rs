@@ -1,6 +1,6 @@
 //! End-to-end test: a real finitesitesd server on an ephemeral port, driven
 //! over HTTP exactly the way `fsite` and a browser would drive it —
-//! NIP-98-signed API calls, Host-routed site requests, magic-link login.
+//! NIP-98-signed API calls, Host-routed site requests, gate-vouch viewing.
 
 // Test helpers return ureq's own error so assertions can match on exact
 // HTTP statuses; its size does not matter in a test binary.
@@ -17,13 +17,10 @@ use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
     EmailRedeemResponse, GitAuthRequest, GitAuthResponse, HostedRequesterAssertionRequest,
-    HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
-    NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
-    ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse,
-    ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse,
-    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
-    SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
-    VerifiedEmailViewerSessionResponse,
+    HostedRequesterAssertionResponse, ProjectGrantRequest, ProjectGrantResponse,
+    ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse, ProjectOutputSummary,
+    ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
+    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -36,6 +33,14 @@ use finitesitesd::{ServeOptions, server};
 const BASE_DOMAIN: &str = "sites.localhost";
 const VIEWER_SESSION_SERVICE_TOKEN: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// The Auth Gate's location, as finitesitesd would learn it from
+/// FINITE_SITES_AUTH_GATE_URL. finitesitesd only ever redirects browsers
+/// here; it never calls the gate at runtime, so the URL does not need to
+/// resolve inside the test.
+const AUTH_GATE_URL: &str = "http://auth.sites.localhost:8792";
+/// The gate's vouch-signing secret for tests. Only its PUBLIC key is handed
+/// to finitesitesd, exactly like production.
+const GATE_SIGNING_KEY: [u8; 32] = [0x2a; 32];
 
 fn document_base_domain() -> String {
     format!("docs.{BASE_DOMAIN}")
@@ -124,10 +129,6 @@ impl TestServer {
         .await
     }
 
-    async fn start_without_viewer_session_service(allowed_pubkey: &str) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), true, false, None).await
-    }
-
     async fn start_inner(
         allowed_pubkey: Option<&str>,
         git_auto_reconcile: bool,
@@ -175,6 +176,10 @@ impl TestServer {
             api_url,
             git_base_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
+            auth_gate_url: Some(AUTH_GATE_URL.to_string()),
+            auth_gate_pubkey: Some(
+                finite_authn::gate_pubkey_for_secret(&GATE_SIGNING_KEY).unwrap(),
+            ),
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
             site_url_scheme: "http".to_string(),
@@ -240,39 +245,37 @@ impl TestServer {
             .call()
     }
 
-    fn viewer_session(
-        &self,
-        token: Option<&str>,
-        request: &VerifiedEmailViewerSessionRequest,
-    ) -> Result<ureq::Response, ureq::Error> {
-        let body = serde_json::to_vec(request).unwrap();
-        let mut call = self
-            .agent
-            .post(&format!("{}/internal/v1/viewer-sessions", self.api_url))
-            .set("Content-Type", "application/json");
-        if let Some(token) = token {
-            call = call.set("Authorization", &format!("Bearer {token}"));
-        }
-        call.send_bytes(&body)
+    /// Mint a gate vouch for one email on one output origin, the way the real
+    /// gate does after a WorkOS (or dev-mode) authentication. Each call uses
+    /// a fresh nonce so vouches are single-use.
+    fn gate_vouch(&self, origin: &str, email: &str) -> String {
+        let nonce = finitesites_proto::ids::random_32();
+        finite_authn::mint_vouch(
+            &GATE_SIGNING_KEY,
+            origin,
+            email,
+            now_unix(),
+            &finite_authn::AuthPolicy::default(),
+            nonce,
+        )
+        .unwrap()
     }
 
-    fn native_viewer_session(
+    /// Redeem a gate vouch at the output origin's `/_finite/auth` consumer,
+    /// the way the gate redirects a browser back.
+    fn redeem_gate_code(
         &self,
-        token: Option<&str>,
-        request: &NativeViewerSessionExchangeRequest,
+        origin: &str,
+        code: &str,
+        return_to: &str,
     ) -> Result<ureq::Response, ureq::Error> {
-        let body = serde_json::to_vec(request).unwrap();
-        let mut call = self
-            .agent
-            .post(&format!(
-                "{}/internal/v1/native-viewer-sessions",
-                self.api_url
+        self.agent
+            .get(&format!(
+                "{origin}/_finite/auth?gate_code={}&return_to={}",
+                urlencode(code),
+                urlencode(return_to)
             ))
-            .set("Content-Type", "application/json");
-        if let Some(token) = token {
-            call = call.set("Authorization", &format!("Bearer {token}"));
-        }
-        call.send_bytes(&body)
+            .call()
     }
 
     fn hosted_requester_assertion(
@@ -338,6 +341,18 @@ fn hook_helper_path() -> PathBuf {
 
 fn json_body<T: serde::de::DeserializeOwned>(response: ureq::Response) -> T {
     response.into_json().unwrap()
+}
+
+fn urlencode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn outbox_link(outbox: &Path) -> String {
@@ -1263,14 +1278,22 @@ async fn full_publish_share_and_view_flow() {
         let summary = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
         assert_eq!(summary.active_version, Some(1));
 
-        let gated = server.site_get("finitechat-native-mockup", "/", port);
-        let Err(ureq::Error::Status(401, response)) = gated else {
-            panic!("expected 401 for private site");
-        };
-        let login_page = response.into_string().unwrap();
-        assert!(login_page.contains("private"));
-        assert!(login_page.contains("href=\"/llms.txt\""));
-        assert!(login_page.contains("Open llms.txt"));
+        // Auth-needed is now a top-level redirect to the Auth Gate carrying
+        // this output's canonical origin and the return path.
+        let gated = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
+        assert_eq!(gated.status(), 303);
+        let gate_redirect = gated.header("location").unwrap().to_string();
+        let expected_origin = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
+        assert!(
+            gate_redirect.starts_with(&format!(
+                "{AUTH_GATE_URL}/authorize?output={}",
+                urlencode(&expected_origin)
+            )),
+            "{gate_redirect}"
+        );
+        assert!(gated.header("cache-control").unwrap().contains("no-store"));
 
         let share_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("shared".into()),
@@ -1308,15 +1331,12 @@ async fn full_publish_share_and_view_flow() {
         assert!(matches!(old_site_route, ureq::Error::Status(404, _)));
 
         let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
-        let generic = server
-            .agent
-            .post(&format!("{site_base}/_finite/request-link"))
-            .send_form(&[("email", "stranger@example.com")])
-            .unwrap();
-        assert!(generic.into_string().unwrap().contains("Check your email"));
-        let stranger_link = outbox_link(&server.outbox);
-        let ureq::Error::Status(403, not_shared) =
-            server.agent.get(&stranger_link).call().unwrap_err()
+        // A gate vouch for an unshared mailbox proves the mailbox (so the
+        // request-access flow stays usable) but grants no view.
+        let stranger_vouch = server.gate_vouch(&site_base, "stranger@example.com");
+        let ureq::Error::Status(403, not_shared) = server
+            .redeem_gate_code(&site_base, &stranger_vouch, "/")
+            .unwrap_err()
         else {
             panic!("verified unshared mailbox should see the not-shared page");
         };
@@ -1373,40 +1393,41 @@ async fn full_publish_share_and_view_flow() {
             std::fs::remove_file(entry.unwrap().path()).unwrap();
         }
 
-        server
-            .agent
-            .post(&format!("{site_base}/_finite/request-link"))
-            .send_form(&[("email", "friend@example.com")])
+        // A gate vouch for the shared mailbox mints the viewer cookie and
+        // continues to the return path. No mail is involved anymore.
+        let friend_vouch = server.gate_vouch(&site_base, "friend@example.com");
+        let redeemed = server
+            .redeem_gate_code(&site_base, &friend_vouch, "/gallery?x=1")
             .unwrap();
-        let link = outbox_link(&server.outbox);
-        assert!(link.starts_with(&format!("{site_base}/_finite/auth?token=")));
-
-        let redeemed = server.agent.get(&link).call().unwrap();
         assert_eq!(redeemed.status(), 303);
+        assert_eq!(redeemed.header("location").unwrap(), "/gallery?x=1");
         let cookie = redeemed
             .header("set-cookie")
-            .expect("login sets a cookie")
+            .expect("vouch redemption sets a cookie")
             .split(';')
             .next()
             .unwrap()
             .to_string();
+        assert!(cookie.starts_with("finite_site_auth="));
+        assert_eq!(std::fs::read_dir(&server.outbox).unwrap().count(), 0);
 
-        let replayed = server.agent.get(&link).call().unwrap();
-        assert_eq!(replayed.status(), 303);
-        assert!(replayed.header("set-cookie").is_some());
+        // The same vouch is single-use: replaying it fails closed.
+        let replayed = server.redeem_gate_code(&site_base, &friend_vouch, "/");
+        assert!(matches!(replayed, Err(ureq::Error::Status(400, _))));
 
-        for _ in 0..3 {
-            server
-                .agent
-                .post(&format!("{site_base}/_finite/request-link"))
-                .send_form(&[("email", "friend@example.com")])
-                .unwrap();
-        }
-        assert_eq!(
-            std::fs::read_dir(&server.outbox).unwrap().count(),
-            3,
-            "fourth request must not send a fourth mail"
-        );
+        // A vouch minted for another output origin is not a passport here.
+        let other_origin = format!("http://other.{BASE_DOMAIN}:{port}");
+        let cross_site_vouch = server.gate_vouch(&other_origin, "friend@example.com");
+        let cross_site = server.redeem_gate_code(&site_base, &cross_site_vouch, "/");
+        assert!(matches!(cross_site, Err(ureq::Error::Status(400, _))));
+
+        // A fresh vouch for the same viewer mints a fresh working session.
+        let second_vouch = server.gate_vouch(&site_base, "friend@example.com");
+        let second = server
+            .redeem_gate_code(&site_base, &second_vouch, "/")
+            .unwrap();
+        assert_eq!(second.status(), 303);
+        assert!(second.header("set-cookie").is_some());
 
         let page = server
             .agent
@@ -1506,28 +1527,7 @@ async fn full_publish_share_and_view_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn verified_email_viewer_session_endpoint_is_disabled_without_its_service_token() {
-    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
-    let server = TestServer::start_without_viewer_session_service(&user_pubkey).await;
-    let request = VerifiedEmailViewerSessionRequest {
-        output_url: format!(
-            "http://finitechat-native-mockup.{BASE_DOMAIN}:{}/",
-            server.port()
-        ),
-        verified_email: "friend@example.com".into(),
-        return_to: "/".into(),
-    };
-    let task = tokio::task::spawn_blocking(move || {
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
-            Err(ureq::Error::Status(503, _))
-        ));
-    });
-    task.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
+async fn gate_vouch_viewing_replaces_the_deleted_session_exchanges() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
@@ -1551,67 +1551,41 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
         wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
 
         let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
-        let request = VerifiedEmailViewerSessionRequest {
-            output_url: format!("{site_base}/"),
-            verified_email: "Friend@Example.com".into(),
-            return_to: "/gallery?view=one#photo".into(),
-        };
 
-        assert!(matches!(
-            server.viewer_session(None, &request),
-            Err(ureq::Error::Status(401, _))
-        ));
-        assert!(matches!(
-            server.viewer_session(Some("wrong-token"), &request),
-            Err(ureq::Error::Status(401, _))
-        ));
-        let verified_but_unshared: VerifiedEmailViewerSessionResponse = json_body(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
-                .unwrap(),
-        );
-        let Err(ureq::Error::Status(403, response)) =
-            server.agent.get(&verified_but_unshared.redeem_url).call()
+        // The internal account-to-session exchanges are gone entirely.
+        for dead in [
+            "/internal/v1/viewer-sessions",
+            "/internal/v1/native-viewer-sessions",
+        ] {
+            assert!(matches!(
+                server
+                    .agent
+                    .post(&format!("{}{dead}", server.api_url))
+                    .set(
+                        "Authorization",
+                        &format!("Bearer {VIEWER_SESSION_SERVICE_TOKEN}")
+                    )
+                    .send_bytes(b"{}"),
+                Err(ureq::Error::Status(404, _))
+            ));
+        }
+
+        // An unshared verified mailbox reaches the not-shared page (and can
+        // request access), but its cookie grants no view.
+        let unshared_vouch = server.gate_vouch(&site_base, "Friend@Example.com");
+        let ureq::Error::Status(403, not_shared) = server
+            .redeem_gate_code(&site_base, &unshared_vouch, "/")
+            .unwrap_err()
         else {
             panic!("verified but unshared mailbox must reach the not-shared page");
         };
-        assert!(response.into_string().unwrap().contains("Request access"));
+        assert!(not_shared.into_string().unwrap().contains("Request access"));
 
-        let mut unshared = request.clone();
-        unshared.verified_email = "unshared@example.com".into();
-        assert!(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared)
-                .is_ok()
-        );
-        unshared.verified_email = format!("{}@example.com", "a".repeat(255));
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared),
-            Err(ureq::Error::Status(403, _))
-        ));
-
-        let mut invalid = request.clone();
-        invalid.output_url = "https://example.com/".into();
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
-            Err(ureq::Error::Status(400, _))
-        ));
-        invalid.output_url = format!("{site_base}/not-canonical");
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
-            Err(ureq::Error::Status(400, _))
-        ));
-        invalid = request.clone();
-        invalid.return_to = "//evil.example".into();
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
-            Err(ureq::Error::Status(400, _))
-        ));
-
+        // Sharing the mailbox makes the same ceremony succeed.
         let share_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("shared".into()),
             confirm_public: false,
-            add_emails: vec!["friend@example.com".into(), "rate@example.com".into()],
+            add_emails: vec!["friend@example.com".into()],
             remove_emails: vec![],
             add_npubs: vec![],
             remove_npubs: vec![],
@@ -1626,120 +1600,10 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             )
             .unwrap();
 
-        let mut still_unshared = request.clone();
-        still_unshared.verified_email = "unshared@example.com".into();
-        let still_unshared_session: VerifiedEmailViewerSessionResponse = json_body(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &still_unshared)
-                .unwrap(),
-        );
-        assert!(matches!(
-            server.agent.get(&still_unshared_session.redeem_url).call(),
-            Err(ureq::Error::Status(403, _))
-        ));
-
-        let mut bounded_request = request.clone();
-        bounded_request.verified_email = "rate@example.com".into();
-        let mut first_redeem_url = None;
-        let mut latest_redeem_url = None;
-        for index in 0..finitesitesd::limiter::MAX_VIEWER_SESSIONS_PER_EMAIL {
-            let issued: VerifiedEmailViewerSessionResponse = json_body(
-                server
-                    .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &bounded_request)
-                    .unwrap(),
-            );
-            if index == 0 {
-                first_redeem_url = Some(issued.redeem_url.clone());
-            }
-            latest_redeem_url = Some(issued.redeem_url);
-        }
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &bounded_request),
-            Err(ureq::Error::Status(429, _))
-        ));
-        assert!(matches!(
-            server
-                .agent
-                .get(first_redeem_url.as_deref().unwrap())
-                .call(),
-            Err(ureq::Error::Status(400, _))
-        ));
-        let latest_redeem_url = latest_redeem_url.unwrap();
-        assert_eq!(
-            server
-                .agent
-                .get(&latest_redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
-        assert_eq!(
-            server
-                .agent
-                .get(&latest_redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
-
-        let mut second_project = project_init_request(false);
-        second_project.config.project.slug = "second-preview-project".into();
-        let second_output = second_project.config.outputs.get_mut("mockup").unwrap();
-        second_output.site_name = Some("second-preview-site".into());
-        let second_body = serde_json::to_vec(&second_project).unwrap();
-        server
-            .signed(
-                &user_secret(),
-                "POST",
-                "/api/v1/projects/init",
-                Some(&second_body),
-            )
+        let vouch = server.gate_vouch(&site_base, "friend@example.com");
+        let redeemed = server
+            .redeem_gate_code(&site_base, &vouch, "/gallery?view=one#photo")
             .unwrap();
-
-        let wrong_site_session: VerifiedEmailViewerSessionResponse = json_body(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
-                .unwrap(),
-        );
-        let wrong_site_url = wrong_site_session.redeem_url.replacen(
-            "finitechat-native-mockup.sites.localhost",
-            "second-preview-site.sites.localhost",
-            1,
-        );
-        assert!(matches!(
-            server.agent.get(&wrong_site_url).call(),
-            Err(ureq::Error::Status(400, _))
-        ));
-        assert_eq!(
-            server
-                .agent
-                .get(&wrong_site_session.redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
-
-        let session: VerifiedEmailViewerSessionResponse = json_body(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
-                .unwrap(),
-        );
-        assert!(
-            session
-                .redeem_url
-                .starts_with(&format!("{site_base}/_finite/auth?token="))
-        );
-        assert!(
-            session
-                .redeem_url
-                .contains("&return_to=%2Fgallery%3Fview%3Done%23photo")
-        );
-        assert_eq!(std::fs::read_dir(&server.outbox).unwrap().count(), 0);
-
-        let redeemed = server.agent.get(&session.redeem_url).call().unwrap();
         assert_eq!(redeemed.status(), 303);
         assert_eq!(redeemed.header("location"), Some("/gallery?view=one#photo"));
         let set_cookies = redeemed.all("set-cookie");
@@ -1766,15 +1630,50 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             .unwrap()
             .to_string();
 
-        assert_eq!(
-            server
-                .agent
-                .get(&session.redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
+        // Single use: the redeemed vouch cannot be replayed.
+        assert!(matches!(
+            server.redeem_gate_code(&site_base, &vouch, "/"),
+            Err(ureq::Error::Status(400, _))
+        ));
+        // Garbage and wrong-key vouches fail closed without side effects.
+        assert!(matches!(
+            server.redeem_gate_code(&site_base, "garbage", "/"),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let mut other_key = [0x77u8; 32];
+        other_key[0] = GATE_SIGNING_KEY[0].wrapping_add(1);
+        let wrong_key_vouch = {
+            let nonce = finitesites_proto::ids::random_32();
+            finite_authn::mint_vouch(
+                &other_key,
+                &site_base,
+                "friend@example.com",
+                now_unix(),
+                &finite_authn::AuthPolicy::default(),
+                nonce,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            server.redeem_gate_code(&site_base, &wrong_key_vouch, "/"),
+            Err(ureq::Error::Status(400, _))
+        ));
+        // Bad return paths are rejected before anything is trusted.
+        let bounded_vouch = server.gate_vouch(&site_base, "friend@example.com");
+        assert!(matches!(
+            server.redeem_gate_code(&site_base, &bounded_vouch, "//evil.example"),
+            Err(ureq::Error::Status(400, _))
+        ));
+        // The origin binding is exact: a vouch for a different output is
+        // not a passport to this one.
+        let second_origin = format!("http://second-preview-site.{BASE_DOMAIN}:{port}");
+        let cross_vouch = server.gate_vouch(&second_origin, "friend@example.com");
+        assert!(matches!(
+            server.redeem_gate_code(&site_base, &cross_vouch, "/"),
+            Err(ureq::Error::Status(400, _))
+        ));
+
+        // Existing cookies keep working; both cookie kinds view content.
         let clean_agent = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
         let page = clean_agent
             .get(&format!("{site_base}/"))
@@ -1792,6 +1691,7 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             "<h1>account preview</h1>"
         );
 
+        // Logout clears both cookies.
         let logout = clean_agent
             .get(&format!("{site_base}/_finite/logout"))
             .call()
@@ -1807,6 +1707,8 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             ]
         );
 
+        // Revoking the share closes live sessions: view access flips to the
+        // gate redirect, and a fresh vouch lands on the not-shared page.
         let revoke_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("shared".into()),
             confirm_public: false,
@@ -1824,277 +1726,22 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
                 Some(&revoke_body),
             )
             .unwrap();
-        assert!(matches!(
-            clean_agent
-                .get(&format!("{site_base}/"))
-                .set("Cookie", &ordinary_cookie)
-                .call(),
-            Err(ureq::Error::Status(401, _))
-        ));
-        assert!(matches!(
-            clean_agent
-                .get(&format!("{site_base}/"))
-                .set("Cookie", &partitioned_cookie)
-                .call(),
-            Err(ureq::Error::Status(401, _))
-        ));
-        let revoked_session: VerifiedEmailViewerSessionResponse = json_body(
-            server
-                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
-                .unwrap(),
+        let revoked_view = clean_agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &ordinary_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(revoked_view.status(), 303);
+        assert!(
+            revoked_view
+                .header("location")
+                .unwrap()
+                .starts_with(&format!("{AUTH_GATE_URL}/authorize?output="))
         );
+        let after_revoke_vouch = server.gate_vouch(&site_base, "friend@example.com");
         assert!(matches!(
-            server.agent.get(&revoked_session.redeem_url).call(),
+            server.redeem_gate_code(&site_base, &after_revoke_vouch, "/"),
             Err(ureq::Error::Status(403, _))
-        ));
-    });
-    task.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn native_requesting_user_sessions_open_private_output_without_magic_link() {
-    let agent_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
-    let viewer_pubkey = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
-    let viewer_npub = finitesites_proto::npub::encode_npub(&viewer_pubkey).unwrap();
-    let server = TestServer::start(&agent_pubkey).await;
-    let port = server.port();
-
-    let task = tokio::task::spawn_blocking(move || {
-        let mut init = project_init_request(false);
-        init.requesting_user_npub = Some(viewer_npub.clone());
-        let init_body = serde_json::to_vec(&init).unwrap();
-        let created: ProjectInitResponse = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/init",
-                    Some(&init_body),
-                )
-                .unwrap(),
-        );
-        assert_eq!(
-            created.requesting_user_npub.as_deref(),
-            Some(viewer_npub.as_str())
-        );
-        assert!(created.outputs[0].requesting_user_shared);
-
-        let credential = mint_skyler_git_credential(&server);
-        push_project_files(
-            &server,
-            &credential,
-            &created.finite_toml,
-            "main",
-            &[("index.html", "<h1>requesting user preview</h1>")],
-            "Requesting user viewer deploy",
-        );
-        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
-
-        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
-        assert!(matches!(
-            server.site_get("finitechat-native-mockup", "/", port),
-            Err(ureq::Error::Status(401, _))
-        ));
-
-        let direct_request = NativeViewerSessionRequest {
-            purpose: "finite_site_view_session".into(),
-            return_to: "/preview?owner=true".into(),
-            client: "finitechat-ios".into(),
-            nonce: "direct-requesting-user-proof".into(),
-        };
-        let direct_body = serde_json::to_vec(&direct_request).unwrap();
-        let direct_url = format!("{site_base}/_finite/auth/native-session");
-        let direct_auth = nip98::build_auth_header(
-            &viewer_secret(),
-            &direct_url,
-            "POST",
-            Some(&direct_body),
-            now_unix(),
-        )
-        .unwrap();
-
-        let stranger_auth = nip98::build_auth_header(
-            &stranger_secret(),
-            &direct_url,
-            "POST",
-            Some(&direct_body),
-            now_unix(),
-        )
-        .unwrap();
-        assert!(matches!(
-            server
-                .agent
-                .post(&direct_url)
-                .set("Authorization", &stranger_auth)
-                .send_bytes(&direct_body),
-            Err(ureq::Error::Status(401, _))
-        ));
-
-        let mut tampered_request = direct_request.clone();
-        tampered_request.return_to = "/tampered".into();
-        let tampered_body = serde_json::to_vec(&tampered_request).unwrap();
-        assert!(matches!(
-            server
-                .agent
-                .post(&direct_url)
-                .set("Authorization", &direct_auth)
-                .send_bytes(&tampered_body),
-            Err(ureq::Error::Status(401, _))
-        ));
-
-        let direct = server
-            .agent
-            .post(&direct_url)
-            .set("Authorization", &direct_auth)
-            .send_bytes(&direct_body)
-            .unwrap();
-        assert_eq!(direct.status(), 303);
-        assert_eq!(direct.header("location"), Some("/preview?owner=true"));
-        let direct_cookie = direct
-            .all("set-cookie")
-            .into_iter()
-            .find(|cookie| cookie.starts_with("finite_site_auth="))
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-        assert!(matches!(
-            server
-                .agent
-                .post(&direct_url)
-                .set("Authorization", &direct_auth)
-                .send_bytes(&direct_body),
-            Err(ureq::Error::Status(400, _))
-        ));
-        let page = server
-            .agent
-            .get(&format!("{site_base}/"))
-            .set("Cookie", &direct_cookie)
-            .call()
-            .unwrap();
-        assert_eq!(
-            page.into_string().unwrap(),
-            "<h1>requesting user preview</h1>"
-        );
-
-        let hosted_request = NativeViewerSessionRequest {
-            purpose: "finite_site_view_session".into(),
-            return_to: "/hosted-preview".into(),
-            client: "finite-dashboard".into(),
-            nonce: "hosted-requesting-user-proof".into(),
-        };
-        let signed_body = serde_json::to_string(&hosted_request).unwrap();
-        let output_url = format!("{site_base}/");
-        let hosted_auth = nip98::build_auth_header(
-            &viewer_secret(),
-            &format!("{output_url}_finite/auth/native-session"),
-            "POST",
-            Some(signed_body.as_bytes()),
-            now_unix(),
-        )
-        .unwrap();
-        let hosted_exchange = NativeViewerSessionExchangeRequest {
-            output_url,
-            authorization: hosted_auth,
-            signed_body,
-        };
-        assert!(matches!(
-            server.native_viewer_session(None, &hosted_exchange),
-            Err(ureq::Error::Status(401, _))
-        ));
-        let issued: NativeViewerSessionExchangeResponse = json_body(
-            server
-                .native_viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &hosted_exchange)
-                .unwrap(),
-        );
-        assert!(issued.redeem_url.contains("native_token="));
-        assert!(issued.redeem_url.contains("return_to=%2Fhosted-preview"));
-        assert!(matches!(
-            server.native_viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &hosted_exchange,),
-            Err(ureq::Error::Status(409, _))
-        ));
-
-        let redeemed = server.agent.get(&issued.redeem_url).call().unwrap();
-        assert_eq!(redeemed.status(), 303);
-        assert_eq!(redeemed.header("location"), Some("/hosted-preview"));
-        let hosted_cookie = redeemed
-            .all("set-cookie")
-            .into_iter()
-            .find(|cookie| cookie.starts_with("finite_site_auth="))
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-        assert!(matches!(
-            server.agent.get(&issued.redeem_url).call(),
-            Err(ureq::Error::Status(400, _))
-        ));
-        let hosted_page = server
-            .agent
-            .get(&format!("{site_base}/"))
-            .set("Cookie", &hosted_cookie)
-            .call()
-            .unwrap();
-        assert_eq!(
-            hosted_page.into_string().unwrap(),
-            "<h1>requesting user preview</h1>"
-        );
-
-        let revoke = SharingRequest {
-            visibility: None,
-            confirm_public: false,
-            add_emails: vec![],
-            remove_emails: vec![],
-            add_npubs: vec![],
-            remove_npubs: vec![viewer_npub],
-        };
-        let revoke_body = serde_json::to_vec(&revoke).unwrap();
-        let revoked: ProjectOutputSharingResponse = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
-                    Some(&revoke_body),
-                )
-                .unwrap(),
-        );
-        assert!(revoked.shared_npubs.is_empty());
-        for cookie in [&direct_cookie, &hosted_cookie] {
-            assert!(matches!(
-                server
-                    .agent
-                    .get(&format!("{site_base}/"))
-                    .set("Cookie", cookie)
-                    .call(),
-                Err(ureq::Error::Status(401, _))
-            ));
-        }
-
-        let after_revoke_request = NativeViewerSessionRequest {
-            purpose: "finite_site_view_session".into(),
-            return_to: "/".into(),
-            client: "finitechat-ios".into(),
-            nonce: "after-revoke-proof".into(),
-        };
-        let after_revoke_body = serde_json::to_vec(&after_revoke_request).unwrap();
-        let after_revoke_auth = nip98::build_auth_header(
-            &viewer_secret(),
-            &direct_url,
-            "POST",
-            Some(&after_revoke_body),
-            now_unix(),
-        )
-        .unwrap();
-        assert!(matches!(
-            server
-                .agent
-                .post(&direct_url)
-                .set("Authorization", &after_revoke_auth)
-                .send_bytes(&after_revoke_body),
-            Err(ureq::Error::Status(401, _))
         ));
     });
     task.await.unwrap();
@@ -2172,7 +1819,7 @@ async fn hosted_requester_assertion_binds_verified_mailbox_to_exact_agent_projec
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn share_send_invite_emails_viewer_magic_link_and_replays() {
+async fn share_rows_are_the_invitation_and_send_no_viewer_mail() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
@@ -2195,28 +1842,9 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
         );
         wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
 
-        let invalid_invite_body = serde_json::to_vec(&SharingRequest {
-            visibility: Some("private".into()),
-            confirm_public: false,
-            add_emails: vec!["Friend@Example.com".into()],
-            remove_emails: vec![],
-            add_npubs: vec![],
-            remove_npubs: vec![],
-        })
-        .unwrap();
-        let invalid_invite = server
-            .signed(
-                &user_secret(),
-                "POST",
-                "/api/v1/projects/finitechat-native/outputs/mockup/sharing?send_invites=true",
-                Some(&invalid_invite_body),
-            )
-            .unwrap_err();
-        assert!(matches!(invalid_invite, ureq::Error::Status(400, _)));
-        let unchanged = project_output_status(&server, "finitechat-native-mockup");
-        assert_eq!(unchanged.visibility, "private");
-        assert!(outbox_bodies(&server.outbox).is_empty());
-
+        // Sharing adds access and sends nothing: the share row is the
+        // invitation, and the added viewer signs in through the Auth Gate
+        // at the site URL.
         let share_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("shared".into()),
             confirm_public: false,
@@ -2231,7 +1859,7 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing?send_invites=true",
+                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
                     Some(&share_body),
                 )
                 .unwrap(),
@@ -2242,28 +1870,38 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             shared.shared_emails,
             vec!["friend@example.com", "owner@example.com"]
         );
-        assert_eq!(shared.invited_emails, vec!["friend@example.com"]);
+        assert!(shared.invited_emails.is_empty());
+        assert!(outbox_bodies(&server.outbox).is_empty());
 
-        let bodies = outbox_bodies(&server.outbox);
-        assert_eq!(bodies.len(), 1);
-        assert!(bodies[0].contains("finitechat-native-mockup has been shared with you."));
-        assert!(bodies[0].contains("To view it, open this sign-in link:"));
-        assert!(bodies[0].contains("For your agent"));
-        assert!(bodies[0].contains("ask it to read this email"));
-        assert!(bodies[0].contains("/llms.txt"));
+        // The shared viewer can still view immediately, through the gate.
         let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
-        let link = outbox_link(&server.outbox);
-        assert!(link.starts_with(&format!("{site_base}/_finite/auth?token=")));
-        let redeemed = server.agent.get(&link).call().unwrap();
+        let vouch = server.gate_vouch(&site_base, "friend@example.com");
+        let redeemed = server.redeem_gate_code(&site_base, &vouch, "/").unwrap();
         assert_eq!(redeemed.status(), 303);
+        let cookie = redeemed
+            .all("set-cookie")
+            .into_iter()
+            .find(|cookie| cookie.starts_with("finite_site_auth="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let page = server
+            .agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &cookie)
+            .call()
+            .unwrap();
+        assert_eq!(page.into_string().unwrap(), "<h1>invite</h1>");
 
-        clear_outbox(&server.outbox);
+        // Replays are idempotent and still send nothing.
         let replay: ProjectOutputSharingResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing?send_invites=true",
+                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
                     Some(&share_body),
                 )
                 .unwrap(),
@@ -2272,8 +1910,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             replay.shared_emails,
             vec!["friend@example.com", "owner@example.com"]
         );
-        assert_eq!(replay.invited_emails, vec!["friend@example.com"]);
-        assert_eq!(outbox_bodies(&server.outbox).len(), 1);
+        assert!(replay.invited_emails.is_empty());
+        assert!(outbox_bodies(&server.outbox).is_empty());
     });
     task.await.unwrap();
 }
@@ -3414,8 +3052,17 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
         assert_eq!(doc_summary.output_name, "finitechat-native-docs");
         assert_eq!(doc_summary.entry.as_deref(), Some("index.md"));
 
-        let private = server.document_get("finitechat-native-docs", "/", port);
-        assert!(matches!(private, Err(ureq::Error::Status(401, _))));
+        // Private documents redirect to the Auth Gate like every output.
+        let private = server
+            .document_get("finitechat-native-docs", "/", port)
+            .unwrap();
+        assert_eq!(private.status(), 303);
+        assert!(
+            private
+                .header("location")
+                .unwrap()
+                .starts_with(&format!("{AUTH_GATE_URL}/authorize?output="))
+        );
 
         let share_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("public".into()),

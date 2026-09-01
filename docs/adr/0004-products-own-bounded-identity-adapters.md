@@ -2,6 +2,20 @@
 
 Status: accepted, 2026-07-13.
 
+Amendment (2026-08-31): the Sites `authorizeViewerSession` adapter operation
+is deleted, along with its `finite-sites-identity-provider-v1` executor in
+the Hosted Device, the dashboard's NIP-98 preview detour, and the
+`/_finite/auth/native-session` + internal viewer-session exchanges. Viewer
+auth for Finite Sites is now the Auth Gate vouch: a browser without a session
+is redirected to `finite-gated`, which authenticates the human (WorkOS
+AuthKit) and returns a short-lived, origin-bound, single-use signed vouch
+that finitesitesd verifies offline (pinned gate public key, shared
+`finite-authn` policy) before minting its ordinary viewer cookie. The
+Brain adapter and the Project Init native-share atom (requesting-user npub
+Share rows) are unchanged; the full decision record lives on the docs branch
+(PR #796). Actors still sign (NIP-98, unchanged); only the viewer sentence
+changed.
+
 Implementation note: the hosted phase uses the versioned
 `finite-brain-identity-provider-v1` contract. The Product Client calls the
 dashboard bridge at `POST /api/brain/identity-provider`; the server-sandboxed
@@ -19,16 +33,12 @@ version, payload, and tags; grant wrapping accepts typed grant or invite
 metadata rather than arbitrary NIP-44 plaintext. Missing Chat setup
 returns setup-required, and arbitrary sign/decrypt operations are not routes.
 
-Sites implementation note: Sites owns the versioned
-`finite-sites-identity-provider-v1` contract. Project Init signed by an Agent
-Principal may atomically create an explicit, revocable Native Principal Share
-for the authenticated human sender npub on each Project Output. The hosted
-dashboard asks the WorkOS-bound Hosted Device only to
-`authorizeViewerSession` for an exact Output native-session URL and bounded
-body; iOS/Electron sign the same request locally. Sites, not the adapter,
-verifies the proof against an existing Share and mints its ordinary Viewer
-Cookie (or a single-use hosted redemption URL). A valid signature never
-creates a Share, and revocation is rechecked on every content request.
+Sites implementation note (amended 2026-08-31): Sites owns the Project Init
+native-share atom. Project Init signed by an Agent Principal may atomically
+create an explicit, revocable Native Principal Share for the authenticated
+human sender npub on each Project Output. The former
+`authorizeViewerSession` hosted/native signing detour is deleted; see the
+amendment above.
 
 ## Context
 

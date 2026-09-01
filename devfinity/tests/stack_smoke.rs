@@ -33,6 +33,41 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
         &format!("{}/api/v1/healthz", env.finitesites_api_url),
         "\"ok\":true",
     )?;
+    // The Auth Gate runs in dev mode (no WorkOS env): /authorize renders the
+    // loudly-labeled fixed-identity confirmation, and confirming mints an
+    // origin-bound vouch redirect back to the output's /_finite/auth.
+    assert_http_contains(
+        "finite-gate",
+        &format!("{}/healthz", env.auth_gate_url),
+        "ok",
+    )?;
+    let output_origin = format!(
+        "http://smoke.sites.localhost:{}",
+        env.finitesites_api_url
+            .rsplit_once(':')
+            .map(|(_, port)| port.to_string())
+            .unwrap_or_default()
+    );
+    let authorize = format!(
+        "{}/authorize?output={}&return_to=%2F",
+        env.auth_gate_url,
+        url_escape(&output_origin)
+    );
+    assert_http_contains("finite-gate", &authorize, "DEV MODE")?;
+    let confirm = ureq::post(&format!("{}/dev/confirm", env.auth_gate_url))
+        .set("content-type", "application/x-www-form-urlencoded")
+        .send_string(&format!(
+            "output={}&return_to=%2F",
+            url_escape(&output_origin)
+        ))?;
+    let status = confirm.status();
+    let location = confirm.header("location").unwrap_or_default().to_string();
+    if status != 303 || !location.starts_with(&format!("{output_origin}/_finite/auth?gate_code=")) {
+        return Err(format!(
+            "finite-gate dev confirm must redirect to the output vouch consumer: {status} {location}"
+        )
+        .into());
+    }
     assert_http_contains("dashboard", &env.dashboard_url, "<html")?;
 
     let run_id = smoke_run_id();
@@ -302,6 +337,7 @@ struct DevfinityEnv {
     finitechat_url: String,
     hosted_web_device_url: String,
     finitesites_api_url: String,
+    auth_gate_url: String,
     operator_access_token: String,
     customer_access_token: String,
     hosted_api_token: String,
@@ -318,6 +354,7 @@ impl DevfinityEnv {
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
             hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
+            auth_gate_url: trim_trailing_slash(env::var("FINITE_SITES_AUTH_GATE_URL")?),
             operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
             customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
             hosted_api_token: env::var("FINITECHAT_HOSTED_API_TOKEN")?,
@@ -346,6 +383,18 @@ fn assert_http_contains(
         "{name} response from {url} did not contain {expected:?}: {body}"
     );
     Ok(())
+}
+
+fn url_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn trim_trailing_slash(value: String) -> String {
