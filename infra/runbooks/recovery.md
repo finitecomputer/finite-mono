@@ -363,6 +363,200 @@ never run a restored copy beside its live writer.
   replace the database with an older snapshot merely to make a launch
   retry.
 
+### 4a. Chat quarantine repair (frozen room cursor on a rejected entry)
+
+*(Folded from the former `chat-quarantine-repair.md`, 2026-09-01.)*
+
+When a room sync tick hits an entry the device cannot apply (typically an MLS
+application ciphertext from another member it cannot decrypt), the failure is
+quarantined silently: the room lands in `room_sync_failures`, the durable
+cursor freezes, and — before image `2026-08-29.5` — the server's
+`RoomAdvanced` hint made the sidecar refetch the same rejected page at
+network speed forever (the #776 livelock). The image fix stops the refetch
+storm; it does not move the cursor. This runbook is the proven per-agent
+state repair (exercised 2026-08-29 on five agents — see
+[`docs/runs/2026-08-29-chat-plane-freeze.md`](../../docs/runs/2026-08-29-chat-plane-freeze.md)).
+
+**`finitechat repair skip-entry` is the ONLY production-sanctioned way to
+advance a durable room cursor past a rejected entry.** It never accepts an
+operator-typed sequence: it derives the skip list from a replay of the
+captured log, rehearses against byte copies, and applies to the real store
+only when the rehearsal cleanly reaches the capture head. Never hand-edit
+the SQLite store. A refusal is a STOP, not a retry-harder.
+
+### Identify (read-only first)
+
+1. **Refetch signature.** On lat2, the chat vhost's Caddy access logs
+   (`/var/log/caddy/access-chat.finite.computer*.log`) show a sustained
+   high rate of `POST /sync/group` from a runner host's IP — during the
+   incident, 13–25 requests/s per affected agent, all returning 200 (every
+   individual fetch succeeds; that is why request-bound alarms never fire).
+   On images `≥ 2026-08-29.5` the sidecar also emits a single-line stderr
+   quarantine report (room id, `rejected_after_seq`, error class) and
+   `/readyz` gains `runtime_status` ("ready; N rooms need repair").
+2. **Cursor vs head.** Compare the room's durable cursor against the
+   server-side `last_seq`. A permanently-behind cursor with a growing server
+   head is the quarantine signature.
+3. **Gotcha: the cursor is not the events table.** Read the cursor from the
+   diagnostic record — `client_app_events` max-seq is NOT the durable cursor
+   (they diverged by 10 on one agent during the incident), and an agent
+   store's head is not a server-side number. Label every seq you write down
+   with its owner.
+
+### PRECONDITIONS
+
+- The agent's room is identified (room id + the frozen cursor seq) and the
+  cause is understood as undecryptable application ciphertext, not an outage.
+- You are on the runner host that owns the Agent's Kata volume
+  (lat3 or lat4), with `sudo` for `nerdctl --namespace finite` and read
+  access to `/var/lib/finite-saas-runner/kata/<machine-id>/`.
+- You know the Agent's exact runtime image digest
+  (`nerdctl --namespace finite inspect <machine-id>`).
+- `finitechat capture room-log` works read-only against
+  `https://chat.finite.computer`; nothing below mutates the server.
+
+### STEPS (per agent; prove each stage before the next)
+
+#### 1. Host-side byte-copy backup
+
+Back up the store AND its WAL sibling from the Kata volume before anything
+touches them, and record checksums:
+
+```sh
+KATA=/var/lib/finite-saas-runner/kata/<machine-id>
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+sudo cp -p "$KATA/agent/client.sqlite3"     "client.sqlite3.$TS.bak"
+sudo cp -p "$KATA/agent/client.sqlite3-wal" "client.sqlite3-wal.$TS.bak" 2>/dev/null || true
+sudo sha256sum "client.sqlite3.$TS.bak" "client.sqlite3-wal.$TS.bak" | tee "backup.$TS.sha256"
+```
+
+Retain the backups with the audit trail; the rollback boundary is exactly
+these files with the container stopped.
+
+#### 2. Stop the agent container
+
+The apply phase writes the REAL store; the writer must be quiesced:
+
+```sh
+sudo nerdctl --namespace finite stop <machine-id>
+```
+
+#### 3. Capture + diagnose (read-only; inside a one-shot container)
+
+Run the tooling where the store and the identity live — a one-shot container
+from the Agent's own image with the Kata volume at `/data` (CLI at
+`/runtime/bin/finitechat`, store at `/data/agent/client.sqlite3`, account
+secret inside `/data/agent/identity/identity.json`). Secrets stay in-VM
+mode-600 files: extract, use, delete; never typed on the host, never echoed
+into logs.
+
+```sh
+W=/data/repair-<alias>
+cd "$W"
+# secret to file (never echoed); mode 600; deleted at the end of each stage
+python3 -c "import json; open('$W/secret.hex','w').write(json.load(open('/data/agent/identity/identity.json'))['secret_hex'].strip())"
+chmod 600 "$W/secret.hex"
+# byte copy of the store for diagnosis
+cp /data/agent/client.sqlite3 "$W/store-copy.sqlite3"
+cp /data/agent/client.sqlite3-wal "$W/store-copy.sqlite3-wal" 2>/dev/null || true
+# page the unapplied range off the server (read-only), starting at the CURSOR
+/runtime/bin/finitechat capture room-log \
+  --server https://chat.finite.computer \
+  --room-id <ROOM-ID> \
+  --device-id agent \
+  --account-secret-file "$W/secret.hex" \
+  --out "$W/room-log.json" \
+  --after-seq <CURSOR>
+# replay against the COPY; emits the privacy-locked classification record
+SECRET=$(cat "$W/secret.hex")
+/runtime/bin/finitechat diagnose rejected-entry \
+  --store "$W/store-copy.sqlite3" \
+  --work-dir "$W/diag-work" \
+  --room-log "$W/room-log.json" \
+  --device-id agent \
+  --account-secret-hex "$SECRET" \
+  --incident-alias <alias>
+rm -f "$W/secret.hex"
+```
+
+**STOP unless every candidate skip classifies as `kind=application` with
+`error_class=mls_application_ciphertext`.** Any other kind or error class is
+an unexplained failure — capture the record and escalate; do not repair.
+The tooling enforces the same rule and will refuse, but read the record
+yourself first.
+
+#### 4. Repair (apply phase; container still stopped)
+
+```sh
+SECRET=$(cat "$W/secret.hex")   # re-extract if removed; delete again after
+/runtime/bin/finitechat repair skip-entry \
+  --store /data/agent/client.sqlite3 \
+  --work-dir "$W/repair-work" \
+  --room-log "$W/room-log.json" \
+  --device-id agent \
+  --account-secret-hex "$SECRET" \
+  --incident-alias <alias> \
+  --audit-log "$W/repair-audit.jsonl" \
+  --max-skips 64
+rm -f "$W/secret.hex"
+```
+
+- Phase 1 rehearses the skip list against byte copies and refuses without
+  changing anything if the replay cannot reach the capture head. Phase 2
+  applies only the derived skips, ascending, through the sanctioned monotonic
+  cursor path; no entries are rewritten or deleted and no other table is
+  touched.
+- `--max-skips` defaults to 16 with a hard cap of 64. If the diagnosis finds
+  more than 64 skips in the captured range, do NOT raise the cap: re-run the
+  capture bounded to a nearer window (`--after-seq <CURSOR> --max-pages N`)
+  and repair in sequential windows.
+
+#### 5. Restart the agent
+
+Bring the Agent back on its own image and entrypoint with the same volume:
+
+```sh
+sudo nerdctl --namespace finite run --rm \
+  -v /var/lib/finite-saas-runner/kata/<machine-id>:/data \
+  <image> /start
+```
+
+(Or via the runner's normal lifecycle once it reconciles the container.)
+
+### VERIFY
+
+1. Catch-up: the room's durable cursor reaches the server `last_seq` and
+   sync ticks go quiet; held outbound messages drain.
+2. A fresh `hermes-inbox.json` mtime inside the agent home (it is rewritten
+   as held traffic lands) — write-on-change files must show NEW writes, not
+   merely recent ones.
+3. The Caddy `/sync/group` rate for that runner host falls from the
+   refetch-storm rate to the steady hint cadence.
+4. On images `≥ 2026-08-29.5`: the sidecar's quarantine stderr line stops
+   recurring for the room and `/readyz` no longer names it in
+   `runtime_status`.
+
+### ROLLBACK
+
+Restore the step-1 byte copies (store + WAL) into the Kata volume with the
+container stopped, `sha256sum -c` against the recorded checksums, and
+restart the agent. A quarantined-but-restored cursor is the pre-repair state:
+safe, silent only up to the #776 backoff, and re-repairable. Never roll back
+only one of the db/WAL pair.
+
+### Records and privacy
+
+- Every repair appends to `--audit-log` (JSONL, mode 0600): one line per
+  applied skip plus a final summary (`apply` or `refused`). Keep the audit
+  JSONL and the step-1 backups together, keyed by incident alias.
+- The tooling is privacy-locked: seqs, kinds, SHA-256 entry bindings, error
+  classes, cursor numbers, and counts only — never identifiers, plaintext,
+  ciphertext, or secrets. Payloads are never read by anything in this
+  procedure, including the operator.
+- Secrets live only as in-VM mode-600 files during the procedure; the
+  account secret is never a host-side CLI argument, never printed, never
+  committed.
+
 ## 5. Exact relocation transaction (one stopped Kata Runtime)
 
 Operator-only move between Finite-owned Kata hosts preserving Runtime ID,
