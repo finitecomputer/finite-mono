@@ -393,17 +393,6 @@ pub fn router() -> Router {
     router_with_state(ServerState::new(store, DEFAULT_PUBLIC_BASE_URL))
 }
 
-/// Build a router backed by an on-disk SQLite store.
-pub fn router_with_sqlite_path(
-    path: impl AsRef<Path>,
-    public_base_url: impl Into<String>,
-) -> Result<Router, StoreError> {
-    Ok(router_with_state(server_state_with_sqlite_path(
-        path,
-        public_base_url,
-    )?))
-}
-
 /// Build server state backed by an on-disk SQLite store.
 pub fn server_state_with_sqlite_path(
     path: impl AsRef<Path>,

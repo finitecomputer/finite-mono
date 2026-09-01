@@ -10,8 +10,8 @@ use finitechat_http::{
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
     PublishKeyPackageResponse, PushPlatform, PutNostrProfileRequest, PutNostrProfileResponse,
     RegisterPushTokenRequest, RegisterPushTokenResponse, RemovePushTokenRequest,
-    RemovePushTokenResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
+    RemovePushTokenResponse, RevokeDeviceRequest, RevokeDeviceResponse, SyncHintEvent,
+    SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
 };
 use finitechat_mls::{
     ExpectedDeviceCredential, FiniteDeviceCredentialV1, MlsCredentialError, NOSTR_PUBLIC_KEY_BYTES,
@@ -2041,22 +2041,6 @@ impl FiniteChatDevice {
             .collect()
     }
 
-    /// Record which server hosts a room's ordered log. `None` means the
-    /// home server. Rooms activated from a Welcome record the room server
-    /// that stored the Welcome.
-    pub fn set_room_server_url(
-        &mut self,
-        room_id: &str,
-        server_url: Option<String>,
-    ) -> Result<(), ClientError> {
-        validate_room_id(room_id)?;
-        if let Some(server_url) = &server_url {
-            validate_string_bytes("room.server_url", server_url, MAX_ROOM_SERVER_URL_BYTES)?;
-        }
-        self.room_entry_mut(room_id)?.server_url = server_url;
-        Ok(())
-    }
-
     pub fn room_server_url(&self, room_id: &str) -> Option<&str> {
         self.rooms
             .get(room_id)
@@ -2254,75 +2238,6 @@ impl FiniteChatDevice {
         Ok(())
     }
 
-    pub fn queue_link_fanout_page(
-        &mut self,
-        fanout_id: &str,
-        page: &ListAccountRoomsPage,
-        plans: &[LinkFanoutRoomPlan],
-    ) -> Result<(), ClientError> {
-        page.validate_limits().map_err(ClientError::from)?;
-        validate_item_count("link_fanout.page_plans", plans.len(), MAX_LINK_FANOUT_ROOMS)?;
-        let target_device = self.link_fanout(fanout_id)?.target_device.clone();
-        let mut plans_by_room = BTreeMap::<RoomId, LinkFanoutRoomPlan>::new();
-        for plan in plans {
-            plan.validate_limits()?;
-            if plans_by_room
-                .insert(plan.room_id.clone(), plan.clone())
-                .is_some()
-            {
-                return Err(ClientError::DuplicateLinkFanoutRoom(plan.room_id.clone()));
-            }
-        }
-
-        let mut queued = Vec::new();
-        for room in &page.rooms {
-            let target_already_current = room
-                .devices
-                .iter()
-                .any(|device| device.device == target_device);
-            if target_already_current {
-                continue;
-            }
-            self.group(&room.room_id)?;
-            let plan = plans_by_room
-                .remove(&room.room_id)
-                .ok_or_else(|| ClientError::MissingLinkFanoutRoomPlan(room.room_id.clone()))?;
-            if plan.key_package_id.is_empty()
-                || plan.welcome_id.is_empty()
-                || plan.idempotency_key.is_empty()
-            {
-                return Err(ClientError::MissingLinkFanoutRoomPlan(plan.room_id));
-            }
-            queued.push(LinkFanoutRoomState {
-                plan,
-                claimed_key_package: None,
-                status: LinkFanoutRoomStatus::Pending,
-            });
-        }
-        if let Some((extra_room_id, _)) = plans_by_room.into_iter().next() {
-            return Err(ClientError::UnexpectedLinkFanoutRoomPlan(extra_room_id));
-        }
-
-        let fanout = self.link_fanout_mut(fanout_id)?;
-        let mut seen_rooms = fanout
-            .rooms
-            .iter()
-            .map(|room| room.plan.room_id.clone())
-            .collect::<BTreeSet<_>>();
-        for room in queued {
-            if !seen_rooms.insert(room.plan.room_id.clone()) {
-                return Err(ClientError::DuplicateLinkFanoutRoom(
-                    room.plan.room_id.clone(),
-                ));
-            }
-            fanout.rooms.push(room);
-        }
-        fanout.after_room_id = page.next_after_room_id.clone();
-        fanout.discovery_complete = !page.has_more;
-        fanout.validate_limits()?;
-        Ok(())
-    }
-
     pub fn queue_claimed_link_fanout_page(
         &mut self,
         fanout_id: &str,
@@ -2405,44 +2320,6 @@ impl FiniteChatDevice {
         fanout.discovery_complete = !page.has_more;
         fanout.validate_limits()?;
         Ok(())
-    }
-
-    pub fn prepare_link_fanout_room_commit(
-        &mut self,
-        fanout_id: &str,
-        room_id: &str,
-        claimed_key_package: &ClaimKeyPackageResult,
-    ) -> Result<PreparedCommit, ClientError> {
-        validate_room_id(room_id)?;
-        let (target_device, plan) = {
-            let fanout = self.link_fanout(fanout_id)?;
-            let room = fanout
-                .rooms
-                .iter()
-                .find(|room| room.plan.room_id == room_id)
-                .ok_or_else(|| ClientError::LinkFanoutRoomNotFound(room_id.to_string()))?;
-            match &room.status {
-                LinkFanoutRoomStatus::Pending => {}
-                LinkFanoutRoomStatus::Prepared { .. } if !self.has_pending_commit(room_id)? => {}
-                _ => return Err(ClientError::LinkFanoutRoomNotPending(room_id.to_string())),
-            }
-            (fanout.target_device.clone(), room.plan.clone())
-        };
-        if claimed_key_package.owner != target_device {
-            return Err(ClientError::LinkFanoutClaimTargetMismatch {
-                expected: target_device,
-                actual: claimed_key_package.owner.clone(),
-            });
-        }
-        if claimed_key_package.key_package_id != plan.key_package_id {
-            return Err(ClientError::LinkFanoutClaimPackageMismatch {
-                expected: plan.key_package_id,
-                actual: claimed_key_package.key_package_id.clone(),
-            });
-        }
-        let prepared =
-            self.prepare_link_fanout_room_commit_inner(fanout_id, room_id, claimed_key_package)?;
-        Ok(prepared)
     }
 
     pub fn prepare_claimed_link_fanout_room_commit(
@@ -2737,33 +2614,6 @@ impl FiniteChatDevice {
         })
     }
 
-    pub fn verified_member_count(
-        &self,
-        room_id: &str,
-        device: &DeviceRef,
-    ) -> Result<u32, ClientError> {
-        let group = self.group(room_id)?;
-        let expected_account_public_key = account_public_key_from_device_ref(device)?;
-        let mut count = 0u32;
-        for member in group.members() {
-            let credential = FiniteDeviceCredentialV1::from_credential(member.credential)?;
-            // Device ids are only unique per account (DeviceRef is the
-            // tuple); two accounts may share a device-id string.
-            if credential.account_public_key() == expected_account_public_key
-                && credential.device_id() == device.device_id
-            {
-                credential.verify_expected(ExpectedDeviceCredential {
-                    account_public_key: expected_account_public_key,
-                    device_id: &device.device_id,
-                    mls_leaf_signing_public_key: &member.signature_key,
-                    now_unix_seconds: self.now_unix_seconds,
-                })?;
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
     pub fn room_members(&self, room_id: &str) -> Result<Vec<DeviceRef>, ClientError> {
         let group = self.group(room_id)?;
         let mut members = Vec::new();
@@ -2799,39 +2649,6 @@ impl FiniteChatDevice {
     pub fn generate_object_id(&self, prefix: &str) -> Result<String, ClientError> {
         let bytes = self.random_bytes::<8>()?;
         Ok(format!("{prefix}-{}", hex_lower(&bytes)))
-    }
-
-    /// Verify that some member of the room carries a valid credential for
-    /// the given account after activating a Welcome: a hostile rendezvous
-    /// server that admits the device to a different group fails here.
-    pub fn verify_room_member_account(
-        &self,
-        room_id: &str,
-        account_id: &str,
-    ) -> Result<(), ClientError> {
-        let group = self.group(room_id)?;
-        let expected = NostrPublicKey::from_bytes(decode_lower_hex_32(account_id)?)
-            .map_err(ClientError::from)?;
-        for member in group.members() {
-            let Ok(credential) = FiniteDeviceCredentialV1::from_credential(member.credential)
-            else {
-                continue;
-            };
-            if credential.account_public_key() != expected {
-                continue;
-            }
-            credential.verify_expected(ExpectedDeviceCredential {
-                account_public_key: expected,
-                device_id: credential.device_id(),
-                mls_leaf_signing_public_key: &member.signature_key,
-                now_unix_seconds: self.now_unix_seconds,
-            })?;
-            return Ok(());
-        }
-        Err(ClientError::AccountNotInRoom {
-            room_id: room_id.to_owned(),
-            account_id: account_id.to_owned(),
-        })
     }
 
     /// Encrypt an ephemeral activity payload (typing/working indicators)
@@ -3595,22 +3412,6 @@ impl SqliteClientStore {
         self.with_transaction(|tx| save_device_state_tx(tx, &state, &encryption_key))
     }
 
-    pub fn save_device_state_and_app_messages(
-        &mut self,
-        device: &FiniteChatDevice,
-        messages: &[StoredAppMessage],
-    ) -> Result<(), ClientStoreError> {
-        let state = device.export_state()?;
-        let owner = state.device_ref.clone();
-        let encryption_key = self.options.encryption_key.clone();
-        self.with_transaction(|tx| {
-            save_device_state_tx(tx, &state, &encryption_key)?;
-            save_app_messages_tx(tx, &encryption_key, &owner, messages)?;
-            prune_app_messages_tx(tx, &owner, MAX_STORED_APP_MESSAGES)?;
-            Ok(())
-        })
-    }
-
     pub fn save_device_state_and_app_messages_and_events(
         &mut self,
         device: &FiniteChatDevice,
@@ -3942,19 +3743,6 @@ impl SqliteClientStore {
         let encryption_key = self.options.encryption_key.clone();
         self.with_transaction(|tx| {
             commit_device_link_bootstrap_tx(tx, &encryption_key, owner, expected, room, profiles)
-        })
-    }
-
-    pub fn poison_device_link_bootstrap(
-        &mut self,
-        owner: &DeviceRef,
-        expected: &StoredDeviceLinkBootstrapReceipt,
-    ) -> Result<(), ClientStoreError> {
-        validate_app_message_owner(owner)?;
-        validate_device_link_bootstrap_receipt(expected)?;
-        self.with_transaction(|tx| {
-            poison_device_link_bootstrap_tx(tx, owner, expected)?;
-            Ok(())
         })
     }
 
@@ -4734,17 +4522,6 @@ impl SqliteClientStore {
         self.save_device_state(device)
     }
 
-    pub fn queue_link_fanout_page_and_save(
-        &mut self,
-        device: &mut FiniteChatDevice,
-        fanout_id: &str,
-        page: &ListAccountRoomsPage,
-        plans: &[LinkFanoutRoomPlan],
-    ) -> Result<(), ClientStoreError> {
-        device.queue_link_fanout_page(fanout_id, page, plans)?;
-        self.save_device_state(device)
-    }
-
     pub fn queue_claimed_link_fanout_page_and_save(
         &mut self,
         device: &mut FiniteChatDevice,
@@ -4754,19 +4531,6 @@ impl SqliteClientStore {
     ) -> Result<(), ClientStoreError> {
         device.queue_claimed_link_fanout_page(fanout_id, page, claimed_key_packages)?;
         self.save_device_state(device)
-    }
-
-    pub fn prepare_link_fanout_room_commit_and_save(
-        &mut self,
-        device: &mut FiniteChatDevice,
-        fanout_id: &str,
-        room_id: &str,
-        claimed_key_package: &ClaimKeyPackageResult,
-    ) -> Result<PreparedCommit, ClientStoreError> {
-        let prepared =
-            device.prepare_link_fanout_room_commit(fanout_id, room_id, claimed_key_package)?;
-        self.save_device_state(device)?;
-        Ok(prepared)
     }
 
     pub fn prepare_claimed_link_fanout_room_commit_and_save(
@@ -5345,32 +5109,9 @@ impl<T> HttpRuntimeDelivery<T> {
     pub fn transport(&self) -> &T {
         &self.transport
     }
-
-    pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
-    }
-
-    pub fn into_transport(self) -> T {
-        self.transport
-    }
 }
 
 impl<T: HttpRuntimeTransport> HttpRuntimeDelivery<T> {
-    pub fn publish_account_room_record(
-        &mut self,
-        account_id: &str,
-        record: &AccountRoomRecord,
-    ) -> Result<(), HttpRuntimeDeliveryError<T::Error>> {
-        let request = SaveAccountRoomRequest {
-            account_id: account_id.to_owned(),
-            room_id: record.room_id.clone(),
-            record: serde_json::to_value(record)
-                .map_err(|error| HttpRuntimeDeliveryError::Json(error.to_string()))?,
-        };
-        let _: SaveAccountRoomResponse = self.post_json("/account-rooms", &request)?;
-        Ok(())
-    }
-
     pub fn bootstrap_account_room(
         &mut self,
         request: &CreateRoomRequest,
@@ -8182,43 +7923,6 @@ fn poison_device_link_bootstrap_identity_tx(
             identity.bootstrap_id,
             &identity.source.account_id,
             &identity.source.device_id,
-            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
-            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED,
-            DEVICE_LINK_BOOTSTRAP_STATE_POISONED,
-        ],
-    )?;
-    Ok(())
-}
-
-fn poison_device_link_bootstrap_tx(
-    tx: &Transaction<'_>,
-    owner: &DeviceRef,
-    expected: &StoredDeviceLinkBootstrapReceipt,
-) -> Result<(), ClientStoreError> {
-    let identity = device_link_bootstrap_identity_from_receipt(owner, expected);
-    tx.execute(
-        r#"
-        UPDATE client_device_link_bootstrap_transfers
-        SET state = CASE
-          WHEN state IN (?8, ?9) THEN ?9
-          ELSE ?10
-        END
-        WHERE account_id = ?1
-          AND device_id = ?2
-          AND room_id = ?3
-          AND bootstrap_id = ?4
-          AND source_account_id = ?5
-          AND source_device_id = ?6
-          AND manifest_sha256 = ?7
-        "#,
-        params![
-            &identity.owner.account_id,
-            &identity.owner.device_id,
-            identity.room_id,
-            identity.bootstrap_id,
-            &identity.source.account_id,
-            &identity.source.device_id,
-            &expected.manifest_sha256,
             DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
             DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED,
             DEVICE_LINK_BOOTSTRAP_STATE_POISONED,

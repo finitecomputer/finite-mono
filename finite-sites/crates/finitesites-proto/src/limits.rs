@@ -26,10 +26,6 @@ pub const MAX_SITES_PER_OWNER: u32 = 100;
 /// Google-Doc-shaped (a few collaborators), not a mailing list.
 pub const MAX_SHARES_PER_SITE: u32 = 50;
 
-/// One site may have this many email-keyed editors. This matches the
-/// document-collaboration shape and keeps per-publish editor checks cheap.
-pub const MAX_EDITORS_PER_SITE: u32 = 50;
-
 /// One verified email may keep a handful of active local keys, enough for a
 /// laptop plus agent boxes without becoming an unbounded credential list.
 pub const MAX_EMAIL_KEYS_PER_EMAIL: u32 = 5;
@@ -115,24 +111,8 @@ pub const MAX_APP_BUNDLE_FILES: u32 = 100_000;
 /// runner enforces the same cap while extracting.
 pub const MAX_APP_BUNDLE_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Source snapshots are optional editor-handoff archives, not dependency
-/// mirrors. Excluding vendor/build output keeps this comfortably under app
-/// bundle size while allowing real project source.
-pub const MAX_SOURCE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
-
-/// Source snapshots may include larger project trees than static manifests,
-/// but remain bounded so archive creation and extraction are reviewable.
-pub const MAX_SOURCE_SNAPSHOT_FILES: u32 = 5_000;
-
-/// Empty/generated directory trees should not make source walking unbounded.
-pub const MAX_SOURCE_SNAPSHOT_DIRECTORIES: u32 = 5_000;
-
 /// Start commands are one shell line, not scripts.
 pub const MAX_START_COMMAND_BYTES: u32 = 1024;
-
-/// App listen ports are allocated from this range, one per app site.
-pub const APP_PORT_RANGE_START: u16 = 21000;
-pub const APP_PORT_RANGE_END: u16 = 29999;
 
 /// One Project Config can describe multiple outputs later, but milestone 1
 /// stays small enough that validation, deploy reconciliation, and agent error

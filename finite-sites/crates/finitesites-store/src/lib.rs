@@ -213,14 +213,6 @@ impl PublishStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct PublishRecord {
-    pub id: String,
-    pub site_id: String,
-    pub status: PublishStatus,
-    pub version_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct FinalizedVersion {
     pub version_id: String,
     pub version_number: u32,
@@ -440,13 +432,6 @@ pub struct ProjectInitStoreOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SitesEmailPrincipalRecord {
-    pub id: String,
-    pub email: String,
-    pub verified_at: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SitesAuthorizedKeyRecord {
     pub id: String,
     pub email_principal_id: String,
@@ -463,11 +448,6 @@ pub struct SitesIdentityReconciliationReport {
     pub unchanged: u64,
     pub conflicts: u64,
     pub needs_proof: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyEmailGrantCandidate {
-    pub email: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1511,16 +1491,6 @@ impl Store {
         self.has_publish_access(pubkey, 0)
     }
 
-    pub fn list_allowed(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let grants = self.list_publish_grants(0)?;
-        let mut out = Vec::with_capacity(grants.len());
-        // Bounded: the publish grant cache is operator/Core curated.
-        for grant in grants {
-            out.push((grant.pubkey, grant.note));
-        }
-        Ok(out)
-    }
-
     pub fn grant_publish_access(
         &mut self,
         pubkey: &str,
@@ -1676,10 +1646,6 @@ impl Store {
     }
 
     // ---- principals and projects -----------------------------------------
-
-    pub fn principal_by_email(&self, email: &str) -> Result<Option<PrincipalRecord>, StoreError> {
-        self.principal_query("WHERE email = ?1", email)
-    }
 
     pub fn principal_by_pubkey(&self, pubkey: &str) -> Result<Option<PrincipalRecord>, StoreError> {
         self.principal_query("WHERE pubkey = ?1", pubkey)
@@ -1915,30 +1881,6 @@ impl Store {
         })
     }
 
-    pub fn project_access_by_slug(
-        &self,
-        principal_id: &str,
-        slug: &str,
-    ) -> Result<Option<ProjectAccessRecord>, StoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT p.id, p.slug, p.owner_principal_id, p.visibility, pc.role
-                 FROM projects p
-                 JOIN project_collaborators pc ON pc.project_id = p.id
-                 WHERE p.slug = ?1
-                   AND pc.principal_id = ?2
-                   AND pc.removed_at IS NULL",
-                params![slug, principal_id],
-                Self::row_to_project_access,
-            )
-            .optional()?;
-        match row {
-            Some(result) => Ok(Some(result?)),
-            None => Ok(None),
-        }
-    }
-
     pub fn project_access_by_actor(
         &self,
         actor_pubkey: &str,
@@ -2097,27 +2039,6 @@ impl Store {
             )
             .optional()?;
         Ok(allowed.is_some())
-    }
-
-    pub fn projects_for_principal(
-        &self,
-        principal_id: &str,
-    ) -> Result<Vec<ProjectAccessRecord>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.slug, p.owner_principal_id, p.visibility, pc.role
-             FROM projects p
-             JOIN project_collaborators pc ON pc.project_id = p.id
-             WHERE pc.principal_id = ?1
-               AND pc.removed_at IS NULL
-             ORDER BY p.created_at, p.slug",
-        )?;
-        let rows = stmt.query_map(params![principal_id], Self::row_to_project_access)?;
-        let mut out = Vec::new();
-        // Bounded by Project Output publishing limits and collaborator grants.
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
     }
 
     pub fn projects_for_actor(
@@ -3321,36 +3242,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn publish_by_id(&self, publish_id: &str) -> Result<Option<PublishRecord>, StoreError> {
-        let record = self
-            .conn
-            .query_row(
-                "SELECT id, site_id, status, version_id
-                 FROM publishes WHERE id = ?1",
-                params![publish_id],
-                |row| {
-                    let status_raw: String = row.get(2)?;
-                    Ok((
-                        PublishRecord {
-                            id: row.get(0)?,
-                            site_id: row.get(1)?,
-                            status: PublishStatus::Pending,
-                            version_id: row.get(3)?,
-                        },
-                        status_raw,
-                    ))
-                },
-            )
-            .optional()?;
-        match record {
-            Some((mut publish, status_raw)) => {
-                publish.status = PublishStatus::from_db(&status_raw)?;
-                Ok(Some(publish))
-            }
-            None => Ok(None),
-        }
-    }
-
     pub fn publish_files(&self, publish_id: &str) -> Result<Vec<ManifestFile>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT path, sha256, size FROM publish_files WHERE publish_id = ?1 ORDER BY path",
@@ -3368,25 +3259,6 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
-    }
-
-    /// Size of the first publish-file entry with this hash, if the publish
-    /// references it. Content-addressed: all entries with one hash share a
-    /// size, so "first" is unambiguous.
-    pub fn publish_file_by_hash(
-        &self,
-        publish_id: &str,
-        sha256: &str,
-    ) -> Result<Option<u64>, StoreError> {
-        let size: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT size FROM publish_files WHERE publish_id = ?1 AND sha256 = ?2 LIMIT 1",
-                params![publish_id, sha256],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(size.map(|s| s as u64))
     }
 
     pub fn version_by_id(&self, version_id: &str) -> Result<Option<FinalizedVersion>, StoreError> {
@@ -3410,24 +3282,6 @@ impl Store {
         };
         version.version_id = version_id.to_string();
         Ok(Some(version))
-    }
-
-    pub fn version_by_git_ref_event_id(
-        &self,
-        event_id: i64,
-    ) -> Result<Option<FinalizedVersion>, StoreError> {
-        let version_id = self
-            .conn
-            .query_row(
-                "SELECT id FROM versions WHERE git_ref_event_id = ?1 ORDER BY created_at, id LIMIT 1",
-                params![event_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        match version_id {
-            Some(version_id) => self.version_by_id(&version_id),
-            None => Ok(None),
-        }
     }
 
     pub fn version_by_git_ref_event_id_for_site(
@@ -4412,28 +4266,6 @@ impl Store {
             conflicts: conflicts as u64,
             needs_proof: needs_proof as u64,
         })
-    }
-
-    pub fn legacy_email_grant_candidates(
-        &self,
-    ) -> Result<Vec<LegacyEmailGrantCandidate>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT email FROM shares
-             UNION
-             SELECT p.email
-             FROM principals p
-             JOIN project_collaborators pc ON pc.principal_id = p.id
-             WHERE p.kind = 'external' AND pc.removed_at IS NULL
-             ORDER BY email",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(LegacyEmailGrantCandidate { email: row.get(0)? })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
     }
 
     pub fn add_native_grants_for_legacy_email(

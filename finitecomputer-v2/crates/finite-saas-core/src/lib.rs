@@ -1078,34 +1078,6 @@ pub struct RuntimeArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectRuntimeLink {
-    pub id: String,
-    pub project_id: String,
-    pub agent_runtime_id: String,
-    pub active: bool,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChatIdentity {
-    pub id: String,
-    pub user_id: String,
-    pub kind: String,
-    pub device_id: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectRoomMembership {
-    pub id: String,
-    pub project_id: String,
-    pub chat_identity_id: String,
-    pub role: ProjectMembershipRole,
-    pub created_at: String,
-    pub archived_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentCreationEntitlement {
     pub id: String,
     pub customer_org_id: String,
@@ -2298,10 +2270,6 @@ impl RunnerLeaseCapacity {
         !self.runner_classes.is_empty()
             && !self.draining
             && (self.requires_core_in_flight_reservation() || !self.sandbox_limit_reached())
-    }
-
-    pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
-        self.runner_classes.contains(&runner_class)
     }
 
     pub fn supports_runtime_control(&self, kind: RuntimeControlKind) -> bool {

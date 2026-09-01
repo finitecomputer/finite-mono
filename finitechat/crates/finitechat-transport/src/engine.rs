@@ -24,13 +24,6 @@ impl KeyPackage {
         }
     }
 
-    pub fn with_source_event_id(bytes: Vec<u8>, event_id: MessageId) -> Self {
-        Self {
-            bytes,
-            source: Some(KeyPackageSource { event_id }),
-        }
-    }
-
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
