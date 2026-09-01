@@ -17,8 +17,11 @@
 //! - `FINITE_GATE_SIGNING_KEY` — 64 lowercase hex chars; the vouch signing
 //!   secret. Its public counterpart is pinned by finitesitesd.
 //! - `FINITE_GATE_WORKOS_CLIENT_ID` / `FINITE_GATE_WORKOS_API_KEY` — when
-//!   the client id is absent the gate runs in DEV MODE and never calls
-//!   WorkOS.
+//!   set, production WorkOS AuthKit mode.
+//! - `FINITE_GATE_DEV_MODE` — `1` opts into DEV MODE explicitly (fixed dev
+//!   identity, no WorkOS). Dev mode is never a fallback: a gate with
+//!   neither WorkOS credentials nor this flag refuses to start, so a
+//!   production box with a failed env file fails closed.
 //! - `FINITE_GATE_DEV_EMAIL` — the fixed dev-mode identity (default
 //!   `dev@finite.computer`).
 

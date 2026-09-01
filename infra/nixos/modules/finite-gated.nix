@@ -12,8 +12,12 @@
 #                                 its x-only public key is what finitesitesd
 #                                 pins as FINITE_SITES_AUTH_GATE_PUBKEY
 #                                 (`finite-gated` logs the pubkey at startup)
-#   FINITE_GATE_WORKOS_CLIENT_ID  absent => dev mode (fixed dev identity)
+#   FINITE_GATE_WORKOS_CLIENT_ID  production WorkOS AuthKit client
 #   FINITE_GATE_WORKOS_API_KEY    must be set together with the client id
+#   FINITE_GATE_DEV_MODE          never set on a prod host: 1 = explicit
+#                                 local-dev mode (fixed dev identity). With
+#                                 neither WorkOS nor this flag the gate
+#                                 refuses to start (fail closed).
 {
   config,
   finitePackages,

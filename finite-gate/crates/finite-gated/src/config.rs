@@ -10,6 +10,7 @@ pub const PUBLIC_URL_ENV: &str = "FINITE_GATE_PUBLIC_URL";
 pub const SIGNING_KEY_ENV: &str = "FINITE_GATE_SIGNING_KEY";
 pub const WORKOS_CLIENT_ID_ENV: &str = "FINITE_GATE_WORKOS_CLIENT_ID";
 pub const WORKOS_API_KEY_ENV: &str = "FINITE_GATE_WORKOS_API_KEY";
+pub const DEV_MODE_ENV: &str = "FINITE_GATE_DEV_MODE";
 pub const DEV_EMAIL_ENV: &str = "FINITE_GATE_DEV_EMAIL";
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8792";
@@ -24,15 +25,21 @@ pub struct GateConfig {
     /// Vouch signing secret. Its x-only public key is what finitesitesd
     /// pins as `FINITE_SITES_AUTH_GATE_PUBKEY`.
     pub signing_key: [u8; 32],
-    /// Present ⇒ production WorkOS AuthKit mode; absent ⇒ dev mode.
+    /// Present ⇒ production WorkOS AuthKit mode.
     pub workos_client_id: Option<String>,
     pub workos_api_key: Option<String>,
+    /// Explicit opt-in dev mode (`FINITE_GATE_DEV_MODE=1`). Dev mode is
+    /// never the fallback for missing configuration: a gate with neither
+    /// WorkOS credentials nor the dev flag refuses to start, so a prod box
+    /// whose env file fails to load fails closed instead of minting
+    /// vouches for a fixed dev identity.
+    pub dev_mode: bool,
     pub dev_email: String,
 }
 
 impl GateConfig {
     pub fn dev_mode(&self) -> bool {
-        self.workos_client_id.is_none()
+        self.dev_mode
     }
 
     /// The x-only public key hex for the configured signing key, so an
@@ -57,9 +64,11 @@ impl GateConfig {
         let workos_api_key = non_empty_env(WORKOS_API_KEY_ENV);
         if workos_client_id.is_some() != workos_api_key.is_some() {
             bail!(
-                "{WORKOS_CLIENT_ID_ENV} and {WORKOS_API_KEY_ENV} must be set together; omit both for dev mode"
+                "{WORKOS_CLIENT_ID_ENV} and {WORKOS_API_KEY_ENV} must be set together; configure both for production or set {DEV_MODE_ENV}=1 for local dev"
             );
         }
+        let dev_flag = parse_dev_flag(&std::env::var(DEV_MODE_ENV).ok())?;
+        let dev_mode = resolve_dev_mode(workos_client_id.is_some(), dev_flag)?;
         let public_url = match non_empty_env(PUBLIC_URL_ENV) {
             Some(url) => {
                 let parsed = url::Url::parse(&url)
@@ -87,8 +96,32 @@ impl GateConfig {
             signing_key,
             workos_client_id,
             workos_api_key,
+            dev_mode,
             dev_email,
         })
+    }
+}
+
+fn parse_dev_flag(raw: &Option<String>) -> Result<bool> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(false),
+        Some("1") | Some("true") | Some("TRUE") | Some("True") => Ok(true),
+        Some(other) => bail!("{DEV_MODE_ENV} must be 1 or true, got {other:?}"),
+    }
+}
+
+/// Pure mode matrix: WorkOS configured XOR explicit dev flag. Neither set is
+/// a refusal to start (fail closed), both set is a contradiction.
+fn resolve_dev_mode(workos_configured: bool, dev_flag: bool) -> Result<bool> {
+    match (workos_configured, dev_flag) {
+        (true, true) => {
+            bail!("{DEV_MODE_ENV}=1 conflicts with configured WorkOS credentials; unset one")
+        }
+        (true, false) => Ok(false),
+        (false, true) => Ok(true),
+        (false, false) => bail!(
+            "refusing to start: configure {WORKOS_CLIENT_ID_ENV}/{WORKOS_API_KEY_ENV} for production or set {DEV_MODE_ENV}=1 for local dev"
+        ),
     }
 }
 
@@ -125,5 +158,27 @@ mod tests {
             parse_signing_key("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn dev_mode_requires_explicit_opt_in_and_fails_closed_without_workos() {
+        // Production: WorkOS configured, no dev flag.
+        assert!(!resolve_dev_mode(true, false).unwrap());
+        // Local dev: explicit flag, no WorkOS.
+        assert!(resolve_dev_mode(false, true).unwrap());
+        // Contradiction: refuse.
+        assert!(resolve_dev_mode(true, true).is_err());
+        // The dangerous case: nothing configured. Refuse to start rather
+        // than silently becoming the dev gate (fail closed).
+        assert!(resolve_dev_mode(false, false).is_err());
+    }
+
+    #[test]
+    fn dev_flag_parses_strictly() {
+        assert!(!parse_dev_flag(&None).unwrap());
+        assert!(!parse_dev_flag(&Some(String::new())).unwrap());
+        assert!(parse_dev_flag(&Some("1".into())).unwrap());
+        assert!(parse_dev_flag(&Some(" true ".into())).unwrap());
+        assert!(parse_dev_flag(&Some("yes".into())).is_err());
     }
 }

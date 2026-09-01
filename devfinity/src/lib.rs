@@ -1740,6 +1740,7 @@ wait "$postgres_pid"
                     "FINITE_GATE_SIGNING_KEY",
                     finite_authn::hex::encode(&self.gate_signing_key),
                 ),
+                ("FINITE_GATE_DEV_MODE", "1".to_string()),
             ],
         );
         let _ = writeln!(yaml, "    depends_on:");

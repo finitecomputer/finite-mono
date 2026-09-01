@@ -96,6 +96,7 @@ mod tests {
             signing_key: [7; 32],
             workos_client_id: None,
             workos_api_key: None,
+            dev_mode: true,
             dev_email: DEFAULT_DEV_EMAIL.to_string(),
         })
     }
