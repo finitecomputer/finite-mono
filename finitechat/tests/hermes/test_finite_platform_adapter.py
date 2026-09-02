@@ -554,9 +554,8 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         # With no route signal at all (no Topic/Chat and no Hermes thread id)
         # the adapter refuses without a send. A present-but-unknown thread id is
-        # the sidecar's responsibility: it logs a Home fallback by default, and
-        # strict mode (`FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`) fails
-        # closed with a typed error — covered by the Rust resolver tests.
+        # the sidecar's responsibility: it logs a warned Home fallback, covered
+        # by the Rust resolver tests.
         result = asyncio.run(
             adapter.send_clarify(
                 chat_id="room-agent-1",
@@ -2034,6 +2033,70 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         empty = self._send_with_service_http_error(503, b"")
         self.assertFalse(empty.retryable)
         self.assertEqual(empty.error, "finitechat service returned HTTP 503")
+
+    # --- Core classification envelopes -----------------------------------
+    #
+    # The sidecar derives `error_kind` / `retryable` / status from Core's one
+    # classification. The adapter carries both fields verbatim; the message
+    # text below is chosen so that any text matcher would decide the other
+    # way.
+
+    def test_core_transport_envelope_is_retried(self):
+        result = self._send_with_service_http_error(
+            503,
+            b'{"ok":false,"status":"error","http_status":503,"error_kind":"transport",'
+            b'"retryable":true,"error":"delivery error: permanently refused, do not retry"}',
+        )
+        self.assertFalse(result.success)
+        self.assertTrue(result.retryable)
+
+    def test_core_non_retryable_envelope_is_not_retried_whatever_the_text_says(self):
+        for status, kind in ((409, "currency_behind"), (502, "server_rejected")):
+            body = (
+                f'{{"ok":false,"status":"error","http_status":{status},"error_kind":"{kind}",'
+                '"retryable":false,"error":"unknown thread_id timeout; connection reset, retry"}'
+            )
+            result = self._send_with_service_http_error(status, body.encode())
+            self.assertFalse(result.success, kind)
+            self.assertFalse(result.retryable, kind)
+
+    def test_failed_send_never_turns_the_settlement_into_a_release(self):
+        """A failed turn acks its inbox entry regardless of how the failed
+        send was worded: the adapter keeps no text-derived route-failure state."""
+        module = cast(Any, self.module)
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            del timeout
+            calls.append((action, payload))
+            if action == "send":
+                return module._FiniteChatResult(
+                    False,
+                    {},
+                    'hermes: unknown thread_id "topic-gone" for room room-agent-1 (send)',
+                    False,
+                    error_kind="hermes",
+                )
+            return module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        event = MessageEvent(
+            text="a user message",
+            source=types.SimpleNamespace(chat_id="room-agent-1"),
+            raw_message={"room_id": "room-agent-1", "seq": 7, "message_id": "m-7"},
+        )
+
+        async def exercise():
+            sent = await adapter.send("room-agent-1", "reply", metadata={"thread_id": "topic-gone"})
+            await adapter._settle_event_ack(event, "failure")
+            return sent
+
+        sent = asyncio.run(exercise())
+        self.assertFalse(sent.success)
+        self.assertFalse(sent.retryable)
+        self.assertEqual([action for action, _payload in calls], ["send", "ack"])
+        self.assertEqual(calls[1][1]["message_id"], "m-7")
 
     def test_service_error_parser_reads_kind_and_ignores_non_boolean_retryable(self):
         module = cast(Any, self.module)

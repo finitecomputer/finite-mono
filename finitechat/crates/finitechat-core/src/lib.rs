@@ -190,6 +190,246 @@ pub enum FiniteChatCoreError {
     },
 }
 
+/// The closed set of failure classes a [`FiniteChatCoreError`] falls into.
+/// Bridges (the daemon, the Hermes service, the `--json` CLI) report this
+/// class and the retry decision verbatim and never re-derive either from a
+/// variant or from the message text; this enum is the single place that
+/// decides both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    /// The server could not be reached, or the exchange failed in transit.
+    Transport,
+    /// The server answered and refused the request.
+    ServerRejected,
+    /// The server already holds a different outcome for this idempotency key.
+    Conflict,
+    /// The device store is behind what the server already accepted from this
+    /// device, or has no state for the requested device; a rekey or a fresh
+    /// store is needed, not a retry.
+    CurrencyBehind,
+    /// The store's currency has not been verified by a sync since it was
+    /// opened; the same request can succeed once a sync tick completes.
+    CurrencyUnverified,
+    /// The local store or filesystem failed.
+    Store,
+    /// The caller's input, profile, or account secret was rejected locally.
+    Client,
+    /// This runtime holds the store read-only.
+    ReadOnly,
+    /// An internal invariant broke (a poisoned lock).
+    Internal,
+}
+
+impl ErrorKind {
+    /// The wire spelling (`error_kind` in bridge envelopes).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::ServerRejected => "server_rejected",
+            Self::Conflict => "conflict",
+            Self::CurrencyBehind => "currency_behind",
+            Self::CurrencyUnverified => "currency_unverified",
+            Self::Store => "store",
+            Self::Client => "client",
+            Self::ReadOnly => "read_only",
+            Self::Internal => "internal",
+        }
+    }
+
+    /// The HTTP status a local bridge (daemon, Hermes service) reports for
+    /// this class. 503 is the status HTTP reserves for "try again later"
+    /// (`Retry-After`), so it carries the two retryable classes; 502 says the
+    /// upstream answered and refused; 409 says the request conflicts with
+    /// state the caller must first change.
+    pub fn http_status(self) -> u16 {
+        match self {
+            Self::Transport | Self::CurrencyUnverified => 503,
+            Self::ServerRejected => 502,
+            Self::Conflict | Self::CurrencyBehind => 409,
+            Self::Store | Self::ReadOnly | Self::Internal => 500,
+            Self::Client => 400,
+        }
+    }
+}
+
+impl Serialize for ErrorKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What a [`FiniteChatCoreError`] means to a caller deciding what to do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ErrorClassification {
+    pub kind: ErrorKind,
+    /// Whether the same request, unchanged, may succeed if repeated.
+    pub retryable: bool,
+}
+
+impl ErrorClassification {
+    pub fn http_status(self) -> u16 {
+        self.kind.http_status()
+    }
+}
+
+impl FiniteChatCoreError {
+    /// The one decision of class and retryability for every variant. The
+    /// match is exhaustive on purpose: a new variant does not compile until
+    /// it has been classified here.
+    pub fn classification(&self) -> ErrorClassification {
+        let (kind, retryable) = match self {
+            // The server was not reached; nothing was consumed.
+            Self::Delivery { .. } => (ErrorKind::Transport, true),
+            // The server answered: repeating the same bytes repeats the refusal.
+            Self::ServerRejected { .. } => (ErrorKind::ServerRejected, false),
+            Self::IdempotencyConflict { .. } => (ErrorKind::Conflict, false),
+            Self::DeviceStateBehindServer { .. } | Self::DeviceStateMissing { .. } => {
+                (ErrorKind::CurrencyBehind, false)
+            }
+            Self::CurrencyUnverified { .. } => (ErrorKind::CurrencyUnverified, true),
+            // A store or filesystem failure is deterministic for the same
+            // bytes (disk full, permissions, a corrupt file) and can sit after
+            // a send already left the device, so a blind repeat risks a
+            // duplicate delivery; the caller surfaces it instead.
+            Self::Store { .. } | Self::Filesystem { .. } => (ErrorKind::Store, false),
+            Self::Client { .. } | Self::Profile { .. } | Self::InvalidAccountSecret => {
+                (ErrorKind::Client, false)
+            }
+            Self::ReadOnly => (ErrorKind::ReadOnly, false),
+            Self::LockPoisoned => (ErrorKind::Internal, false),
+        };
+        ErrorClassification { kind, retryable }
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use super::{ErrorClassification, ErrorKind, FiniteChatCoreError};
+
+    /// One instance of every variant. Keep in step with the enum: the
+    /// `expected` match below is exhaustive, so a new variant fails to
+    /// compile until it is both classified and listed here.
+    fn every_variant() -> Vec<FiniteChatCoreError> {
+        vec![
+            FiniteChatCoreError::Filesystem {
+                reason: "fs".into(),
+            },
+            FiniteChatCoreError::InvalidAccountSecret,
+            FiniteChatCoreError::Client {
+                reason: "client".into(),
+            },
+            FiniteChatCoreError::Delivery {
+                reason: "delivery".into(),
+            },
+            FiniteChatCoreError::ServerRejected {
+                reason: "rejected".into(),
+            },
+            FiniteChatCoreError::IdempotencyConflict {
+                reason: "conflict".into(),
+            },
+            FiniteChatCoreError::Store {
+                reason: "store".into(),
+            },
+            FiniteChatCoreError::Profile {
+                reason: "profile".into(),
+            },
+            FiniteChatCoreError::LockPoisoned,
+            FiniteChatCoreError::ReadOnly,
+            FiniteChatCoreError::DeviceStateBehindServer {
+                room_id: "room".into(),
+                local_mark: 3,
+                observed_seq: 7,
+            },
+            FiniteChatCoreError::CurrencyUnverified {
+                room_id: "room".into(),
+            },
+            FiniteChatCoreError::DeviceStateMissing {
+                db_path: "db".into(),
+                requested_device_id: "device".into(),
+                stored_device_ids: vec!["other".into()],
+                stored_device_states: 1,
+            },
+        ]
+    }
+
+    /// The decision table: (kind, retryable, HTTP status) per variant.
+    fn expected(error: &FiniteChatCoreError) -> (ErrorKind, bool, u16) {
+        match error {
+            FiniteChatCoreError::Delivery { .. } => (ErrorKind::Transport, true, 503),
+            FiniteChatCoreError::ServerRejected { .. } => (ErrorKind::ServerRejected, false, 502),
+            FiniteChatCoreError::IdempotencyConflict { .. } => (ErrorKind::Conflict, false, 409),
+            FiniteChatCoreError::DeviceStateBehindServer { .. } => {
+                (ErrorKind::CurrencyBehind, false, 409)
+            }
+            FiniteChatCoreError::DeviceStateMissing { .. } => {
+                (ErrorKind::CurrencyBehind, false, 409)
+            }
+            FiniteChatCoreError::CurrencyUnverified { .. } => {
+                (ErrorKind::CurrencyUnverified, true, 503)
+            }
+            FiniteChatCoreError::Store { .. } => (ErrorKind::Store, false, 500),
+            FiniteChatCoreError::Filesystem { .. } => (ErrorKind::Store, false, 500),
+            FiniteChatCoreError::Client { .. } => (ErrorKind::Client, false, 400),
+            FiniteChatCoreError::Profile { .. } => (ErrorKind::Client, false, 400),
+            FiniteChatCoreError::InvalidAccountSecret => (ErrorKind::Client, false, 400),
+            FiniteChatCoreError::ReadOnly => (ErrorKind::ReadOnly, false, 500),
+            FiniteChatCoreError::LockPoisoned => (ErrorKind::Internal, false, 500),
+        }
+    }
+
+    #[test]
+    fn every_variant_is_classified_as_decided() {
+        let variants = every_variant();
+        assert_eq!(variants.len(), 13, "every variant is listed exactly once");
+        for error in &variants {
+            let (kind, retryable, status) = expected(error);
+            let classification = error.classification();
+            assert_eq!(
+                classification,
+                ErrorClassification { kind, retryable },
+                "classification of {error:?}"
+            );
+            assert_eq!(classification.http_status(), status, "status of {error:?}");
+        }
+    }
+
+    #[test]
+    fn classification_serializes_the_wire_spelling() {
+        let value = serde_json::to_value(
+            FiniteChatCoreError::Delivery {
+                reason: "offline".into(),
+            }
+            .classification(),
+        )
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "kind": "transport", "retryable": true })
+        );
+        let kinds = [
+            ErrorKind::Transport,
+            ErrorKind::ServerRejected,
+            ErrorKind::Conflict,
+            ErrorKind::CurrencyBehind,
+            ErrorKind::CurrencyUnverified,
+            ErrorKind::Store,
+            ErrorKind::Client,
+            ErrorKind::ReadOnly,
+            ErrorKind::Internal,
+        ];
+        for kind in kinds {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
+            assert_eq!(kind.to_string(), kind.as_str());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
 pub struct OpenOptions {
     pub data_dir: String,

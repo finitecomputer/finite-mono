@@ -9,6 +9,7 @@ mod hermes;
 mod repair;
 
 use clap::Parser;
+use finitechat_core::FiniteChatCoreError;
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
 use finitechat_http::{
     AckWelcomeRequest, ApplicationEffectRequest, BootstrapAccountRoomRequest,
@@ -65,6 +66,10 @@ pub enum CliError {
     Identity(String),
     #[error("runtime: {0}")]
     Runtime(String),
+    /// A Core failure, carried whole so `kind`, `retryable`, and the service
+    /// HTTP status all come from [`FiniteChatCoreError::classification`].
+    #[error("{0}")]
+    Core(#[from] FiniteChatCoreError),
 }
 
 impl CliError {
@@ -78,7 +83,8 @@ impl CliError {
             | Self::Output(_)
             | Self::Hermes(_)
             | Self::Identity(_)
-            | Self::Runtime(_) => 1,
+            | Self::Runtime(_)
+            | Self::Core(_) => 1,
         }
     }
 
@@ -96,6 +102,7 @@ impl CliError {
             Self::Hermes(_) => "hermes",
             Self::Identity(_) => "identity",
             Self::Runtime(_) => "runtime",
+            Self::Core(error) => error.classification().kind.as_str(),
         }
     }
 
@@ -116,6 +123,7 @@ impl CliError {
             | Self::Hermes(_)
             | Self::Identity(_)
             | Self::Runtime(_) => false,
+            Self::Core(error) => error.classification().retryable,
         }
     }
 

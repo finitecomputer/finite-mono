@@ -105,15 +105,6 @@ const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 /// override per host with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
 const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 45 * 60 * 1000;
 const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
-/// Policy for a `thread_id` that resolves to no conversation or segment in the
-/// agent store. Unset (the default) routes unknown threads to Core's Home
-/// default with a loud warning — the pre-d6a8b424 product semantics: a topic
-/// archived mid-session must never silently consume the user's message, so the
-/// reply stays deliverable and the routing decision is visible in the log.
-/// Values: `home`/`default` spell the fallback explicitly; `error` (and any
-/// other value) restores the strict typed error so a typo fails closed instead
-/// of silently rerouting replies.
-const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
 /// Comma-separated account ids (64-hex or `npub1…`) allowed to auto-admit
 /// this agent into rooms: a claimed Welcome from any other sender is
 /// discarded without being stored, activated, or acked, which closes
@@ -432,9 +423,7 @@ async fn prepare_hermes_service(
     // StartRuntime publishes/replenishes KeyPackages and activates pending
     // Welcomes on every resident-service start, which also makes restart the
     // natural healing path after Chat/server interruption.
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
@@ -738,11 +727,8 @@ async fn hermes_service_readyz(
     State(state): State<HermesServiceState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let result = tokio::task::spawn_blocking(move || {
-        let app = state.runtime.state().map_err(map_core_hermes_error)?;
-        let room_cursors = state
-            .runtime
-            .room_sync_cursors()
-            .map_err(map_core_hermes_error)?;
+        let app = state.runtime.state()?;
+        let room_cursors = state.runtime.room_sync_cursors()?;
         Ok(json!({
             "status": "ready",
             // The runtime's own status line names quarantined rooms (e.g.
@@ -926,10 +912,11 @@ fn handle_agentd_result(
         .validate_structure()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.result).map_err(CliError::Serialize)?;
-    let message_id = state
-        .runtime
-        .send_runtime_command_result_and_wait(delivery.room_id, delivery.conversation_id, payload)
-        .map_err(map_core_hermes_error)?;
+    let message_id = state.runtime.send_runtime_command_result_and_wait(
+        delivery.room_id,
+        delivery.conversation_id,
+        payload,
+    )?;
     Ok(json!({ "message_id": message_id }))
 }
 
@@ -941,10 +928,11 @@ fn handle_agentd_state(
         .validate_limits()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.snapshot).map_err(CliError::Serialize)?;
-    let message_id = state
-        .runtime
-        .send_runtime_state_snapshot_and_wait(delivery.room_id, delivery.conversation_id, payload)
-        .map_err(map_core_hermes_error)?;
+    let message_id = state.runtime.send_runtime_state_snapshot_and_wait(
+        delivery.room_id,
+        delivery.conversation_id,
+        payload,
+    )?;
     Ok(json!({ "message_id": message_id }))
 }
 
@@ -1089,10 +1077,7 @@ fn handle_hermes_service_activity(
         serde_json::from_value(payload).map_err(CliError::Json)?;
     resolve_hermes_activity_route(&state.runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = state
-        .runtime
-        .append_ephemeral_activity_and_wait(input)
-        .map_err(map_core_hermes_error)?;
+    let accepted = state.runtime.append_ephemeral_activity_and_wait(input)?;
     Ok(json!({ "accepted": true, "result": accepted }))
 }
 
@@ -1260,6 +1245,10 @@ fn hermes_inbound_ndjson(payload: &Value) -> Result<String, CliError> {
 
 fn status_for_cli_error(error: &CliError) -> StatusCode {
     match error {
+        // Core errors carry their own class; the status is that class's, so
+        // the daemon and this service answer identically for the same failure.
+        CliError::Core(error) => StatusCode::from_u16(error.classification().http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         CliError::Usage(_) | CliError::Json(_) => StatusCode::BAD_REQUEST,
         CliError::Hermes(_) | CliError::Identity(_) => StatusCode::CONFLICT,
         CliError::Serialize(_)
@@ -1416,9 +1405,7 @@ fn non_empty_home_channel_value(name: &str, value: String) -> Result<String, Cli
 fn ensure_agent_room_available(home_dir: &Path, room_id: &str) -> Result<(), CliError> {
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    let state = runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    let state = runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     if state
         .rooms
         .iter()
@@ -1487,9 +1474,8 @@ fn cmd_init<W: Write>(
         device_id: device_id.clone(),
         account_secret_hex: Some(hex_lower(secret.as_bytes())),
         now_unix_seconds: Some(now_secs()),
-    })
-    .map_err(map_core_hermes_error)?;
-    let state = runtime.state().map_err(map_core_hermes_error)?;
+    })?;
+    let state = runtime.state()?;
 
     let config = AgentConfig {
         server_url,
@@ -1844,9 +1830,7 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let mut joined: Vec<String> = Vec::new();
 
     while events.is_empty() {
-        let bridge = runtime
-            .agent_bridge_poll_once()
-            .map_err(map_core_hermes_error)?;
+        let bridge = runtime.agent_bridge_poll_once()?;
         joined.extend(bridge.joined_account_ids);
         joined.sort();
         joined.dedup();
@@ -2861,9 +2845,7 @@ fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_send_route(&runtime, &mut request)?;
     let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
@@ -2875,9 +2857,7 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_edit_route(home_dir, &runtime, &mut request)?;
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
@@ -2897,9 +2877,7 @@ fn cmd_rekey<W: Write>(
 ) -> Result<(), CliError> {
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    let report = runtime
-        .rekey_room_and_wait(args.room)
-        .map_err(map_core_hermes_error)?;
+    let report = runtime.rekey_room_and_wait(args.room)?;
     if json_mode {
         crate::write_pretty_json(output, &report)
     } else {
@@ -2943,9 +2921,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         )?;
         let home = load_home(home_dir)?;
         let runtime = open_agent_runtime(&home)?;
-        runtime
-            .dispatch_and_wait(AppAction::StartRuntime)
-            .map_err(map_core_hermes_error)?;
+        runtime.dispatch_and_wait(AppAction::StartRuntime)?;
         append_payload_to_room_with_runtime(
             &runtime,
             &recovery.room_id,
@@ -2958,32 +2934,6 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         save_hermes_running(home_dir, &HermesRunningState::default())?;
     }
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
-}
-
-/// What a send/edit/activity does when its `thread_id` matches nothing in the
-/// agent store; selected by [`HERMES_UNKNOWN_THREAD_ROUTE_ENV`].
-enum UnknownThreadRoutePolicy {
-    /// Fail closed: a typed non-retryable error (HTTP 409 from the resident
-    /// service, `error_kind: "hermes"`, `retryable: false`).
-    Error,
-    /// Deliver anyway: clear the route fields so Core applies its Home
-    /// default, after logging a loud routing warning.
-    HomeDefault,
-}
-
-fn unknown_thread_route_policy() -> UnknownThreadRoutePolicy {
-    match std::env::var(HERMES_UNKNOWN_THREAD_ROUTE_ENV)
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        // Unset is the deliverable-by-default product behavior; only an
-        // explicitly set value selects strict (so `=error` opts in and any
-        // unrecognized value fails closed rather than rerouting silently).
-        None => UnknownThreadRoutePolicy::HomeDefault,
-        Some("home") | Some("default") => UnknownThreadRoutePolicy::HomeDefault,
-        Some(_) => UnknownThreadRoutePolicy::Error,
-    }
 }
 
 /// Resolve a Hermes `thread_id` against the agent store: it is either a
@@ -3017,9 +2967,8 @@ fn resolve_thread_id_route(
 /// explicit `conversation_id`/`segment_id` always wins (thread_id is only a
 /// resolver); with neither route nor thread_id the send is an intentional Home
 /// message (Core applies its default). An unknown thread_id falls back to the
-/// Home default with a loud warning by default so replies stay deliverable;
-/// setting `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE` to `error` restores the
-/// strict typed failure.
+/// Home default with a loud warning so the reply stays deliverable: a topic
+/// archived mid-session must never silently consume the user's message.
 fn resolve_route_fields(
     runtime: &FiniteChatRuntime,
     room_id: &str,
@@ -3034,26 +2983,17 @@ fn resolve_route_fields(
     let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok((None, None));
     };
-    let state = runtime.state().map_err(map_core_hermes_error)?;
+    let state = runtime.state()?;
     if let Some((conversation_id, segment_id)) =
         resolve_thread_id_route(&state.topics, room_id, thread_id)
     {
         return Ok((Some(conversation_id), segment_id));
     }
-    match unknown_thread_route_policy() {
-        UnknownThreadRoutePolicy::Error => Err(CliError::Hermes(format!(
-            "unknown thread_id {thread_id:?} for room {room_id} ({context}): \
-             no matching conversation or segment in the agent store"
-        ))),
-        UnknownThreadRoutePolicy::HomeDefault => {
-            eprintln!(
-                "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room \
-                 {room_id}; falling back to the Home default so this reply stays deliverable \
-                 ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=error restores the strict typed error)"
-            );
-            Ok((None, None))
-        }
-    }
+    eprintln!(
+        "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room {room_id}; \
+         falling back to the Home default so this reply stays deliverable"
+    );
+    Ok((None, None))
 }
 
 fn resolve_hermes_send_route(
@@ -3115,7 +3055,7 @@ fn resolve_hermes_edit_route(
         // A route override must name a real conversation, so a wrong override
         // is a typed error rather than a silent misroute to a phantom topic.
         if let Some(conversation_id) = request.conversation_id.as_deref() {
-            let state = runtime.state().map_err(map_core_hermes_error)?;
+            let state = runtime.state()?;
             let exists = state.topics.iter().any(|topic| {
                 topic.room_id == request.room_id
                     && topic.topic_id == conversation_id
@@ -3238,8 +3178,7 @@ fn prepare_hermes_send_attachments(
 
     for attachment in loaded {
         prepared.attachments[attachment.index] = runtime
-            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)
-            .map_err(map_core_hermes_error)?;
+            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)?;
     }
     prepared
         .validate_limits()
@@ -3358,7 +3297,7 @@ fn append_payload_to_room_with_runtime(
 ) -> Result<AppSentMessage, CliError> {
     runtime
         .send_encoded_chat_message_and_wait(room_id.to_owned(), payload, preview)
-        .map_err(map_core_hermes_error)
+        .map_err(CliError::from)
 }
 
 fn write_sent_message<W: Write>(output: &mut W, sent: &AppSentMessage) -> Result<(), CliError> {
@@ -3475,14 +3414,10 @@ fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Re
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_activity_route(&runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = runtime
-        .append_ephemeral_activity_and_wait(input)
-        .map_err(map_core_hermes_error)?;
+    let accepted = runtime.append_ephemeral_activity_and_wait(input)?;
     crate::write_pretty_json(output, &json!({ "accepted": true, "result": accepted }))
 }
 
@@ -3716,7 +3651,7 @@ fn load_or_generate_agent_secret() -> Result<NostrSecretKey, CliError> {
 type AgentDelivery = HttpRuntimeDelivery<ReqwestHttpRuntimeTransport>;
 
 fn open_agent_runtime(home: &AgentHome) -> Result<Arc<FiniteChatRuntime>, CliError> {
-    FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(map_core_hermes_error)
+    FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(CliError::from)
 }
 
 fn agent_runtime_open_options(home: &AgentHome) -> OpenOptions {
@@ -3727,10 +3662,6 @@ fn agent_runtime_open_options(home: &AgentHome) -> OpenOptions {
         account_secret_hex: Some(hex_lower(home.secret.as_bytes())),
         now_unix_seconds: None,
     }
-}
-
-fn map_core_hermes_error(error: FiniteChatCoreError) -> CliError {
-    CliError::Hermes(error.to_string())
 }
 
 fn open_agent(
@@ -4244,6 +4175,52 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn core_envelope(error: FiniteChatCoreError) -> (StatusCode, Value) {
+        let (status, Json(body)) = service_cli_error(CliError::from(error));
+        (status, body)
+    }
+
+    #[test]
+    fn service_error_envelope_is_the_core_classification() {
+        // A transport failure is advertised as retryable with the retry
+        // status, not as a permanent 409.
+        let (status, body) = core_envelope(FiniteChatCoreError::Delivery {
+            reason: "connection refused".into(),
+        });
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["http_status"], 503);
+        assert_eq!(body["error_kind"], "transport");
+        assert_eq!(body["retryable"], Value::Bool(true));
+        assert_eq!(body["error"], "delivery error: connection refused");
+
+        let (status, body) = core_envelope(FiniteChatCoreError::ServerRejected {
+            reason: "stale epoch".into(),
+        });
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error_kind"], "server_rejected");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        let (status, body) = core_envelope(FiniteChatCoreError::IdempotencyConflict {
+            reason: "key reused".into(),
+        });
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error_kind"], "conflict");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        let (status, body) = core_envelope(FiniteChatCoreError::Store {
+            reason: "disk full".into(),
+        });
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_kind"], "store");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        // The bridge's own string errors keep their own class.
+        let (status, Json(body)) = service_cli_error(CliError::Hermes("no such turn".into()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error_kind"], "hermes");
+        assert_eq!(body["retryable"], Value::Bool(false));
+    }
     use clap::Parser as _;
     use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
@@ -5740,36 +5717,6 @@ mod tests {
             resolve_thread_id_route(&topics, "room-a", "topic-old"),
             None
         );
-    }
-
-    #[test]
-    fn unknown_thread_route_policy_defaults_to_home_fallback() {
-        // The env var is process-global; this test owns it and restores it.
-        // SAFETY: single-threaded mutation of a test-only environment variable.
-        unsafe {
-            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
-        }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::HomeDefault
-        ));
-        unsafe {
-            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home");
-        }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::HomeDefault
-        ));
-        unsafe {
-            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "error");
-        }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::Error
-        ));
-        unsafe {
-            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
-        }
     }
 
     #[test]

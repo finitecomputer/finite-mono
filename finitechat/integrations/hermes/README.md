@@ -145,11 +145,13 @@ its own.
   with no route fields is resolved by looking the original message up by
   `(room_id, message_id)`. An explicit Topic/Chat route still wins as an
   override; an unknown thread id falls back to the Home default with a loud
-  warning by default (an archived topic must never silently consume a message),
-  and the adapter releases the inbox entry instead of acking when that turn
-  could not deliver anything. Strict operators can restore the typed failure
-  with `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`; `home`/`default` spell
-  the fallback explicitly, never a *silent* Home fallback.
+  warning (an archived topic must never silently consume a message). There is
+  no policy switch: the fallback is the only behaviour.
+- **Error classification.** Core decides each failure's class and whether the
+  same request may be retried (`FiniteChatCoreError::classification`); the
+  sidecar's error envelope (`error_kind`, `retryable`, HTTP status) and the
+  daemon's status are derived from that one decision, and the adapter reads
+  those fields verbatim. Nothing on either side matches on error text.
 
 None of this changes the Rust inbox on-disk format, the CLI/service protocol
 (the `release` command and the optional `thread_id` request field are additive),
