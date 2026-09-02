@@ -237,8 +237,10 @@ jobs:
     env:
       # The upstream PyPI channel is retired; use the pinned upstream Nix
       # package instead of downloading GitHub archives during CI. The pin
-      # lives in flake.lock (hermes-agent, fetched from the codeload
-      # archive endpoint — see flake.nix); no live getFlake fetches here.
+      # lives in flake.lock (hermes-agent, fetched over git smart HTTP —
+      # not the api.github.com or codeload archive endpoints, which share
+      # GitHub's per-IP secondary rate limit and 429 from shared runner
+      # egress; see flake.nix); no live getFlake fetches here.
       HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
       HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
       NIX_CONFIG: |

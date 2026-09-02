@@ -16,15 +16,19 @@
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
-    # Fetch Hermes from the codeload archive endpoint (rev-pinned tarball),
-    # never the `github:` scheme: `github:` inputs resolve to
-    # api.github.com/repos/.../tarball/<rev>, which shared CI runner egress
-    # IPs secondary-rate-limit (HTTP 429) — that 429 repeatedly killed the
-    # Rust workspace, devfinity smoke, and Hermes bridge jobs. Same upstream
-    # flake, same tag/rev, identical source tree (the lock's narHash is
-    # unchanged by the switch). Bumps edit the rev here and re-lock.
-    # Current pin: v2026.8.3.
-    hermes-agent.url = "https://github.com/NousResearch/hermes-agent/archive/3c27eb6234bf91b8ceee9e9071591b31e9b148cb.tar.gz";
+    # Fetch Hermes over git smart HTTP (rev-pinned), never a GitHub archive:
+    # `github:` inputs resolve to api.github.com/repos/.../tarball/<rev> and
+    # the codeload archive URL (github.com/.../archive/<rev>.tar.gz) is the
+    # other front door to the same archive service. Both share GitHub's
+    # per-IP secondary rate limit, which shared CI runner egress IPs trip
+    # (HTTP 429) — chronically, even after the move to the archive endpoint.
+    # The smart-HTTP git fetch (`git+https`) is not behind that limit. Same
+    # upstream flake, same tag/rev, identical source tree (the lock's narHash
+    # is unchanged by the switch). `shallow=1` keeps the fresh-runner clone
+    # to the pinned commit (~60 MB) instead of full history (~500 MB); it
+    # locks to the same rev/narHash. Bumps edit the rev here and re-lock.
+    # Current pin: v2026.8.3 (rev 3c27eb62).
+    hermes-agent.url = "git+https://github.com/NousResearch/hermes-agent?rev=3c27eb6234bf91b8ceee9e9071591b31e9b148cb&shallow=1";
     hermes-agent.inputs.nixpkgs.follows = "hermes-nixpkgs";
     # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
     # the same pin for its platform-only upgrade while retaining its existing
