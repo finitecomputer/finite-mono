@@ -10482,10 +10482,17 @@ mod tests {
                 Some("artifact-v2")
             );
             let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
+            // The Runner half of this pin is finite-saas-runner's
+            // `legacy_runtime_migrates_by_container_name_and_the_probe_agrees`
+            // (same machine id, same `agent_runtime_id != source_machine_id`
+            // shape): the machine-named directory is discovered by container
+            // name and renamed to the runtime-id root, never planned from
+            // the spec.
+            assert_ne!(runtime_id, "finite-kata-upgrade");
             assert_eq!(
                 runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
-                "finite-kata-upgrade",
-                "legacy synthesis preserves the source-machine /data directory"
+                runtime_id,
+                "legacy synthesis names the durable root by the Agent Runtime id, never the source machine"
             );
             assert_eq!(
                 runtime_spec_v1(synthesized_upgrade_spec).operation_id,

@@ -5393,11 +5393,18 @@ where
                         placement,
                     },
                     &current_artifact,
-                    // Pre-RuntimeSpec Kata launches used source_machine_id as
-                    // their durable-state directory. Preserve that proven
-                    // mount identity instead of inventing the Core surrogate
-                    // Runtime id during expand-generation synthesis.
-                    &runtime.source_machine_id,
+                    // Pre-RuntimeSpec Kata launches mounted a directory named
+                    // by source_machine_id. That name is NOT a spec input: the
+                    // Runner derives a runtime's durable root from its durable
+                    // state id alone (work_root/kata/<durable_state_id>) and
+                    // treats a machine-named directory as a migration
+                    // candidate it discovers by container name and renames,
+                    // once, to the runtime-id root. Synthesizing the machine
+                    // name here would make the machine-named path the planned
+                    // root, so that migration would never run for exactly the
+                    // runtime it exists for. The durable state id is the Agent
+                    // Runtime id, as for every persisted spec.
+                    &runtime.id,
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
@@ -13928,9 +13935,10 @@ mod tests {
                 upgraded_spec["spec"]["environment"]["FINITE_BRAIN_SERVER_URL"],
                 "https://brain.finite.computer"
             );
+            assert_ne!(runtime_id, machine);
             assert_eq!(
-                upgraded_spec["spec"]["durableStateId"], machine,
-                "legacy synthesis preserves the source-machine /data directory"
+                upgraded_spec["spec"]["durableStateId"], runtime_id,
+                "legacy synthesis names the durable root by the Agent Runtime id, never the source machine"
             );
             drop(raw);
             raw_connection.abort();

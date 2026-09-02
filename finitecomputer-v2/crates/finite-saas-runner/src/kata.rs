@@ -6634,6 +6634,177 @@ esac
         assert!(!plan.state_root.exists());
     }
 
+    /// Cross-boundary pin for the one pre-runtime-id-era runtime in the fleet.
+    ///
+    /// Core synthesizes the control spec for a runtime with no persisted
+    /// creation spec, and names its durable root by the Agent Runtime id,
+    /// never by `source_machine_id` (the Core half of this pin lives in
+    /// finite-saas-core's expand-generation synthesis tests, with the same
+    /// machine id and the same `agent_runtime_id != source_machine_id`
+    /// shape). The Runner therefore plans `work_root/kata/<runtime id>`,
+    /// discovers the machine-named directory by container name, and moves
+    /// it there once nothing binds it; the lifecycle probe agrees with the
+    /// same verdict at every step.
+    #[test]
+    fn legacy_runtime_migrates_by_container_name_and_the_probe_agrees() {
+        use crate::lifecycle_probe::{
+            LifecycleProbeConfig, LifecycleProbeRequest, LifecycleVerdict, probe_runtime_lifecycle,
+        };
+
+        const MACHINE: &str = "finite-kata-upgrade";
+        const RUNTIME_ID: &str = "runtime-1";
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, fixture_plan, fake_state) = test_launcher(&temp, 41305);
+        // Start from the legacy layout: only the machine-named root exists.
+        std::fs::remove_dir_all(&fixture_plan.state_root).unwrap();
+        let plan = kata_launch_plan_for_source_machine(
+            &launcher.config,
+            MACHINE,
+            Some(RUNTIME_ID),
+            launcher.config.container_port,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.state_root,
+            launcher
+                .config
+                .work_root
+                .join(KATA_PROVIDER_DIR)
+                .join(RUNTIME_ID)
+        );
+        let legacy = kata_legacy_machine_named_root(&launcher.config, MACHINE);
+        std::fs::create_dir_all(legacy.join("agent")).unwrap();
+        std::fs::write(legacy.join("agent/life"), "everything").unwrap();
+
+        // The control lease Core hands out: no creation spec was ever
+        // persisted, so the spec is synthesized, and its durable state id is
+        // the runtime id even though the machine is named differently.
+        let mut lease = upgrade_lease("runtime_ctl_legacy_migration");
+        lease.request.source_machine_id = MACHINE.to_string();
+        lease.runtime.source_machine_id = MACHINE.to_string();
+        lease.runtime.source_import_key = format!("finite-lat-1/{MACHINE}");
+        lease.runtime_spec = Some(kata_upgrade_spec(&lease));
+        assert_ne!(lease.runtime.id, lease.runtime.source_machine_id);
+        let RuntimeSpecEnvelope::V1(spec) = lease.runtime_spec.as_ref().unwrap();
+        assert_eq!(spec.durable_state_id, RUNTIME_ID);
+        assert_eq!(lease.runtime.id, RUNTIME_ID);
+
+        // The probe sees the same host through the same provider fake; the
+        // task and sandbox state describe one healthy VM.
+        let container_id = format!("{MACHINE}-id");
+        let ctr = temp.path().join("ctr-probe-fake");
+        write_executable(
+            &ctr,
+            &format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1:-}}\" = \"--namespace\" ]; then shift 2; fi\ncase \"${{1:-}} ${{2:-}}\" in\n  \"tasks list\") printf 'TASK                PID       STATUS\\n{container_id}  4242      RUNNING\\n' ;;\n  \"tasks ps\") printf 'PID\\n4242\\n' ;;\n  *) exit 42 ;;\nesac\n"
+            ),
+        );
+        let sandbox_root = temp.path().join("sbs");
+        std::fs::create_dir_all(sandbox_root.join(&container_id)).unwrap();
+        std::fs::write(
+            sandbox_root.join(&container_id).join("persist.json"),
+            format!(
+                r#"{{"State":"running","SandboxContainer":"{container_id}","PersistVersion":2,"HypervisorState":{{"Pid":4242,"Type":"qemu"}}}}"#
+            ),
+        )
+        .unwrap();
+        let proc_root = temp.path().join("proc");
+        std::fs::create_dir_all(proc_root.join("4242")).unwrap();
+        std::fs::write(proc_root.join("4242/comm"), "qemu-system-x86\n").unwrap();
+        let probe_config = LifecycleProbeConfig {
+            nerdctl_bin: launcher.config.nerdctl_bin.clone(),
+            ctr_bin: ctr,
+            namespace: launcher.config.namespace.clone(),
+            source_host_id: launcher.config.source_host_id.clone(),
+            work_root: launcher.config.work_root.clone(),
+            sandbox_root,
+            netns_root: temp.path().join("netns"),
+            proc_root,
+            command_timeout: Duration::from_secs(30),
+            overall_timeout: Duration::from_secs(120),
+        };
+        let probe_request = LifecycleProbeRequest {
+            project_id: "project-1".to_string(),
+            agent_runtime_id: RUNTIME_ID.to_string(),
+            source_machine_id: MACHINE.to_string(),
+        };
+        let bind_compute = |mount: &Path| {
+            write_fake_container(
+                &fake_state,
+                MACHINE,
+                "runtime:v1",
+                "artifact-v1",
+                "",
+                41305,
+                mount,
+            );
+            std::fs::write(fake_state.join(format!("{MACHINE}.source")), MACHINE).unwrap();
+        };
+
+        // (a) Live compute still binds the machine-named root: the plan fails
+        // closed and the probe calls that bind a mismatch. Nothing moves.
+        bind_compute(&legacy);
+        let error = launcher.plan_for_control(&lease).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::LegacyDurableStateRootBound { container_name, machine_named_root, .. }
+                    if container_name == MACHINE && machine_named_root == &legacy
+            ),
+            "{error}"
+        );
+        assert!(legacy.join("agent/life").exists());
+        assert!(!plan.state_root.exists());
+        let report = probe_runtime_lifecycle(&probe_config, &probe_request);
+        assert_eq!(
+            report.verdict,
+            LifecycleVerdict::Inoperable,
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap()
+        );
+        assert_eq!(report.reason.as_deref(), Some("provider_handle_mismatch"));
+
+        // (b) Compute removed: the very next plan renames the machine-named
+        // root to the runtime-id root and leaves the marker behind.
+        launcher.remove_compute(MACHINE).unwrap();
+        let migrated = launcher.plan_for_control(&lease).unwrap();
+        assert_eq!(migrated.state_root, plan.state_root);
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read_to_string(plan.state_root.join("agent/life")).unwrap(),
+            "everything"
+        );
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plan.state_root.join(DURABLE_STATE_ROOT_MIGRATION_MARKER))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["migrated_from"], MACHINE);
+        assert_eq!(marker["previous_path"], legacy.display().to_string());
+
+        // (c) Compute recreated against the runtime-id root: the probe reads
+        // operable with exactly that root, and the plan stays put.
+        bind_compute(&plan.state_root);
+        let report = probe_runtime_lifecycle(&probe_config, &probe_request);
+        assert_eq!(
+            report.verdict,
+            LifecycleVerdict::Operable,
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap()
+        );
+        let canonical = report
+            .checks
+            .iter()
+            .find(|check| check.name == "canonical_handle")
+            .unwrap();
+        assert_eq!(
+            canonical.evidence["state_root"].as_str(),
+            plan.state_root.to_str()
+        );
+        let (validated, _) = launcher.validate_control(&lease).unwrap();
+        assert_eq!(validated.state_root, plan.state_root);
+    }
+
     #[test]
     fn kata_upgrade_plan_uses_same_data_and_never_places_secrets_in_argv() {
         let config = KataConfig {
