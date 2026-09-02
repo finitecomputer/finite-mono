@@ -59,12 +59,6 @@ brain-product-matrix:
 chat-device-parity:
     just chat chat-device-parity
 
-chat-electron-check:
-    just chat chat-electron-check
-
-chat-electron-package:
-    just chat chat-electron-package
-
 chat-history-stress:
     just chat chat-history-stress
 

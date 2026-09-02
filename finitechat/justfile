@@ -42,26 +42,4 @@ chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/repor
         --python "$hermes_python" \
         --report "$report_path"
 
-# Focused protocol/process proof for the Hosted Web + Electron Device alpha.
-chat-device-parity:
-    cd .. && cargo test --locked -p finitechat-core --test electron_device_parity
-    cd .. && cargo test --locked -p finitechat-hosted-device --test http
-    cd .. && cargo test --locked -p finitechat-daemon
-    cd apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
-
-# Reproducible local/CI gate for every surface changed by Electron parity.
-chat-electron-check:
-    cd .. && cargo test --locked -p finitechat-daemon
-    cd .. && cargo test --locked -p finitechat-core --test electron_device_parity
-    cd .. && cargo test --locked -p finitechat-hosted-device
-    cd apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
-    cd ../finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run typecheck && pnpm run build
-
-# Build the macOS Electron app. It is ad-hoc signed by default; release callers
-# supply FINITECHAT_CODESIGN_IDENTITY (and optionally a temporary keychain) for
-# Developer ID signing. pnpm never invokes Cargo; this recipe supplies the exact
-# release daemon copied into app resources.
-chat-electron-package:
-    cd .. && cargo build --locked --release -p finitechat-daemon
-    cd apps/electron-chat && pnpm install --frozen-lockfile && FINITECHAT_DAEMON_BINARY="$PWD/../../../target/release/finitechatd" pnpm run package:mac
 

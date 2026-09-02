@@ -50,9 +50,9 @@ A Principal backed by a Nostr public key controlled by a human or agent Finite i
 _Avoid_: native account, npub user
 
 **User Nostr Identity**:
-The human-controlled Nostr keypair used across that user's Hosted Web, Electron,
-and iOS surfaces. Hosted Web keeps it behind a server-side signer adapter while
-native surfaces keep it in protected local storage; the custody difference does
+The human-controlled Nostr keypair used across that user's Hosted Web
+surfaces. Hosted Web keeps it behind a server-side signer adapter; a future
+native surface would keep it in protected local storage; the custody difference does
 not create another Principal.
 _Avoid_: WorkOS identity, hosted-device identity, agent key
 
@@ -134,8 +134,8 @@ handing raw key material to product client code. Each product owns its own
 adapter and bounded provider contract; Finite Identity does not own a universal
 product adapter, product grants, content crypto, or authorization policy.
 For Hosted Web, Finite Chat's Hosted Device is the initial user-key setup and
-custody flow. The product's adapter acts as the same User Nostr Identity used
-by Electron and iOS, not as a separate product identity. Account Auth may
+custody flow. The product's adapter acts as the same User Nostr Identity, not
+as a separate product identity. Account Auth may
 authorize its session, but the product must still grant the User Nostr Identity
 access explicitly. It does not make the User Nostr Identity and an Agent
 Principal Key the same identity.

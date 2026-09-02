@@ -66,7 +66,7 @@ revision, and opening or wrapping an appropriately scoped Folder Key Grant.
 FiniteBrain retains ownership of Brain, Folder, content-crypto, and grant
 policy. It also owns its own hosted-now/native-later adapter. The contract
 never exposes a raw identity secret or generic sign/decrypt operation to
-Product Client code. Hosted, Electron, and iOS adapters may implement the same
+Product Client code. Hosted and future native adapters may implement the same
 contract for one User Nostr Identity despite their different custody models.
 Finite Identity supplies key-storage and lifecycle primitives; it does not own
 a universal product adapter. The adapter opens a validated Folder Key Grant,
@@ -234,11 +234,10 @@ unready Folder and remains safe to retry. _Avoid_: Admin Sharing, Brain Access.
 
 ### User Nostr Identity
 
-The human-controlled Nostr `npub` used across Hosted Web, Electron, and iOS.
+The human-controlled Nostr `npub` used across Hosted Web surfaces.
 In FiniteBrain it is a Member Identity and receives the appropriate Brain
 ownership or membership, Folder Access, and Folder Key Grants. Hosted Web uses
-it through a server-held Brain Identity Provider; Electron and iOS use the same
-identity from protected local storage. The custody difference does not create
+it through a server-held Brain Identity Provider. The custody difference does not create
 another Brain identity. Account Auth may authorize a Hosted Web session but does
 not grant Brain access. A User Nostr Identity remains distinct from every Agent
 Principal Key. In the first hosted phase, the Finite Chat Hosted Device is the

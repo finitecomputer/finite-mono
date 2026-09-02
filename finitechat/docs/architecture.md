@@ -23,7 +23,7 @@ durability, and membership bookkeeping over bytes it cannot read.**
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Devices (CLI / Electron — one FiniteChatDevice each)                │
+│ Devices (CLI — one FiniteChatDevice each)                           │
 │  OpenMLS group state · encrypted SQLite snapshot store             │
 │  sync worker · link-fanout worker                                  │
 └───────────────▲────────────────────────────────────────────────────┘

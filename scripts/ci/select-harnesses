@@ -16,7 +16,6 @@ OUTPUT_NAMES = (
     "run_rust",
     "run_dashboard",
     "run_dashboard_browser",
-    "run_electron_alpha",
     "run_hermes_bridge",
     "run_nix_checks",
     "run_skills_check",
@@ -152,7 +151,6 @@ class HarnessSelection:
     run_rust: bool = False
     run_dashboard: bool = False
     run_dashboard_browser: bool = False
-    run_electron_alpha: bool = False
     run_hermes_bridge: bool = False
     run_nix_checks: bool = False
     run_skills_check: bool = False
@@ -165,8 +163,6 @@ class HarnessSelection:
     def select_all(self) -> None:
         for field in fields(self):
             setattr(self, field.name, True)
-        # Electron CI remains disabled until the Electron surface is active.
-        self.run_electron_alpha = False
 
     def values(self) -> dict[str, str]:
         return {

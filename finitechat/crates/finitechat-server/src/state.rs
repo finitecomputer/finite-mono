@@ -16,25 +16,23 @@ use finitechat_delivery::{
     HttpServerError, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FiniteAccountRoomCommitProjection,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
-    GetPairingSessionRequest, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
-    HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingEventRecord, HttpPairingSessionRecord,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, CreatePairingSessionRequest, DeviceLivenessRecord,
+    ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest,
+    ExpirePairingSessionResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest,
+    GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest,
+    HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
+    HttpKeyPackageInventory, HttpPairingEventRecord, HttpPairingSessionRecord,
     HttpPairingSessionState, KeyPackageAvailabilityEntry, KeyPackageInventoryRequest,
     LeaveRoomRequest, LeaveRoomResponse, ListAccountRoomDirectoryRequest,
     ListAccountRoomDirectoryResponse, NostrProfileCacheEntry, NostrProfileRecord,
     ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
     PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
-    PutNostrProfileRequest,
-    PutNostrProfileResponse, ReportInvalidCommitRequest,
+    PutNostrProfileRequest, PutNostrProfileResponse, ReportInvalidCommitRequest,
     ReportInvalidCommitResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
     SaveAccountRoomResponse, SyncHintEvent, SyncWaitRequest, UpdateRoomAdminsRequest,
     UpdateRoomAdminsResponse,
@@ -492,17 +490,16 @@ impl HttpServerState {
                 ))
             })
             .map_err(normalized_store_error)?;
-        let (pairing_sessions, nostr_profiles, welcome_claims, blob_meta) =
-            sql_store
-                .read(|conn| {
-                    Ok((
-                        metadata::load_pairing_sessions(conn)?,
-                        metadata::load_nostr_profiles(conn)?,
-                        metadata::load_welcome_claims(conn)?,
-                        metadata::load_blob_meta(conn)?,
-                    ))
-                })
-                .map_err(normalized_store_error)?;
+        let (pairing_sessions, nostr_profiles, welcome_claims, blob_meta) = sql_store
+            .read(|conn| {
+                Ok((
+                    metadata::load_pairing_sessions(conn)?,
+                    metadata::load_nostr_profiles(conn)?,
+                    metadata::load_welcome_claims(conn)?,
+                    metadata::load_blob_meta(conn)?,
+                ))
+            })
+            .map_err(normalized_store_error)?;
 
         // Normalized-owned state: directory + revoked devices are current
         // state; rooms derive from the checkpoint plus entry tails.

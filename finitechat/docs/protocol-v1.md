@@ -249,7 +249,6 @@ semantics:
 
 - `hosted_web_bridge`: a server-side trusted client for hosted web chat;
 - `native_device`: a local-device E2EE user client;
-- `electron_daemon`: a desktop local-device E2EE user client;
 - `runtime_device`: an agent/runtime participant whose device secrets stay on
   the runtime host; it is not a user-facing disclosure surface;
 - `plaintext_archive`: read-only imported legacy chat.

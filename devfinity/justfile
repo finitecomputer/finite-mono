@@ -49,10 +49,6 @@ smoke:
 saas-smoke:
     cd .. && nix run .#devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
-# Launches a clean Electron Device against either local-agent profile.
-electron-local-agent:
-    cd .. && finitechat/scripts/electron-local-agent.sh
-
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:
     cd .. && nix run .#devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture

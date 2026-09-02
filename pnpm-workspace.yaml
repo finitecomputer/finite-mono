@@ -6,6 +6,5 @@ sharedWorkspaceLockfile: false
 
 packages:
   - finitecomputer-v2/apps/dashboard
-  - finitechat/apps/electron-chat
   - finite-sites/examples/nextjs-demo
   - finite-skills/ab-testing

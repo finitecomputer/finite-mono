@@ -811,7 +811,6 @@ pub enum ProductTrustModeV1 {
 pub enum ProductClientKindV1 {
     HostedWebBridge,
     NativeDevice,
-    ElectronDaemon,
     RuntimeDevice,
     PlaintextArchive,
 }
@@ -1360,7 +1359,7 @@ impl ProductClientKindV1 {
     pub fn secret_location(self) -> DeviceSecretLocationV1 {
         match self {
             Self::HostedWebBridge => DeviceSecretLocationV1::TrustedHostedServer,
-            Self::NativeDevice | Self::ElectronDaemon => DeviceSecretLocationV1::UserDevice,
+            Self::NativeDevice => DeviceSecretLocationV1::UserDevice,
             Self::RuntimeDevice => DeviceSecretLocationV1::RuntimeHost,
             Self::PlaintextArchive => DeviceSecretLocationV1::None,
         }
@@ -1369,7 +1368,7 @@ impl ProductClientKindV1 {
     pub fn product_trust_mode(self) -> Option<ProductTrustModeV1> {
         match self {
             Self::HostedWebBridge => Some(ProductTrustModeV1::HostedTrustedServerClient),
-            Self::NativeDevice | Self::ElectronDaemon => Some(ProductTrustModeV1::LocalDeviceE2ee),
+            Self::NativeDevice => Some(ProductTrustModeV1::LocalDeviceE2ee),
             Self::PlaintextArchive => Some(ProductTrustModeV1::PlaintextArchive),
             // Runtime devices are chat participants, not user-facing product
             // surfaces. Their secrets stay on the runtime host and product copy
@@ -6235,10 +6234,6 @@ mod tests {
             DeviceSecretLocationV1::UserDevice
         );
         assert_eq!(
-            ProductClientKindV1::ElectronDaemon.secret_location(),
-            DeviceSecretLocationV1::UserDevice
-        );
-        assert_eq!(
             ProductClientKindV1::RuntimeDevice.secret_location(),
             DeviceSecretLocationV1::RuntimeHost
         );
@@ -6249,11 +6244,8 @@ mod tests {
     }
 
     #[test]
-    fn native_and_electron_modes_keep_device_secrets_on_user_device() {
-        for client_kind in [
-            ProductClientKindV1::NativeDevice,
-            ProductClientKindV1::ElectronDaemon,
-        ] {
+    fn native_mode_keeps_device_secrets_on_user_device() {
+        for client_kind in [ProductClientKindV1::NativeDevice] {
             let trust_mode = client_kind.product_trust_mode().unwrap();
             let disclosure = ProductTrustDisclosureV1::for_mode(trust_mode);
 

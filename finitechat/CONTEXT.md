@@ -218,8 +218,7 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   **Direct Agent Principal**.
 - A **Direct Agent Principal** is appropriate for bots or shared agents that
   should appear as their own participant or resource principal.
-- A **Hosted Web Device** is one revocable **Device**; Electron enrolls a
-  separate Device whose key and store remain local.
+- A **Hosted Web Device** is one revocable **Device**.
 - A **Hosted Web Device** may decrypt its Rooms by design, so SaaS web chat is
   not described as browser E2EE even though the room server stores ciphertext.
 - The **Hosted Web Device** is also the hosted custody location for the human's
@@ -344,9 +343,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 
 > **Dev:** "If Hermes is broken, is chat broken?"
 > **Domain expert:** "No. The Finite Chat Daemon still owns sync, Runtime State, and recovery commands while the host is online."
-
-> **Dev:** "Does Electron reuse the Hosted Web Device?"
-> **Domain expert:** "No. The same account enrolls Electron as another Device, and Electron keeps that Device's key and store locally."
 
 > **Dev:** "After scanning an invite and entering the PIN, does the inviter need to tap Accept?"
 > **Domain expert:** "No. The correct PIN is the approval ceremony; valid Room Admission is automatic."

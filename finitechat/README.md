@@ -149,8 +149,7 @@ Then `hermes gateway start` brings the agent onto Finite Chat.
 The agent publishes its Agent Principal `npub`; it does not create a room or
 an invite session at gateway startup. A user Device scans/selects that profile,
 publishes its KeyPackage, and starts the room through the normal MLS
-Add/Welcome flow. Hosted Web and Electron clients are independent Devices using that
-same contract.
+Add/Welcome flow. Hosted Web clients are independent Devices using that same contract.
 
 For the full agent integration surface (message polling, sending, the
 supervised `hermes serve` bridge, smoke tests, and hardening evidence), see
@@ -279,8 +278,7 @@ nix develop ..#hermes-bridge-ci --command bash -lc \
 Pushing a `finitechat/vX.Y.Z` tag runs
 `.github/workflows/release-finitechat.yml`, which builds the CLI archives for
 linux-x86_64, macos-aarch64, and macos-x86_64 and publishes them to
-`finitecomputer/finite-releases`. The Electron experiment is on hold and is not
-part of this release workflow. The install block at the top of this README
+`finitecomputer/finite-releases`. The install block at the top of this README
 consumes the refreshed `finitechat-latest` alias from the release repository.
 
 ### Publish Safety

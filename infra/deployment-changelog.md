@@ -31,8 +31,7 @@ the sources above cannot carry lands here.
 ## Standing promises
 
 - The finitechat server keeps accepting every fielded CLI until a deprecation
-  is announced. The Electron experiment is on hold and is not part of the
-  current release path.
+  is announced.
 - Hosted Agents pin their Runtime image at launch and do **not** auto-update.
   Kata launches the immutable digest through a promoted Core artifact;
   existing Agents are rolled serially through Core's guarded same-volume
@@ -51,6 +50,24 @@ the sources above cannot carry lands here.
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-09-02 — iOS client, Electron app, and APNs push surface deleted from source
+
+- **Source-only change** (branch `cleanup/delete-ios-platform`): the SwiftUI
+  iOS app, `finitechat-rmp`, the UniFFI pipeline, the Electron app, and the
+  `finitechatd` daemon are gone; the never-shipped push-wake/token surface is
+  removed from the chat server with idempotent `DROP TABLE` migrations for
+  `http_push_tokens`/`http_push_wakes` at next server boot.
+- **Compat promises still live:** shipped Electron alphas (v0.1.4/v0.1.5,
+  `finitechat-electron-macos-aarch64.zip`) poll the `finitechat-latest`
+  generic update feed; those clients are now stranded by design — do not
+  repurpose the alias for a different artifact shape. `backfill_releases`
+  still filters electron assets because the old host's history contains them.
+- **Dashboard roll needed:** `/auth/ios/callback`, the Apple
+  app-site-association route, and the `/api/device-links/*` B-side are gone;
+  `FC_WORKOS_IOS_CLIENT_ID` is removed from the dashboard module env and the
+  lat1 configmap. Out-of-repo cleanup that remains: retire the Xcode Cloud
+  workflows in App Store Connect and remove the WorkOS iOS client redirect.
 
 ### 2026-09-02 — Chat engine fold (#799) deployed; Agent Runtime `2026-09-02.1` (rekey lever, #809) fleet-rolled; six rewound-sender rooms rekeyed
 

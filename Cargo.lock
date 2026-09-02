@@ -1280,30 +1280,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "finitechat-daemon"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "finitechat-core",
- "finitechat-http",
- "finitechat-server",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "http-body-util",
- "nostr",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tower",
- "zeroize",
-]
-
-[[package]]
 name = "finitechat-delivery"
 version = "0.1.0"
 dependencies = [

@@ -8,25 +8,24 @@ use finitechat_delivery::{
     MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
-    GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
-    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
-    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest,
-    HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
-    HttpKeyPackageInventory, HttpPairingSessionRecord, HttpPairingSessionState, InboxSyncRequest,
-    KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
-    ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
-    PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
-    PutNostrProfileRequest, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
-    RevokeDeviceRequest, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
-    SyncStreamRequest, SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom,
-    UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse,
+    ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection,
+    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
+    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
+    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
+    GetPairingSessionRequest, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
+    HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingSessionRecord,
+    HttpPairingSessionState, InboxSyncRequest, KeyPackageInventoryRequest, LeaveRoomRequest,
+    LeaveRoomResponse, ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse,
+    NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
+    PublishMessageRequest, PublishPairingCompleteRequest, PublishPairingOfferRequest,
+    PublishPairingResponseRequest, PutNostrProfileRequest, ReportInvalidCommitRequest,
+    ReportInvalidCommitResponse, RevokeDeviceRequest, SaveAccountRoomRequest,
+    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitInbox, SyncWaitRequest,
+    SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -7081,8 +7080,6 @@ async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
         .expect("count legacy rows");
     assert_eq!(legacy_rows, 1);
 }
-
-
 
 async fn bootstrap_room(app: &Router, room_id: &str, mls_group_id: &str, creator: &DeviceRef) {
     let response = post_json(

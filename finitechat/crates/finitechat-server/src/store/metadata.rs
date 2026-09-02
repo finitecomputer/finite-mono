@@ -538,7 +538,6 @@ pub(crate) fn load_welcome_claims(
     Ok(claims)
 }
 
-
 pub(crate) fn load_blob_meta(
     conn: &Connection,
 ) -> Result<BTreeMap<String, BlobMeta>, DurableStoreError> {
