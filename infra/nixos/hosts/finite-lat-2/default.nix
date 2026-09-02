@@ -452,6 +452,7 @@ in
     mdadm
     nvme-cli
     pciutils
+    python3
     smartmontools
   ];
 
