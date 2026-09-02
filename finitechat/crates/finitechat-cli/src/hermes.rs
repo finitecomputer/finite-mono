@@ -674,10 +674,30 @@ fn room_cursors_summary_json(cursors: &[AppRoomSyncCursor]) -> Value {
             .map(|cursor| json!({
                 "room_id": cursor.room_id,
                 "last_applied_seq": cursor.last_applied_seq,
+                // Currency gate (rewound-store guard): the durable own-send
+                // mark, whether this process has verified the room since
+                // opening the store, and sticky behind-server evidence.
+                "own_send_high_water_seq": cursor.own_send_high_water_seq,
+                "currency_initialized": cursor.currency_initialized,
+                "currency_verified": cursor.currency_verified,
+                "behind_server": cursor.behind_server.as_ref().map(|evidence| json!({
+                    "local_mark": evidence.local_mark,
+                    "observed_seq": evidence.observed_seq,
+                    "message_id": evidence.message_id,
+                    "observed_at": evidence.observed_at,
+                    "evidence_epoch": evidence.evidence_epoch,
+                })),
             }))
             .collect::<Vec<_>>(),
         "total": total,
         "truncated": total > READYZ_ROOM_CURSOR_LIMIT,
+        // Any room behind the server means every send from this store is
+        // refused; surfaced at the top level so a probe need not scan rooms.
+        "behind_server_rooms": cursors
+            .iter()
+            .filter(|cursor| cursor.behind_server.is_some())
+            .map(|cursor| cursor.room_id.clone())
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -4702,6 +4722,16 @@ mod tests {
             .map(|index| AppRoomSyncCursor {
                 room_id: format!("room-{index:03}"),
                 last_applied_seq: index as u64,
+                own_send_high_water_seq: 0,
+                currency_initialized: true,
+                currency_verified: index == 0,
+                behind_server: (index == 1).then(|| finitechat_core::AppBehindServerEvidence {
+                    local_mark: 1,
+                    observed_seq: 2,
+                    message_id: "msg-1".to_owned(),
+                    observed_at: 3,
+                    evidence_epoch: 4,
+                }),
             })
             .collect::<Vec<_>>();
         let summary = room_cursors_summary_json(&cursors);
@@ -4716,6 +4746,17 @@ mod tests {
         // Deterministic first-rooms slice, not an arbitrary sample.
         assert_eq!(rooms[0]["room_id"], serde_json::json!("room-000"));
         assert_eq!(rooms[0]["last_applied_seq"], serde_json::json!(0));
+        assert_eq!(rooms[0]["currency_verified"], serde_json::json!(true));
+        assert_eq!(rooms[0]["behind_server"], serde_json::Value::Null);
+        assert_eq!(rooms[1]["currency_verified"], serde_json::json!(false));
+        assert_eq!(
+            rooms[1]["behind_server"]["observed_seq"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            summary["behind_server_rooms"],
+            serde_json::json!(["room-001"])
+        );
         assert_eq!(
             rooms[READYZ_ROOM_CURSOR_LIMIT - 1]["room_id"],
             serde_json::json!(format!("room-{:03}", READYZ_ROOM_CURSOR_LIMIT - 1))
