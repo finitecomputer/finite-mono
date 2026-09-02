@@ -4974,7 +4974,16 @@ where
         return Err(CoreError::RuntimeControlUnsupported);
     }
     let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
-    if target_source_host_id == runtime.source_host_id {
+    // A same-host relocation is the recovery lane for a Runtime whose
+    // container is gone from a host that is still up: a restart requires the
+    // container to exist, so recreating compute against the durable tree
+    // where it already lives is a relocation whose source and target host
+    // coincide. Only the compute-absent attestation gives that shape a
+    // meaning; without it a same-host "relocation" would be a restart under
+    // another name and is refused as before. The target Runner proves the
+    // absence for itself (no provider record binds the tree, nothing writes
+    // into it) before it launches.
+    if target_source_host_id == runtime.source_host_id && !input.operator_observed_compute_absent {
         return Err(CoreError::RuntimeSpecMismatch);
     }
     let expected_agent_npub = input.expected_agent_npub.trim().to_string();
@@ -5100,6 +5109,17 @@ where
         .map_err(store_error)?
         .ok_or(CoreError::RuntimeSpecMismatch)?;
     let current_creation = agent_creation_request_from_row(&current_row)?;
+    let current_spec = repair_persisted_runtime_spec(
+        client,
+        &runtime,
+        &current_creation.id,
+        current_creation
+            .runtime_spec
+            .clone()
+            .ok_or(CoreError::RuntimeSpecMismatch)?,
+        &now,
+    )
+    .await?;
     let artifact_id = runtime
         .runtime_artifact_id
         .as_deref()
@@ -5109,10 +5129,7 @@ where
         .ok_or(CoreError::RuntimeArtifactNotFound)?;
     let request_id = new_agent_creation_request_id()?;
     let runtime_spec = runtime_operation_spec_v1(
-        current_creation
-            .runtime_spec
-            .as_ref()
-            .ok_or(CoreError::RuntimeSpecMismatch)?,
+        &current_spec,
         RuntimeSpecIdentity {
             operation_id: &request_id,
             project_id: &project.id,
@@ -5177,6 +5194,61 @@ where
     )
     .await?;
     Ok(request)
+}
+
+/// Repair a persisted RuntimeSpec that names the durable root by the source
+/// machine instead of the Agent Runtime.
+///
+/// Expand-generation synthesis for a pre-RuntimeSpec Kata runtime once
+/// persisted `source_machine_id` as the durable state id, and every operation
+/// spec since carried it forward (`runtime_operation_spec_v1` copies the
+/// current id). The Runner derives a runtime's durable root from that id
+/// alone (work_root/kata/<durable_state_id>) and migrates a machine-named
+/// directory it discovers by container name; a spec that names the machine
+/// plans the machine-named path as the root, so the one-time migration never
+/// runs for exactly the runtime it exists for, and the lifecycle probe reads
+/// that bind as a mismatch. The durable state id is the Agent Runtime id, as
+/// for every spec Core builds itself.
+///
+/// The repair happens where the persisted spec is next read into a control
+/// lease or a relocation envelope, and is written back in the same
+/// transaction so every later read (upgrade and destroy completion, the
+/// retirement receipt check) sees the value the Runner was handed. Only the
+/// known-wrong shape is touched: an id that is neither the runtime id nor the
+/// source machine is not this repair's to guess at and is left as persisted.
+async fn repair_persisted_runtime_spec<C>(
+    client: &C,
+    runtime: &AgentRuntime,
+    creation_id: &str,
+    spec: RuntimeSpecEnvelope,
+    now: &str,
+) -> CoreResult<RuntimeSpecEnvelope>
+where
+    C: GenericClient + Sync,
+{
+    let persisted = runtime_spec_v1(&spec);
+    if persisted.durable_state_id == runtime.id
+        || persisted.durable_state_id != runtime.source_machine_id
+    {
+        return Ok(spec);
+    }
+    let repaired = match spec {
+        RuntimeSpecEnvelope::V1(mut spec) => {
+            spec.durable_state_id = runtime.id.clone();
+            RuntimeSpecEnvelope::V1(spec)
+        }
+    };
+    let value = serde_json::to_value(&repaired).map_err(json_error)?;
+    client
+        .execute(
+            "UPDATE agent_creation_requests
+             SET runtime_spec = $2, updated_at = $3::text::timestamptz
+             WHERE id = $1",
+            &[&creation_id, &value, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(repaired)
 }
 
 /// Partitioned claim: a runner leases only requests routable to it. When the
@@ -5367,7 +5439,10 @@ where
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
             let current_spec = if let Some(value) = row.get::<_, Option<Value>>("runtime_spec") {
-                serde_json::from_value(value).map_err(json_error)?
+                let creation_id: String = row.get("id");
+                let persisted = serde_json::from_value(value).map_err(json_error)?;
+                repair_persisted_runtime_spec(client, &runtime, &creation_id, persisted, &now)
+                    .await?
             } else {
                 let creation_id: String = row.get("id");
                 let creation_project_id: String = row.get("project_id");
@@ -10428,6 +10503,449 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_same_host_relocation_recreates_compute_only_under_absence_attestation() {
+        with_isolated_postgres(|store| async move {
+            let run = "cold-relocate-same-host";
+            let host = "relocate-same-host";
+            let machine = "finite-kata-relocate-same-host";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "relocate-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Same-Host Relocation Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            // A cleanly stopped runtime: the strongest precondition a
+            // cross-host relocation accepts. Same-host still needs more.
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id,
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Same-Host Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Offline),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let relocate_input = |absent: bool| AdminRuntimeRelocateExactInput {
+                admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-relocate-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine.to_string(),
+                target_source_host_id: host.to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "d".repeat(64),
+                operator_observed_compute_absent: absent,
+                now: None,
+            };
+
+            // Source and target host coincide: without the compute-absent
+            // attestation that is a restart under another name, refused
+            // exactly as before, even for a cleanly stopped source.
+            let unattested = store
+                .admin_request_runtime_relocate_exact(relocate_input(false))
+                .await;
+            assert!(matches!(unattested, Err(CoreError::RuntimeSpecMismatch)));
+
+            // Under the attestation the container is gone and a restart has
+            // nothing to restart; the same-host relocation is the lane that
+            // recreates compute against the durable tree where it lives.
+            let relocation = store
+                .admin_request_runtime_relocate_exact(relocate_input(true))
+                .await
+                .unwrap();
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+            assert_eq!(relocation.target_source_host_id.as_deref(), Some(host));
+            let envelope = relocation.relocation.as_ref().unwrap().v1();
+            assert_eq!(envelope.source_host_id, host);
+            assert_eq!(envelope.target_source_host_id, host);
+            assert_eq!(envelope.source_machine_id, machine);
+            assert!(envelope.source_compute_absent);
+            assert_eq!(
+                runtime_spec_v1(relocation.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id,
+                "the recreated compute mounts the runtime-id durable root"
+            );
+
+            // The same host's Runner leases it, registers (non-mutating) and
+            // completes under the same machine name: the runtime keeps its
+            // binding and comes back online with no second runtime row.
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "relocate-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.request.id, relocation.id);
+            store
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "relocate-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let registered = store.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(
+                registered.host_facts.runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "relocate-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                completed.request.status,
+                AgentCreationRequestStatus::Running
+            );
+            assert_eq!(
+                completed.request.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            let relocated = store.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(relocated.source_host_id, host);
+            assert_eq!(relocated.source_machine_id, machine);
+            assert_eq!(
+                relocated.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            let runtime_rows = store
+                .query_json(
+                    "SELECT to_jsonb(id) FROM agent_runtimes WHERE project_id = $1",
+                    &[&project_id],
+                )
+                .await;
+            assert_eq!(runtime_rows, vec![serde_json::json!(runtime_id)]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_persisted_machine_named_durable_state_id_is_repaired_on_read() {
+        with_isolated_postgres(|store| async move {
+            let run = "machine-named-spec";
+            let host = "machine-named-host";
+            let target_host = "machine-named-target";
+            let machine = "finite-kata-machine-named";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-machine-named-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:machine-named-v1@sha256:{}",
+                        "5".repeat(64)
+                    ),
+                    version_label: "machine-named-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Machine-Named Spec Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-machine-named-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4205/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Machine-Named Spec Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let creation_id = created.request.id;
+            assert_ne!(runtime_id, machine);
+            async fn persisted_durable_state_id(store: &TestDb, creation_id: &str) -> Value {
+                store
+                    .query_json(
+                        "SELECT runtime_spec->'spec'->'durableStateId'
+                         FROM agent_creation_requests WHERE id = $1",
+                        &[&creation_id],
+                    )
+                    .await
+                    .pop()
+                    .unwrap()
+            }
+            // The production shape this repair exists for: a spec synthesized
+            // before the durable root was named by the runtime id, persisted
+            // with the source machine as its durable state id.
+            async fn poison(store: &TestDb, creation_id: &str, machine: &str) -> Vec<Value> {
+                store
+                    .query_json(
+                        "UPDATE agent_creation_requests
+                         SET runtime_spec = jsonb_set(
+                             runtime_spec, '{spec,durableStateId}', to_jsonb($2::text))
+                         WHERE id = $1
+                         RETURNING runtime_spec->'spec'->'durableStateId'",
+                        &[&creation_id, &machine],
+                    )
+                    .await
+            }
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id)
+            );
+            assert_eq!(
+                poison(&store, &creation_id, machine).await,
+                vec![serde_json::json!(machine)]
+            );
+
+            // A control lease hands the Runner the runtime-id root and writes
+            // the repaired spec back in the same transaction.
+            let restart = store
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    project_id: project_id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let restart_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "restart-lease".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("restart should lease");
+            assert_eq!(restart_lease.request.id, restart.id);
+            assert_eq!(
+                runtime_spec_v1(restart_lease.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id,
+                "the lease names the durable root by the Agent Runtime id, never the source machine"
+            );
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id),
+                "the repair is persisted, not re-derived on every read"
+            );
+            store
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "restart-lease".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            // A relocation envelope is minted from the repaired spec too, and
+            // the current creation row is repaired alongside it.
+            assert_eq!(
+                poison(&store, &creation_id, machine).await,
+                vec![serde_json::json!(machine)]
+            );
+            let relocation = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "e".repeat(64),
+                    operator_observed_compute_absent: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime_spec_v1(relocation.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id
+            );
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id)
+            );
         })
         .await;
     }
