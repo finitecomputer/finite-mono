@@ -19,6 +19,25 @@ SLOTS_DASHBOARD = (
 )
 SLOTS_HOSTS = ("finite-lat-3", "finite-lat-4")
 TINFOIL_DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-tinfoil-gpu.json"
+TINFOIL_COLLECTOR = ROOT / "infra/monitoring/tinfoil/tinfoil-usage-collector"
+TINFOIL_CONTAINER_NAME = "finite-private"
+
+# Frozen binding of dashboard panel titles to the `finite_tinfoil_*` metric
+# names. Shared by the dashboard contract check and the collector contract
+# check so collector and dashboard cannot drift apart independently.
+TINFOIL_PANEL_METRIC_BINDINGS = {
+    "Data Freshness": "finite_tinfoil_source_sample_timestamp_seconds",
+    "Sample Age": "finite_tinfoil_source_sample_timestamp_seconds",
+    "Container Ready": "finite_tinfoil_container_ready",
+    "GPU Allocation": "finite_tinfoil_container_gpus",
+    "Model Upstream": "finite_tinfoil_component_ready",
+    "Accounting API": "finite_tinfoil_component_ready",
+    "GPU Utilization": "finite_tinfoil_gpu_utilization_percent",
+    "GPU Memory Utilization": "finite_tinfoil_gpu_memory_utilization_percent",
+    "CPU Utilization": "finite_tinfoil_cpu_utilization_percent",
+    "Host Memory Utilization": "finite_tinfoil_host_memory_utilization_percent",
+    "Current Dependency Probe Latency": "finite_tinfoil_component_probe_duration_seconds",
+}
 
 LAT_DASHBOARD_HOSTS = (
     "finite-lat-1",
@@ -611,19 +630,7 @@ def check_tinfoil_dashboard_contract() -> None:
         container_name in panels_by_title["Draft data contract"]["options"]["content"],
         f"Tinfoil draft notice must name the selected container {container_name!r}",
     )
-    panel_metric_bindings = {
-        "Data Freshness": "finite_tinfoil_source_sample_timestamp_seconds",
-        "Sample Age": "finite_tinfoil_source_sample_timestamp_seconds",
-        "Container Ready": "finite_tinfoil_container_ready",
-        "GPU Allocation": "finite_tinfoil_container_gpus",
-        "Model Upstream": "finite_tinfoil_component_ready",
-        "Accounting API": "finite_tinfoil_component_ready",
-        "GPU Utilization": "finite_tinfoil_gpu_utilization_percent",
-        "GPU Memory Utilization": "finite_tinfoil_gpu_memory_utilization_percent",
-        "CPU Utilization": "finite_tinfoil_cpu_utilization_percent",
-        "Host Memory Utilization": "finite_tinfoil_host_memory_utilization_percent",
-        "Current Dependency Probe Latency": "finite_tinfoil_component_probe_duration_seconds",
-    }
+    panel_metric_bindings = TINFOIL_PANEL_METRIC_BINDINGS
     for title, metric_name in panel_metric_bindings.items():
         expressions = [
             target["expr"] for target in panel_targets(panels_by_title[title])
@@ -690,6 +697,73 @@ def check_tinfoil_dashboard_contract() -> None:
         notice,
         "It is not yet provisioned to production Grafana and no production Tinfoil metrics source is wired yet",
         "Tinfoil draft notice",
+    )
+
+
+def check_tinfoil_collector_contract() -> None:
+    """Pin the textfile collector to the dashboard's frozen metric bindings.
+
+    The dashboard's metric names are the collector contract: the collector
+    script must emit exactly those names, with the same container selector,
+    the same component label values, and fail-closed rendering (NaN until a
+    successful sample, frozen sample timestamp). Drift fails CI, not Grafana.
+    """
+    collector = TINFOIL_COLLECTOR.read_text()
+    # The collector writes utilization metrics as `finite_tinfoil_${key}`
+    # over its USAGE_KEYS list; expand that template before comparing with
+    # the frozen bindings.
+    usage_keys_match = re.search(r"USAGE_KEYS=\(([^)]*)\)", collector)
+    require(usage_keys_match, "Tinfoil collector must define USAGE_KEYS")
+    emitted = set(re.findall(r"finite_tinfoil_[a-z_]+", collector))
+    for key in re.findall(r"[a-z_]+", usage_keys_match.group(1)):
+        emitted.add(f"finite_tinfoil_{key}")
+    contract = set(TINFOIL_PANEL_METRIC_BINDINGS.values())
+    require(
+        emitted == contract,
+        "Tinfoil collector metrics must equal the dashboard panel bindings: "
+        f"collector-only={sorted(emitted - contract)} "
+        f"dashboard-only={sorted(contract - emitted)}",
+    )
+    require(
+        f'CONTAINER="${{FINITE_TINFOIL_CONTAINER:-{TINFOIL_CONTAINER_NAME}}}"'
+        in collector,
+        "Tinfoil collector default container must match the dashboard selector",
+    )
+    require(
+        "COMPONENT_NAMES=(upstream usage_api)" in collector,
+        "Tinfoil collector components must stay upstream and usage_api",
+    )
+    require_contains(
+        collector, 'aggregation=\\"mean\\"', "collector utilization aggregation label"
+    )
+    require_contains(
+        collector,
+        "value_or_nan",
+        "collector sample timestamp must render NaN until a good sample",
+    )
+    require_contains(
+        collector,
+        'LAST_GOOD_TS_FILE="${STATE_DIR}/last-good-sample-ts"',
+        "collector must persist the last good sample timestamp (fail closed)",
+    )
+    require_contains(
+        collector,
+        'TEXTFILE="${STATE_DIR}/textfile/tinfoil.prom"',
+        "collector must write the node_exporter textfile",
+    )
+    require_contains(
+        collector,
+        'container get "$CONTAINER" --output json',
+        "collector must use the same tinfoil CLI flags as finite-private-ops",
+    )
+    require_contains(
+        collector,
+        "timeout -s TERM",
+        "collector must bound the tinfoil CLI and usage command",
+    )
+    require(
+        "up{" not in collector,
+        "Tinfoil collector health must fail closed on sample age, not up{}",
     )
 
 
@@ -876,6 +950,7 @@ def main() -> int:
     check_mvp_dashboard_contract()
     check_agent_runtime_slots_dashboard_contract()
     check_tinfoil_dashboard_contract()
+    check_tinfoil_collector_contract()
     check_ubuntu_contract()
 
     print("monitoring NixOS contract OK")

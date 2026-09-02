@@ -51,7 +51,8 @@ trap 'rm -f "${archive}"' EXIT
 
 COPYFILE_DISABLE=1 tar -czf "${archive}" \
   infra/monitoring/ubuntu \
-  infra/monitoring/grafana/dashboards/finite-production-mvp.json
+  infra/monitoring/grafana/dashboards/finite-production-mvp.json \
+  infra/monitoring/tinfoil/tinfoil-usage-collector
 
 remote_archive="/tmp/finite-monitoring-ubuntu-${rev}.tar.gz"
 echo "==> uploading monitoring config ${rev} to ${TARGET}"
@@ -100,6 +101,8 @@ install -d -m 0750 -o finite-monitoring -g finite-monitoring \
   /var/lib/finite-monitoring/grafana/plugins \
   /var/lib/finite-monitoring/loki \
   /var/lib/finite-monitoring/prometheus \
+  /var/lib/finite-monitoring/tinfoil \
+  /var/lib/finite-monitoring/tinfoil/textfile \
   /var/log/finite-monitoring \
   /var/log/finite-monitoring/caddy \
   /var/log/finite-monitoring/grafana
@@ -188,6 +191,8 @@ prometheus_archive="$(download "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar
 blackbox_archive="$(download "blackbox_exporter-${BLACKBOX_EXPORTER_VERSION}.linux-amd64.tar.gz" "${BLACKBOX_EXPORTER_URL}" sha256 "${BLACKBOX_EXPORTER_SHA256}")"
 caddy_archive="$(download "caddy_${CADDY_VERSION}_linux_amd64.tar.gz" "${CADDY_URL}" sha512 "${CADDY_SHA512}")"
 loki_archive="$(download "loki-${LOKI_VERSION}.linux-amd64.zip" "${LOKI_URL}" sha256 "${LOKI_SHA256}")"
+node_exporter_archive="$(download "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz" "${NODE_EXPORTER_URL}" sha256 "${NODE_EXPORTER_SHA256}")"
+jq_binary="$(download "jq-${JQ_VERSION}-linux-amd64" "${JQ_URL}" sha256 "${JQ_SHA256}")"
 
 grafana_tmp="$(mktemp -d /tmp/finite-monitoring-grafana.XXXXXX)"
 tar -xzf "${grafana_archive}" -C "${grafana_tmp}"
@@ -217,6 +222,8 @@ install_from_tar "${prometheus_archive}" promtool /opt/finite-monitoring/bin/pro
 install_from_tar "${blackbox_archive}" blackbox_exporter /opt/finite-monitoring/bin/blackbox_exporter
 install_from_tar "${caddy_archive}" caddy /opt/finite-monitoring/bin/caddy
 install_from_zip "${loki_archive}" loki-linux-amd64 /opt/finite-monitoring/bin/loki
+install_from_tar "${node_exporter_archive}" node_exporter /opt/finite-monitoring/bin/node_exporter
+install -m 0755 "${jq_binary}" /opt/finite-monitoring/bin/jq
 
 install -m 0644 Caddyfile /etc/finite/monitoring/Caddyfile
 install -m 0644 prometheus.yml /etc/finite/monitoring/prometheus.yml
@@ -229,6 +236,16 @@ install -m 0644 grafana/provisioning/datasources/finite.yml /etc/finite/monitori
 install -m 0644 grafana/provisioning/dashboards/finite.yml /etc/finite/monitoring/grafana/provisioning/dashboards/finite.yml
 install -m 0644 "${staging}/infra/monitoring/grafana/dashboards/finite-production-mvp.json" \
   /var/lib/finite-monitoring/grafana/dashboards/finite-production-mvp.json
+
+install -m 0755 "${staging}/infra/monitoring/tinfoil/tinfoil-usage-collector" \
+  /opt/finite-monitoring/bin/tinfoil-usage-collector
+# Operator-provisioned credential for the Tinfoil organization key.
+# Created empty (mode 0600) if absent; documented by NAME only — never a value.
+if [[ ! -e /etc/finite/monitoring/tinfoil.env ]]; then
+  install -m 0640 -o root -g finite-monitoring /dev/null /etc/finite/monitoring/tinfoil.env
+fi
+chown root:finite-monitoring /etc/finite/monitoring/tinfoil.env
+chmod 0640 /etc/finite/monitoring/tinfoil.env
 chown -R finite-monitoring:finite-monitoring /var/lib/finite-monitoring /var/log/finite-monitoring
 
 install -m 0644 systemd/finite-monitoring-blackbox-exporter.service /etc/systemd/system/finite-monitoring-blackbox-exporter.service
@@ -236,6 +253,9 @@ install -m 0644 systemd/finite-monitoring-prometheus.service /etc/systemd/system
 install -m 0644 systemd/finite-monitoring-loki.service /etc/systemd/system/finite-monitoring-loki.service
 install -m 0644 systemd/finite-monitoring-grafana.service /etc/systemd/system/finite-monitoring-grafana.service
 install -m 0644 systemd/finite-monitoring-caddy.service /etc/systemd/system/finite-monitoring-caddy.service
+install -m 0644 systemd/finite-monitoring-node-exporter.service /etc/systemd/system/finite-monitoring-node-exporter.service
+install -m 0644 systemd/finite-monitoring-tinfoil-collector.service /etc/systemd/system/finite-monitoring-tinfoil-collector.service
+install -m 0644 systemd/finite-monitoring-tinfoil-collector.timer /etc/systemd/system/finite-monitoring-tinfoil-collector.timer
 
 /opt/finite-monitoring/bin/promtool check config /etc/finite/monitoring/prometheus.yml
 /opt/finite-monitoring/bin/caddy validate \
@@ -258,20 +278,30 @@ systemctl enable --now \
   finite-monitoring-prometheus.service \
   finite-monitoring-loki.service \
   finite-monitoring-grafana.service \
-  finite-monitoring-caddy.service
+  finite-monitoring-caddy.service \
+  finite-monitoring-node-exporter.service \
+  finite-monitoring-tinfoil-collector.timer
 systemctl restart \
   finite-monitoring-blackbox-exporter.service \
   finite-monitoring-prometheus.service \
   finite-monitoring-loki.service \
   finite-monitoring-grafana.service \
-  finite-monitoring-caddy.service
+  finite-monitoring-caddy.service \
+  finite-monitoring-node-exporter.service
+# One collector cycle now (as the service user), so the textfile exists
+# before Prometheus scrapes. The oneshot itself is fail-closed: a missing
+# tinfoil CLI or key still writes NaN/zero series and exits 0.
+systemctl start finite-monitoring-tinfoil-collector.service
+test -s /var/lib/finite-monitoring/tinfoil/textfile/tinfoil.prom
 
 for unit in \
   finite-monitoring-blackbox-exporter.service \
   finite-monitoring-prometheus.service \
   finite-monitoring-loki.service \
   finite-monitoring-grafana.service \
-  finite-monitoring-caddy.service
+  finite-monitoring-caddy.service \
+  finite-monitoring-node-exporter.service \
+  finite-monitoring-tinfoil-collector.timer
 do
   systemctl is-active --quiet "${unit}"
 done
