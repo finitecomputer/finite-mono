@@ -119,6 +119,53 @@ macro_rules! wire_enum {
             }
         }
     };
+    // Forward-tolerant form: an unrecognised wire string parses as the named
+    // fallback variant instead of failing, so an N-1 reader survives the next
+    // added variant. Only for enums with a variant whose documented meaning
+    // is already "not known" — never for enums where a wrong guess would be
+    // acted on.
+    (
+        $(#[doc = $doc:literal])*
+        $name:ident { $($variant:ident => $wire:literal),+ $(,)? }
+        parse: $parse:ident
+        fallback: $fallback:ident
+    ) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Ok($parse(&value).unwrap_or(Self::$fallback))
+            }
+        }
+
+        /// Never `None`: an unrecognised string is the fallback variant. The
+        /// `Option` return keeps the shape of every other `parse_*`.
+        pub fn $parse(value: &str) -> Option<$name> {
+            match value {
+                $($wire => Some($name::$variant),)+
+                _ => Some($name::$fallback),
+            }
+        }
+    };
 }
 
 wire_enum! {
@@ -158,6 +205,11 @@ wire_enum! {
 /// up-bound control that completed but whose runtime has not yet been seen
 /// by the runner's standing health poller. The user-facing status is never
 /// this latch verbatim: see `derive_runtime_summary_status`.
+///
+/// Parsing is forward-tolerant: an unrecognised string reads as `Unknown`
+/// (registered-but-unconfirmed), so a reader one release behind survives a
+/// newly added variant. Runner-facing payloads additionally go through
+/// `for_runner_wire`.
     RuntimeSummaryStatus {
     Online => "online",
     Offline => "offline",
@@ -166,6 +218,7 @@ wire_enum! {
     PendingFirstReport => "pending_first_report",
     }
     parse: parse_runtime_summary_status
+    fallback: Unknown
 }
 
 impl RuntimeSummaryStatus {
@@ -174,6 +227,19 @@ impl RuntimeSummaryStatus {
     /// standing health poller has confirmed the runtime since.
     pub fn is_launched(self) -> bool {
         matches!(self, Self::Online | Self::PendingFirstReport)
+    }
+
+    /// The latch as a runner may see it. Runners only ever act on the
+    /// lifecycle facts they are handed (a lease, the health-target listing),
+    /// never on this latch, and an N-1 runner parses the wire strictly, so
+    /// `pending_first_report` is sent as its documented approximation
+    /// `unknown`. Core keeps the precise variant in the database and on
+    /// operator and dashboard surfaces. Additive-only wire policy.
+    pub fn for_runner_wire(self) -> Self {
+        match self {
+            Self::PendingFirstReport => Self::Unknown,
+            Self::Online | Self::Offline | Self::Stale | Self::Unknown => self,
+        }
     }
 }
 
@@ -4117,6 +4183,47 @@ mod tests {
         assert!(RuntimeSummaryStatus::PendingFirstReport.is_launched());
         assert!(!RuntimeSummaryStatus::Stale.is_launched());
         assert!(!RuntimeSummaryStatus::Offline.is_launched());
+    }
+
+    /// The additive-only wire policy for runners: the precise latch never
+    /// leaves Core on a runner-facing surface, and a reader one release
+    /// behind survives the next variant anyway.
+    #[test]
+    fn runtime_summary_status_is_forward_tolerant_and_runner_wire_safe() {
+        assert_eq!(
+            RuntimeSummaryStatus::PendingFirstReport.for_runner_wire(),
+            RuntimeSummaryStatus::Unknown
+        );
+        for status in [
+            RuntimeSummaryStatus::Online,
+            RuntimeSummaryStatus::Offline,
+            RuntimeSummaryStatus::Stale,
+            RuntimeSummaryStatus::Unknown,
+        ] {
+            assert_eq!(status.for_runner_wire(), status);
+        }
+        // An unrecognised string parses as `unknown`, via both surfaces.
+        assert_eq!(
+            parse_runtime_summary_status("pending_second_report"),
+            Some(RuntimeSummaryStatus::Unknown)
+        );
+        assert_eq!(
+            serde_json::from_str::<RuntimeSummaryStatus>("\"pending_second_report\"").unwrap(),
+            RuntimeSummaryStatus::Unknown
+        );
+        // Known strings still parse precisely, and the wire shape is unchanged.
+        assert_eq!(
+            serde_json::from_str::<RuntimeSummaryStatus>("\"pending_first_report\"").unwrap(),
+            RuntimeSummaryStatus::PendingFirstReport
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeSummaryStatus::PendingFirstReport).unwrap(),
+            "\"pending_first_report\""
+        );
+        assert!(serde_json::from_str::<RuntimeSummaryStatus>("7").is_err());
+        // Enums without a safe fallback stay strict.
+        assert_eq!(parse_runtime_health_status("bogus"), None);
+        assert!(serde_json::from_str::<RuntimeHealthStatus>("\"bogus\"").is_err());
     }
 
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one

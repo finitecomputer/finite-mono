@@ -25,9 +25,9 @@ use crate::{
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
-    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthProjection,
-    RuntimeHealthReportAck, RuntimeHealthReportRequest, RuntimeHealthStatus,
-    RuntimeHealthTargetList, RuntimePlacement, RuntimeSummaryStatus,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeControlLease,
+    RuntimeHealthProjection, RuntimeHealthReportAck, RuntimeHealthReportRequest,
+    RuntimeHealthStatus, RuntimeHealthTargetList, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest, UpsertRuntimeArtifactInput,
     derive_runtime_summary_status, normalize_owner_email, normalize_runtime_contact_endpoint,
@@ -1018,12 +1018,27 @@ async fn runtime_health_targets(
     headers: HeaderMap,
 ) -> Result<Json<RuntimeHealthTargetList>, ApiError> {
     let credential = require_runner_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .runtime_health_targets_for_host(&credential.source_host_id)
-            .await?,
-    ))
+    let listing = state
+        .store
+        .runtime_health_targets_for_host(&credential.source_host_id)
+        .await?;
+    Ok(Json(runner_wire_health_targets(listing)))
+}
+
+/// The runner-facing surfaces carry the lifecycle latch only through
+/// `RuntimeSummaryStatus::for_runner_wire`: these two functions are the only
+/// places a latch is written into a payload a runner parses.
+fn runner_wire_runtime_control_lease(mut lease: RuntimeControlLease) -> RuntimeControlLease {
+    lease.runtime.host_facts.runtime_status =
+        lease.runtime.host_facts.runtime_status.for_runner_wire();
+    lease
+}
+
+fn runner_wire_health_targets(mut listing: RuntimeHealthTargetList) -> RuntimeHealthTargetList {
+    for target in &mut listing.targets {
+        target.lifecycle_status = target.lifecycle_status.for_runner_wire();
+    }
+    listing
 }
 
 async fn upsert_runtime_artifact(
@@ -1893,19 +1908,18 @@ async fn lease_runtime_control_request(
     let runner_capacity = authorize_runner_capacity(&credential, input.runner_capacity)?;
     let source_host_id =
         authorize_runner_source_host(&credential, input.source_host_id.as_deref())?;
-    Ok(Json(
-        state
-            .store
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: input.runner_id,
-                lease_token: input.lease_token,
-                lease_seconds: input.lease_seconds,
-                source_host_id: Some(source_host_id),
-                runner_capacity: Some(runner_capacity),
-                now: input.now,
-            })
-            .await?,
-    ))
+    let lease = state
+        .store
+        .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+            runner_id: input.runner_id,
+            lease_token: input.lease_token,
+            lease_seconds: input.lease_seconds,
+            source_host_id: Some(source_host_id),
+            runner_capacity: Some(runner_capacity),
+            now: input.now,
+        })
+        .await?;
+    Ok(Json(lease.map(runner_wire_runtime_control_lease)))
 }
 
 async fn complete_runtime_control_request(
@@ -3029,6 +3043,76 @@ mod tests {
                 runtime_retirement: false,
             })
         );
+    }
+
+    /// The two runner-facing payload builders map the latch, and only the
+    /// latch; the precise variant never appears on those surfaces.
+    #[test]
+    fn runner_facing_payloads_never_carry_pending_first_report() {
+        let runtime = AgentRuntime {
+            id: "runtime-pending".to_string(),
+            project_id: "project-pending".to_string(),
+            source_host_id: "host-1".to_string(),
+            source_machine_id: "machine-1".to_string(),
+            source_import_key: "host-1:machine-1".to_string(),
+            runtime_artifact_id: None,
+            state_schema_version: None,
+            placement: None,
+            provider_runtime_handle: None,
+            provider_runtime_handle_history: Vec::new(),
+            contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+            runtime_capabilities: None,
+            host_facts: crate::HostOwnedRuntimeFacts {
+                display_name: "Pending".to_string(),
+                hostname: None,
+                runtime_host: "host-1".to_string(),
+                runtime_status: RuntimeSummaryStatus::PendingFirstReport,
+                active_inference_profile: None,
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+            },
+            created_at: "2026-07-11T12:00:00Z".to_string(),
+            updated_at: "2026-07-11T12:00:00Z".to_string(),
+        };
+        let lease = runner_wire_runtime_control_lease(RuntimeControlLease {
+            request: crate::RuntimeControlRequest {
+                id: "ctl-1".to_string(),
+                project_id: "project-pending".to_string(),
+                agent_runtime_id: "runtime-pending".to_string(),
+                source_host_id: "host-1".to_string(),
+                source_machine_id: "machine-1".to_string(),
+                requested_by_user_id: "user-1".to_string(),
+                kind: crate::RuntimeControlKind::Restart,
+                target_runtime_artifact_id: None,
+                status: crate::RuntimeControlRequestStatus::Launching,
+                failure_stage: None,
+                runner_id: Some("runner-1".to_string()),
+                lease_token: Some("lease-1".to_string()),
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-07-11T12:00:00Z".to_string(),
+                updated_at: "2026-07-11T12:00:00Z".to_string(),
+                completed_at: None,
+            },
+            runtime,
+            runtime_spec: None,
+            target_runtime_artifact: None,
+        });
+        let wire = serde_json::to_value(&lease).unwrap();
+        assert_eq!(wire["runtime"]["host_facts"]["runtime_status"], "unknown");
+        assert_eq!(wire["request"]["status"], "launching");
+        let listing = runner_wire_health_targets(RuntimeHealthTargetList {
+            source_host_id: "host-1".to_string(),
+            targets: vec![crate::RuntimeHealthTarget {
+                agent_runtime_id: "runtime-pending".to_string(),
+                source_machine_id: "machine-1".to_string(),
+                contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
+                agent_npub: None,
+                lifecycle_status: RuntimeSummaryStatus::PendingFirstReport,
+            }],
+        });
+        let wire = serde_json::to_value(&listing).unwrap();
+        assert_eq!(wire["targets"][0]["lifecycleStatus"], "unknown");
     }
 
     async fn issue_test_launch_code(store: &CoreStore) -> String {
@@ -6256,6 +6340,26 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(lease["request"]["id"], upgrade_id);
             assert_eq!(lease["target_runtime_artifact"]["id"], "artifact-v2");
+            // The restart just completed, so Core holds the precise
+            // `pending_first_report` latch; the runner-facing lease carries
+            // its documented approximation so an N-1 runner's strict parser
+            // still accepts the payload, and the current parser reads it the
+            // same way.
+            assert_eq!(
+                db.store
+                    .agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::PendingFirstReport
+            );
+            assert_eq!(lease["runtime"]["host_facts"]["runtime_status"], "unknown");
+            let parsed: RuntimeControlLease = serde_json::from_value(lease.clone()).unwrap();
+            assert_eq!(
+                parsed.runtime.host_facts.runtime_status,
+                RuntimeSummaryStatus::Unknown
+            );
             let (status, upgraded) = send_json(
                 &app,
                 "POST",
