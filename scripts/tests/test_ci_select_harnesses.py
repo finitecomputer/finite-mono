@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -50,6 +51,35 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
         self.assertIn("pull_request:\n    branches:\n      - main", workflow)
         self.assertNotIn("branches: [production]", workflow)
+
+    def test_ci_authenticates_nix_github_fetches(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertIn(
+            "NIX_CONFIG: |\n"
+            "    access-tokens = github.com=${{ github.token }}",
+            workflow,
+        )
+
+    def test_hermes_flake_input_avoids_github_api_tarball_fetcher(self) -> None:
+        flake_nix = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        flake_lock = json.loads((ROOT / "flake.lock").read_text(encoding="utf-8"))
+        hermes_agent = flake_lock["nodes"]["hermes-agent"]
+        locked = hermes_agent["locked"]
+        original = hermes_agent["original"]
+
+        self.assertEqual(locked["type"], "tarball")
+        self.assertRegex(
+            locked["url"],
+            r"^https://github\.com/NousResearch/hermes-agent/archive/[0-9a-f]{40}\.tar\.gz$",
+        )
+        self.assertEqual(original, {"type": "tarball", "url": locked["url"]})
+        self.assertNotIn("github:NousResearch/hermes-agent", flake_nix)
+        self.assertNotIn("github:NousResearch/hermes-agent", ci_workflow_text())
+        self.assertNotIn(
+            "api.github.com/repos/NousResearch/hermes-agent/tarball",
+            flake_nix + ci_workflow_text(),
+        )
 
     def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
         for job_id in (
