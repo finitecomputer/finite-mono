@@ -15,13 +15,21 @@
 //!   path is added, and a Core outage never interrupts a healthy guest.
 //! - **Latest report only.** Core stores one report per runtime and projects
 //!   readiness at read time; staleness (no report within 3x the cadence) reads
-//!   as the named `unknown` state. There is no sweeper and no history table.
+//!   as the named `stale` state, and a runtime that was never reported on is
+//!   `unknown`. There is no sweeper and no history table.
 //! - **Transport failure is reported, not skipped.** When nobody answers at
 //!   the recorded endpoint the runner posts `ready: false` with reason
 //!   `unreachable`, so a dead runtime reads `not_ready` immediately. Staleness
 //!   then means exactly one thing — the runner stopped reporting (runner
-//!   down, Core unreachable, or a pre-poller runner) — and reads `unknown`.
+//!   down, Core unreachable, or a pre-poller runner) — and reads `stale`.
 //!   The two failure classes stay distinguishable in the fleet view.
+//! - **Every runtime this host owns is registered.** A registry entry is
+//!   written or refreshed on every successful up-bound completion (launch,
+//!   relocation adoption, restart, recovery, upgrade), not only on fresh
+//!   launch, and the registry is reconciled against Core's host-scoped
+//!   target list when the runner process starts. Only an explicit stop or
+//!   destroy removes an entry; a Core 404 is logged and retried on the
+//!   normal cadence, never treated as permission to forget a runtime.
 //! - **Identity-pinned attribution.** Ports are reallocated across stops (the
 //!   2026-08-07 port-squat class), so a response is only attributed to a
 //!   runtime when it presents the pinned Agent Principal npub. The pin is
@@ -56,8 +64,9 @@ pub struct HealthReportConfig {
 
 /// One poll target, persisted in the on-disk registry because `run_cycle`
 /// rebuilds the runner every cycle. Written when a launch (or cold
-/// relocation) completes, refreshed when an upgrade moves the contact
-/// endpoint, removed when a stop/destroy completes.
+/// relocation) completes, written or refreshed when any other up-bound
+/// control completes and by the startup reconcile, removed only when a
+/// stop/destroy completes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthReportTarget {
@@ -143,33 +152,149 @@ pub fn record_target(
     }
 }
 
-/// Move a target's contact endpoint after an upgrade while keeping its
-/// identity pin. Best-effort: a failure leaves the old endpoint polling a
-/// reallocated port, which the npub gate renders stale rather than wrong.
-pub fn refresh_target_endpoint(
-    config: &HealthReportConfig,
-    agent_runtime_id: &str,
-    contact_endpoint: &str,
-) {
-    let Some(path) = target_path(&config.registry_dir, agent_runtime_id) else {
-        return;
-    };
-    let Some(mut target) = std::fs::read(&path)
+fn read_target(registry_dir: &Path, agent_runtime_id: &str) -> Option<HealthReportTarget> {
+    let path = target_path(registry_dir, agent_runtime_id)?;
+    std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<HealthReportTarget>(&bytes).ok())
-    else {
-        return;
+}
+
+/// The outcome of `ensure_target`, for logging and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureTargetOutcome {
+    /// No entry existed; one was created.
+    Created,
+    /// The entry existed and its endpoint or machine moved.
+    Refreshed,
+    /// The entry already matched.
+    Unchanged,
+    /// Nothing to poll (no contact endpoint) or the write failed.
+    Skipped,
+}
+
+/// Make sure a runtime this host owns has a poll target: create a missing
+/// entry, or move an existing one to the current contact endpoint while
+/// keeping its identity pin and throttle. Called on every successful
+/// up-bound control completion (restart, recovery, upgrade) and by the
+/// startup reconcile, so a runtime that was upgraded in place or relocated in
+/// is reported on exactly like one launched fresh. A pin is only ever added,
+/// never replaced: an existing launch-verified or first-seen principal wins
+/// over a caller-supplied one. Best-effort: a failure loses telemetry, never
+/// the lifecycle work it rides on.
+pub fn ensure_target(
+    config: &HealthReportConfig,
+    agent_runtime_id: &str,
+    source_machine_id: &str,
+    contact_endpoint: Option<&str>,
+    agent_npub: Option<&str>,
+) -> EnsureTargetOutcome {
+    let Some(contact_endpoint) = contact_endpoint else {
+        eprintln!(
+            "warning: health report target for {agent_runtime_id} has no contact endpoint; \
+             it cannot be polled"
+        );
+        return EnsureTargetOutcome::Skipped;
     };
-    target.contact_endpoint = contact_endpoint.to_string();
-    if let Err(error) = write_target(&config.registry_dir, &target) {
-        eprintln!("warning: health report endpoint refresh for {agent_runtime_id} failed: {error}");
+    let (target, outcome) = match read_target(&config.registry_dir, agent_runtime_id) {
+        Some(mut existing) => {
+            let moved = existing.contact_endpoint != contact_endpoint
+                || existing.source_machine_id != source_machine_id;
+            let pinned = existing.agent_npub.is_none() && agent_npub.is_some();
+            if !moved && !pinned {
+                return EnsureTargetOutcome::Unchanged;
+            }
+            if moved {
+                existing.contact_endpoint = contact_endpoint.to_string();
+                existing.source_machine_id = source_machine_id.to_string();
+                // A moved endpoint deserves a prompt first poll.
+                existing.last_attempt_unix_ms = None;
+            }
+            if pinned {
+                existing.agent_npub = agent_npub.map(str::to_string);
+            }
+            (existing, EnsureTargetOutcome::Refreshed)
+        }
+        None => (
+            HealthReportTarget {
+                agent_runtime_id: agent_runtime_id.to_string(),
+                source_machine_id: source_machine_id.to_string(),
+                contact_endpoint: contact_endpoint.to_string(),
+                agent_npub: agent_npub.map(str::to_string),
+                last_attempt_unix_ms: None,
+            },
+            EnsureTargetOutcome::Created,
+        ),
+    };
+    match write_target(&config.registry_dir, &target) {
+        Ok(()) => outcome,
+        Err(error) => {
+            eprintln!("warning: health report registration for {agent_runtime_id} failed: {error}");
+            EnsureTargetOutcome::Skipped
+        }
     }
 }
 
-/// Deregister a poll target — after a stop/destroy completes, or when Core
-/// answers a report with 404 (the runtime is no longer scoped to this host,
-/// e.g. it cold-relocated away) — so a departed or deliberately offline
-/// runtime is not polled and reported unreachable forever.
+/// Reconcile the on-disk registry against Core's host-scoped list of the
+/// runtimes this runner should be reporting on. Runs once per runner
+/// process start. Adds missing entries and moves stale endpoints; it never
+/// removes an entry, because only an explicit stop/destroy completion on
+/// this host knows a runtime is deliberately gone. A Core that does not
+/// serve the listing (or is unreachable) leaves the registry as it is.
+pub fn reconcile_targets(
+    queue: &mut dyn AgentCreationQueue,
+    config: &HealthReportConfig,
+    source_host_id: Option<&str>,
+) {
+    let listing = match queue.list_runtime_health_targets() {
+        Ok(Some(listing)) => listing,
+        Ok(None) => {
+            eprintln!(
+                "warning: health report registry reconcile skipped: Core does not list \
+                 standing-health targets for this runner"
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("warning: health report registry reconcile skipped: {error}");
+            return;
+        }
+    };
+    if let Some(source_host_id) = source_host_id
+        && listing.source_host_id != source_host_id
+    {
+        eprintln!(
+            "warning: health report registry reconcile skipped: the runner credential is \
+             scoped to host {} but this runner serves {source_host_id}",
+            listing.source_host_id
+        );
+        return;
+    }
+    let (mut created, mut refreshed, mut skipped) = (0_usize, 0_usize, 0_usize);
+    for target in &listing.targets {
+        match ensure_target(
+            config,
+            &target.agent_runtime_id,
+            &target.source_machine_id,
+            target.contact_endpoint.as_deref(),
+            target.agent_npub.as_deref(),
+        ) {
+            EnsureTargetOutcome::Created => created += 1,
+            EnsureTargetOutcome::Refreshed => refreshed += 1,
+            EnsureTargetOutcome::Unchanged => {}
+            EnsureTargetOutcome::Skipped => skipped += 1,
+        }
+    }
+    eprintln!(
+        "health report registry reconciled against Core for host {}: {} listed, {created} \
+         registered, {refreshed} refreshed, {skipped} unpollable",
+        listing.source_host_id,
+        listing.targets.len()
+    );
+}
+
+/// Deregister a poll target after a stop/destroy completes, so a
+/// deliberately offline runtime is not polled and reported unreachable
+/// forever. This is the only path that removes an entry.
 pub fn remove_target(config: &HealthReportConfig, agent_runtime_id: &str) {
     let Some(path) = target_path(&config.registry_dir, agent_runtime_id) else {
         return;
@@ -291,8 +416,13 @@ fn bounded_reason(value: Option<&str>) -> Option<String> {
 
 /// Poll every due target once and forward one report per runtime to Core.
 /// Best-effort, throttled per runtime: telemetry must never fail or slow the
-/// lease cycle beyond its own bounded HTTP timeouts.
-pub fn forward_due_reports(queue: &mut dyn AgentCreationQueue, config: &HealthReportConfig) {
+/// lease cycle beyond its own bounded HTTP timeouts. `source_host_id` is the
+/// host this runner serves, named in the 404 diagnostic.
+pub fn forward_due_reports(
+    queue: &mut dyn AgentCreationQueue,
+    config: &HealthReportConfig,
+    source_host_id: Option<&str>,
+) {
     let Ok(entries) = std::fs::read_dir(&config.registry_dir) else {
         return;
     };
@@ -381,10 +511,23 @@ pub fn forward_due_reports(queue: &mut dyn AgentCreationQueue, config: &HealthRe
             now: None,
         };
         if let Err(error) = queue.report_runtime_health(request) {
-            // A 404 means Core no longer scopes this runtime to this host
-            // (destroyed elsewhere, or cold-relocated away): stop polling it.
+            // A 404 means Core does not scope this runtime to the host the
+            // runner credential asserts: usually a `source_host_id` that
+            // drifted after a host move, sometimes a runtime destroyed or
+            // relocated away. Either way the fix is an operator's, not a
+            // silent deregistration that would hide the runtime forever. The
+            // target keeps its slot and its per-target throttle, so the next
+            // attempt is one interval away.
             if matches!(error, RunnerError::CoreStatus { status: 404, .. }) {
-                remove_target(config, &target.agent_runtime_id);
+                eprintln!(
+                    "error: Core does not recognise runtime {} on host {} (contact {}); the \
+                     runner credential's source host may not match the runtime's — keeping the \
+                     health report target and retrying next interval: {error}",
+                    target.agent_runtime_id,
+                    source_host_id.unwrap_or("<unset>"),
+                    target.contact_endpoint
+                );
+                continue;
             }
             eprintln!(
                 "warning: health report for {} failed: {error}",
@@ -406,8 +549,10 @@ mod tests {
         RetryRuntimeControlRequestInput, RunnerLeaseCapacity, RuntimeControlLease,
         RuntimeControlRequest,
     };
-    use finite_saas_core::RuntimeHealthReportAck;
     use finite_saas_core::api::RecordProviderOperationTransitionRequest;
+    use finite_saas_core::{
+        RuntimeHealthReportAck, RuntimeHealthTarget, RuntimeHealthTargetList, RuntimeSummaryStatus,
+    };
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -416,6 +561,7 @@ mod tests {
     struct RecordingQueue {
         reports: Vec<RuntimeHealthReportRequest>,
         report_status_error: Option<u16>,
+        listing: Option<RuntimeHealthTargetList>,
     }
 
     impl AgentCreationQueue for RecordingQueue {
@@ -529,6 +675,12 @@ mod tests {
             self.reports.push(input);
             Ok(ack)
         }
+
+        fn list_runtime_health_targets(
+            &mut self,
+        ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+            Ok(self.listing.clone())
+        }
     }
 
     /// A minimal `/contact` server: one fixed body per test, one thread, and
@@ -629,7 +781,7 @@ mod tests {
             &target(&server.endpoint(), Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")),
         );
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(server.request_count(), 1);
         assert_eq!(queue.reports.len(), 1);
         let report = &queue.reports[0];
@@ -656,7 +808,7 @@ mod tests {
             &target(&server.endpoint(), Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")),
         );
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(queue.reports.len(), 1);
         let report = &queue.reports[0];
         assert!(!report.ready);
@@ -685,7 +837,7 @@ mod tests {
             ),
         );
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(queue.reports.len(), 1);
         let report = &queue.reports[0];
         assert!(!report.ready);
@@ -714,7 +866,7 @@ mod tests {
             &target(&server.endpoint(), Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")),
         );
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(server.request_count(), 1);
         assert!(queue.reports.is_empty());
     }
@@ -728,7 +880,7 @@ mod tests {
         let config = test_config(registry.path());
         registry_with(&config.registry_dir, &target(&server.endpoint(), None));
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(queue.reports.len(), 1);
         assert_eq!(
             queue.reports[0].agent_npub.as_deref(),
@@ -751,7 +903,7 @@ mod tests {
         let config = test_config(registry.path());
         registry_with(&config.registry_dir, &target(&server.endpoint(), None));
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert!(queue.reports.is_empty());
     }
 
@@ -772,7 +924,7 @@ mod tests {
         junk_target.agent_runtime_id = "runtime-2".to_string();
         registry_with(&config.registry_dir, &junk_target);
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert!(queue.reports.is_empty());
     }
 
@@ -787,7 +939,7 @@ mod tests {
         throttled.last_attempt_unix_ms = Some(u64::MAX);
         registry_with(&config.registry_dir, &throttled);
         let mut queue = RecordingQueue::default();
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, None);
         assert_eq!(server.request_count(), 0);
         assert!(queue.reports.is_empty());
     }
@@ -812,14 +964,35 @@ mod tests {
             Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")
         );
 
-        // An upgrade moves the endpoint but keeps the identity pin.
-        refresh_target_endpoint(&config, "runtime-1", "http://127.0.0.1:41009/contact");
+        // An upgrade moves the endpoint but keeps the identity pin, and a
+        // weaker caller-supplied pin never replaces the recorded one.
+        assert_eq!(
+            ensure_target(
+                &config,
+                "runtime-1",
+                "machine-1",
+                Some("http://127.0.0.1:41009/contact"),
+                Some("npub1zzzzzzzzzzzzzzzzzzzzzzzz"),
+            ),
+            EnsureTargetOutcome::Refreshed
+        );
         let refreshed: HealthReportTarget =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(refreshed.contact_endpoint, "http://127.0.0.1:41009/contact");
         assert_eq!(
             refreshed.agent_npub.as_deref(),
             Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")
+        );
+        // Restating the same facts is a no-op write.
+        assert_eq!(
+            ensure_target(
+                &config,
+                "runtime-1",
+                "machine-1",
+                Some("http://127.0.0.1:41009/contact"),
+                None,
+            ),
+            EnsureTargetOutcome::Unchanged
         );
 
         remove_target(&config, "runtime-1");
@@ -828,11 +1001,167 @@ mod tests {
         remove_target(&config, "runtime-1");
     }
 
-    /// Core answering 404 means the runtime is no longer scoped to this host
-    /// (destroyed elsewhere or cold-relocated away): the runner stops polling
-    /// it instead of reporting unreachable forever.
+    /// The upgrade/relocation gap: a runtime with no registry file (upgraded
+    /// in place by a pre-registry runner, or adopted by a cold relocation)
+    /// gets one created, not skipped.
     #[test]
-    fn a_core_not_found_answer_deregisters_the_target() {
+    fn ensure_target_creates_a_missing_entry_and_pins_a_later_principal() {
+        let registry = tempfile::tempdir().unwrap();
+        let config = test_config(registry.path());
+        let path = registry.path().join("runtime-1.json");
+        assert!(!path.exists());
+        assert_eq!(
+            ensure_target(
+                &config,
+                "runtime-1",
+                "machine-1",
+                Some("http://127.0.0.1:41009/contact"),
+                None,
+            ),
+            EnsureTargetOutcome::Created
+        );
+        let created: HealthReportTarget =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(created.contact_endpoint, "http://127.0.0.1:41009/contact");
+        assert_eq!(created.source_machine_id, "machine-1");
+        assert_eq!(created.agent_npub, None);
+        // An unpinned entry accepts a pin without moving.
+        assert_eq!(
+            ensure_target(
+                &config,
+                "runtime-1",
+                "machine-1",
+                Some("http://127.0.0.1:41009/contact"),
+                Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq"),
+            ),
+            EnsureTargetOutcome::Refreshed
+        );
+        let pinned: HealthReportTarget =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            pinned.agent_npub.as_deref(),
+            Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")
+        );
+        // Without an endpoint there is nothing to poll: no file is written.
+        assert_eq!(
+            ensure_target(&config, "runtime-2", "machine-2", None, None),
+            EnsureTargetOutcome::Skipped
+        );
+        assert!(!registry.path().join("runtime-2.json").exists());
+    }
+
+    fn listed(
+        agent_runtime_id: &str,
+        contact_endpoint: Option<&str>,
+        agent_npub: Option<&str>,
+    ) -> RuntimeHealthTarget {
+        RuntimeHealthTarget {
+            agent_runtime_id: agent_runtime_id.to_string(),
+            source_machine_id: format!("machine-{agent_runtime_id}"),
+            contact_endpoint: contact_endpoint.map(str::to_string),
+            agent_npub: agent_npub.map(str::to_string),
+            lifecycle_status: RuntimeSummaryStatus::Online,
+        }
+    }
+
+    /// Startup reconcile: Core's host-scoped list creates missing entries and
+    /// moves stale endpoints, keeps every existing pin, and never removes an
+    /// entry Core did not list.
+    #[test]
+    fn reconcile_registers_missing_targets_and_never_removes_active_ones() {
+        let registry = tempfile::tempdir().unwrap();
+        let config = test_config(registry.path());
+        // Already registered with a launch-verified pin, at an old endpoint.
+        registry_with(
+            &config.registry_dir,
+            &HealthReportTarget {
+                agent_runtime_id: "runtime-known".to_string(),
+                source_machine_id: "machine-runtime-known".to_string(),
+                contact_endpoint: "http://127.0.0.1:41001/contact".to_string(),
+                agent_npub: Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq".to_string()),
+                last_attempt_unix_ms: Some(unix_millis_now()),
+            },
+        );
+        // Registered locally but absent from Core's list (e.g. a runtime Core
+        // has not caught up on): must survive the reconcile untouched.
+        registry_with(
+            &config.registry_dir,
+            &HealthReportTarget {
+                agent_runtime_id: "runtime-local-only".to_string(),
+                source_machine_id: "machine-runtime-local-only".to_string(),
+                contact_endpoint: "http://127.0.0.1:41003/contact".to_string(),
+                agent_npub: None,
+                last_attempt_unix_ms: None,
+            },
+        );
+        let mut queue = RecordingQueue {
+            listing: Some(RuntimeHealthTargetList {
+                source_host_id: "host-1".to_string(),
+                targets: vec![
+                    listed(
+                        "runtime-known",
+                        Some("http://127.0.0.1:41002/contact"),
+                        Some("npub1zzzzzzzzzzzzzzzzzzzzzzzz"),
+                    ),
+                    listed(
+                        "runtime-missing",
+                        Some("http://127.0.0.1:41004/contact"),
+                        Some("npub1rrrrrrrrrrrrrrrrrrrrrrrr"),
+                    ),
+                    listed("runtime-unpollable", None, None),
+                ],
+            }),
+            ..RecordingQueue::default()
+        };
+        reconcile_targets(&mut queue, &config, Some("host-1"));
+
+        let read = |id: &str| -> Option<HealthReportTarget> {
+            std::fs::read(registry.path().join(format!("{id}.json")))
+                .ok()
+                .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        };
+        let known = read("runtime-known").unwrap();
+        assert_eq!(known.contact_endpoint, "http://127.0.0.1:41002/contact");
+        assert_eq!(
+            known.agent_npub.as_deref(),
+            Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq"),
+            "the launch-verified pin beats Core's last-observed npub"
+        );
+        assert_eq!(
+            known.last_attempt_unix_ms, None,
+            "a moved endpoint polls promptly"
+        );
+        let missing = read("runtime-missing").unwrap();
+        assert_eq!(missing.contact_endpoint, "http://127.0.0.1:41004/contact");
+        assert_eq!(missing.source_machine_id, "machine-runtime-missing");
+        assert_eq!(
+            missing.agent_npub.as_deref(),
+            Some("npub1rrrrrrrrrrrrrrrrrrrrrrrr")
+        );
+        assert!(
+            read("runtime-local-only").is_some(),
+            "reconcile never removes"
+        );
+        assert!(read("runtime-unpollable").is_none());
+
+        // A host mismatch between the credential and this runner is refused
+        // rather than registering another host's runtimes here.
+        let before = std::fs::read_dir(registry.path()).unwrap().count();
+        reconcile_targets(&mut queue, &config, Some("host-2"));
+        assert_eq!(std::fs::read_dir(registry.path()).unwrap().count(), before);
+
+        // A Core without the listing leaves the registry alone.
+        let mut older_core = RecordingQueue::default();
+        reconcile_targets(&mut older_core, &config, Some("host-1"));
+        assert_eq!(std::fs::read_dir(registry.path()).unwrap().count(), before);
+    }
+
+    /// Core answering 404 means the runtime is not scoped to the host the
+    /// runner credential asserts. That is an operator's problem to see, not
+    /// a reason to forget the runtime: the target stays, the attempt is
+    /// logged, and the per-target throttle spaces the retries.
+    #[test]
+    fn a_core_not_found_answer_keeps_the_target_and_backs_off() {
         let registry = tempfile::tempdir().unwrap();
         let server = ContactServer::start(
             r#"{"ready":true,"agent_npub":"npub1qqqqqqqqqqqqqqqqqqqqqqqq"}"#.to_string(),
@@ -846,8 +1175,18 @@ mod tests {
             report_status_error: Some(404),
             ..RecordingQueue::default()
         };
-        forward_due_reports(&mut queue, &config);
+        forward_due_reports(&mut queue, &config, Some("host-1"));
         assert!(queue.reports.is_empty());
-        assert!(!config.registry_dir.join("runtime-1.json").exists());
+        assert_eq!(server.request_count(), 1);
+        let kept: HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(config.registry_dir.join("runtime-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept.contact_endpoint, server.endpoint());
+        assert!(kept.last_attempt_unix_ms.is_some());
+        // Within the interval the target is not retried (the throttle is the
+        // back-off); Core coming back later is answered on the next cadence.
+        forward_due_reports(&mut queue, &config, Some("host-1"));
+        assert_eq!(server.request_count(), 1);
     }
 }

@@ -554,6 +554,16 @@ where
     if let Some(identity_authority) = config.agent_identity_authority {
         runner = runner.with_agent_identity_authority(identity_authority)?;
     }
+    // Once per process: make sure every runtime Core scopes to this host has
+    // a standing-health poll target, including the ones this process never
+    // launched (upgraded in place, relocated in, pre-registry launches).
+    // `run_cycle` rebuilds the runner every cycle, so the once-ness lives
+    // here rather than on the runner value.
+    static HEALTH_REGISTRY_RECONCILED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !HEALTH_REGISTRY_RECONCILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        runner.reconcile_health_report_targets();
+    }
     runner.run_once().map_err(Into::into)
 }
 

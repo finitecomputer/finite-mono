@@ -8,9 +8,9 @@ use finite_saas_core::{
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeHealthReportAck,
-    RuntimeHealthReportRequest, RuntimeLifecycleStage, RuntimePlacement, RuntimeResourceClass,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
-    api::RecordProviderOperationTransitionRequest,
+    RuntimeHealthReportRequest, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
+    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
+    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -515,6 +515,19 @@ where
         self
     }
 
+    /// Reconcile the standing-health registry against Core's host-scoped
+    /// list of the runtimes this runner should be reporting on. Meant to run
+    /// once when the runner process starts, so runtimes upgraded in place or
+    /// relocated in before this process existed are polled too. Best-effort
+    /// and add-only; never removes a target.
+    pub fn reconcile_health_report_targets(&mut self) {
+        let Some(config) = self.health_reports.clone() else {
+            return;
+        };
+        let source_host_id = self.launcher.source_host_id().map(str::to_string);
+        health_reports::reconcile_targets(&mut self.queue, &config, source_host_id.as_deref());
+    }
+
     pub fn with_agent_identity_authority(
         mut self,
         config: AgentIdentityAuthorityConfig,
@@ -562,11 +575,15 @@ where
         // Best-effort, throttled per runtime: standing health telemetry must
         // never fail or slow the lease cycle beyond its own bounded HTTP
         // timeouts.
+        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         if let Some(config) = self.health_reports.clone() {
-            health_reports::forward_due_reports(&mut self.queue, &config);
+            health_reports::forward_due_reports(
+                &mut self.queue,
+                &config,
+                source_host_id.as_deref(),
+            );
         }
         let lease_token = self.lease_tokens.next_lease_token()?;
-        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
         runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
@@ -1007,31 +1024,38 @@ where
                 )?;
                 // Keep the standing-health registry aligned with the lifecycle
                 // outcome: a deliberately offline runtime is deregistered, and
-                // an upgrade moves the entry to the new contact endpoint
-                // (restart and recover preserve it — Kata asserts the
-                // persisted endpoint is unchanged and Phala restarts the same
-                // CVM).
+                // every other successful completion makes sure the runtime is
+                // registered at its current contact endpoint — creating the
+                // entry when this runner never launched it (upgraded in
+                // place, relocated in, or launched by a pre-registry runner),
+                // moving it when an upgrade reallocated the endpoint, and
+                // leaving a matching entry (and its identity pin) alone.
                 if let Some(config) = &self.health_reports {
                     match kind {
                         RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
                             health_reports::remove_target(config, &completed.agent_runtime_id);
                         }
-                        RuntimeControlKind::Upgrade => {
-                            if let Some(facts) = upgrade_facts.as_ref()
-                                && let Some(contact_endpoint) = facts
-                                    .published_app_urls
-                                    .iter()
-                                    .find(|url| url.ends_with("/contact"))
-                            {
-                                health_reports::refresh_target_endpoint(
-                                    config,
-                                    &completed.agent_runtime_id,
-                                    contact_endpoint,
-                                );
-                            }
+                        RuntimeControlKind::Upgrade
+                        | RuntimeControlKind::Restart
+                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {
+                            let contact_endpoint = upgrade_facts
+                                .as_ref()
+                                .and_then(|facts| {
+                                    facts
+                                        .published_app_urls
+                                        .iter()
+                                        .find(|url| url.ends_with("/contact"))
+                                        .cloned()
+                                })
+                                .or_else(|| runtime_control_contact_endpoint(&lease.runtime));
+                            health_reports::ensure_target(
+                                config,
+                                &completed.agent_runtime_id,
+                                &lease.runtime.source_machine_id,
+                                contact_endpoint.as_deref(),
+                                None,
+                            );
                         }
-                        RuntimeControlKind::Restart
-                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {}
                     }
                 }
                 Ok(runtime_control_success_outcome(
@@ -1176,6 +1200,23 @@ where
     }
 }
 
+/// The contact endpoint Core holds for a leased runtime: the explicit fact
+/// when recorded, else the `/contact` published URL older rows carry.
+fn runtime_control_contact_endpoint(runtime: &finite_saas_core::AgentRuntime) -> Option<String> {
+    runtime
+        .contact_endpoint
+        .clone()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .or_else(|| {
+            runtime
+                .host_facts
+                .published_app_urls
+                .iter()
+                .find(|url| url.ends_with("/contact"))
+                .cloned()
+        })
+}
+
 pub trait AgentCreationQueue {
     fn lease_runtime_control(
         &mut self,
@@ -1254,6 +1295,16 @@ pub trait AgentCreationQueue {
         &mut self,
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError>;
+
+    /// Core's host-scoped list of the runtimes this runner should be
+    /// reporting on, for the startup registry reconcile. `Ok(None)` means the
+    /// queue cannot list (an older Core, or a test double), which leaves the
+    /// registry as it is.
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        Ok(None)
+    }
 }
 
 pub trait ProviderOperationJournal {
@@ -2286,6 +2337,22 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError> {
         self.post_json("/api/core/v1/runtime-health-reports", &input)
+    }
+
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        let url = format!("{}/api/core/v1/runtime-health-targets", self.base_url);
+        let response = ureq::get(&url)
+            .set("authorization", &format!("Bearer {}", self.api_token))
+            .call();
+        match decode_core_response(response) {
+            Ok(listing) => Ok(Some(listing)),
+            // A Core without the listing route (N-1) is not an error: the
+            // reconcile is skipped and per-completion registration carries.
+            Err(RunnerError::CoreStatus { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -4583,6 +4650,104 @@ mod tests {
         assert_eq!(entry.contact_endpoint, "http://oslo-host-1/contact");
         assert_eq!(entry.source_machine_id, "finite-agent_123");
         assert_eq!(entry.agent_npub, None);
+    }
+
+    /// The upgrade gap: a runtime upgraded in place (or relocated in, or
+    /// launched by a pre-registry runner) has no registry file. Completion
+    /// creates it at the upgraded contact endpoint instead of skipping.
+    #[test]
+    fn run_once_registers_a_health_target_when_upgrade_completes_without_one() {
+        let registry = tempfile::tempdir().unwrap();
+        let mut runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+            FixedLeaseTokens::new(["lease-upgrade"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        }));
+        assert!(!registry.path().join("runtime_123.json").exists());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::RuntimeUpgraded { .. }));
+        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(registry.path().join("runtime_123.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.contact_endpoint, "http://127.0.0.1:41002/contact");
+        assert_eq!(entry.source_machine_id, "oslo-agent-001");
+        assert_eq!(entry.agent_npub, None);
+    }
+
+    /// Restart and recovery keep the persisted endpoint, so completion
+    /// registers a missing entry from Core's recorded contact endpoint and
+    /// leaves an existing entry's identity pin untouched.
+    #[test]
+    fn run_once_registers_a_health_target_when_restart_completes() {
+        let registry = tempfile::tempdir().unwrap();
+        let config = HealthReportConfig {
+            registry_dir: registry.path().to_path_buf(),
+            interval: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(250),
+        };
+        let mut runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Restart);
+        runtime_control.runtime.contact_endpoint = Some("http://127.0.0.1:9/contact".to_string());
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(config.clone()));
+        let outcome = runner.run_once().unwrap();
+        assert!(matches!(outcome, RunOnceOutcome::RuntimeRestarted { .. }));
+        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(registry.path().join("runtime_123.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.contact_endpoint, "http://127.0.0.1:9/contact");
+        assert_eq!(entry.agent_npub, None);
+
+        // A second restart against a pinned entry keeps the pin.
+        health_reports::record_target(
+            &config,
+            "runtime_123",
+            "oslo-agent-001",
+            Some("http://127.0.0.1:9/contact"),
+            Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq"),
+        );
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-2"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_health_reports(Some(config));
+        runner.run_once().unwrap();
+        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
+            &std::fs::read(registry.path().join("runtime_123.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            entry.agent_npub.as_deref(),
+            Some("npub1qqqqqqqqqqqqqqqqqqqqqqqq")
+        );
     }
 
     #[test]
