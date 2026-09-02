@@ -5,7 +5,7 @@
 Use three storage profiles:
 
 - Client/device: encrypted local SQLite for MLS client state, pending outbound
-  work, inbound event cache, and device-linking state.
+  work, and inbound event cache.
 - Local/dev, first server proof, and self-hosted single-node production: SQLite.
 - Hosted multi-node room server: Postgres.
 
@@ -218,7 +218,6 @@ Postgres shape:
 - `room_membership_intervals`
 - `key_packages`
 - `welcomes`
-- `link_sessions`
 - `idempotency_records`
 
 The store still uses SQLite for local/dev and first-server proof, but the
@@ -288,7 +287,6 @@ The Postgres schema should keep this same model:
 - `key_packages`
 - `welcomes`
 - `idempotency_records`
-- `link_sessions`
 - `repair_reports`
 
 The critical transaction remains the same:

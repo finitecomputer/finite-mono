@@ -306,22 +306,6 @@ export type HostedRuntimeCommandResponse = {
   error?: { code: string; message: string } | null;
 };
 
-export type HostedDeviceReconcileRequest = {
-  project_id: string;
-  target_device_id: string;
-};
-
-export type HostedDeviceReconcileStatus =
-  | "awaiting_key_package"
-  | "joining_rooms"
-  | "ready";
-
-export type HostedDeviceReconcileResponse = HostedDeviceReconcileRequest & {
-  status: HostedDeviceReconcileStatus;
-  room_count: number;
-  active_room_count: number;
-};
-
 export function hostedDeviceConfig(
   env: Record<string, string | undefined> = process.env
 ): HostedDeviceConfig | null {
@@ -537,23 +521,6 @@ export async function hostedDeviceRuntimeCommand(
   );
 }
 
-export async function hostedDeviceReconcileDevice(
-  config: HostedDeviceConfig,
-  account: AccountAuthContext,
-  input: HostedDeviceReconcileRequest
-) {
-  const result = await hostedDeviceJson<unknown>(
-    config,
-    account,
-    "/v1/device-links/reconcile",
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    }
-  );
-  return parseHostedDeviceReconcileResponse(result, input);
-}
-
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -669,9 +636,6 @@ export function hostedDeviceDiagnosticPath(path: string) {
   if (pathname.startsWith("/v1/app/attachments/")) {
     return "/v1/app/attachments/:room/:message/:attachment";
   }
-  if (pathname.startsWith("/v1/device-links/")) {
-    return "/v1/device-links/:operation";
-  }
   if (
     new Set([
       "/v1/app/actions",
@@ -693,46 +657,6 @@ export function hostedDeviceDiagnosticPath(path: string) {
     return "/v1/sites/:operation";
   }
   return "/unknown";
-}
-
-function parseHostedDeviceReconcileResponse(
-  value: unknown,
-  expected: HostedDeviceReconcileRequest
-): HostedDeviceReconcileResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Device reconciliation service returned an invalid response.");
-  }
-  const record = value as Record<string, unknown>;
-  const statuses = new Set<HostedDeviceReconcileStatus>([
-    "awaiting_key_package",
-    "joining_rooms",
-    "ready",
-  ]);
-  const status = record.status;
-  const roomCount = record.room_count;
-  const activeRoomCount = record.active_room_count;
-  if (
-    record.project_id !== expected.project_id ||
-    record.target_device_id !== expected.target_device_id ||
-    typeof status !== "string" ||
-    !statuses.has(status as HostedDeviceReconcileStatus) ||
-    !Number.isSafeInteger(roomCount) ||
-    (roomCount as number) < 0 ||
-    !Number.isSafeInteger(activeRoomCount) ||
-    (activeRoomCount as number) < 0 ||
-    (activeRoomCount as number) > (roomCount as number)
-  ) {
-    throw new Error("Device reconciliation service returned an invalid response.");
-  }
-  // Project an exact allowlist so internal signer or recovery material can
-  // never cross the dashboard boundary if the service response expands.
-  return {
-    project_id: expected.project_id,
-    target_device_id: expected.target_device_id,
-    status: status as HostedDeviceReconcileStatus,
-    room_count: roomCount as number,
-    active_room_count: activeRoomCount as number,
-  };
 }
 
 async function hostedDeviceRequestError(response: Response) {

@@ -65,8 +65,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
-pub mod nip_ab;
-
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
 const LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
     "finitechat.device-link.bootstrap-request.v2";

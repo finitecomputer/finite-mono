@@ -51,13 +51,16 @@ the sources above cannot carry lands here.
 
 ## Entries
 
-### 2026-09-02 — iOS client, Electron app, and APNs push surface deleted from source
+### 2026-09-02 — iOS client, Electron app, APNs push, and NIP-AB pairing deleted from source
 
 - **Source-only change** (branch `cleanup/delete-ios-platform`): the SwiftUI
   iOS app, `finitechat-rmp`, the UniFFI pipeline, the Electron app, and the
   `finitechatd` daemon are gone; the never-shipped push-wake/token surface is
   removed from the chat server with idempotent `DROP TABLE` migrations for
-  `http_push_tokens`/`http_push_wakes` at next server boot.
+  `http_push_tokens`/`http_push_wakes`/`http_pairing_sessions` at next server
+  boot; the NIP-AB pairing rendezvous routes, the hosted-device device-link
+  admission surface, and the `nip_ab` pairing crypto module are gone with
+  them (every pairing client was iOS or Electron).
 - **Compat promises still live:** shipped Electron alphas (v0.1.4/v0.1.5,
   `finitechat-electron-macos-aarch64.zip`) poll the `finitechat-latest`
   generic update feed; those clients are now stranded by design — do not

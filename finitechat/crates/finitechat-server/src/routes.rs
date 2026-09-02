@@ -19,18 +19,15 @@ use finitechat_http::{
     AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
     ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
     ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
-    ClaimWelcomesRequest, CreatePairingSessionRequest, DeviceLivenessRecord,
-    ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest,
-    ExpirePairingSessionResponse, FINITECHAT_SERVER_CONTRACT_VERSION, GetDeviceLivenessRequest,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FINITECHAT_SERVER_CONTRACT_VERSION, GetDeviceLivenessRequest,
     GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
     GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
-    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest, HealthResponse,
-    HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
-    HttpKeyPackageInventory, HttpPairingSessionRecord, InboxSyncRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HealthResponse, HttpApplicationDeliveryEffect,
+    HttpClaimedWelcome, HttpKeyPackageClaim, HttpKeyPackageInventory, InboxSyncRequest,
     KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishPairingCompleteRequest,
-    PublishPairingOfferRequest, PublishPairingResponseRequest, PutNostrProfileRequest,
+    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PutNostrProfileRequest,
     PutNostrProfileResponse, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
     RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse,
     SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse, UpdateRoomAdminsRequest,
@@ -77,12 +74,6 @@ pub fn http_router(state: HttpServerState) -> Router {
             "/key-packages/leases/expire",
             post(expire_key_package_lease),
         )
-        .route("/pairing-sessions", post(create_pairing_session))
-        .route("/pairing-sessions/get", post(get_pairing_session))
-        .route("/pairing-sessions/offer", post(publish_pairing_offer))
-        .route("/pairing-sessions/response", post(publish_pairing_response))
-        .route("/pairing-sessions/complete", post(publish_pairing_complete))
-        .route("/pairing-sessions/expire", post(expire_pairing_session))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_public_routes,
@@ -630,54 +621,6 @@ async fn expire_key_package_lease(
     Json(request): Json<ExpireKeyPackageLeaseRequest>,
 ) -> Result<Json<ExpireKeyPackageLeaseResponse>, ServerHttpError> {
     let response = state.expire_key_package_lease(request)?;
-    Ok(Json(response))
-}
-
-async fn create_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<CreatePairingSessionRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.create_pairing_session(request)?;
-    Ok(Json(record))
-}
-
-async fn get_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<GetPairingSessionRequest>,
-) -> Result<Json<Option<HttpPairingSessionRecord>>, ServerHttpError> {
-    let record = state.get_pairing_session(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_offer(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingOfferRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_offer(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_response(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingResponseRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_response(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_complete(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingCompleteRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_complete(request)?;
-    Ok(Json(record))
-}
-
-async fn expire_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<ExpirePairingSessionRequest>,
-) -> Result<Json<ExpirePairingSessionResponse>, ServerHttpError> {
-    let response = state.expire_pairing_session(request)?;
     Ok(Json(response))
 }
 

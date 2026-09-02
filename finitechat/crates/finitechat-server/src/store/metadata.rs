@@ -2,7 +2,7 @@
 //!
 //! These tables predate the normalized delivery engine (they lived behind
 //! the legacy op-log store's connection) but they were never part of the
-//! op-log engine itself: pairing sessions, Nostr profiles and
+//! op-log engine itself: Nostr profiles and
 //! wakes, welcome claims, application-delivery effects, publish/claim
 //! idempotency, the finite KeyPackage inventory, and blob objects are
 //! current-state metadata written and read by the server layer directly.
@@ -18,9 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
-use finitechat_http::{
-    HttpApplicationDeliveryEffect, HttpPairingSessionRecord, NostrProfileRecord,
-};
+use finitechat_http::{HttpApplicationDeliveryEffect, NostrProfileRecord};
 use finitechat_transport::MessageId;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -50,6 +48,9 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), DurableStoreError> {
     // good; nothing consumes them.
     conn.execute_batch("DROP TABLE IF EXISTS http_push_tokens;")?;
     conn.execute_batch("DROP TABLE IF EXISTS http_push_wakes;")?;
+    // http_pairing_sessions held the NIP-AB native-device pairing protocol
+    // state; every pairing client (iOS, Electron) is gone.
+    conn.execute_batch("DROP TABLE IF EXISTS http_pairing_sessions;")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS http_publish_idempotency (
             idempotency_key TEXT PRIMARY KEY,
@@ -65,10 +66,6 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), DurableStoreError> {
             key_package_id_json TEXT PRIMARY KEY,
             owner_json TEXT NOT NULL,
             state_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS http_pairing_sessions (
-            pairing_session_id TEXT PRIMARY KEY,
-            record_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS http_nostr_profiles (
             account_id TEXT PRIMARY KEY,
@@ -350,39 +347,6 @@ pub(crate) fn upsert_key_package_payload(
         ],
     )?;
     Ok(())
-}
-
-pub(crate) fn upsert_pairing_session(
-    conn: &Connection,
-    record: &HttpPairingSessionRecord,
-) -> Result<(), DurableStoreError> {
-    conn.execute(
-        "INSERT INTO http_pairing_sessions (pairing_session_id, record_json)
-         VALUES (?1, ?2)
-         ON CONFLICT(pairing_session_id) DO UPDATE SET
-            record_json = excluded.record_json",
-        params![record.pairing_session_id, serde_json::to_string(record)?],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn load_pairing_sessions(
-    conn: &Connection,
-) -> Result<BTreeMap<String, HttpPairingSessionRecord>, DurableStoreError> {
-    let mut statement = conn.prepare(
-        "SELECT pairing_session_id, record_json
-         FROM http_pairing_sessions
-         ORDER BY pairing_session_id ASC",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut sessions = BTreeMap::new();
-    for row in rows {
-        let (pairing_session_id, record_json) = row?;
-        sessions.insert(pairing_session_id, serde_json::from_str(&record_json)?);
-    }
-    Ok(sessions)
 }
 
 pub(crate) fn upsert_nostr_profile(

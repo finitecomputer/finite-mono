@@ -369,45 +369,6 @@ Repair:
 
 - `POST /v1/rooms/{room_id}/repair-reports`
 
-Device linking:
-
-- `POST /v1/pairing-sessions`
-- `POST /v1/pairing-sessions/get`
-- `POST /v1/pairing-sessions/offer`
-- `POST /v1/pairing-sessions/response`
-- `POST /v1/pairing-sessions/complete`
-- `POST /v1/pairing-sessions/expire`
-
-The pairing payload is never server plaintext. These endpoints are a bounded,
-durable rendezvous for signed NIP-AB kind `24134` events. Session creation
-immutably binds one target Device and ephemeral target public key. A WorkOS
-authenticated hosted Device supplies the source descriptor out of band,
-authenticates the target offer, and publishes the encrypted account payload.
-The payload includes a random enrollment resume capability whose digest alone
-is stored by the hosted source. The target persists and reads back the account
-secret and capability together before publishing its completion event.
-
-NIP-AB is only the bounded credential grant. Room fanout and complete-history
-transfer are a durable enrollment operation that starts after credential
-storage is acknowledged and may outlive the 120-second grant. The target may
-resume that exact pending enrollment through a service-authenticated capability
-endpoint without WorkOS; the capability neither reopens nor extends the NIP-AB
-transcript. A wrong capability fails closed. `ready` requires both the source's
-exact linked Room count and the target's exact connected, hydrated Room
-projection with its canonical paired agent. See ADR 0014.
-
-A newly linked device joins existing rooms through normal add-device Commits.
-Because MLS KeyPackages are single-use, the device must replenish enough
-KeyPackages for the rooms it is being linked into; each accepted room add
-releases a distinct Welcome for that room. The replenishment loop should query
-inventory, upload at most the missing packages needed to reach the device's
-target available count, and stay under the unconsumed inventory cap.
-The account-room discovery endpoint is a control-plane helper for that worker:
-it pages over current/pending membership rows for an account and returns room
-head metadata plus the account's current devices. It is not an authorization
-oracle for identity; clients still verify Nostr-rooted MLS credentials and the
-server only orders the resulting Commits.
-
 ## History Policy
 
 V1 room history starts for a device at that device's accepted add Commit. A
@@ -420,39 +381,6 @@ provided by encrypted backup or an explicit member-to-member history-share
 message, not by making the server authoritative over old plaintext or hidden
 key access. A product that promises retained history must implement and test
 one of those paths before treating Device-store loss as recoverable.
-
-Finite's linked clients use the explicit member-to-member path. The durable
-link-fanout record is also the sole source-side history job; there is no
-target-authored bootstrap request, replay ledger, or process-local worker.
-After each Room add Commit is accepted, the source freezes that accepted
-sequence as the immutable history cutoff. Later messages use ordinary MLS sync
-and cannot change the enrollment snapshot.
-
-Authenticated or capability enrollment polling advances at most one bounded
-export phase or one page. The source first audits the server-visible Room log
-through the frozen cutoff and proves that every application entry has a
-corresponding encrypted local plaintext event. A gap aborts the transfer.
-It then plans canonical `(seq, message_id)`-ordered pages, persists every page
-boundary and digest, and emits at most one
-`finitechat.device-link.bootstrap.v2` chunk per tick with a deterministic
-idempotency key. Restart resumes from the persisted phase and boundaries.
-
-Every chunk repeats one immutable manifest: bootstrap id, source and target,
-Room metadata, canonical selection, chunk count, total event count, per-chunk
-digests, and the aggregate SHA-256 of those ordered digests. The target stages
-authenticated chunks in encrypted SQLite in the same transaction that advances
-its Room cursor. It accepts exact duplicates, durably poisons conflicts, and
-projects nothing until all indices, counts, event limits, ordering constraints,
-and digests validate. One transaction then imports all history and profiles,
-publishes authoritative Room metadata, records the exact manifest receipt, and
-removes the staged chunk bodies. A crash before that transaction exposes
-nothing; a crash after it reopens from the receipt without contacting the
-source. Source `ready` is an immutable list of those expected receipts, and the
-client declares local readiness only after observing the exact list.
-
-The V2 event names are intentionally distinct. A V1 receiver must not decode a
-V2 chunk as a standalone complete bootstrap, and a total-history client does
-not accept the old bounded V1 projection as complete history.
 
 ## Message Ids
 
@@ -580,8 +508,7 @@ boolean; later accepted room order wins. Archiving is organizational only:
 clients choose its presentation, the transcript remains readable and sendable,
 and new messages do not implicitly restore the chat. Clients retain the
 encrypted current-value projection alongside the append-only encrypted event
-journal. A same-account Device link transfers the complete journal in bounded
-V2 chunks; neither local projection is a server-side source of truth.
+journal; neither local projection is a server-side source of truth.
 
 Push policy is part of the server-visible envelope, not the encrypted semantic
 kind. V1 defaults are:

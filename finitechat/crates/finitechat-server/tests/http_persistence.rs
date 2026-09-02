@@ -11,21 +11,19 @@ use finitechat_http::{
     AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
     ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
     ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
-    ClaimWelcomesRequest, CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse,
-    ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
-    GetPairingSessionRequest, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
-    HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingSessionRecord,
-    HttpPairingSessionState, InboxSyncRequest, KeyPackageInventoryRequest, LeaveRoomRequest,
-    LeaveRoomResponse, ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse,
-    NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
-    PublishMessageRequest, PublishPairingCompleteRequest, PublishPairingOfferRequest,
-    PublishPairingResponseRequest, PutNostrProfileRequest, ReportInvalidCommitRequest,
-    ReportInvalidCommitResponse, RevokeDeviceRequest, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitInbox, SyncWaitRequest,
-    SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest,
+    GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
+    HttpKeyPackageClaim, HttpKeyPackageInventory, InboxSyncRequest, KeyPackageInventoryRequest,
+    LeaveRoomRequest, LeaveRoomResponse, ListAccountRoomDirectoryRequest,
+    ListAccountRoomDirectoryResponse, NostrProfileRecord, ObserveDeviceLivenessRequest,
+    PublishKeyPackageResponse, PublishMessageRequest, PutNostrProfileRequest,
+    ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
+    SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest,
+    SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest,
+    UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -49,8 +47,6 @@ use finitechat_transport::transport::{
 };
 use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use futures_util::StreamExt;
-use nostr::event::FinalizeEvent;
-use nostr::{EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp as NostrTimestamp};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1455,174 +1451,6 @@ async fn sqlite_batch_key_package_claim_conflict_has_no_side_effects() {
             .as_slice(),
         b"kp-conflict-laptop"
     );
-}
-
-fn pairing_event(keys: &Keys, recipient: PublicKey, content: &str) -> Vec<u8> {
-    let event = EventBuilder::new(Kind::Custom(24_134), content)
-        .tags([Tag::public_key(recipient)])
-        .custom_created_at(NostrTimestamp::now())
-        .finalize(keys)
-        .expect("signed pairing event");
-    serde_json::to_vec(&event).expect("pairing event JSON")
-}
-
-#[tokio::test]
-async fn sqlite_pairing_events_are_bound_idempotent_and_survive_restart() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let pairing_session_id = "pair-http-session".to_owned();
-    let target = Keys::generate();
-    let source = Keys::generate();
-    let attacker = Keys::generate();
-    let offer = pairing_event(&target, source.public_key(), "offer-ciphertext");
-    let attacker_offer = pairing_event(&attacker, source.public_key(), "attacker-offer");
-    let confirmation = pairing_event(&source, target.public_key(), "confirm-ciphertext");
-    let payload = pairing_event(&source, target.public_key(), "payload-ciphertext");
-    let complete = pairing_event(&target, source.public_key(), "complete-ciphertext");
-    let app = persistent_app(&db_path);
-
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions",
-        &CreatePairingSessionRequest {
-            version: 1,
-            pairing_session_id: pairing_session_id.clone(),
-            target_device_id: "ios-test".to_owned(),
-            target_public_key: target.public_key().to_hex(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let created: HttpPairingSessionRecord = read_json(response).await;
-    assert_eq!(created.state, HttpPairingSessionState::Created);
-    assert!(created.events.is_empty());
-
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/offer",
-        &PublishPairingOfferRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            offer_event: attacker_offer,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/get",
-        &GetPairingSessionRequest {
-            pairing_session_id: pairing_session_id.clone(),
-        },
-    )
-    .await;
-    let unchanged: Option<HttpPairingSessionRecord> = read_json(response).await;
-    assert_eq!(
-        unchanged
-            .expect("attacker rejection preserves session")
-            .state,
-        HttpPairingSessionState::Created
-    );
-
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/offer",
-        &PublishPairingOfferRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            offer_event: offer.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/offer",
-        &PublishPairingOfferRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            offer_event: offer,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let offered: HttpPairingSessionRecord = read_json(response).await;
-    assert_eq!(offered.events.len(), 1);
-
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/response",
-        &PublishPairingResponseRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            source_confirmation_event: confirmation.clone(),
-            payload_event: payload.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let responded: HttpPairingSessionRecord = read_json(response).await;
-    assert_eq!(responded.state, HttpPairingSessionState::ResponsePublished);
-    assert_eq!(responded.events.len(), 3);
-
-    let altered_payload = pairing_event(&source, target.public_key(), "different-payload");
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/response",
-        &PublishPairingResponseRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            source_confirmation_event: confirmation.clone(),
-            payload_event: altered_payload,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/response",
-        &PublishPairingResponseRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            source_confirmation_event: confirmation,
-            payload_event: payload,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/complete",
-        &PublishPairingCompleteRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            complete_event: complete.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/pairing-sessions/complete",
-        &PublishPairingCompleteRequest {
-            pairing_session_id: pairing_session_id.clone(),
-            complete_event: complete,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let completed: HttpPairingSessionRecord = read_json(response).await;
-    assert_eq!(completed.state, HttpPairingSessionState::Completed);
-    assert_eq!(completed.events.len(), 4);
-
-    let response = post_json(
-        app,
-        "/pairing-sessions/get",
-        &GetPairingSessionRequest { pairing_session_id },
-    )
-    .await;
-    let stored: Option<HttpPairingSessionRecord> = read_json(response).await;
-    assert_eq!(stored.expect("persisted pairing"), completed);
 }
 
 #[tokio::test]
