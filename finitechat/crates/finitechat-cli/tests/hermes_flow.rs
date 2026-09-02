@@ -377,6 +377,29 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
             .as_str()
             .is_some_and(|message_id| !message_id.is_empty())
     );
+    // Committed from a current cursor: nothing replayed, nothing skipped.
+    assert_eq!(rekeyed["cursor_after"], rekeyed["commit_seq"]);
+    assert_eq!(rekeyed["applied"], 0);
+    assert_eq!(rekeyed["skipped"].as_array().map(Vec::len), Some(0));
+    // Every run appends one line to the agent home's rekey audit trail.
+    let audit_path = std::path::Path::new(&agent_home).join("rekey-audit.jsonl");
+    let read_audit = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .expect("rekey audit trail exists")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("audit line is JSON"))
+            .collect::<Vec<_>>()
+    };
+    let audit_lines = read_audit(&audit_path);
+    assert_eq!(audit_lines.len(), 1);
+    assert_eq!(audit_lines[0]["record"], "rekey");
+    assert_eq!(audit_lines[0]["phase"], "applied");
+    assert_eq!(audit_lines[0]["schema_version"], 1);
+    assert_eq!(audit_lines[0]["room_id"], room_id);
+    assert_eq!(audit_lines[0]["commit_seq"], rekeyed["commit_seq"]);
+    assert_eq!(audit_lines[0]["cursor_after"], rekeyed["commit_seq"]);
+    assert_eq!(audit_lines[0]["applied"], 0);
+    assert_eq!(audit_lines[0]["skipped"].as_array().map(Vec::len), Some(0));
     let rekey_error = finitechat_cli::run(
         [
             "hermes".to_owned(),
@@ -394,6 +417,16 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
         rekey_error
             .to_string()
             .contains("not available on this device")
+    );
+    // A refusal is audited too.
+    let audit_lines = read_audit(&audit_path);
+    assert_eq!(audit_lines.len(), 2);
+    assert_eq!(audit_lines[1]["phase"], "refused");
+    assert_eq!(audit_lines[1]["room_id"], "room-1-unknown");
+    assert!(
+        audit_lines[1]["refusal"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not available on this device"))
     );
 
     cli_json(&[

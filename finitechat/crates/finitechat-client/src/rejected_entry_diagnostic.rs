@@ -548,6 +548,31 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Classify one rejected entry the way the production replay does: the
+/// entry's kind (coarsened to the incident vocabulary) and the error class
+/// of its failure.
+pub fn classify_rejected_entry(
+    kind: LogEntryKind,
+    error: &ClientStoreError,
+) -> (RejectedEntryKind, RejectedEntryErrorClass) {
+    (
+        rejected_entry_kind(kind),
+        classify_store_error(Some(kind), error),
+    )
+}
+
+/// The one skip rule, shared by `finitechat repair skip-entry` and the
+/// rekey's pre-commit backlog replay: an entry may be skipped only when it
+/// is an application entry whose rejection classifies as an MLS
+/// application-ciphertext failure. Nothing else is ever skippable.
+pub fn is_skippable_rejection(
+    kind: RejectedEntryKind,
+    error_class: RejectedEntryErrorClass,
+) -> bool {
+    kind == RejectedEntryKind::Application
+        && error_class == RejectedEntryErrorClass::MlsApplicationCiphertext
+}
+
 fn rejected_entry_kind(kind: LogEntryKind) -> RejectedEntryKind {
     match kind {
         LogEntryKind::Application => RejectedEntryKind::Application,

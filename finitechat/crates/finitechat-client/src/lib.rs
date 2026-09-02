@@ -1910,12 +1910,40 @@ impl FiniteChatDevice {
         self.clear_behind_server_if_healed(room_id)
     }
 
+    /// True when `entry` is this device's own Commit whose effects are
+    /// already merged: the group epoch has reached
+    /// `post_commit_epoch(entry.epoch)` and no Commit is pending. Re-paging
+    /// such an entry (a frozen cursor completing a rekey heal, an older
+    /// durable cursor restored from backup) is a no-op advance, not an
+    /// epoch error. Every other Commit shape keeps its existing rule: a
+    /// foreign Commit at an unexpected epoch, an own Commit whose epoch
+    /// has not moved, or an own Commit with a newer pending Commit all
+    /// still fail closed.
+    fn own_commit_already_merged(
+        &self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<bool, ClientError> {
+        if entry.kind != LogEntryKind::Commit
+            || entry.sender != self.device_ref
+            || entry.envelope.sender != self.device_ref
+        {
+            return Ok(false);
+        }
+        let group = self.group(room_id)?;
+        Ok(group.epoch().as_u64() >= post_commit_epoch(entry.epoch)?
+            && group.pending_commit().is_none())
+    }
+
     fn apply_commit_entry_inner(
         &mut self,
         room_id: &str,
         entry: &RoomLogEntry,
     ) -> Result<(), ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        if self.own_commit_already_merged(room_id, entry)? {
+            return Ok(());
+        }
         let post_commit_epoch = post_commit_epoch(entry.epoch)?;
         let own_device_ref = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
@@ -2077,6 +2105,18 @@ impl FiniteChatDevice {
         if let Some(entry) = self.rooms.get_mut(room_id) {
             entry.currency_verified = true;
             entry.behind_server = None;
+        }
+    }
+
+    /// Test-only: move a room's sync cursor backwards, simulating an older
+    /// durable cursor (a restored backup) that re-pages entries the group
+    /// already merged. The production cursor path is monotonic. Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn rewind_room_cursor_for_tests(&mut self, room_id: &str, seq: u64) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.last_applied_seq = seq;
         }
     }
 
@@ -5100,6 +5140,14 @@ fn apply_log_entry_in_memory(
         }
         return Ok(None);
     }
+    // An own Commit whose effects are already merged (rekey heal on a
+    // frozen cursor, older cursor restored from backup) is satisfied: the
+    // cursor advances across it without re-applying or re-reporting it.
+    if device.own_commit_already_merged(room_id, entry)? {
+        validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        device.set_last_applied_seq(room_id, entry.seq)?;
+        return Ok(None);
+    }
     // Own application messages cannot be decrypted by their sender (MLS);
     // they advance the cursor without producing an applied entry. Commits
     // are never skipped: own commits go through the pending-merge rule.
@@ -6255,6 +6303,157 @@ pub struct RuntimeRekeyRoomReport {
     pub new_epoch: u64,
     pub commit_seq: u64,
     pub message_id: MessageId,
+    /// The room's sync cursor before the rekey.
+    #[serde(default)]
+    pub cursor_before: u64,
+    /// The room's sync cursor after the rekey: `commit_seq` once the
+    /// backlog replay and the merge completed.
+    #[serde(default)]
+    pub cursor_after: u64,
+    /// Backlog entries the pre-commit replay applied and stored normally
+    /// (application messages and any Commit that applied).
+    #[serde(default)]
+    pub applied: u64,
+    /// Backlog entries the pre-commit replay skipped on evidence: application
+    /// entries whose apply at the current epoch failed with the MLS
+    /// application-ciphertext error class. Each carries its sender and
+    /// error class; nothing else is ever skipped.
+    #[serde(default)]
+    pub skipped: Vec<RuntimeRekeySkippedEntry>,
+}
+
+/// One backlog entry the rekey's pre-commit replay skipped on evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRekeySkippedEntry {
+    pub seq: u64,
+    pub sender_account_id: String,
+    pub sender_device_id: String,
+    pub message_id: MessageId,
+    pub error_class: rejected_entry_diagnostic::RejectedEntryErrorClass,
+}
+
+/// Pages read while paging the backlog above the cursor, matching the
+/// bounded replay tick. A backlog that does not fit refuses the rekey
+/// instead of being truncated.
+const MAX_REKEY_BACKLOG_PAGES: u32 = 64;
+
+/// Page a room's log strictly above `after_seq` up to the server head.
+/// Read-only. Returns the entries and the head's `next_after_seq`, or
+/// `None` when the page bound is hit or paging stalls.
+fn page_rekey_backlog<D: RuntimeDelivery>(
+    delivery: &mut D,
+    own_device: &DeviceRef,
+    room_id: &str,
+    after_seq: u64,
+) -> Result<Option<(Vec<RoomLogEntry>, u64)>, D::Error> {
+    let mut entries = Vec::new();
+    let mut after = after_seq;
+    for _ in 0..MAX_REKEY_BACKLOG_PAGES {
+        let page = delivery.sync_events(room_id, own_device, after)?;
+        entries.extend(
+            page.entries
+                .into_iter()
+                .filter(|entry| entry.seq > after_seq),
+        );
+        if !page.has_more {
+            return Ok(Some((entries, page.next_after_seq.max(after))));
+        }
+        if page.next_after_seq <= after {
+            return Ok(None);
+        }
+        after = page.next_after_seq;
+    }
+    Ok(None)
+}
+
+/// Outcome of the pre-commit backlog replay.
+#[derive(Default)]
+struct RekeyBacklogReplay {
+    applied: u64,
+    skipped: Vec<RuntimeRekeySkippedEntry>,
+}
+
+/// Replay the backlog above the cursor at the current epoch through the
+/// real apply path, before any Commit is prepared. An entry that applies
+/// is applied and stored normally. An entry whose apply fails is skipped
+/// only under the one skip rule shared with `repair skip-entry`
+/// ([`rejected_entry_diagnostic::is_skippable_rejection`]: an application
+/// entry rejected with the MLS application-ciphertext class); the cursor
+/// moves past it and the skip is recorded with its sender and error class.
+/// Any other failure (a Commit or Proposal that fails, a non-MLS error, an
+/// own-device entry that errors) refuses the rekey with a typed error and
+/// no durable change. The single save happens only when the whole backlog
+/// replayed or skipped.
+fn replay_rekey_backlog<E>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    room_id: &str,
+    entries: &[RoomLogEntry],
+    head_after_seq: u64,
+) -> Result<RekeyBacklogReplay, RuntimeWorkerError<E>> {
+    let mut replay = RekeyBacklogReplay::default();
+    if entries.is_empty() && head_after_seq <= device.last_applied_seq(room_id)? {
+        return Ok(replay);
+    }
+    let mut app_messages = Vec::new();
+    let mut app_events = Vec::new();
+    for entry in entries {
+        let applied = match apply_log_entry_in_memory(device, room_id, entry) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let (kind, error_class) =
+                    rejected_entry_diagnostic::classify_rejected_entry(entry.kind, &error);
+                if rejected_entry_diagnostic::is_skippable_rejection(kind, error_class) {
+                    device.set_last_applied_seq(room_id, entry.seq)?;
+                    replay.skipped.push(RuntimeRekeySkippedEntry {
+                        seq: entry.seq,
+                        sender_account_id: entry.sender.account_id.clone(),
+                        sender_device_id: entry.sender.device_id.clone(),
+                        message_id: entry.message_id.clone(),
+                        error_class,
+                    });
+                    continue;
+                }
+                return Err(ClientError::RekeyBacklogNotReplayable {
+                    room_id: room_id.to_string(),
+                    seq: entry.seq,
+                    kind: entry.kind,
+                    error_class,
+                }
+                .into());
+            }
+        };
+        let Some(applied) = applied else {
+            continue;
+        };
+        replay.applied = replay
+            .applied
+            .checked_add(1)
+            .ok_or(ClientError::RuntimeCounterOverflow)?;
+        if let Some(message) = stored_app_message_from_applied(
+            room_id,
+            entry.seq,
+            &entry.message_id,
+            entry.timestamp_unix_seconds,
+            &applied,
+        ) {
+            app_messages.push(message);
+        }
+        if let Some(event) = stored_app_event_from_applied(
+            room_id,
+            entry.seq,
+            &entry.message_id,
+            entry.timestamp_unix_seconds,
+            &applied,
+        ) {
+            app_events.push(event);
+        }
+    }
+    if head_after_seq > device.last_applied_seq(room_id)? {
+        device.set_last_applied_seq(room_id, head_after_seq)?;
+    }
+    store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
+    Ok(replay)
 }
 
 /// Directory pages scanned while looking up one room's server epoch.
@@ -6300,15 +6499,27 @@ fn server_room_epoch<D: RuntimeDelivery>(
 /// ratchet was rewound (its stale generations become irrelevant without
 /// replacing any device).
 ///
-/// Fails closed, with no durable change, unless the room exists locally,
-/// no Commit is pending, and the local epoch equals the server's current
-/// epoch for the room (read from the account room directory). The room's
-/// sync cursor is deliberately NOT required to be at the server head: a
-/// receiver quarantined behind undecryptable application entries can still
-/// commit, because only unapplied Commits matter and the epoch check rules
-/// those out. The cursor advances across the accepted Commit only when it
-/// is the very next entry; a frozen cursor stays where it is and the
-/// operator's sanctioned skip repair moves it to `commit_seq`.
+/// Fails closed, with no durable change, unless the room exists locally
+/// and no Commit is pending. The room's sync cursor is NOT required to be
+/// at the server head: the backlog above the cursor is replayed first, at
+/// the current epoch, through the real apply path (see
+/// [`replay_rekey_backlog`]). Healthy entries are applied and stored; only
+/// application entries rejected with the MLS application-ciphertext class
+/// are skipped, on that evidence, and listed in the report with their
+/// sender and error class. A Commit or Proposal that fails, any other
+/// error class, or an own-device entry that errors refuses the rekey with
+/// a typed error ("sync or repair first"). A backlog whose newest own
+/// Commit is already merged above a frozen cursor (a previous attempt on
+/// an older image, or a crash after acceptance) can no longer be
+/// classified honestly — past-epoch secrets are gone — so it is refused
+/// with [`ClientError::RekeyCursorBehindOwnCommit`], naming `finitechat
+/// repair skip-entry` as the sanctioned path (which crosses the merged
+/// Commit as a no-op advance).
+///
+/// Only after the backlog is fully replayed-or-skipped is the Commit
+/// prepared; the local epoch must then equal the server's current epoch
+/// (read from the account room directory), and the cursor lands on
+/// `commit_seq` through the normal merge.
 ///
 /// Durability order mirrors the add-member flow: the pending Commit is
 /// saved before submit (so a crash after acceptance is merged by the next
@@ -6322,10 +6533,34 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
     idempotency_key: impl Into<String>,
 ) -> Result<RuntimeRekeyRoomReport, RuntimeWorkerError<D::Error>> {
     validate_room_id(room_id).map_err(ClientError::from)?;
-    let previous_epoch = device.group_epoch(room_id)?;
     if device.has_pending_commit(room_id)? {
         return Err(ClientError::PendingCommitExists(room_id.to_string()).into());
     }
+    let cursor_before = device.last_applied_seq(room_id)?;
+
+    let Some((backlog, head_after_seq)) =
+        page_rekey_backlog(delivery, device.device_ref(), room_id, cursor_before)
+            .map_err(RuntimeWorkerError::Delivery)?
+    else {
+        return Err(ClientError::RekeyBacklogNotPaged {
+            room_id: room_id.to_string(),
+            cursor: cursor_before,
+        }
+        .into());
+    };
+    for entry in backlog.iter().rev() {
+        if device.own_commit_already_merged(room_id, entry)? {
+            return Err(ClientError::RekeyCursorBehindOwnCommit {
+                room_id: room_id.to_string(),
+                cursor: cursor_before,
+                commit_seq: entry.seq,
+            }
+            .into());
+        }
+    }
+    let replay = replay_rekey_backlog(store, device, room_id, &backlog, head_after_seq)?;
+
+    let previous_epoch = device.group_epoch(room_id)?;
     let account_id = device.device_ref().account_id.clone();
     let server_epoch = server_room_epoch(delivery, &account_id, room_id)
         .map_err(RuntimeWorkerError::Delivery)?
@@ -6366,9 +6601,12 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     device.merge_pending_commit_from_log(room_id, &page.entries, &message_id)?;
     let new_epoch = device.group_epoch(room_id)?;
+    // The replay left the cursor at the head; the Commit is the next entry
+    // unless something landed in between (the next sync tick pages it).
     if device.last_applied_seq(room_id)?.saturating_add(1) == accepted.seq {
         device.set_last_applied_seq(room_id, accepted.seq)?;
     }
+    let cursor_after = device.last_applied_seq(room_id)?;
     store.save_device_state(device)?;
 
     Ok(RuntimeRekeyRoomReport {
@@ -6377,6 +6615,10 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         new_epoch,
         commit_seq: accepted.seq,
         message_id,
+        cursor_before,
+        cursor_after,
+        applied: replay.applied,
+        skipped: replay.skipped,
     })
 }
 
@@ -7229,6 +7471,27 @@ pub enum ClientError {
     },
     #[error("rekey refused for {0}: the server directory does not list this room")]
     RekeyRoomNotOnServer(RoomId),
+    #[error(
+        "rekey refused for {room_id}: the backlog above cursor {cursor} could not be paged within the bound; sync the room first"
+    )]
+    RekeyBacklogNotPaged { room_id: RoomId, cursor: u64 },
+    #[error(
+        "rekey refused for {room_id}: seq {seq} ({kind:?}) failed to replay with {error_class:?}; sync or repair the room first"
+    )]
+    RekeyBacklogNotReplayable {
+        room_id: RoomId,
+        seq: u64,
+        kind: LogEntryKind,
+        error_class: rejected_entry_diagnostic::RejectedEntryErrorClass,
+    },
+    #[error(
+        "rekey refused for {room_id}: this device's own Commit at seq {commit_seq} is already merged above the frozen cursor {cursor}; complete the heal with `finitechat repair skip-entry`"
+    )]
+    RekeyCursorBehindOwnCommit {
+        room_id: RoomId,
+        cursor: u64,
+        commit_seq: u64,
+    },
     #[error("rekey Commit acceptance mismatch for {room_id}: expected {expected}, actual {actual}")]
     RekeyPreparedCommitMismatch {
         room_id: RoomId,
