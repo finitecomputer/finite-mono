@@ -4,20 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import glob
 import hashlib
 import io
 import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import unquote, urlparse
 
 
@@ -103,6 +108,45 @@ CONTRACT: dict[str, Any] = {
         "plan_name": "plan.json",
         "events_name": "events.jsonl",
     },
+    # Chat-plane incident probes (2026-08-27..29 outage: a server-side
+    # projection freeze plus an agent-side quarantine livelock both sat green
+    # under every existing section). Both probes are host-local and
+    # read-only; each names its evidence and degrades to unknown, never to a
+    # guessed green or red. (The 2026-09-01 live run deleted the third probe,
+    # the client cursor-lag detector: agent stores live only on runner hosts
+    # while server room heads live only on the app host, so no single host
+    # can ever run the comparison; see the PR that removed it.)
+    "chat_plane": {
+        # App host (ADR 0007): finitechat-server SQLite via DynamicUser
+        # StateDirectory (modules/finitechat-server.nix, litestream config in
+        # hosts/finite-lat-2/default.nix).
+        "server_database": "/var/lib/private/finite-chat/data/server.sqlite3",
+        # finitechat-server writes a durable-state snapshot every
+        # SNAPSHOT_INTERVAL_OPS accepted operations
+        # (finitechat/crates/finitechat-server/src/lib.rs). The freeze detector
+        # goes red past two un-snapshotted intervals: the Aug 27-29 freeze had
+        # accumulated ~8,000 un-snapshotted ops before anyone noticed.
+        "snapshot_interval_ops": 4_096,
+        "snapshot_gap_red_intervals": 2,
+        # Quarantine-livelock detector: healthy sync clients sit far below one
+        # POST /sync/group per second per egress address (the resident bridge
+        # syncs every ~10s); the Aug 29 livelock ran 13-25/s per client. The
+        # red line is per client IP so a full runner host of healthy agents
+        # (~0.1/s each through one egress IP) stays far below it.
+        "sync_path": "/sync/group",
+        "edge_unit": "caddy.service",
+        "access_log_glob": "/var/log/caddy/access*.log",
+        "sync_rate_window_seconds": 5,
+        "sync_rate_red_per_second": 10.0,
+        # Runner egress addresses (infra/nixos/hosts/*/default.nix) used for
+        # best-effort attribution of sync-rate clients to fleet hosts.
+        "egress_ips": {
+            "64.34.82.77": "finite-lat-1",
+            "64.34.80.19": "finite-lat-2",
+            "207.188.7.157": "finite-lat-3",
+            "152.236.34.15": "finite-lat-4",
+        },
+    },
     "hosts": {
         "finite-lat-1": {
             "mounts": ["/", "/data"],
@@ -111,26 +155,33 @@ CONTRACT: dict[str, Any] = {
                 "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F",
                 "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146",
             ],
+            # Historical combined host: it ran the app stack AND the
+            # existing-Agent Runner lane before the ADR 0007 cutover.
+            "roles": ["app", "runner"],
             "recovery": True,
         },
         "finite-lat-3": {
             "mounts": ["/", "/data", "/boot-a", "/boot-b"],
             "storage": "raid",
             "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
             "recovery": False,
         },
         # Emergency replacement app-plane host (ADR 0007, 2026-08-28): the
-        # Recovery Authority role moves here with lat1's stack.
+        # Recovery Authority role moves here with lat1's stack. It runs no
+        # Agent Runner, so runner-role gates must never score it.
         "finite-lat-2": {
             "mounts": ["/", "/data", "/boot-a", "/boot-b"],
             "storage": "raid",
             "storage_health_unit": "finite-storage-health.service",
+            "roles": ["app"],
             "recovery": True,
         },
         "finite-lat-4": {
             "mounts": ["/", "/data", "/boot-a", "/boot-b"],
             "storage": "raid",
             "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
             "recovery": False,
         },
     },
@@ -488,15 +539,22 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
     if profile is None:
         return {"hostname": hostname, "error": "host has no finite-status profile"}
 
-    raw: dict[str, Any] = {"hostname": hostname, "errors": [], "units": {}}
-    units = list(CONTRACT["healthcheck"]["services"])
-    units.extend(
-        [
-            CONTRACT["healthcheck"]["unit"],
-            CONTRACT["runner"]["service"],
-            CONTRACT["runner"]["timer"],
-        ]
-    )
+    raw: dict[str, Any] = {
+        "hostname": hostname,
+        "errors": [],
+        "units": {},
+        # Role-scoped scoring: an app host is never scored against runner
+        # invariants and a Runner host never against app-plane services
+        # (ADR 0007 split the roles across hosts). Legacy inputs without a
+        # recorded role keep the historical combined scoring.
+        "roles": profile.get("roles", ["app", "runner"]),
+    }
+    units: list[str] = []
+    if "app" in raw["roles"]:
+        units.extend(CONTRACT["healthcheck"]["services"])
+        units.append(CONTRACT["healthcheck"]["unit"])
+    if "runner" in raw["roles"]:
+        units.extend([CONTRACT["runner"]["service"], CONTRACT["runner"]["timer"]])
     if profile.get("storage_health_unit"):
         units.append(profile["storage_health_unit"])
     for unit in dict.fromkeys(units):
@@ -506,11 +564,14 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             raw["units"][unit] = {"error": str(error)}
 
     healthcheck = raw["units"].get(CONTRACT["healthcheck"]["unit"], {})
-    try:
-        raw["probes"] = collect_healthcheck_journal(healthcheck)
-    except CollectionError as error:
+    if "app" in raw["roles"]:
+        try:
+            raw["probes"] = collect_healthcheck_journal(healthcheck)
+        except CollectionError as error:
+            raw["probes"] = {}
+            raw["errors"].append(str(error))
+    else:
         raw["probes"] = {}
-        raw["errors"].append(str(error))
 
     raw["filesystems"] = []
     for mount in profile["mounts"]:
@@ -561,32 +622,33 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             raw["errors"].append(str(error))
 
     runner = CONTRACT["runner"]
-    runner_keys = {
-        runner["drain_variable"],
-        runner["artifact_variable"],
-        runner["base_url_variable"],
-        runner["model_variable"],
-    }
     raw["runner_environment"] = {}
     # Which environment files were actually readable. Projections need this to
     # tell "the environment was read and this key is genuinely absent" apart
     # from "we never got the environment" (see the FC_RUNNER_RUNTIME_ARTIFACT_ID
     # projection below).
     raw["runner_environment_files_read"] = []
-    # Match systemd EnvironmentFile ordering: the operator file loads last and
-    # may deliberately override the Nix-rendered shared role.
-    for path_key, result_key in (
-        ("shared_environment_file", "runner_shared_environment"),
-        ("environment_file", "runner_operator_environment"),
-    ):
-        try:
-            values = read_environment_values(Path(runner[path_key]), runner_keys)
-            raw[result_key] = values
-            raw["runner_environment"].update(values)
-            raw["runner_environment_files_read"].append(result_key)
-        except CollectionError as error:
-            raw[result_key] = {}
-            raw["errors"].append(str(error))
+    if "runner" in raw["roles"]:
+        runner_keys = {
+            runner["drain_variable"],
+            runner["artifact_variable"],
+            runner["base_url_variable"],
+            runner["model_variable"],
+        }
+        # Match systemd EnvironmentFile ordering: the operator file loads last and
+        # may deliberately override the shared role.
+        for path_key, result_key in (
+            ("shared_environment_file", "runner_shared_environment"),
+            ("environment_file", "runner_operator_environment"),
+        ):
+            try:
+                values = read_environment_values(Path(runner[path_key]), runner_keys)
+                raw[result_key] = values
+                raw["runner_environment"].update(values)
+                raw["runner_environment_files_read"].append(result_key)
+            except CollectionError as error:
+                raw[result_key] = {}
+                raw["errors"].append(str(error))
     return raw
 
 
@@ -859,6 +921,351 @@ def collect_lifecycle_probe(
             report["verdict"], report.get("reason")
         )
     return raw
+
+
+# Scratch-copy ceiling for the SQLite probes: a status command must stay
+# fast; a store beyond this size refuses (unknown) instead of stalling.
+SCRATCH_COPY_MAX_BYTES = 16 * (1 << 30)
+
+
+@contextlib.contextmanager
+def scratch_copy_sqlite(database: Path) -> Iterator[Path]:
+    """Yield a scratch copy of a live SQLite database, then remove it.
+
+    Follows the repo's snapshot-sqlite discipline: the live file (and its
+    WAL/SHM sidecars) is never opened directly, only an uncoordinated copy in
+    a private scratch directory is queried read-only. A torn copy from a
+    concurrent writer surfaces as a query error and degrades to unknown.
+    """
+    if not database.is_file():
+        raise CollectionError(f"{database} is not a regular file")
+    scratch = Path(tempfile.mkdtemp(prefix="finite-status-sqlite."))
+    try:
+        # Sidecar copy order matches scripts/snapshot-sqlite (db, wal, shm).
+        # The size ceiling keeps a pathological store from stalling the
+        # status command; refusing degrades the probe to unknown.
+        total_bytes = 0
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{database}{suffix}")
+            if not source.exists():
+                continue
+            if not source.is_file() or source.is_symlink():
+                raise CollectionError(f"{source} is not a regular, non-symlink file")
+            total_bytes += source.stat().st_size
+        if total_bytes > SCRATCH_COPY_MAX_BYTES:
+            raise CollectionError(
+                f"{database} is {total_bytes / (1 << 30):.1f} GiB; over the"
+                f" {SCRATCH_COPY_MAX_BYTES / (1 << 30):.0f} GiB status-probe copy ceiling"
+            )
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{database}{suffix}")
+            if not source.exists():
+                continue
+            copied = scratch / f"scratch.sqlite3{suffix}"
+            shutil.copyfile(source, copied)
+            copied.chmod(0o600)
+        yield scratch / "scratch.sqlite3"
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def sqlite3_command() -> str:
+    """Locate the sqlite3 CLI robustly.
+
+    Production hosts carry sqlite3 only under /nix/store, and a non-login
+    ssh session does not inherit the profile PATH (the 2026-09-01 live run
+    hit exactly that). Fall back to the newest nix store sqlite bin; a host
+    with neither yields a clear CollectionError so the probe degrades to
+    unknown instead of crashing.
+    """
+    found = shutil.which("sqlite3")
+    if found:
+        return found
+    # Newest-first: prefer the currently-linked version.
+    candidates = sorted(
+        glob.glob("/nix/store/*-sqlite-*-bin/bin/sqlite3"), reverse=True
+    )
+    if candidates:
+        return candidates[0]
+    raise CollectionError(
+        "sqlite3 CLI not found on PATH or under /nix/store/*-sqlite-*-bin"
+    )
+
+
+def sqlite_json_query(
+    database: Path, sql: str, timeout: int = 15
+) -> list[dict[str, Any]]:
+    """Run one read-only SQLite query on a scratch copy; -json rows back."""
+    result = run_read_only(
+        [
+            sqlite3_command(),
+            "-safe",
+            "-readonly",
+            "-batch",
+            "-init",
+            "/dev/null",
+            "-json",
+            str(database),
+            sql,
+        ],
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()
+        raise CollectionError(
+            f"read-only sqlite query failed: {detail[-1] if detail else result.returncode}"
+        )
+    payload = result.stdout.strip()
+    if not payload:
+        return []
+    try:
+        rows = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise CollectionError(
+            f"sqlite query returned unparseable rows: {error}"
+        ) from error
+    if not isinstance(rows, list):
+        raise CollectionError("sqlite query returned an unexpected row shape")
+    return rows
+
+
+def sqlite_int_query(database: Path, sql: str, timeout: int = 15) -> int:
+    rows = sqlite_json_query(database, sql, timeout=timeout)
+    if len(rows) != 1:
+        raise CollectionError("sqlite scalar query did not return exactly one row")
+    (row,) = rows
+    if len(row) != 1:
+        raise CollectionError("sqlite scalar query did not return exactly one column")
+    try:
+        return int(next(iter(row.values())))
+    except (TypeError, ValueError) as error:
+        raise CollectionError(f"sqlite scalar is not an integer: {error}") from error
+
+
+def collect_chat_server_state(hostname: str) -> dict[str, Any]:
+    """Snapshot-watermark evidence from the app host's chat server database.
+
+    `http_delivery_ops` is the accepted-operation log and
+    `http_state_snapshots_v2.last_op_seq` is the replay watermark: a server
+    that keeps accepting ops while its watermark stands still is exactly the
+    2026-08-27..29 projection freeze, so both numbers are recorded side by
+    side.
+    """
+    contract = CONTRACT["chat_plane"]
+    database = Path(contract["server_database"])
+    roles = host_roles(hostname)
+    raw: dict[str, Any] = {
+        "database": str(database),
+        "applicable": True,
+        "errors": [],
+    }
+    if roles is not None and "app" not in roles:
+        # Runner-role hosts never carry the chat server database; that is a
+        # role fact, not an evidence failure, so the probe is not-applicable.
+        raw["applicable"] = False
+        raw["reason"] = (
+            "chat server database is not on this runner-role host "
+            f"(roles: {', '.join(roles)})"
+        )
+        return raw
+    if not database.exists():
+        # App-role (or unprofiled) hosts are expected to carry this database:
+        # a missing/moved path is an evidence failure and must stay unknown,
+        # never silently not-applicable/green.
+        raw["errors"].append(
+            f"chat server database not present on this host: {database}"
+        )
+        return raw
+    try:
+        with scratch_copy_sqlite(database) as scratch:
+            raw["ops_head"] = sqlite_int_query(
+                scratch, "SELECT COALESCE(MAX(seq), 0) AS head FROM http_delivery_ops;"
+            )
+            raw["snapshot_watermark"] = sqlite_int_query(
+                scratch,
+                "SELECT COALESCE(last_op_seq, 0) AS watermark"
+                " FROM http_state_snapshots_v2 WHERE id = 1;",
+            )
+    except CollectionError as error:
+        raw["errors"].append(str(error))
+    return raw
+
+
+def parse_caddy_access_entry(line: str) -> dict[str, Any] | None:
+    """Extract (ts, remote_ip, method, path) from one Caddy JSON log line."""
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    request = entry.get("request")
+    if not isinstance(request, dict):
+        return None
+    ts = entry.get("ts")
+    if not isinstance(ts, (int, float)):
+        return None
+    return {
+        "ts": float(ts),
+        "remote_ip": request.get("remote_ip"),
+        "method": request.get("method"),
+        "path": str(request.get("uri") or "").split("?", 1)[0],
+    }
+
+
+def collect_sync_fetch_rate(now: datetime) -> dict[str, Any]:
+    """Sample POST /sync/group rates per client over a bounded recent window.
+
+    The quarantine livelock of 2026-08-29 showed as one or two egress
+    addresses re-fetching the same group sync 13-25 times per second for
+    hours. Evidence is host-local and read-only: the newest Caddy access-log
+    file when one exists, else the Caddy unit journal (the deployed edge logs
+    access entries to the default logger -> journald).
+    """
+    contract = CONTRACT["chat_plane"]
+    window = int(contract["sync_rate_window_seconds"])
+    since = now - timedelta(seconds=window)
+    raw: dict[str, Any] = {
+        "window_seconds": window,
+        "since": isoformat(since),
+        "available": False,
+        "source": None,
+        "clients": [],
+        "total": 0,
+        "errors": [],
+    }
+
+    def tally(entries: list[dict[str, Any]], source: str) -> None:
+        counts: Counter[str] = Counter()
+        for entry in entries:
+            if entry["method"] != "POST" or entry["path"] != contract["sync_path"]:
+                continue
+            if entry["ts"] < since.timestamp():
+                continue
+            address = entry["remote_ip"] or "unknown"
+            counts[address] += 1
+        raw["available"] = True
+        raw["source"] = source
+        raw["total"] = sum(counts.values())
+        raw["clients"] = [
+            {
+                "ip": address,
+                "count": count,
+                "rate_per_second": round(count / window, 2),
+                "attributed_host": contract["egress_ips"].get(address),
+            }
+            for address, count in counts.most_common()
+        ]
+
+    # Source 1: operator-configured access-log files (newest wins).
+    def log_mtime(name: str) -> float:
+        try:
+            return os.path.getmtime(name)
+        except OSError:
+            return 0.0
+
+    log_files = sorted(glob.glob(contract["access_log_glob"]), key=log_mtime)
+    for name in reversed(log_files):
+        try:
+            size = os.path.getsize(name)
+            with open(name, "rb") as stream:
+                if size > 262_144:
+                    stream.seek(size - 262_144)
+                    stream.readline()  # drop the partial first line
+                chunk = stream.read().decode("utf-8", errors="replace")
+        except OSError as error:
+            raw["errors"].append(f"cannot read {name}: {error}")
+            continue
+        entries = [
+            parsed
+            for parsed in (
+                parse_caddy_access_entry(line) for line in chunk.splitlines()
+            )
+            if parsed is not None
+        ]
+        if entries:
+            tally(entries, f"file:{name}")
+            return raw
+
+    # Source 2: the Caddy unit journal over the same bounded window.
+    try:
+        result = run_read_only(
+            [
+                "journalctl",
+                "--no-pager",
+                "--output=json",
+                f"--unit={contract['edge_unit']}",
+                f"--since={isoformat(since)}",
+                "--lines=20000",
+            ],
+            timeout=20,
+        )
+    except CollectionError as error:
+        raw["errors"].append(str(error))
+        return raw
+    if result.returncode != 0:
+        raw["errors"].append(
+            f"cannot read {contract['edge_unit']} journal: "
+            f"{result.stderr.strip() or result.returncode}"
+        )
+        return raw
+    entries = []
+    for line in result.stdout.splitlines():
+        try:
+            journal_entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = journal_entry.get("MESSAGE")
+        if not isinstance(message, str):
+            continue
+        parsed = parse_caddy_access_entry(message)
+        if parsed is not None:
+            entries.append(parsed)
+    if not entries:
+        raw["errors"].append(
+            "no access-log evidence in the "
+            f"{contract['edge_unit']} journal; the chat vhost needs a `log`"
+            " directive (infra/nixos/modules/caddy.nix) for this probe"
+        )
+        return raw
+    tally(entries, f"journal:{contract['edge_unit']}")
+    return raw
+
+
+def host_roles(hostname: str) -> list[str] | None:
+    """Contract roles for this host; None when the host has no profile.
+
+    A host without a profile is not a fleet host (e.g. a dev machine); its
+    probes keep the historical collect-everything behavior and degrade to
+    unknown with reasons rather than not-applicable.
+    """
+    profile = CONTRACT["hosts"].get(hostname)
+    if profile is None:
+        return None
+    return list(profile.get("roles", ["app", "runner"]))
+
+
+def collect_chat_plane(hostname: str, now: datetime) -> dict[str, Any]:
+    """Collect every chat-plane incident probe for this host.
+
+    Probes are role-gated like host health (ADR 0007): the chat edge and the
+    server database live on app-role hosts, so a runner-role host records the
+    sync-rate probe as not-applicable instead of failing to read a Caddy
+    journal it does not run.
+    """
+    roles = host_roles(hostname)
+    if roles is not None and "app" not in roles:
+        sync_rate: dict[str, Any] = {
+            "applicable": False,
+            "reason": (
+                "chat edge is not on this runner-role host "
+                f"(roles: {', '.join(roles)})"
+            ),
+        }
+    else:
+        sync_rate = collect_sync_fetch_rate(now)
+    return {
+        "server": collect_chat_server_state(hostname),
+        "sync_rate": sync_rate,
+    }
 
 
 def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1159,42 +1566,49 @@ def build_host_health(
             "error": "host evidence unavailable" if raw is None else raw["error"],
         }
     statuses: list[str] = []
+    roles = raw.get("roles") or ["app", "runner"]
     units = []
-    for unit in CONTRACT["healthcheck"]["services"]:
-        properties = raw.get("units", {}).get(unit, {"error": "not observed"})
-        status = unit_status(properties, active_required=True)
-        statuses.append(status)
-        units.append(
-            {
-                "unit": unit,
-                "status": status,
-                "active_state": properties.get("ActiveState"),
-                "sub_state": properties.get("SubState"),
-                "error": properties.get("error"),
-            }
-        )
+    if "app" in roles:
+        for unit in CONTRACT["healthcheck"]["services"]:
+            properties = raw.get("units", {}).get(unit, {"error": "not observed"})
+            status = unit_status(properties, active_required=True)
+            statuses.append(status)
+            units.append(
+                {
+                    "unit": unit,
+                    "status": status,
+                    "active_state": properties.get("ActiveState"),
+                    "sub_state": properties.get("SubState"),
+                    "error": properties.get("error"),
+                }
+            )
 
     health_unit = CONTRACT["healthcheck"]["unit"]
     health_props = raw.get("units", {}).get(health_unit, {"error": "not observed"})
-    health_status = unit_status(health_props, active_required=False)
-    statuses.append(health_status)
+    if "app" in roles:
+        health_status = unit_status(health_props, active_required=False)
+        statuses.append(health_status)
+    else:
+        health_status = "green"
+        health_props = {"not_applicable": True}
     probes = []
-    for name, endpoint in CONTRACT["healthcheck"]["probes"].items():
-        observed = raw.get("probes", {}).get(name)
-        status = (
-            "green"
-            if observed == "OK"
-            else ("red" if observed == "FAIL" else "unknown")
-        )
-        statuses.append(status)
-        probes.append(
-            {
-                "name": name,
-                "endpoint": endpoint,
-                "recorded_result": observed,
-                "status": status,
-            }
-        )
+    if "app" in roles:
+        for name, endpoint in CONTRACT["healthcheck"]["probes"].items():
+            observed = raw.get("probes", {}).get(name)
+            status = (
+                "green"
+                if observed == "OK"
+                else ("red" if observed == "FAIL" else "unknown")
+            )
+            statuses.append(status)
+            probes.append(
+                {
+                    "name": name,
+                    "endpoint": endpoint,
+                    "recorded_result": observed,
+                    "status": status,
+                }
+            )
 
     filesystems = []
     for filesystem in raw.get("filesystems", []):
@@ -1242,107 +1656,116 @@ def build_host_health(
     statuses.append(containers["status"])
 
     runner_contract = CONTRACT["runner"]
-    timer_props = raw.get("units", {}).get(runner_contract["timer"], {})
-    timer_status = unit_status(timer_props, active_required=True)
-    runner_env = raw.get("runner_environment", {})
-    drain = runner_env.get(runner_contract["drain_variable"])
-    if drain is None:
-        drain_status = "unknown"
+    if "runner" not in roles:
+        # ADR 0007: the app host runs no Agent Runner. Runner invariants are
+        # displayed as not applicable instead of a wall of not-found unknowns.
+        runner = {
+            "applicable": False,
+            "timer_unit": runner_contract["timer"],
+        }
     else:
-        drain_status = "green" if drain.lower() == "false" else "red"
-    pin = runner_env.get(runner_contract["artifact_variable"])
-    # Status/state pair, mirroring finite_private_model_status/_state below.
-    # An absent FC_RUNNER_RUNTIME_ARTIFACT_ID is a halt-new-agents condition
-    # (the Runner fails closed without a pin), so once the environment itself
-    # was readable it must render red/"absent" — never the same plain unknown
-    # an unprobeable host gets. Legacy inputs predating
-    # runner_environment_files_read keep the conservative unknown.
-    if not pin:
-        if raw.get("runner_environment_files_read"):
-            pin_status = "red"
-            pin_state = "absent"
+        timer_props = raw.get("units", {}).get(runner_contract["timer"], {})
+        timer_status = unit_status(timer_props, active_required=True)
+        runner_env = raw.get("runner_environment", {})
+        drain = runner_env.get(runner_contract["drain_variable"])
+        if drain is None:
+            drain_status = "unknown"
         else:
+            drain_status = "green" if drain.lower() == "false" else "red"
+        pin = runner_env.get(runner_contract["artifact_variable"])
+        # Status/state pair, mirroring finite_private_model_status/_state below.
+        # An absent FC_RUNNER_RUNTIME_ARTIFACT_ID is a halt-new-agents condition
+        # (the Runner fails closed without a pin), so once the environment itself
+        # was readable it must render red/"absent" — never the same plain unknown
+        # an unprobeable host gets. Legacy inputs predating
+        # runner_environment_files_read keep the conservative unknown.
+        if not pin:
+            if raw.get("runner_environment_files_read"):
+                pin_status = "red"
+                pin_state = "absent"
+            else:
+                pin_status = "unknown"
+                pin_state = "unresolved"
+        elif not target_id:
             pin_status = "unknown"
             pin_state = "unresolved"
-    elif not target_id:
-        pin_status = "unknown"
-        pin_state = "unresolved"
-    else:
-        pin_status = "green" if pin == target_id else "red"
-        pin_state = "matched" if pin == target_id else "mismatched"
-    finite_private_base_url = runner_env.get(runner_contract["base_url_variable"])
-    if finite_private_base_url is None:
-        finite_private_base_url_status = "unknown"
-    else:
-        finite_private_base_url_status = (
-            "green"
-            if finite_private_base_url == runner_contract["expected_base_url"]
-            else "red"
+        else:
+            pin_status = "green" if pin == target_id else "red"
+            pin_state = "matched" if pin == target_id else "mismatched"
+        finite_private_base_url = runner_env.get(runner_contract["base_url_variable"])
+        if finite_private_base_url is None:
+            finite_private_base_url_status = "unknown"
+        else:
+            finite_private_base_url_status = (
+                "green"
+                if finite_private_base_url == runner_contract["expected_base_url"]
+                else "red"
+            )
+        finite_private_model = runner_env.get(runner_contract["model_variable"])
+        shared_model = raw.get("runner_shared_environment", {}).get(
+            runner_contract["model_variable"]
         )
-    finite_private_model = runner_env.get(runner_contract["model_variable"])
-    shared_model = raw.get("runner_shared_environment", {}).get(
-        runner_contract["model_variable"]
-    )
-    operator_model = raw.get("runner_operator_environment", {}).get(
-        runner_contract["model_variable"]
-    )
-    if finite_private_model is None:
-        finite_private_model_status = "unknown"
-        finite_private_model_state = "unresolved"
-    elif finite_private_model == runner_contract["expected_model"]:
-        finite_private_model_status = "green"
-        finite_private_model_state = "canonical"
-    elif finite_private_model in runner_contract["mixed_version_models"]:
-        if shared_model is None:
+        operator_model = raw.get("runner_operator_environment", {}).get(
+            runner_contract["model_variable"]
+        )
+        if finite_private_model is None:
             finite_private_model_status = "unknown"
-            finite_private_model_state = "unresolved-shared-role"
-        elif (
-            shared_model == runner_contract["expected_model"]
-            and operator_model == finite_private_model
-        ):
-            finite_private_model_status = "red"
-            finite_private_model_state = "stale-operator-override"
-        elif shared_model in runner_contract["mixed_version_models"]:
-            # Before the canonical Runner role is deployed, the historical
-            # request name is a deliberately served mixed-version alias. It
-            # must not block the independent scheduler promotion.
+            finite_private_model_state = "unresolved"
+        elif finite_private_model == runner_contract["expected_model"]:
             finite_private_model_status = "green"
-            finite_private_model_state = "mixed-version-compatibility"
+            finite_private_model_state = "canonical"
+        elif finite_private_model in runner_contract["mixed_version_models"]:
+            if shared_model is None:
+                finite_private_model_status = "unknown"
+                finite_private_model_state = "unresolved-shared-role"
+            elif (
+                shared_model == runner_contract["expected_model"]
+                and operator_model == finite_private_model
+            ):
+                finite_private_model_status = "red"
+                finite_private_model_state = "stale-operator-override"
+            elif shared_model in runner_contract["mixed_version_models"]:
+                # Before the canonical Runner role is deployed, the historical
+                # request name is a deliberately served mixed-version alias. It
+                # must not block the independent scheduler promotion.
+                finite_private_model_status = "green"
+                finite_private_model_state = "mixed-version-compatibility"
+            else:
+                finite_private_model_status = "red"
+                finite_private_model_state = "unexpected-shared-role"
         else:
             finite_private_model_status = "red"
-            finite_private_model_state = "unexpected-shared-role"
-    else:
-        finite_private_model_status = "red"
-        finite_private_model_state = "unexpected"
-    statuses.extend(
-        [
-            timer_status,
-            drain_status,
-            pin_status,
-            finite_private_base_url_status,
-            finite_private_model_status,
-        ]
-    )
-    runner = {
-        "timer_unit": runner_contract["timer"],
-        "timer_status": timer_status,
-        "drain": drain,
-        "drain_status": drain_status,
-        "artifact_pin": pin,
-        "target_artifact_id": target_id,
-        "pin_status": pin_status,
-        "pin_state": pin_state,
-        "finite_private_base_url": finite_private_base_url,
-        "finite_private_base_url_status": finite_private_base_url_status,
-        "finite_private_model": finite_private_model,
-        "finite_private_model_status": finite_private_model_status,
-        "finite_private_model_state": finite_private_model_state,
-        "finite_private_shared_model": shared_model,
-        "finite_private_operator_model": operator_model,
-    }
+            finite_private_model_state = "unexpected"
+        statuses.extend(
+            [
+                timer_status,
+                drain_status,
+                pin_status,
+                finite_private_base_url_status,
+                finite_private_model_status,
+            ]
+        )
+        runner = {
+            "timer_unit": runner_contract["timer"],
+            "timer_status": timer_status,
+            "drain": drain,
+            "drain_status": drain_status,
+            "artifact_pin": pin,
+            "target_artifact_id": target_id,
+            "pin_status": pin_status,
+            "pin_state": pin_state,
+            "finite_private_base_url": finite_private_base_url,
+            "finite_private_base_url_status": finite_private_base_url_status,
+            "finite_private_model": finite_private_model,
+            "finite_private_model_status": finite_private_model_status,
+            "finite_private_model_state": finite_private_model_state,
+            "finite_private_shared_model": shared_model,
+            "finite_private_operator_model": operator_model,
+        }
     return {
         "status": combine_status(statuses),
         "hostname": raw.get("hostname"),
+        "roles": roles,
         "healthcheck": {
             "unit": health_unit,
             "status": health_status,
@@ -1534,6 +1957,103 @@ def build_rollout(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def build_chat_plane(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """Score the chat-plane incident probes collected for this host.
+
+    Every probe names its evidence. Where the evidence source is not on this
+    host (server database / chat edge live on the app host) the probe reads
+    not-applicable rather than guessing; where evidence should exist but
+    cannot be read, it reads unknown — unknown is a
+    displayed state, never hidden, and never silently green.
+    """
+    if raw is None:
+        return {"status": "unknown", "error": "chat-plane evidence unavailable"}
+    contract = CONTRACT["chat_plane"]
+    statuses: list[str] = []
+
+    server = dict(raw.get("server") or {})
+    watermark: dict[str, Any]
+    if not server.get("applicable"):
+        watermark = {
+            "status": "green",
+            "applicable": False,
+            "state": "not-applicable",
+            "reason": server.get("reason", "chat server database not on this host"),
+        }
+    elif server.get("errors"):
+        watermark = {
+            "status": "unknown",
+            "applicable": True,
+            "database": server.get("database"),
+            "errors": server["errors"],
+        }
+    else:
+        head = int(server.get("ops_head", 0))
+        mark = int(server.get("snapshot_watermark", 0))
+        gap = head - mark
+        interval = int(contract["snapshot_interval_ops"])
+        limit = interval * int(contract["snapshot_gap_red_intervals"])
+        watermark = {
+            "status": "red" if gap > limit else "green",
+            "applicable": True,
+            "database": server.get("database"),
+            "ops_head": head,
+            "snapshot_watermark": mark,
+            "gap_ops": gap,
+            "snapshot_interval_ops": interval,
+            "gap_red_ops": limit,
+            "gap_intervals": round(gap / interval, 2),
+        }
+    statuses.append(watermark["status"])
+
+    rate = dict(raw.get("sync_rate") or {})
+    sync: dict[str, Any]
+    if rate.get("applicable") is False:
+        sync = {
+            "status": "green",
+            "available": False,
+            "applicable": False,
+            "state": "not-applicable",
+            "reason": rate.get(
+                "reason", "chat edge is not on this host"
+            ),
+        }
+    elif rate.get("available"):
+        hot = [
+            client
+            for client in rate.get("clients", [])
+            if float(client.get("rate_per_second", 0))
+            >= float(contract["sync_rate_red_per_second"])
+        ]
+        sync = {
+            "status": "red" if hot else "green",
+            "available": True,
+            "source": rate.get("source"),
+            "window_seconds": rate.get("window_seconds"),
+            "since": rate.get("since"),
+            "path": contract["sync_path"],
+            "red_per_second": contract["sync_rate_red_per_second"],
+            "total_requests": rate.get("total", 0),
+            "clients": rate.get("clients", []),
+            "over_threshold": hot,
+        }
+    else:
+        sync = {
+            "status": "unknown",
+            "available": False,
+            "window_seconds": rate.get("window_seconds"),
+            "path": contract["sync_path"],
+            "errors": rate.get("errors") or ["sync-rate evidence unavailable"],
+        }
+    statuses.append(sync["status"])
+
+    return {
+        "status": combine_status(statuses),
+        "server_watermark": watermark,
+        "sync_fetch_rate": sync,
+    }
+
+
 def report_exit_code(report: dict[str, Any]) -> int:
     statuses = [section["status"] for section in report["sections"].values()]
     if "red" in statuses:
@@ -1554,6 +2074,7 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         "host_health": build_host_health(raw.get("host_health"), target_id),
         "recovery_boundary": build_recovery(raw.get("recovery"), now),
         "rollout_state": build_rollout(raw.get("rollout")),
+        "chat_plane": build_chat_plane(raw.get("chat_plane"), now),
     }
     report = {
         "schema_version": "finite.status.v1",
@@ -1734,23 +2255,28 @@ def render_human(report: dict[str, Any]) -> str:
             f"Kata VMs {containers.get('kata_running')}/{containers.get('kata_total')} running"
         )
         runner = health["runner"]
-        # Only a CONFIRMED absence reads as unset; an unprobeable environment
-        # stays honest about never having seen the value.
-        pin_display = runner["artifact_pin"] or (
-            "unset" if runner["pin_state"] == "absent" else "unknown"
-        )
-        lines.append(
-            f"  runner: timer {badge(runner['timer_status'])}; drain={runner['drain'] or 'unknown'} "
-            f"{badge(runner['drain_status'])}; pin={pin_display} "
-            f"{badge(runner['pin_status'])} ({runner['pin_state']})"
-        )
-        lines.append(
-            f"    Finite Private: model={runner['finite_private_model'] or 'unknown'} "
-            f"{badge(runner['finite_private_model_status'])} "
-            f"({runner['finite_private_model_state']}); "
-            f"route={runner['finite_private_base_url'] or 'unknown'} "
-            f"{badge(runner['finite_private_base_url_status'])}"
-        )
+        if runner.get("applicable") is False:
+            lines.append(
+                "  runner: not applicable on this host (app-plane host, ADR 0007)"
+            )
+        else:
+            # Only a CONFIRMED absence reads as unset; an unprobeable environment
+            # stays honest about never having seen the value.
+            pin_display = runner["artifact_pin"] or (
+                "unset" if runner["pin_state"] == "absent" else "unknown"
+            )
+            lines.append(
+                f"  runner: timer {badge(runner['timer_status'])}; drain={runner['drain'] or 'unknown'} "
+                f"{badge(runner['drain_status'])}; pin={pin_display} "
+                f"{badge(runner['pin_status'])} ({runner['pin_state']})"
+            )
+            lines.append(
+                f"    Finite Private: model={runner['finite_private_model'] or 'unknown'} "
+                f"{badge(runner['finite_private_model_status'])} "
+                f"({runner['finite_private_model_state']}); "
+                f"route={runner['finite_private_base_url'] or 'unknown'} "
+                f"{badge(runner['finite_private_base_url_status'])}"
+            )
     else:
         lines.append(f"  {health.get('error', 'unavailable')}")
     lines.append("")
@@ -1790,6 +2316,59 @@ def render_human(report: dict[str, Any]) -> str:
         )
     else:
         lines.append(f"  {rollout.get('error', 'unavailable')}")
+    lines.append("")
+
+    chat = sections["chat_plane"]
+    lines.append(f"Chat plane {badge(chat['status'])}")
+    if not {"server_watermark", "sync_fetch_rate"} <= chat.keys():
+        # Error-only section: no chat-plane evidence was collected at all.
+        lines.append(f"  {chat.get('error', 'chat-plane evidence unavailable')}")
+        lines.extend(
+            [
+                "",
+                "Exit codes: 0 all green; 1 any red; 2 could not determine (when nothing is red).",
+            ]
+        )
+        return "\n".join(lines)
+    watermark = chat["server_watermark"]
+    # Applicable-but-errored probes (e.g. the sqlite3 CLI missing from a
+    # non-login ssh PATH) carry no numbers: render unknown-with-reason,
+    # never a traceback (2026-09-01 live-run crash).
+    if watermark.get("applicable") and "ops_head" in watermark:
+        lines.append(
+            f"  server watermark: ops head {watermark['ops_head']}; "
+            f"snapshot {watermark['snapshot_watermark']}; "
+            f"gap {watermark['gap_ops']} ops "
+            f"(~{watermark['gap_intervals']} intervals of "
+            f"{watermark['snapshot_interval_ops']}) {badge(watermark['status'])}"
+        )
+    elif watermark.get("state") == "not-applicable":
+        lines.append(f"  server watermark: not applicable ({watermark['reason']})")
+    else:
+        detail = watermark.get("errors") or [watermark.get("error", "unavailable")]
+        lines.append(f"  server watermark {badge(watermark['status'])}: {detail[0]}")
+
+    sync = chat["sync_fetch_rate"]
+    if sync.get("available"):
+        lines.append(
+            f"  sync fetch rate: {sync['total_requests']} POST {sync['path']} in "
+            f"{sync['window_seconds']}s from {sync['source']} "
+            f"(red >= {sync['red_per_second']}/s per client) {badge(sync['status'])}"
+        )
+        for client in sync.get("clients", [])[:3]:
+            attributed = client.get("attributed_host")
+            hot = client in sync.get("over_threshold", [])
+            lines.append(
+                f"    {client['ip']}"
+                f"{f' ({attributed})' if attributed else ''}: "
+                f"{client['rate_per_second']}/s" + (" [RED]" if hot else "")
+            )
+    elif sync.get("state") == "not-applicable":
+        lines.append(f"  sync fetch rate: not applicable ({sync['reason']})")
+    else:
+        detail = sync.get("errors") or ["sync-rate evidence unavailable"]
+        lines.append(f"  sync fetch rate {badge(sync['status'])}: {detail[0]}")
+
     lines.extend(
         [
             "",
@@ -1813,6 +2392,7 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     raw["lifecycle_probe"] = collect_lifecycle_probe(
         raw.get("core", {}).get("runtimes", []), hostname
     )
+    raw["chat_plane"] = collect_chat_plane(hostname, now)
     return raw, now
 
 
@@ -1853,6 +2433,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "host_health": {"status": "unknown", "error": str(error)},
                 "recovery_boundary": {"status": "unknown", "error": str(error)},
                 "rollout_state": {"status": "unknown", "error": str(error)},
+                "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
     if options.json:

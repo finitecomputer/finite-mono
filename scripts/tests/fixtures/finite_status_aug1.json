@@ -1,5 +1,30 @@
 {
   "now": "2026-08-01T14:00:00Z",
+  "chat_plane": {
+    "server": {
+      "database": "/var/lib/private/finite-chat/data/server.sqlite3",
+      "applicable": true,
+      "ops_head": 206563,
+      "snapshot_watermark": 204801,
+      "errors": []
+    },
+    "sync_rate": {
+      "window_seconds": 5,
+      "since": "2026-08-01T13:59:55Z",
+      "available": true,
+      "source": "journal:caddy.service",
+      "total": 2,
+      "clients": [
+        {
+          "ip": "207.188.7.157",
+          "count": 2,
+          "rate_per_second": 0.4,
+          "attributed_host": "finite-lat-3"
+        }
+      ],
+      "errors": []
+    }
+  },
   "core": {
     "artifacts": [
       {
@@ -16,10 +41,26 @@
       }
     ],
     "distribution": [
-      {"source_host_id": "finite-lat-1", "version_label": "2026-07-22.1", "count": 13},
-      {"source_host_id": "finite-lat-1", "version_label": "2026-08-01.1", "count": 21},
-      {"source_host_id": "finite-lat-3", "version_label": "2026-07-22.1", "count": 21},
-      {"source_host_id": "finite-lat-3", "version_label": "2026-08-01.1", "count": 3}
+      {
+        "source_host_id": "finite-lat-1",
+        "version_label": "2026-07-22.1",
+        "count": 13
+      },
+      {
+        "source_host_id": "finite-lat-1",
+        "version_label": "2026-08-01.1",
+        "count": 21
+      },
+      {
+        "source_host_id": "finite-lat-3",
+        "version_label": "2026-07-22.1",
+        "count": 21
+      },
+      {
+        "source_host_id": "finite-lat-3",
+        "version_label": "2026-08-01.1",
+        "count": 3
+      }
     ],
     "runtimes": [],
     "runtime_groups": [
@@ -79,16 +120,61 @@
     "hostname": "finite-lat-1",
     "errors": [],
     "units": {
-      "finite-saas-core.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "podman-finite-saas-dashboard.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "finitechat-server.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "finitechat-hosted-device.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "finite-brain-app.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "finite-saas-sites.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "prometheus-node-exporter.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running"},
-      "finite-healthcheck.service": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0", "InvocationID": "fixture-healthcheck"},
-      "finite-saas-runner.service": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
-      "finite-saas-runner.timer": {"LoadState": "loaded", "ActiveState": "active", "SubState": "waiting"}
+      "finite-saas-core.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "podman-finite-saas-dashboard.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "finitechat-server.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "finitechat-hosted-device.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "finite-brain-app.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "finite-saas-sites.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "prometheus-node-exporter.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "finite-healthcheck.service": {
+        "LoadState": "loaded",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "Result": "success",
+        "ExecMainStatus": "0",
+        "InvocationID": "fixture-healthcheck"
+      },
+      "finite-saas-runner.service": {
+        "LoadState": "loaded",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "Result": "success",
+        "ExecMainStatus": "0"
+      },
+      "finite-saas-runner.timer": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "waiting"
+      }
     },
     "probes": {
       "finite-saas-core": "OK",
@@ -100,18 +186,39 @@
       "node-exporter": "OK"
     },
     "filesystems": [
-      {"mount": "/", "total_bytes": 480000000000, "available_bytes": 300000000000, "used_percent": 37.5},
-      {"mount": "/data", "total_bytes": 1900000000000, "available_bytes": 1500000000000, "used_percent": 21.1}
+      {
+        "mount": "/",
+        "total_bytes": 480000000000,
+        "available_bytes": 300000000000,
+        "used_percent": 37.5
+      },
+      {
+        "mount": "/data",
+        "total_bytes": 1900000000000,
+        "available_bytes": 1500000000000,
+        "used_percent": 21.1
+      }
     ],
     "storage": {
       "mode": "single-disk",
       "md_arrays": [],
       "disks": [
-        {"path": "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F", "present": true},
-        {"path": "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146", "present": true}
+        {
+          "path": "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F",
+          "present": true
+        },
+        {
+          "path": "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146",
+          "present": true
+        }
       ]
     },
-    "containers": {"podman_running": 7, "podman_total": 7, "kata_running": 28, "kata_total": 30},
+    "containers": {
+      "podman_running": 7,
+      "podman_total": 7,
+      "kata_running": 28,
+      "kata_total": 30
+    },
     "runner_environment": {
       "FC_RUNNER_DRAIN": "false",
       "FC_RUNNER_RUNTIME_ARTIFACT_ID": "finite-agent-runtime-2026-08-01.1",
@@ -133,26 +240,86 @@
       "manifest_failures": []
     },
     "borg_last_success_epoch": 1785589200,
-    "borg_job_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
-    "borg_health_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"},
+    "borg_job_unit": {
+      "LoadState": "loaded",
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "Result": "success",
+      "ExecMainStatus": "0"
+    },
+    "borg_health_unit": {
+      "LoadState": "loaded",
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "Result": "success",
+      "ExecMainStatus": "0"
+    },
     "litestream_last_success_epoch": 1785592200,
     "litestream_service_units": {
-      "finite-litestream-finite-chat-server.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Result": "success", "ExecMainStatus": "0"},
-      "finite-litestream-finite-brain.service": {"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Result": "success", "ExecMainStatus": "0"}
+      "finite-litestream-finite-chat-server.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running",
+        "Result": "success",
+        "ExecMainStatus": "0"
+      },
+      "finite-litestream-finite-brain.service": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running",
+        "Result": "success",
+        "ExecMainStatus": "0"
+      }
     },
-    "litestream_health_unit": {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "Result": "success", "ExecMainStatus": "0"}
+    "litestream_health_unit": {
+      "LoadState": "loaded",
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "Result": "success",
+      "ExecMainStatus": "0"
+    }
   },
   "rollout": {
     "exists": true,
     "plan_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "plan": {
-      "planned": [{}, {}, {}, {}, {}, {}, {}]
+      "planned": [
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        {}
+      ]
     },
     "events": [
-      {"event": "start", "phase": "execute", "timestamp": "2026-08-01T10:30:00Z"},
-      {"event": "entry_postflight", "phase": "execute", "status": "succeeded", "agent_runtime_id": "runtime-lat1-straggler-01", "timestamp": "2026-08-01T10:32:00Z"},
-      {"event": "entry_postflight", "phase": "execute", "status": "succeeded", "agent_runtime_id": "runtime-lat1-straggler-02", "timestamp": "2026-08-01T10:34:00Z"},
-      {"event": "final", "phase": "execute", "status": "failure", "exit_code": 17, "timestamp": "2026-08-01T10:35:00Z"}
+      {
+        "event": "start",
+        "phase": "execute",
+        "timestamp": "2026-08-01T10:30:00Z"
+      },
+      {
+        "event": "entry_postflight",
+        "phase": "execute",
+        "status": "succeeded",
+        "agent_runtime_id": "runtime-lat1-straggler-01",
+        "timestamp": "2026-08-01T10:32:00Z"
+      },
+      {
+        "event": "entry_postflight",
+        "phase": "execute",
+        "status": "succeeded",
+        "agent_runtime_id": "runtime-lat1-straggler-02",
+        "timestamp": "2026-08-01T10:34:00Z"
+      },
+      {
+        "event": "final",
+        "phase": "execute",
+        "status": "failure",
+        "exit_code": 17,
+        "timestamp": "2026-08-01T10:35:00Z"
+      }
     ]
   },
   "lifecycle_probe": {
@@ -160,9 +327,18 @@
     "schema": "finite.lifecycle-probe.v1",
     "available": true,
     "agents": {
-      "runtime-lat1-target-01": {"verdict": "operable", "reason": null},
-      "runtime-lat1-straggler-01": {"verdict": "inoperable", "reason": "orphaned_task"},
-      "runtime-lat1-target-02": {"verdict": "unknown", "reason": "task_list_error"}
+      "runtime-lat1-target-01": {
+        "verdict": "operable",
+        "reason": null
+      },
+      "runtime-lat1-straggler-01": {
+        "verdict": "inoperable",
+        "reason": "orphaned_task"
+      },
+      "runtime-lat1-target-02": {
+        "verdict": "unknown",
+        "reason": "task_list_error"
+      }
     },
     "errors": []
   }

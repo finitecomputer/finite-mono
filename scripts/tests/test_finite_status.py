@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 import subprocess
 import tempfile
@@ -302,7 +303,7 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(runner["pin_status"], "unknown")
         self.assertEqual(runner["pin_state"], "unresolved")
 
-    def test_json_has_four_sections_and_red_exit(self) -> None:
+    def test_json_has_five_sections_and_red_exit(self) -> None:
         result = subprocess.run(
             [str(COMMAND), "--json", "--fixture", str(FIXTURE)],
             cwd=ROOT,
@@ -319,6 +320,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "host_health",
                 "recovery_boundary",
                 "rollout_state",
+                "chat_plane",
             },
         )
         self.assertEqual(payload["overall_status"], "red")
@@ -332,6 +334,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "host_health",
                 "recovery_boundary",
                 "rollout_state",
+                "chat_plane",
             )
         }
         report = {"sections": sections}
@@ -896,6 +899,667 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(len(collected["storage"]["disks"]), 2)
         self.assertTrue(all(disk["present"] for disk in collected["storage"]["disks"]))
 
+    # ------------------------------------------------------------------
+    # Chat-plane incident probes (2026-08-27..29 outage).
 
-if __name__ == "__main__":
-    unittest.main()
+    def chat_raw(
+        self,
+        *,
+        server: dict[str, object] | None = None,
+        sync_rate: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "server": server
+            if server is not None
+            else {
+                "applicable": True,
+                "ops_head": 206563,
+                "snapshot_watermark": 204801,
+                "errors": [],
+            },
+            "sync_rate": sync_rate
+            if sync_rate is not None
+            else {
+                "available": True,
+                "source": "journal:caddy.service",
+                "window_seconds": 5,
+                "since": "2026-08-01T13:59:55Z",
+                "total": 2,
+                "clients": [
+                    {
+                        "ip": "207.188.7.157",
+                        "count": 2,
+                        "rate_per_second": 0.4,
+                        "attributed_host": "finite-lat-3",
+                    }
+                ],
+                "errors": [],
+            },
+        }
+
+    def test_watermark_gap_beyond_two_intervals_is_red_with_numbers(self) -> None:
+        # The Aug 27-29 freeze class: ops keep being accepted while the
+        # durable-state watermark stands still (~8,000 un-snapshotted ops).
+        raw = self.chat_raw(
+            server={
+                "applicable": True,
+                "ops_head": 206563,
+                "snapshot_watermark": 198000,
+                "errors": [],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        watermark = report["server_watermark"]
+        self.assertEqual(watermark["status"], "red")
+        self.assertEqual(watermark["gap_ops"], 206563 - 198000)
+        self.assertEqual(watermark["snapshot_interval_ops"], 4096)
+        self.assertEqual(watermark["gap_red_ops"], 8192)
+        self.assertGreater(watermark["gap_intervals"], 2.0)
+        self.assertEqual(report["status"], "red")
+        output = finite_status.render_human(
+            {
+                "generated_at": "2026-08-01T14:00:00Z",
+                "exit_code": 1,
+                "overall_status": "red",
+                "sections": {
+                    name: {"status": "green"}
+                    for name in (
+                        "fleet_convergence",
+                        "host_health",
+                        "recovery_boundary",
+                        "rollout_state",
+                    )
+                }
+                | {"chat_plane": report},
+            }
+        )
+        self.assertIn("gap 8563 ops (~2.09 intervals of 4096) [RED]", output)
+
+    def test_watermark_within_two_intervals_is_green(self) -> None:
+        report = finite_status.build_chat_plane(
+            self.chat_raw(), finite_status.parse_time(raw_sync_since())
+        )
+        self.assertEqual(report["server_watermark"]["status"], "green")
+        self.assertEqual(report["server_watermark"]["gap_ops"], 1762)
+
+    def test_watermark_probe_errors_read_unknown_never_crash(self) -> None:
+        raw = self.chat_raw(
+            server={
+                "applicable": True,
+                "database": "/var/lib/private/finite-chat/data/server.sqlite3",
+                "errors": ["read-only sqlite query failed: disk image is malformed"],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        self.assertEqual(report["server_watermark"]["status"], "unknown")
+        self.assertEqual(report["status"], "unknown")
+
+    def test_watermark_not_applicable_off_the_app_host(self) -> None:
+        raw = self.chat_raw(
+            server={
+                "applicable": False,
+                "reason": "chat server database not present on this host",
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        self.assertEqual(report["server_watermark"]["status"], "green")
+        self.assertEqual(report["server_watermark"]["state"], "not-applicable")
+
+    def test_sync_fetch_rate_red_names_the_livelocked_egress(self) -> None:
+        # The Aug 29 quarantine livelock: 13-25 POST /sync/group per second
+        # from one runner egress address.
+        raw = self.chat_raw(
+            sync_rate={
+                "available": True,
+                "source": "journal:caddy.service",
+                "window_seconds": 5,
+                "since": "2026-08-01T13:59:55Z",
+                "total": 97,
+                "clients": [
+                    {
+                        "ip": "207.188.7.157",
+                        "count": 97,
+                        "rate_per_second": 19.4,
+                        "attributed_host": "finite-lat-3",
+                    },
+                    {
+                        "ip": "198.51.100.7",
+                        "count": 3,
+                        "rate_per_second": 0.6,
+                        "attributed_host": None,
+                    },
+                ],
+                "errors": [],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        sync = report["sync_fetch_rate"]
+        self.assertEqual(sync["status"], "red")
+        self.assertEqual(len(sync["over_threshold"]), 1)
+        self.assertEqual(sync["over_threshold"][0]["attributed_host"], "finite-lat-3")
+
+    def test_sync_fetch_rate_error_only_sections_never_crash_the_render(self) -> None:
+        # The whole-report CollectionError fallback and the no-evidence
+        # builder both emit an error-only chat section; rendering it must
+        # never raise (a probe error degrades to UNKNOWN, never a crash).
+        report = {
+            "schema_version": "finite.status.v1",
+            "generated_at": "2026-08-29T23:00:00Z",
+            "overall_status": "unknown",
+            "exit_code": 2,
+            "sections": {
+                name: {"status": "unknown", "error": "evidence unavailable"}
+                for name in (
+                    "fleet_convergence",
+                    "host_health",
+                    "recovery_boundary",
+                    "rollout_state",
+                    "chat_plane",
+                )
+            },
+        }
+        output = finite_status.render_human(report)
+        self.assertIn("Chat plane [UNKNOWN]", output)
+        self.assertIn("evidence unavailable", output.split("Chat plane", 1)[1])
+
+    def test_collect_sync_fetch_rate_swallows_a_missing_journalctl(self) -> None:
+        now = finite_status.parse_time("2026-08-29T23:00:00Z")
+        with (
+            mock.patch.object(finite_status.glob, "glob", return_value=[]),
+            mock.patch.object(
+                finite_status,
+                "run_read_only",
+                side_effect=finite_status.CollectionError(
+                    "journalctl unavailable: no such file"
+                ),
+            ),
+        ):
+            raw = finite_status.collect_sync_fetch_rate(now)
+        self.assertFalse(raw["available"])
+        self.assertTrue(raw["errors"])
+        self.assertIn("journalctl unavailable", raw["errors"][0])
+
+    def test_sync_fetch_rate_without_evidence_is_unknown_and_actionable(self) -> None:
+        raw = self.chat_raw(
+            sync_rate={
+                "available": False,
+                "window_seconds": 5,
+                "errors": [
+                    "no access-log evidence in the caddy.service journal; the chat"
+                    " vhost needs a `log` directive (infra/nixos/modules/caddy.nix)"
+                    " for this probe"
+                ],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        self.assertEqual(report["sync_fetch_rate"]["status"], "unknown")
+        self.assertIn("log` directive", report["sync_fetch_rate"]["errors"][0])
+
+    def caddy_entry(self, *, ts: float, ip: str, method: str, uri: str) -> str:
+        return json.dumps(
+            {
+                "level": "info",
+                "ts": ts,
+                "logger": "http.log.access.chat.finite.computer",
+                "msg": "handled request",
+                "request": {"remote_ip": ip, "method": method, "uri": uri},
+            }
+        )
+
+    def test_collect_sync_fetch_rate_samples_the_edge_journal(self) -> None:
+        now = finite_status.parse_time("2026-08-29T23:00:00Z")
+        window = finite_status.CONTRACT["chat_plane"]["sync_rate_window_seconds"]
+        journal_lines = [
+            json.dumps(
+                {
+                    "MESSAGE": self.caddy_entry(
+                        ts=now.timestamp() - 1,
+                        ip="207.188.7.157",
+                        method="POST",
+                        uri="/sync/group",
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "MESSAGE": self.caddy_entry(
+                        ts=now.timestamp() - 2,
+                        ip="207.188.7.157",
+                        method="POST",
+                        uri="/sync/group?x=1",
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "MESSAGE": self.caddy_entry(
+                        ts=now.timestamp() - 3,
+                        ip="198.51.100.7",
+                        method="POST",
+                        uri="/sync/group",
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "MESSAGE": self.caddy_entry(
+                        ts=now.timestamp() - 1,
+                        ip="207.188.7.157",
+                        method="GET",
+                        uri="/health",
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "MESSAGE": self.caddy_entry(
+                        ts=now.timestamp() - window - 5,
+                        ip="207.188.7.157",
+                        method="POST",
+                        uri="/sync/group",
+                    )
+                }
+            ),
+            "not json",
+        ]
+        completed = subprocess.CompletedProcess(
+            ["journalctl"], 0, "\n".join(journal_lines), ""
+        )
+        with (
+            mock.patch.object(finite_status.glob, "glob", return_value=[]),
+            mock.patch.object(
+                finite_status, "run_read_only", return_value=completed
+            ) as run,
+        ):
+            raw = finite_status.collect_sync_fetch_rate(now)
+        self.assertTrue(raw["available"])
+        self.assertEqual(raw["source"], "journal:caddy.service")
+        self.assertEqual(raw["total"], 3)
+        clients = {client["ip"]: client for client in raw["clients"]}
+        self.assertEqual(clients["207.188.7.157"]["count"], 2)
+        self.assertEqual(clients["207.188.7.157"]["attributed_host"], "finite-lat-3")
+        self.assertEqual(clients["198.51.100.7"]["count"], 1)
+        self.assertIsNone(clients["198.51.100.7"]["attributed_host"])
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["journalctl", "--no-pager", "--output=json"])
+        self.assertIn("--unit=caddy.service", command)
+        # The window must be bounded and derived from `now`.
+        since_flag = next(part for part in command if part.startswith("--since="))
+        self.assertEqual(
+            since_flag.removeprefix("--since="),
+            finite_status.isoformat(now - timedelta(seconds=window)),
+        )
+
+    def test_collect_sync_fetch_rate_prefers_newest_access_log_file(self) -> None:
+        now = finite_status.parse_time("2026-08-29T23:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            old_log = Path(directory) / "access-chat.finite.computer.log.1"
+            new_log = Path(directory) / "access-chat.finite.computer.log"
+            old_log.write_text(
+                self.caddy_entry(
+                    ts=now.timestamp() - 1,
+                    ip="207.188.7.157",
+                    method="POST",
+                    uri="/sync/group",
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            new_log.write_text(
+                self.caddy_entry(
+                    ts=now.timestamp() - 1,
+                    ip="152.236.34.15",
+                    method="POST",
+                    uri="/sync/group",
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    finite_status.glob,
+                    "glob",
+                    return_value=[str(old_log), str(new_log)],
+                ) as glob_call,
+                mock.patch.object(
+                    finite_status.os.path,
+                    "getmtime",
+                    side_effect=lambda path: 1 if str(path).endswith(".log.1") else 2,
+                ),
+                mock.patch.object(finite_status, "run_read_only") as run,
+            ):
+                raw = finite_status.collect_sync_fetch_rate(now)
+            self.assertTrue(raw["available"])
+            self.assertEqual(raw["source"], f"file:{new_log}")
+            self.assertEqual(raw["clients"][0]["attributed_host"], "finite-lat-4")
+            run.assert_not_called()
+            self.assertTrue(glob_call.call_args.args[0].endswith("access*.log"))
+
+    def test_watermark_errored_probe_renders_unknown_never_crashes(self) -> None:
+        # 2026-09-01 live-run crash: an applicable-but-errored watermark
+        # (the sqlite3 CLI missing from the non-login ssh PATH) carries no
+        # ops_head; the human render must degrade to unknown-with-reason
+        # instead of raising KeyError. Generalized fail-closed contract:
+        # missing evidence scores unknown, never green, never a crash.
+        raw = self.chat_raw(
+            server={
+                "applicable": True,
+                "database": "/var/lib/private/finite-chat/data/server.sqlite3",
+                "errors": [
+                    "sqlite3 CLI not found on PATH or under"
+                    " /nix/store/*-sqlite-*-bin"
+                ],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        self.assertEqual(report["server_watermark"]["status"], "unknown")
+        self.assertEqual(report["status"], "unknown")
+        output = finite_status.render_human(
+            {
+                "generated_at": "2026-09-01T00:00:00Z",
+                "exit_code": 2,
+                "overall_status": "unknown",
+                "sections": {
+                    name: {"status": "green"}
+                    for name in (
+                        "fleet_convergence",
+                        "host_health",
+                        "recovery_boundary",
+                        "rollout_state",
+                    )
+                }
+                | {"chat_plane": report},
+            }
+        )
+        self.assertIn("server watermark [UNKNOWN]", output)
+        self.assertIn("sqlite3 CLI not found", output)
+
+    def test_sqlite3_command_falls_back_to_the_nix_store(self) -> None:
+        # Production hosts carry sqlite3 only under /nix/store and a
+        # non-login ssh session inherits no profile PATH: locate it there
+        # (newest first) or fail closed with a clear reason, never crash.
+        nix_sqlite = "/nix/store/abc123-sqlite-3.51.2-bin/bin/sqlite3"
+        with (
+            mock.patch.object(finite_status.shutil, "which", return_value=None),
+            mock.patch.object(
+                finite_status.glob,
+                "glob",
+                return_value=[
+                    "/nix/store/000-sqlite-3.40.0-bin/bin/sqlite3",
+                    nix_sqlite,
+                ],
+            ) as glob_call,
+        ):
+            self.assertEqual(finite_status.sqlite3_command(), nix_sqlite)
+        glob_call.assert_called_once_with("/nix/store/*-sqlite-*-bin/bin/sqlite3")
+        with (
+            mock.patch.object(finite_status.shutil, "which", return_value=None),
+            mock.patch.object(finite_status.glob, "glob", return_value=[]),
+        ):
+            with self.assertRaises(finite_status.CollectionError):
+                finite_status.sqlite3_command()
+
+    def test_sync_rate_not_applicable_on_runner_role_host(self) -> None:
+        # Runner hosts run no chat edge; the probe reads not-applicable
+        # instead of UNKNOWN from an unreadable caddy journal (review #802).
+        raw = self.chat_raw(
+            sync_rate={
+                "applicable": False,
+                "reason": (
+                    "chat edge is not on this runner-role host (roles: runner)"
+                ),
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        sync = report["sync_fetch_rate"]
+        self.assertEqual(sync["status"], "green")
+        self.assertEqual(sync["state"], "not-applicable")
+        self.assertIn("runner-role host", sync["reason"])
+        output = finite_status.render_human(
+            {
+                "generated_at": "2026-08-29T23:00:00Z",
+                "exit_code": 0,
+                "overall_status": "green",
+                "sections": {
+                    name: {"status": "green"}
+                    for name in (
+                        "fleet_convergence",
+                        "host_health",
+                        "recovery_boundary",
+                        "rollout_state",
+                    )
+                }
+                | {"chat_plane": report},
+            }
+        )
+        self.assertIn("sync fetch rate: not applicable", output)
+
+    def test_collect_chat_plane_gates_sync_rate_by_host_role(self) -> None:
+        now = finite_status.parse_time(raw_sync_since())
+        with mock.patch.object(
+            finite_status, "collect_sync_fetch_rate"
+        ) as sync, mock.patch.object(
+            finite_status,
+            "collect_chat_server_state",
+            return_value={"applicable": False},
+        ):
+            collected = finite_status.collect_chat_plane("finite-lat-3", now)
+        sync.assert_not_called()
+        self.assertFalse(collected["sync_rate"]["applicable"])
+        self.assertIn("runner-role host", collected["sync_rate"]["reason"])
+
+        with mock.patch.object(
+            finite_status, "collect_sync_fetch_rate", return_value={"available": False}
+        ) as sync, mock.patch.object(
+            finite_status,
+            "collect_chat_server_state",
+            return_value={"applicable": True},
+        ):
+            # App-role host (finite-lat-2) and unprofiled hosts keep
+            # collecting; the probe itself degrades to unknown with reasons.
+            for hostname in ("finite-lat-2", "dev-laptop"):
+                collected = finite_status.collect_chat_plane(hostname, now)
+                sync.assert_called()
+                self.assertNotIn("applicable", collected["sync_rate"])
+
+    def test_collect_chat_server_state_never_opens_the_live_database(self) -> None:
+        queries: list[str] = []
+
+        def fake_int(database, sql, timeout=15):
+            queries.append(sql)
+            if "http_delivery_ops" in sql:
+                return 206563
+            if "http_state_snapshots_v2" in sql:
+                return 204801
+            raise AssertionError(f"unexpected int query {sql}")
+
+        with (
+            mock.patch.object(finite_status.Path, "exists", return_value=True),
+            mock.patch.object(finite_status, "scratch_copy_sqlite") as scratch,
+            mock.patch.object(finite_status, "sqlite_int_query", side_effect=fake_int),
+        ):
+            scratch.return_value.__enter__ = mock.MagicMock(
+                return_value=Path("/tmp/scratch/scratch.sqlite3")
+            )
+            scratch.return_value.__exit__ = mock.MagicMock(return_value=False)
+            raw = finite_status.collect_chat_server_state("finite-lat-2")
+
+        self.assertTrue(raw["applicable"])
+        self.assertEqual(raw["ops_head"], 206563)
+        self.assertEqual(raw["snapshot_watermark"], 204801)
+        self.assertEqual(raw["errors"], [])
+        scratch.assert_called_once()
+        live = scratch.call_args.args[0]
+        self.assertEqual(
+            str(live), finite_status.CONTRACT["chat_plane"]["server_database"]
+        )
+        self.assertTrue(all("http_" in sql for sql in queries))
+
+    def test_collect_chat_server_state_marks_missing_database(self) -> None:
+        # Applicability is a role fact, not a filesystem fact: only runner-
+        # role hosts read not-applicable (review #802, round two).
+        with mock.patch.object(finite_status.Path, "exists", return_value=False):
+            raw = finite_status.collect_chat_server_state("finite-lat-3")
+        self.assertFalse(raw["applicable"])
+        self.assertIn("runner-role host", raw["reason"])
+
+        # On the app-role host a missing database is an evidence failure:
+        # the probe stays applicable and fails closed to unknown.
+        with mock.patch.object(finite_status.Path, "exists", return_value=False):
+            raw = finite_status.collect_chat_server_state("finite-lat-2")
+        self.assertTrue(raw["applicable"])
+        self.assertEqual(len(raw["errors"]), 1)
+        self.assertIn("chat server database not present", raw["errors"][0])
+        self.assertIn(
+            finite_status.CONTRACT["chat_plane"]["server_database"], raw["errors"][0]
+        )
+
+        # Unprofiled hosts (dev machines) fail closed the same way.
+        with mock.patch.object(finite_status.Path, "exists", return_value=False):
+            raw = finite_status.collect_chat_server_state("dev-laptop")
+        self.assertTrue(raw["applicable"])
+        self.assertEqual(len(raw["errors"]), 1)
+
+    def test_watermark_missing_database_on_app_host_reads_unknown(self) -> None:
+        # finite-lat-2 with a missing/moved/unreadable server database must
+        # score unknown with a reason, never green/not-applicable.
+        database = finite_status.CONTRACT["chat_plane"]["server_database"]
+        raw = self.chat_raw(
+            server={
+                "applicable": True,
+                "database": database,
+                "errors": [f"chat server database not present on this host: {database}"],
+            }
+        )
+        report = finite_status.build_chat_plane(
+            raw, finite_status.parse_time(raw_sync_since())
+        )
+        watermark = report["server_watermark"]
+        self.assertEqual(watermark["status"], "unknown")
+        self.assertNotEqual(watermark.get("state"), "not-applicable")
+        self.assertIn("not present", watermark["errors"][0])
+        self.assertEqual(report["status"], "unknown")
+
+    def test_scratch_copy_sqlite_copies_sidecars_and_cleans_up(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory) / "server.sqlite3"
+            live.write_bytes(b"db")
+            Path(f"{live}-wal").write_bytes(b"wal")
+            Path(f"{live}-shm").write_bytes(b"shm")
+            scratch_root = Path(directory) / "scratch"
+            scratch_root.mkdir()
+            with (
+                mock.patch.object(
+                    finite_status.tempfile, "mkdtemp", return_value=str(scratch_root)
+                ),
+                mock.patch.object(
+                    finite_status.shutil,
+                    "copyfile",
+                    wraps=finite_status.shutil.copyfile,
+                ) as copy,
+                mock.patch.object(
+                    finite_status.shutil, "rmtree", wraps=finite_status.shutil.rmtree
+                ),
+            ):
+                with finite_status.scratch_copy_sqlite(live) as scratch:
+                    self.assertEqual(scratch.parent, scratch_root)
+                    self.assertTrue(scratch.is_file())
+                    self.assertEqual(
+                        sorted(path.name for path in scratch_root.iterdir()),
+                        [
+                            "scratch.sqlite3",
+                            "scratch.sqlite3-shm",
+                            "scratch.sqlite3-wal",
+                        ],
+                    )
+                self.assertFalse(scratch_root.exists())
+            self.assertEqual(copy.call_count, 3)
+            # The live tree was never written to.
+            self.assertEqual(live.read_bytes(), b"db")
+            self.assertEqual(Path(f"{live}-wal").read_bytes(), b"wal")
+
+    def test_sqlite_json_query_runs_read_only_on_the_scratch_copy(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["sqlite3"], 0, '[{"room_id":"room-a","last_seq":206500}]', ""
+        )
+        with mock.patch.object(
+            finite_status, "run_read_only", return_value=completed
+        ) as run:
+            rows = finite_status.sqlite_json_query(
+                Path("/tmp/scratch/scratch.sqlite3"), "SELECT 1;"
+            )
+        self.assertEqual(rows, [{"room_id": "room-a", "last_seq": 206500}])
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[1:6],
+            ["-safe", "-readonly", "-batch", "-init", "/dev/null"],
+        )
+        self.assertEqual(command[0], finite_status.sqlite3_command())
+        self.assertNotIn(
+            str(finite_status.CONTRACT["chat_plane"]["server_database"]), command
+        )
+
+    def test_runner_host_health_is_not_scored_against_app_services(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["hostname"] = "finite-lat-3"
+        raw["host_health"]["roles"] = ["runner"]
+        # The runner host has none of the app-plane units observed; that must
+        # not drag its health to unknown.
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        health = report["sections"]["host_health"]
+        self.assertEqual(health["services"], [])
+        self.assertEqual(health["http_probes"], [])
+        self.assertNotEqual(health["status"], "unknown")
+        output = finite_status.render_human(report)
+        self.assertIn("Host health", output)
+        self.assertIn("runner: timer", output)
+
+    def test_app_host_runner_fields_are_not_applicable(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["hostname"] = "finite-lat-2"
+        raw["host_health"]["roles"] = ["app"]
+        # lat2 runs no Runner: a missing runner.env must not read as a red
+        # or unknown runner state there (ADR 0007).
+        raw["host_health"]["runner_environment"] = {}
+        raw["host_health"]["runner_environment_files_read"] = []
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["applicable"], False)
+        output = finite_status.render_human(report)
+        self.assertIn("runner: not applicable on this host", output)
+
+    def test_legacy_host_health_input_without_roles_keeps_combined_scoring(
+        self,
+    ) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        self.assertNotIn("roles", raw["host_health"])
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        health = report["sections"]["host_health"]
+        self.assertTrue(health["services"])
+        self.assertTrue(health["http_probes"])
+        self.assertNotEqual(health["runner"].get("applicable"), False)
+        self.assertIn("timer_status", health["runner"])
+
+
+def raw_sync_since() -> str:
+    return "2026-08-01T14:00:00Z"
