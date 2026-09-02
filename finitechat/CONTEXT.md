@@ -104,16 +104,16 @@ The current ability of the app runtime to reach Finite Chat server and wake tran
 _Avoid_: Room State, room lifecycle
 
 **Undelivered Message**:
-A user-sent Message that is saved locally but has not been accepted by the server-ordered delivery log.
-_Avoid_: Failed message, delivery error
+A Message authored on this device whose single synchronous send attempt has not yet returned server acceptance. It is never saved locally and never survives the attempt; the `Undelivered` outbound-delivery value is retained only as API-shape compatibility for older clients and is never produced.
+_Avoid_: Failed message, delivery error, queued message, saved message
 
 **Delivered Message**:
 A Message accepted by the server-ordered delivery log.
 _Avoid_: Sent message, locally saved message
 
 **Delivery Failure**:
-A Message send or upload attempt that reached the server and received a non-success response.
-_Avoid_: Offline send, no connectivity, sync failure, undelivered message
+A Message send or upload attempt that did not get server acceptance, whether the server was unreachable or answered with a non-success response. It is returned to the caller as a typed error with transient app feedback; nothing about it is stored, so there is nothing to retry. The `Failed` outbound-delivery value and the `RetryMessage` action are retained only as API-shape compatibility for older clients: `Failed` is never produced and `RetryMessage` returns a typed not-supported error.
+_Avoid_: Sync failure, undelivered message, retryable message
 
 **Outbound Delivery**:
 The local send and server delivery status of a Message authored by the local device.
@@ -192,12 +192,12 @@ server URL and toggle reachability only. Physical-phone runs use a Mac LAN
 server URL rather than loopback, build/sign/install the app on the phone, and
 copy the app-container `FiniteChatStore` through explicit harness commands for
 assertions. Harness-owned server runs refuse pre-existing listeners and probe
-all-interface binds through local loopback before toggling reachability. Text
-offline assertions check both the raw `client_app_outbox` key and Rust-decrypted
-metadata: Sent locally, Undelivered by the server, same append message id, and
-retained idempotency material. Attachment offline assertions attempt an
-upload-required send while unreachable and require no sent bubble, no additional
-outbox row, and no new server delivery effect.
+all-interface binds through local loopback before toggling reachability. There
+is no durable client outbox: a send either gets server acceptance synchronously
+or fails loudly to the caller, so offline assertions (text and attachment)
+require no sent bubble, no stored send, no retired `client_app_outbox` table,
+and no new server delivery effect, and a fresh send after the server returns
+must succeed under its own idempotency key.
 _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 
 ## Relationships
@@ -275,27 +275,19 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   protocol maintenance phases.
 - **Runtime Connectivity** is independent from **Room State**; a **Room** can
   remain connected while connectivity is temporarily unavailable.
-- A user-sent Message is locally sent when it is saved and visible on the
-  sender's device; it becomes a **Delivered Message** only when accepted by the
-  server-ordered delivery log.
+- A user-sent Message becomes a **Delivered Message** only when accepted by
+  the server-ordered delivery log, and that acceptance happens inside the send
+  itself: a send either returns as a **Delivered Message** or as a **Delivery
+  Failure**. There is no locally saved **Undelivered Message** between the two.
 - In v1, attachment sends require upload before they become sent Messages. If
-  upload is unreachable, the app gives transient feedback and does not create
-  an **Undelivered Message**.
-- An **Undelivered Message** that is later accepted by the server remains the
-  same user-visible Message; delivery state changes without creating a second
-  bubble.
-- An **Undelivered Message** becomes a **Delivery Failure** only when that
-  Message's send or upload attempt receives a non-success server response.
+  upload is unreachable, the app gives transient feedback and creates nothing.
 - Invite/profile/device-list actions are online-only controls in v1. If they
   are unreachable, Rust projects transient feedback/diagnostics and leaves
-  room state, message delivery, and durable outbox state alone.
+  room state and message delivery alone.
 - A **Delivery Failure** belongs to an outbound Message; it does not change
   **Room State** by itself.
-- A **Delivery Failure** is not an automatic-retry state; retry is explicit
-  user action or a named repair flow.
-- Retrying a **Delivery Failure** reuses the same outbound Message, visible
-  bubble, and persisted idempotency material; retry does not create a new
-  Message.
+- A **Delivery Failure** is not a retry state; nothing is queued or persisted.
+  Sending again is a new Message with its own idempotency material.
 - **Outbound Delivery** exists only for Messages authored by the local device;
   inbound Messages do not have local send state.
 - A **Read Receipt** is separate from **Outbound Delivery**; it can change how a
@@ -350,8 +342,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   store open must fail instead of dropping those tables. Encrypted room metadata
   missing current lifecycle fields or carrying old `Offline` / `NeedsAttention`
   values fails closed instead of defaulting into a connected room. Encrypted
-  outbox metadata missing timestamps or carrying old one-axis `delivery_state`
-  payloads fails closed instead of becoming v1 outbound delivery. Encrypted
   app-state/profile metadata missing selected-room, revoked-device, or
   stale-profile fields fails
   closed instead of being defaulted into product state.
@@ -393,15 +383,15 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   state. Resolved: this is **Unavailable on Device**, not a normal product
   Room state.
 - "Failed send" was used for both missing **Runtime Connectivity** and real
-  send rejection. Resolved: locally saved sends without server acceptance are
-  **Undelivered Messages**; only a non-success response to that Message's send
-  or upload attempt is a **Delivery Failure**.
+  send rejection. Resolved: both are a **Delivery Failure** for that one send
+  attempt, distinguished only by the typed error the caller receives; neither
+  leaves a locally saved Message behind.
 - "Server rejected the send" was used as a possible Room lifecycle signal.
   Resolved: it is a **Delivery Failure** for that Message unless local
   membership state is confirmed missing or unusable.
-- "Sent" was used for both local save and server acceptance. Resolved: a
-  locally saved user Message may be sent but **Undelivered**; server-log
-  acceptance makes it a **Delivered Message**.
+- "Sent" was used for both local save and server acceptance. Resolved: there
+  is no local save before acceptance; server-log acceptance makes a
+  **Delivered Message**, and anything else is a **Delivery Failure**.
 - "Delivery status" was used for all Messages. Resolved: **Outbound Delivery**
   belongs only to Messages authored by the local device.
 - "Test cleanup" was used to mean editing individual rows into desired states.

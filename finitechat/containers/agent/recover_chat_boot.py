@@ -54,7 +54,6 @@ REQUIRED_CLIENT_TABLES = {
     "client_device_states",
     "client_app_messages",
     "client_app_events",
-    "client_app_outbox",
     "client_app_rooms",
     "client_app_state",
     "client_app_profiles",

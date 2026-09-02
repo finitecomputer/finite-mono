@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use finitechat_core::{
-    AppAction, AppOutboxDebugRow, AppProfileSummary, AppRoomState, AppState, FiniteChatRuntime,
+    AppAction, AppProfileSummary, AppRoomState, AppState, FiniteChatRuntime,
     OpenOptions as CoreOpenOptions, OutboundLocalSendState, OutboundServerDeliveryState,
     npub_from_account_id,
 };
@@ -228,24 +228,10 @@ fn ios_product_harness_with_ios_development_team_env(
         "after online create/send phase",
         LocalProjectionExpectation {
             expected_messages: 1,
-            expected_delivered: 1,
-            expected_undelivered: 0,
             required_delivered_message_ids: &[],
         },
     )?;
-    let outbox_after_online = assert_local_outbox_snapshot(
-        &store_path,
-        &server_url,
-        &device,
-        "after online create/send phase",
-        OutboxExpectation {
-            expected_rows: 0,
-            required_room_id: None,
-            required_message_id: None,
-            expected_local_state: None,
-            expected_server_delivery_state: None,
-        },
-    )?;
+    assert_no_client_outbox_table(&store_path, "after online create/send phase")?;
     let online_message_id = local_after_online
         .delivered_message_ids
         .first()
@@ -289,6 +275,8 @@ fn ios_product_harness_with_ios_development_team_env(
     )?;
     terminate_phase(&target, launch, verbose)?;
     pull_device_store_if_needed(&target, &store_path, verbose)?;
+    // The offline send fails loudly inside the app and leaves nothing behind:
+    // no server row, no local bubble, no queued send to drain later.
     let after_offline = assert_server_delivery_snapshot(
         &server_sqlite,
         1,
@@ -301,40 +289,16 @@ fn ios_product_harness_with_ios_development_team_env(
         &device,
         "after offline send with server stopped",
         LocalProjectionExpectation {
-            expected_messages: 2,
-            expected_delivered: 1,
-            expected_undelivered: 1,
+            expected_messages: 1,
             required_delivered_message_ids: &[online_message_id.as_str()],
         },
     )?;
-    let offline_message_id = local_after_offline
-        .undelivered_message_ids
-        .first()
-        .cloned()
-        .ok_or_else(|| {
-            CliError::operational(
-                "after offline send with server stopped: expected one undelivered local message id"
-                    .to_owned(),
-            )
-        })?;
-    assert_server_snapshot_excludes_message(
-        &after_offline,
-        &offline_message_id,
+    assert_local_projection_same_visible_outbound(
+        &local_after_offline,
+        &local_after_online,
         "after offline send with server stopped",
     )?;
-    let outbox_after_offline = assert_local_outbox_snapshot(
-        &store_path,
-        &server_url,
-        &device,
-        "after offline send with server stopped",
-        OutboxExpectation {
-            expected_rows: 1,
-            required_room_id: local_after_offline.selected_room_id.as_deref(),
-            required_message_id: Some(offline_message_id.as_str()),
-            expected_local_state: Some("sent"),
-            expected_server_delivery_state: Some("undelivered"),
-        },
-    )?;
+    assert_no_client_outbox_table(&store_path, "after offline send with server stopped")?;
 
     let launch = launch_phase(
         &target,
@@ -356,20 +320,13 @@ fn ios_product_harness_with_ios_development_team_env(
         &device,
         "after offline attachment fail-fast attempt",
     )?;
-    assert_server_snapshot_excludes_message(
-        &after_offline_attachment,
-        &offline_message_id,
-        "after offline attachment fail-fast attempt",
-    )?;
     let local_after_offline_attachment = assert_local_projection_snapshot(
         &store_path,
         &server_url,
         &device,
         "after offline attachment fail-fast attempt",
         LocalProjectionExpectation {
-            expected_messages: 2,
-            expected_delivered: 1,
-            expected_undelivered: 1,
+            expected_messages: 1,
             required_delivered_message_ids: &[online_message_id.as_str()],
         },
     )?;
@@ -378,28 +335,21 @@ fn ios_product_harness_with_ios_development_team_env(
         &local_after_offline,
         "after offline attachment fail-fast attempt",
     )?;
-    let outbox_after_offline_attachment = assert_local_outbox_snapshot(
-        &store_path,
-        &server_url,
-        &device,
-        "after offline attachment fail-fast attempt",
-        OutboxExpectation {
-            expected_rows: 1,
-            required_room_id: local_after_offline_attachment.selected_room_id.as_deref(),
-            required_message_id: Some(offline_message_id.as_str()),
-            expected_local_state: Some("sent"),
-            expected_server_delivery_state: Some("undelivered"),
-        },
-    )?;
+    assert_no_client_outbox_table(&store_path, "after offline attachment fail-fast attempt")?;
 
     let mut server = HarnessServer::start(root, &server_addr, &server_sqlite, &server_log)?;
     server.wait_until_ready(&server_addr, HARNESS_SERVER_START_TIMEOUT)?;
+    // Same URL, server back: a fresh send succeeds under its own idempotency
+    // key, and the failed offline send is not replayed alongside it.
     let launch = launch_phase(
         &target,
         &support_root,
         &server_url,
         &device,
-        &[],
+        &[
+            "--finitechat-auto-send",
+            "online product harness message after restart",
+        ],
         verbose,
         args.settle_seconds,
     )?;
@@ -409,54 +359,48 @@ fn ios_product_harness_with_ios_development_team_env(
         &server_sqlite,
         2,
         &device,
-        "after same-url server restart/drain",
+        "after same-url server restart/send",
     )?;
     let local_after_restart = assert_local_projection_snapshot(
         &store_path,
         &server_url,
         &device,
-        "after same-url server restart/drain",
+        "after same-url server restart/send",
         LocalProjectionExpectation {
             expected_messages: 2,
-            expected_delivered: 2,
-            expected_undelivered: 0,
-            required_delivered_message_ids: &[
-                online_message_id.as_str(),
-                offline_message_id.as_str(),
-            ],
+            required_delivered_message_ids: &[online_message_id.as_str()],
         },
     )?;
+    let restart_message_id = local_after_restart
+        .delivered_message_ids
+        .iter()
+        .find(|message_id| **message_id != online_message_id)
+        .cloned()
+        .ok_or_else(|| {
+            CliError::operational(
+                "after same-url server restart/send: expected one new delivered local message id"
+                    .to_owned(),
+            )
+        })?;
     assert_server_snapshot_contains_message(
         &after_restart,
         &online_message_id,
-        "after same-url server restart/drain",
+        "after same-url server restart/send",
     )?;
     assert_server_snapshot_contains_message(
         &after_restart,
-        &offline_message_id,
-        "after same-url server restart/drain",
+        &restart_message_id,
+        "after same-url server restart/send",
     )?;
-    let outbox_after_restart = assert_local_outbox_snapshot(
-        &store_path,
-        &server_url,
-        &device,
-        "after same-url server restart/drain",
-        OutboxExpectation {
-            expected_rows: 0,
-            required_room_id: None,
-            required_message_id: None,
-            expected_local_state: None,
-            expected_server_delivery_state: None,
-        },
-    )?;
+    assert_no_client_outbox_table(&store_path, "after same-url server restart/send")?;
     let peer_after_restart = assert_peer_delivery_snapshot(
         &peer_store_path,
         &server_url,
         &peer_device,
         &room_id,
         &device,
-        &offline_message_id,
-        "after same-url server restart/drain",
+        &restart_message_id,
+        "after same-url server restart/send",
     )?;
     server.stop()?;
     let assertions = HarnessAssertions {
@@ -469,10 +413,6 @@ fn ios_product_harness_with_ios_development_team_env(
         local_after_offline,
         local_after_offline_attachment,
         local_after_restart,
-        outbox_after_online,
-        outbox_after_offline,
-        outbox_after_offline_attachment,
-        outbox_after_restart,
         peer_after_restart,
     };
 
@@ -581,8 +521,6 @@ fn run_profile_dm_harness(
         "after profile DM start/send phase",
         LocalProjectionExpectation {
             expected_messages: 1,
-            expected_delivered: 1,
-            expected_undelivered: 0,
             required_delivered_message_ids: &[],
         },
     )?;
@@ -659,10 +597,6 @@ struct HarnessAssertions {
     local_after_offline: LocalProjectionSnapshot,
     local_after_offline_attachment: LocalProjectionSnapshot,
     local_after_restart: LocalProjectionSnapshot,
-    outbox_after_online: LocalOutboxSnapshot,
-    outbox_after_offline: LocalOutboxSnapshot,
-    outbox_after_offline_attachment: LocalOutboxSnapshot,
-    outbox_after_restart: LocalOutboxSnapshot,
     peer_after_restart: PeerReceiptSnapshot,
 }
 
@@ -713,24 +647,6 @@ struct LocalProjectionSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct LocalOutboxSnapshot {
-    rows: usize,
-    device_ids: Vec<String>,
-    room_ids: Vec<String>,
-    message_ids: Vec<String>,
-    local_states: Vec<String>,
-    server_delivery_states: Vec<String>,
-    append_request_message_ids: Vec<String>,
-    idempotency_material_rows: usize,
-}
-
-struct LocalOutboxKeyRow {
-    device_id: String,
-    room_id: String,
-    message_id: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
 struct PeerReceiptSnapshot {
     room_id: String,
     peer_device: String,
@@ -743,21 +659,12 @@ struct PeerReceiptSnapshot {
     sender_devices: Vec<String>,
 }
 
+/// Every visible own message must be server-delivered: a send either gets
+/// acceptance synchronously or fails to the caller with nothing left behind.
 #[derive(Clone, Copy, Debug)]
 struct LocalProjectionExpectation<'a> {
     expected_messages: usize,
-    expected_delivered: usize,
-    expected_undelivered: usize,
     required_delivered_message_ids: &'a [&'a str],
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OutboxExpectation<'a> {
-    expected_rows: usize,
-    required_room_id: Option<&'a str>,
-    required_message_id: Option<&'a str>,
-    expected_local_state: Option<&'a str>,
-    expected_server_delivery_state: Option<&'a str>,
 }
 
 enum HarnessIosTarget {
@@ -862,33 +769,15 @@ fn render_harness_result(json: bool, status: &str, result: HarnessResult) {
             assertions.after_restart.message_ids.join(",")
         );
         eprintln!(
-            "assertions: local messages online={}, offline={}, after offline attachment={}, after restart={}; undelivered offline={}; final delivered ids={}",
+            "assertions: local messages online={}, offline={}, after offline attachment={}, after restart={}; final delivered ids={}",
             assertions.local_after_online.messages,
             assertions.local_after_offline.messages,
             assertions.local_after_offline_attachment.messages,
             assertions.local_after_restart.messages,
             assertions
-                .local_after_offline
-                .undelivered_message_ids
-                .join(","),
-            assertions
                 .local_after_restart
                 .delivered_message_ids
                 .join(",")
-        );
-        eprintln!(
-            "assertions: outbox rows online={}, offline={}, after offline attachment={}, after restart={}; offline ids={}; states={}/{}; idempotency material rows={}",
-            assertions.outbox_after_online.rows,
-            assertions.outbox_after_offline.rows,
-            assertions.outbox_after_offline_attachment.rows,
-            assertions.outbox_after_restart.rows,
-            assertions.outbox_after_offline.message_ids.join(","),
-            assertions.outbox_after_offline.local_states.join(","),
-            assertions
-                .outbox_after_offline
-                .server_delivery_states
-                .join(","),
-            assertions.outbox_after_offline.idempotency_material_rows
         );
         eprintln!(
             "assertions: peer received message {} exactly {} time(s) as inbound from {}",
@@ -1404,6 +1293,7 @@ fn assert_server_snapshot_contains_message(
     Ok(())
 }
 
+#[cfg(test)]
 fn assert_server_snapshot_excludes_message(
     snapshot: &ServerDeliverySnapshot,
     message_id: &str,
@@ -1426,18 +1316,6 @@ fn assert_local_projection_snapshot(
 ) -> Result<LocalProjectionSnapshot, CliError> {
     let snapshot = read_local_projection_snapshot(store_path, server_url, device, label)?;
     assert_local_projection_counts(&snapshot, expected, label)?;
-    Ok(snapshot)
-}
-
-fn assert_local_outbox_snapshot(
-    store_path: &Path,
-    server_url: &str,
-    device: &str,
-    label: &str,
-    expected: OutboxExpectation<'_>,
-) -> Result<LocalOutboxSnapshot, CliError> {
-    let snapshot = read_local_outbox_snapshot(store_path, server_url, device, label)?;
-    assert_local_outbox_counts(&snapshot, device, expected, label)?;
     Ok(snapshot)
 }
 
@@ -1503,23 +1381,9 @@ fn establish_peer_membership(
     Ok(())
 }
 
-fn read_local_outbox_snapshot(
-    store_path: &Path,
-    server_url: &str,
-    device: &str,
-    label: &str,
-) -> Result<LocalOutboxSnapshot, CliError> {
-    let key_rows = read_local_outbox_key_rows(store_path)?;
-    let runtime = open_product_runtime(store_path, server_url, device, label)?;
-    let debug_rows = runtime.app_outbox_debug_rows().map_err(|error| {
-        CliError::operational(format!(
-            "{label}: failed to read app outbox debug rows: {error}"
-        ))
-    })?;
-    local_outbox_snapshot_from_rows(key_rows, debug_rows, label)
-}
-
-fn read_local_outbox_key_rows(store_path: &Path) -> Result<Vec<LocalOutboxKeyRow>, CliError> {
+/// The client store must not carry the retired `client_app_outbox` table:
+/// a writer open drops it, and no current code path recreates it.
+fn assert_no_client_outbox_table(store_path: &Path, label: &str) -> Result<(), CliError> {
     let client_sqlite = store_path.join("client.sqlite3");
     let conn = Connection::open(&client_sqlite).map_err(|error| {
         CliError::operational(format!(
@@ -1527,96 +1391,24 @@ fn read_local_outbox_key_rows(store_path: &Path) -> Result<Vec<LocalOutboxKeyRow
             client_sqlite.display()
         ))
     })?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT device_id, room_id, message_id
-            FROM client_app_outbox
-            ORDER BY rowid ASC
-            "#,
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'client_app_outbox')",
+            [],
+            |row| row.get::<_, bool>(0),
         )
         .map_err(|error| {
             CliError::operational(format!(
-                "failed to prepare harness client outbox query: {error}"
+                "{label}: failed to inspect harness client sqlite schema: {error}"
             ))
         })?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(LocalOutboxKeyRow {
-                device_id: row.get::<_, String>(0)?,
-                room_id: row.get::<_, String>(1)?,
-                message_id: row.get::<_, String>(2)?,
-            })
-        })
-        .map_err(|error| {
-            CliError::operational(format!(
-                "failed to query harness client outbox rows: {error}"
-            ))
-        })?;
-
-    let mut key_rows = Vec::new();
-    for row in rows {
-        key_rows.push(row.map_err(|error| {
-            CliError::operational(format!("failed to read harness client outbox row: {error}"))
-        })?);
-    }
-    Ok(key_rows)
-}
-
-fn local_outbox_snapshot_from_rows(
-    key_rows: Vec<LocalOutboxKeyRow>,
-    debug_rows: Vec<AppOutboxDebugRow>,
-    label: &str,
-) -> Result<LocalOutboxSnapshot, CliError> {
-    if key_rows.len() != debug_rows.len() {
+    if exists {
         return Err(CliError::operational(format!(
-            "{label}: raw client_app_outbox row count {} did not match Rust debug row count {}",
-            key_rows.len(),
-            debug_rows.len()
+            "{label}: retired client_app_outbox table still exists in {}",
+            client_sqlite.display()
         )));
     }
-
-    let mut device_ids = BTreeSet::new();
-    let mut room_ids = BTreeSet::new();
-    let mut message_ids = Vec::new();
-    let mut local_states = Vec::new();
-    let mut server_delivery_states = Vec::new();
-    let mut append_request_message_ids = Vec::new();
-    let mut idempotency_material_rows = 0usize;
-
-    for (key_row, debug_row) in key_rows.into_iter().zip(debug_rows.into_iter()) {
-        if key_row.room_id != debug_row.room_id || key_row.message_id != debug_row.message_id {
-            return Err(CliError::operational(format!(
-                "{label}: raw outbox key {}/{} did not match Rust debug row {}/{}",
-                key_row.room_id, key_row.message_id, debug_row.room_id, debug_row.message_id
-            )));
-        }
-        if key_row.device_id != debug_row.sender_device_id {
-            return Err(CliError::operational(format!(
-                "{label}: raw outbox device `{}` did not match Rust debug sender device `{}` for message `{}`",
-                key_row.device_id, debug_row.sender_device_id, key_row.message_id
-            )));
-        }
-        device_ids.insert(key_row.device_id);
-        room_ids.insert(key_row.room_id);
-        message_ids.push(key_row.message_id);
-        local_states.push(debug_row.local_state);
-        server_delivery_states.push(debug_row.server_delivery_state);
-        append_request_message_ids.push(debug_row.append_request_message_id);
-        if debug_row.idempotency_key_present {
-            idempotency_material_rows += 1;
-        }
-    }
-    Ok(LocalOutboxSnapshot {
-        rows: message_ids.len(),
-        device_ids: device_ids.into_iter().collect(),
-        room_ids: room_ids.into_iter().collect(),
-        message_ids,
-        local_states,
-        server_delivery_states,
-        append_request_message_ids,
-        idempotency_material_rows,
-    })
+    Ok(())
 }
 
 fn read_local_projection_snapshot(
@@ -1842,16 +1634,16 @@ fn assert_local_projection_counts(
             snapshot.failed_outbound_messages
         )));
     }
-    if snapshot.delivered_outbound_messages != expected.expected_delivered {
+    if snapshot.undelivered_outbound_messages != 0 {
         return Err(CliError::operational(format!(
-            "{label}: expected {} delivered local outbound message(s), got {}",
-            expected.expected_delivered, snapshot.delivered_outbound_messages
+            "{label}: expected no undelivered local outbound message(s) because sends succeed synchronously or fail loudly, got {} with ids {:?}",
+            snapshot.undelivered_outbound_messages, snapshot.undelivered_message_ids
         )));
     }
-    if snapshot.undelivered_outbound_messages != expected.expected_undelivered {
+    if snapshot.delivered_outbound_messages != expected.expected_messages {
         return Err(CliError::operational(format!(
-            "{label}: expected {} undelivered local outbound message(s), got {}",
-            expected.expected_undelivered, snapshot.undelivered_outbound_messages
+            "{label}: expected every visible message to be delivered ({}), got {}",
+            expected.expected_messages, snapshot.delivered_outbound_messages
         )));
     }
     if snapshot.visible_outbound_message_ids.len() != expected.expected_messages {
@@ -1906,115 +1698,6 @@ fn assert_local_projection_same_visible_outbound(
         return Err(CliError::operational(format!(
             "{label}: expected undelivered outbound ids unchanged at {:?}, got {:?}",
             expected.undelivered_message_ids, actual.undelivered_message_ids
-        )));
-    }
-    Ok(())
-}
-
-fn assert_local_outbox_counts(
-    snapshot: &LocalOutboxSnapshot,
-    device: &str,
-    expected: OutboxExpectation<'_>,
-    label: &str,
-) -> Result<(), CliError> {
-    if expected.expected_rows == 0
-        && (expected.required_room_id.is_some()
-            || expected.required_message_id.is_some()
-            || expected.expected_local_state.is_some()
-            || expected.expected_server_delivery_state.is_some())
-    {
-        return Err(CliError::operational(format!(
-            "{label}: zero-row outbox expectation must not specify row identity or delivery state"
-        )));
-    }
-    if expected.expected_rows > 0
-        && (expected.required_room_id.is_none()
-            || expected.expected_local_state.is_none()
-            || expected.expected_server_delivery_state.is_none())
-    {
-        return Err(CliError::operational(format!(
-            "{label}: non-empty outbox expectation must specify room id plus local and server delivery state"
-        )));
-    }
-    if snapshot.rows != expected.expected_rows {
-        return Err(CliError::operational(format!(
-            "{label}: expected {} durable outbox row(s), got {} with ids {:?}",
-            expected.expected_rows, snapshot.rows, snapshot.message_ids
-        )));
-    }
-    if snapshot.rows > 0 && snapshot.device_ids != vec![device.to_owned()] {
-        return Err(CliError::operational(format!(
-            "{label}: expected outbox rows only for device `{device}`, got {:?}",
-            snapshot.device_ids
-        )));
-    }
-    if let Some(room_id) = expected.required_room_id
-        && snapshot.room_ids != vec![room_id.to_owned()]
-    {
-        return Err(CliError::operational(format!(
-            "{label}: expected durable outbox row in room `{room_id}`, got {:?}",
-            snapshot.room_ids
-        )));
-    }
-    let unique_message_ids = snapshot.message_ids.iter().collect::<BTreeSet<_>>();
-    if unique_message_ids.len() != snapshot.message_ids.len() {
-        return Err(CliError::operational(format!(
-            "{label}: duplicate durable outbox message id(s): {:?}",
-            snapshot.message_ids
-        )));
-    }
-    if let Some(message_id) = expected.required_message_id
-        && !snapshot.message_ids.iter().any(|value| value == message_id)
-    {
-        return Err(CliError::operational(format!(
-            "{label}: expected durable outbox row for visible message id `{message_id}`, got {:?}",
-            snapshot.message_ids
-        )));
-    }
-    if snapshot.local_states.len() != snapshot.rows
-        || snapshot.server_delivery_states.len() != snapshot.rows
-        || snapshot.append_request_message_ids.len() != snapshot.rows
-    {
-        return Err(CliError::operational(format!(
-            "{label}: decrypted outbox metadata shape did not match raw row count {}; local_states={:?} server_delivery_states={:?} append_request_message_ids={:?}",
-            snapshot.rows,
-            snapshot.local_states,
-            snapshot.server_delivery_states,
-            snapshot.append_request_message_ids
-        )));
-    }
-    if snapshot.append_request_message_ids != snapshot.message_ids {
-        return Err(CliError::operational(format!(
-            "{label}: append request message ids {:?} did not match visible outbox ids {:?}",
-            snapshot.append_request_message_ids, snapshot.message_ids
-        )));
-    }
-    if snapshot.idempotency_material_rows != snapshot.rows {
-        return Err(CliError::operational(format!(
-            "{label}: expected idempotency material for all {} outbox row(s), got {}",
-            snapshot.rows, snapshot.idempotency_material_rows
-        )));
-    }
-    if let Some(expected_state) = expected.expected_local_state
-        && snapshot
-            .local_states
-            .iter()
-            .any(|actual| actual != expected_state)
-    {
-        return Err(CliError::operational(format!(
-            "{label}: expected durable outbox local state `{expected_state}`, got {:?}",
-            snapshot.local_states
-        )));
-    }
-    if let Some(expected_state) = expected.expected_server_delivery_state
-        && snapshot
-            .server_delivery_states
-            .iter()
-            .any(|actual| actual != expected_state)
-    {
-        return Err(CliError::operational(format!(
-            "{label}: expected durable outbox server delivery state `{expected_state}`, got {:?}",
-            snapshot.server_delivery_states
         )));
     }
     Ok(())
@@ -2314,9 +1997,9 @@ fn harness_phases(scenario: &str) -> Vec<&'static str> {
     match scenario {
         "text-offline" => vec![
             "online-create-room-and-send",
-            "terminate-server-and-send-offline",
+            "terminate-server-and-fail-offline-send",
             "attempt-offline-attachment-fail-fast",
-            "restart-same-server-url-and-drain",
+            "restart-same-server-url-and-send-online",
         ],
         "profile-dm" => vec!["peer-publishes-key-packages", "profile-dm-start-and-send"],
         _ => vec![],
@@ -2326,7 +2009,6 @@ fn harness_phases(scenario: &str) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
 
     struct ProductHarnessArgsBuilder {
         args: ProductHarnessArgs,
@@ -2846,65 +2528,61 @@ mod tests {
     }
 
     #[test]
-    fn local_projection_counts_accept_force_close_and_drain_identity() {
-        let offline = local_projection_snapshot_fixture(
-            2,
-            1,
-            1,
-            &["online-message"],
-            &["offline-message"],
-            &["online-message", "offline-message"],
-        );
+    fn local_projection_counts_accept_delivered_only_transcripts() {
+        let after_offline = local_projection_snapshot_fixture(&["online-message"], &[]);
         assert_local_projection_counts(
-            &offline,
+            &after_offline,
             LocalProjectionExpectation {
-                expected_messages: 2,
-                expected_delivered: 1,
-                expected_undelivered: 1,
+                expected_messages: 1,
                 required_delivered_message_ids: &["online-message"],
             },
             "after offline",
         )
-        .expect("offline projection shape");
+        .expect("failed offline send leaves only the delivered online message");
 
-        let drained = local_projection_snapshot_fixture(
-            2,
-            2,
-            0,
-            &["online-message", "offline-message"],
-            &[],
-            &["online-message", "offline-message"],
-        );
+        let after_restart =
+            local_projection_snapshot_fixture(&["online-message", "restart-message"], &[]);
         assert_local_projection_counts(
-            &drained,
+            &after_restart,
             LocalProjectionExpectation {
                 expected_messages: 2,
-                expected_delivered: 2,
-                expected_undelivered: 0,
-                required_delivered_message_ids: &["online-message", "offline-message"],
+                required_delivered_message_ids: &["online-message"],
             },
             "after restart",
         )
-        .expect("same visible offline message id promoted to delivered");
+        .expect("fresh online send after restart is delivered alongside the original");
+    }
+
+    #[test]
+    fn local_projection_counts_reject_undelivered_rows() {
+        let queued = local_projection_snapshot_fixture(&["online-message"], &["offline-message"]);
+
+        let error = assert_local_projection_counts(
+            &queued,
+            LocalProjectionExpectation {
+                expected_messages: 2,
+                required_delivered_message_ids: &["online-message"],
+            },
+            "after offline",
+        )
+        .expect_err("an undelivered local row means a send was queued instead of failing");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected no undelivered local outbound message(s)"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
     fn local_projection_counts_reject_missing_online_identity_after_force_close() {
-        let offline = local_projection_snapshot_fixture(
-            2,
-            1,
-            1,
-            &["replacement-online-message"],
-            &["offline-message"],
-            &["replacement-online-message", "offline-message"],
-        );
+        let after_offline = local_projection_snapshot_fixture(&["replacement-online-message"], &[]);
 
         let error = assert_local_projection_counts(
-            &offline,
+            &after_offline,
             LocalProjectionExpectation {
-                expected_messages: 2,
-                expected_delivered: 1,
-                expected_undelivered: 1,
+                expected_messages: 1,
                 required_delivered_message_ids: &["online-message"],
             },
             "after offline",
@@ -2920,52 +2598,13 @@ mod tests {
     }
 
     #[test]
-    fn local_projection_counts_reject_missing_drained_identity() {
-        let drained = local_projection_snapshot_fixture(
-            2,
-            2,
-            0,
-            &["online-message", "replacement-message"],
-            &[],
-            &["online-message", "replacement-message"],
-        );
-
-        let error = assert_local_projection_counts(
-            &drained,
-            LocalProjectionExpectation {
-                expected_messages: 2,
-                expected_delivered: 2,
-                expected_undelivered: 0,
-                required_delivered_message_ids: &["online-message", "offline-message"],
-            },
-            "after restart",
-        )
-        .expect_err("changed local identity should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("expected message id `offline-message`")
-        );
-    }
-
-    #[test]
     fn local_projection_counts_reject_duplicate_visible_ids() {
-        let duplicate = local_projection_snapshot_fixture(
-            2,
-            2,
-            0,
-            &["same-message", "same-message"],
-            &[],
-            &["same-message", "same-message"],
-        );
+        let duplicate = local_projection_snapshot_fixture(&["same-message", "same-message"], &[]);
 
         let error = assert_local_projection_counts(
             &duplicate,
             LocalProjectionExpectation {
                 expected_messages: 2,
-                expected_delivered: 2,
-                expected_undelivered: 0,
                 required_delivered_message_ids: &["same-message"],
             },
             "after restart",
@@ -2980,53 +2619,26 @@ mod tests {
     }
 
     #[test]
-    fn local_projection_same_visible_outbound_accepts_unchanged_attachment_fail_fast() {
-        let before = local_projection_snapshot_fixture(
-            2,
-            1,
-            1,
-            &["online-message"],
-            &["offline-message"],
-            &["online-message", "offline-message"],
-        );
-        let after = local_projection_snapshot_fixture(
-            2,
-            1,
-            1,
-            &["online-message"],
-            &["offline-message"],
-            &["online-message", "offline-message"],
-        );
+    fn local_projection_same_visible_outbound_accepts_unchanged_fail_fast() {
+        let before = local_projection_snapshot_fixture(&["online-message"], &[]);
+        let after = local_projection_snapshot_fixture(&["online-message"], &[]);
 
         assert_local_projection_same_visible_outbound(&after, &before, "after offline attachment")
-            .expect("attachment fail-fast should leave visible outbound ids unchanged");
+            .expect("fail-fast sends should leave visible outbound ids unchanged");
     }
 
     #[test]
-    fn local_projection_same_visible_outbound_rejects_attachment_bubble() {
-        let before = local_projection_snapshot_fixture(
-            2,
-            1,
-            1,
-            &["online-message"],
-            &["offline-message"],
-            &["online-message", "offline-message"],
-        );
-        let after = local_projection_snapshot_fixture(
-            3,
-            1,
-            2,
-            &["online-message"],
-            &["offline-message", "attachment-message"],
-            &["online-message", "offline-message", "attachment-message"],
-        );
+    fn local_projection_same_visible_outbound_rejects_new_bubble() {
+        let before = local_projection_snapshot_fixture(&["online-message"], &[]);
+        let after =
+            local_projection_snapshot_fixture(&["online-message", "attachment-message"], &[]);
 
         let error = assert_local_projection_same_visible_outbound(
             &after,
             &before,
             "after offline attachment",
         )
-        .expect_err("attachment bubble should fail");
+        .expect_err("a bubble from a failed send should fail");
         assert!(
             error
                 .to_string()
@@ -3036,284 +2648,28 @@ mod tests {
     }
 
     #[test]
-    fn local_outbox_counts_accept_offline_row_and_empty_drain() {
-        let offline = local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "offline")]);
-        assert_local_outbox_counts(
-            &offline,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect("offline durable outbox row");
-
-        let drained = local_outbox_snapshot_fixture(&[]);
-        assert_local_outbox_counts(
-            &drained,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 0,
-                required_room_id: None,
-                required_message_id: None,
-                expected_local_state: None,
-                expected_server_delivery_state: None,
-            },
-            "after restart",
-        )
-        .expect("drained outbox");
-    }
-
-    #[test]
-    fn local_outbox_counts_rejects_underspecified_expectations() {
-        let offline = local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "offline")]);
-        let missing_state = assert_local_outbox_counts(
-            &offline,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: None,
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("non-empty outbox expectation should require exact state");
-        assert!(
-            missing_state
-                .to_string()
-                .contains("must specify room id plus local and server delivery state"),
-            "unexpected error: {missing_state}"
-        );
-
-        let missing_room = assert_local_outbox_counts(
-            &offline,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: None,
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("non-empty outbox expectation should require room identity");
-        assert!(
-            missing_room
-                .to_string()
-                .contains("must specify room id plus local and server delivery state"),
-            "unexpected error: {missing_room}"
-        );
-
-        let drained = local_outbox_snapshot_fixture(&[]);
-        let stale_expectation = assert_local_outbox_counts(
-            &drained,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 0,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after restart",
-        )
-        .expect_err("empty outbox expectation should not carry stale row identity");
-        assert!(
-            stale_expectation
-                .to_string()
-                .contains("must not specify row identity or delivery state"),
-            "unexpected error: {stale_expectation}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_counts_reject_missing_visible_message_id() {
-        let snapshot = local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "other")]);
-
-        let error = assert_local_outbox_counts(
-            &snapshot,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("missing visible outbox identity should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("expected durable outbox row for visible message id `offline`"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_counts_reject_wrong_room_id() {
-        let snapshot = local_outbox_snapshot_fixture(&[("simulator-a", "other-room", "offline")]);
-
-        let error = assert_local_outbox_counts(
-            &snapshot,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("wrong outbox room identity should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("expected durable outbox row in room `room-main`"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_counts_reject_metadata_that_changes_visible_identity() {
-        let mut snapshot =
-            local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "offline")]);
-        snapshot.append_request_message_ids = vec!["replacement".to_owned()];
-
-        let error = assert_local_outbox_counts(
-            &snapshot,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("changed append identity should fail");
-
-        assert!(
-            error.to_string().contains("append request message ids"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_counts_reject_missing_idempotency_material() {
-        let mut snapshot =
-            local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "offline")]);
-        snapshot.idempotency_material_rows = 0;
-
-        let error = assert_local_outbox_counts(
-            &snapshot,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("missing idempotency material should fail");
-
-        assert!(
-            error.to_string().contains("expected idempotency material"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_counts_reject_wrong_durable_delivery_state() {
-        let mut snapshot =
-            local_outbox_snapshot_fixture(&[("simulator-a", "room-main", "offline")]);
-        snapshot.local_states = vec!["sending".to_owned()];
-        snapshot.server_delivery_states = vec!["failed".to_owned()];
-
-        let error = assert_local_outbox_counts(
-            &snapshot,
-            "simulator-a",
-            OutboxExpectation {
-                expected_rows: 1,
-                required_room_id: Some("room-main"),
-                required_message_id: Some("offline"),
-                expected_local_state: Some("sent"),
-                expected_server_delivery_state: Some("undelivered"),
-            },
-            "after offline",
-        )
-        .expect_err("wrong outbox state should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("expected durable outbox local state `sent`"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn local_outbox_snapshot_reads_client_sqlite_keys() {
+    fn client_store_outbox_table_check_rejects_retired_table() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store_path = temp.path().join("FiniteChatStore");
         fs::create_dir_all(&store_path).expect("store path");
-        let conn = Connection::open(store_path.join("client.sqlite3")).expect("open sqlite");
+        let client_sqlite = store_path.join("client.sqlite3");
+        let conn = Connection::open(&client_sqlite).expect("open sqlite");
+        conn.execute_batch("CREATE TABLE client_device_states (account_id TEXT PRIMARY KEY);")
+            .expect("schema");
+        assert_no_client_outbox_table(&store_path, "fresh store").expect("no retired table");
+
         conn.execute_batch(
-            r#"
-            CREATE TABLE client_app_outbox (
-              account_id TEXT NOT NULL,
-              device_id TEXT NOT NULL,
-              room_id TEXT NOT NULL,
-              message_id TEXT NOT NULL,
-              nonce BLOB NOT NULL,
-              ciphertext BLOB NOT NULL,
-              PRIMARY KEY (account_id, device_id, room_id, message_id)
-            );
-            "#,
+            "CREATE TABLE client_app_outbox (account_id TEXT NOT NULL, message_id TEXT NOT NULL);",
         )
-        .expect("schema");
-        conn.execute(
-            r#"
-            INSERT INTO client_app_outbox (
-              account_id,
-              device_id,
-              room_id,
-              message_id,
-              nonce,
-              ciphertext
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                "account",
-                "simulator-a",
-                "room-main",
-                "offline-message",
-                b"nonce",
-                b"ciphertext"
-            ],
-        )
-        .expect("insert outbox row");
-
-        let rows = read_local_outbox_key_rows(&store_path).expect("outbox keys");
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].device_id, "simulator-a");
-        assert_eq!(rows[0].room_id, "room-main");
-        assert_eq!(rows[0].message_id, "offline-message");
+        .expect("retired table");
+        let error = assert_no_client_outbox_table(&store_path, "legacy store")
+            .expect_err("retired outbox table should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("retired client_app_outbox table still exists"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3376,66 +2732,34 @@ mod tests {
     }
 
     fn local_projection_snapshot_fixture(
-        messages: usize,
-        delivered: usize,
-        undelivered: usize,
         delivered_ids: &[&str],
         undelivered_ids: &[&str],
-        visible_ids: &[&str],
     ) -> LocalProjectionSnapshot {
+        let delivered_message_ids = delivered_ids
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        let undelivered_message_ids = undelivered_ids
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        let mut visible_outbound_message_ids = delivered_message_ids.clone();
+        visible_outbound_message_ids.extend(undelivered_message_ids.iter().cloned());
         LocalProjectionSnapshot {
             rooms: 1,
             connected_rooms: 1,
             unavailable_on_device_rooms: 0,
             selected_room_id: Some("room-main".to_owned()),
-            messages,
-            local_outbound_messages: messages,
-            delivered_outbound_messages: delivered,
-            undelivered_outbound_messages: undelivered,
+            messages: visible_outbound_message_ids.len(),
+            local_outbound_messages: visible_outbound_message_ids.len(),
+            delivered_outbound_messages: delivered_message_ids.len(),
+            undelivered_outbound_messages: undelivered_message_ids.len(),
             failed_outbound_messages: 0,
             sending_outbound_messages: 0,
             nonlocal_outbound_delivery_messages: 0,
-            delivered_message_ids: delivered_ids
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect(),
-            undelivered_message_ids: undelivered_ids
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect(),
-            visible_outbound_message_ids: visible_ids
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect(),
-        }
-    }
-
-    fn local_outbox_snapshot_fixture(rows: &[(&str, &str, &str)]) -> LocalOutboxSnapshot {
-        let device_ids = rows
-            .iter()
-            .map(|(device, _room, _message)| (*device).to_owned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let room_ids = rows
-            .iter()
-            .map(|(_device, room, _message)| (*room).to_owned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let message_ids: Vec<String> = rows
-            .iter()
-            .map(|(_device, _room, message)| (*message).to_owned())
-            .collect();
-        LocalOutboxSnapshot {
-            rows: rows.len(),
-            device_ids,
-            room_ids,
-            local_states: vec!["sent".to_owned(); message_ids.len()],
-            server_delivery_states: vec!["undelivered".to_owned(); message_ids.len()],
-            append_request_message_ids: message_ids.clone(),
-            idempotency_material_rows: message_ids.len(),
-            message_ids,
+            delivered_message_ids,
+            undelivered_message_ids,
+            visible_outbound_message_ids,
         }
     }
 
