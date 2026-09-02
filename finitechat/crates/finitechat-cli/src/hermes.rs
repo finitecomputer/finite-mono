@@ -1229,22 +1229,14 @@ fn collect_hermes_service_inbound_payload(
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_hermes_inbox(&state.agent_home)?;
-    let recent_events = load_recent_agent_app_events(home)?;
-    initialize_hermes_inbox_cursors_from_events(
-        &state.agent_home,
-        &mut inbox,
-        &home.config.account_id,
-        recent_events.iter(),
-    )?;
     let joined = take_joined_accounts(state);
 
-    recover_stored_hermes_events_from_events(
+    recover_stored_hermes_events(
         &state.agent_home,
         home,
         &state.account_id,
         request.room_id.as_deref(),
         &mut inbox,
-        recent_events,
     )?;
     let events = lease_pending_hermes_inbox_events(
         &state.agent_home,
@@ -1938,7 +1930,6 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let started = Instant::now();
     let own_account = home.config.account_id.clone();
     let mut inbox = load_hermes_inbox(home_dir)?;
-    initialize_hermes_inbox_cursors(home_dir, &home, &mut inbox)?;
     let mut events =
         lease_pending_hermes_inbox_events(home_dir, &mut inbox, request.room_id.as_deref(), limit)?;
     let mut joined: Vec<String> = Vec::new();
@@ -2225,74 +2216,6 @@ fn enqueue_hermes_inbox_event(
     save_hermes_inbox(home_dir, inbox)
 }
 
-fn initialize_hermes_inbox_cursors(
-    home_dir: &Path,
-    home: &AgentHome,
-    inbox: &mut HermesInboxState,
-) -> Result<(), CliError> {
-    if !inbox.cursors.is_empty() {
-        return Ok(());
-    }
-    let recent_events = load_recent_agent_app_events(home)?;
-    initialize_hermes_inbox_cursors_from_events(
-        home_dir,
-        inbox,
-        &home.config.account_id,
-        recent_events.iter(),
-    )
-}
-
-fn initialize_hermes_inbox_cursors_from_events<'a>(
-    home_dir: &Path,
-    inbox: &mut HermesInboxState,
-    own_account: &str,
-    recent_events: impl IntoIterator<Item = &'a StoredAppEvent>,
-) -> Result<(), CliError> {
-    let recent_events = recent_events.into_iter().collect::<Vec<_>>();
-    if !inbox.cursors.is_empty() {
-        return Ok(());
-    }
-    let mut changed = false;
-    let pending = inbox
-        .events
-        .iter()
-        .map(|event| (event.room_id.clone(), event.seq))
-        .collect::<Vec<_>>();
-    for (room_id, seq) in pending {
-        changed |= advance_hermes_inbox_cursor(inbox, &room_id, seq);
-    }
-    if !inbox.events.is_empty() {
-        if changed {
-            save_hermes_inbox(home_dir, inbox)?;
-        }
-        return Ok(());
-    }
-
-    let mut first_counterparty_seq_by_room = BTreeMap::<&str, u64>::new();
-    for event in &recent_events {
-        if event.sender.account_id != own_account {
-            first_counterparty_seq_by_room
-                .entry(event.room_id.as_str())
-                .and_modify(|seq| *seq = (*seq).min(event.seq))
-                .or_insert(event.seq);
-        }
-    }
-
-    for event in recent_events {
-        if event.sender.account_id == own_account
-            && first_counterparty_seq_by_room
-                .get(event.room_id.as_str())
-                .is_none_or(|seq| event.seq < *seq)
-        {
-            changed |= advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
-        }
-    }
-    if changed {
-        save_hermes_inbox(home_dir, inbox)?;
-    }
-    Ok(())
-}
-
 fn recover_stored_hermes_events(
     home_dir: &Path,
     home: &AgentHome,
@@ -2363,6 +2286,14 @@ fn load_recent_agent_app_events(home: &AgentHome) -> Result<Vec<StoredAppEvent>,
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
+/// Highest app-event seq the bridge has already handed to hermes (or skipped
+/// as a non-hermes event) in `room_id`. This is bridge delivery state, not the
+/// device's room sync cursor: the two coincide only in steady state, and a
+/// room with no cursor means *nothing has been handed over yet*, so durable
+/// recovery delivers every counterparty event the store holds. It is never
+/// seeded from the store or from the room sync cursor — the latter is the
+/// device's applied position and seeding from it swallowed the first
+/// counterparty message of a fresh home.
 fn hermes_inbox_cursor(inbox: &HermesInboxState, room_id: &str) -> u64 {
     inbox.cursors.get(room_id).copied().unwrap_or(0)
 }
@@ -4727,30 +4658,6 @@ mod tests {
         assert_eq!(small["rooms"].as_array().unwrap().len(), 3);
     }
 
-    #[test]
-    fn initialized_hermes_inbox_does_not_reopen_event_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent_home = dir.path().join("store-must-remain-unopened");
-        let home = AgentHome {
-            dir: agent_home.clone(),
-            config: AgentConfig {
-                server_url: "http://127.0.0.1:1".to_owned(),
-                device_id: "agent-device".to_owned(),
-                account_id: "agent-account".to_owned(),
-            },
-            secret: NostrSecretKey::from_bytes([0x19; 32]).unwrap(),
-        };
-        let mut inbox = HermesInboxState::default();
-        inbox.cursors.insert("room-main".to_owned(), 7);
-
-        initialize_hermes_inbox_cursors(&agent_home, &home, &mut inbox).unwrap();
-
-        assert!(
-            !agent_home.exists(),
-            "an initialized inbox should not open or scan the encrypted Agent store"
-        );
-    }
-
     fn encoded_media_payload(reference: AttachmentBlobReferenceV1, text: &str) -> Vec<u8> {
         HermesMessagePayloadV1 {
             payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
@@ -5895,6 +5802,149 @@ mod tests {
         );
     }
 
+    fn recovery_test_home(dir: &Path) -> AgentHome {
+        AgentHome {
+            dir: dir.to_path_buf(),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id: "agent-account".to_owned(),
+            },
+            secret: NostrSecretKey::from_bytes([0x19; 32]).unwrap(),
+        }
+    }
+
+    fn stored_hermes_text(seq: u64, message_id: &str, account: &str, text: &str) -> StoredAppEvent {
+        let plaintext = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: None,
+            segment_id: None,
+            text: text.to_owned(),
+            kind: finitechat_hermes::HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .expect("encode text payload");
+        StoredAppEvent {
+            room_id: "room-a".to_owned(),
+            seq,
+            message_id: message_id.to_owned(),
+            sender: finitechat_proto::DeviceRef::new(account, "device"),
+            plaintext,
+            timestamp_unix_seconds: seq,
+        }
+    }
+
+    fn recover_into(home: &AgentHome, inbox: &mut HermesInboxState, events: &[StoredAppEvent]) {
+        recover_stored_hermes_events_from_events(
+            &home.dir,
+            home,
+            &home.config.account_id,
+            None,
+            inbox,
+            events.to_vec(),
+        )
+        .unwrap();
+    }
+
+    fn ack_room_a(home_dir: &Path, seq: u64, message_id: &str) {
+        let mut output = Vec::new();
+        cmd_ack(
+            home_dir,
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-a".to_owned(),
+                seq,
+                message_id: message_id.to_owned(),
+            })
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_inbox_hands_over_every_stored_counterparty_event_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let events = [
+            stored_hermes_text(1, "agent-setup", "agent-account", "agent setup"),
+            stored_hermes_text(2, "user-first", "user-account", "hello agent"),
+            stored_hermes_text(3, "agent-after", "agent-account", "agent after"),
+        ];
+
+        // No cursor means nothing has been handed to hermes yet: the store
+        // (not a seed derived from it) decides what is pending.
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "user-first");
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 2);
+
+        // Re-scanning the same store is idempotent.
+        recover_into(&home, &mut inbox, &events);
+        assert_eq!(pending_hermes_inbox_events(&inbox, None, 10).len(), 1);
+    }
+
+    #[test]
+    fn reopened_inbox_does_not_redeliver_acked_stored_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let events = [
+            stored_hermes_text(1, "agent-setup", "agent-account", "agent setup"),
+            stored_hermes_text(2, "user-first", "user-account", "hello agent"),
+        ];
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        lease_pending_hermes_inbox_events(dir.path(), &mut inbox, None, 10).unwrap();
+        ack_room_a(dir.path(), 2, "user-first");
+
+        // A fresh process reloads the durable inbox and re-scans the store.
+        let mut reopened = load_hermes_inbox(dir.path()).unwrap();
+        assert_eq!(hermes_inbox_cursor(&reopened, "room-a"), 2);
+        recover_into(&home, &mut reopened, &events);
+        assert!(
+            pending_hermes_inbox_events(&reopened, None, 10).is_empty(),
+            "an acked turn must not come back after a reopen"
+        );
+    }
+
+    #[test]
+    fn counterparty_event_after_the_cursor_is_delivered_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let mut events = vec![stored_hermes_text(
+            2,
+            "user-first",
+            "user-account",
+            "hello agent",
+        )];
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        lease_pending_hermes_inbox_events(dir.path(), &mut inbox, None, 10).unwrap();
+        ack_room_a(dir.path(), 2, "user-first");
+
+        events.push(stored_hermes_text(3, "agent-reply", "agent-account", "hi"));
+        events.push(stored_hermes_text(
+            4,
+            "user-second",
+            "user-account",
+            "again",
+        ));
+        let mut inbox = load_hermes_inbox(dir.path()).unwrap();
+        recover_into(&home, &mut inbox, &events);
+        recover_into(&home, &mut inbox, &events);
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "user-second");
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 4);
+    }
+
     fn topic_with_chats(room_id: &str, topic_id: &str, chat_ids: &[&str]) -> AppTopicSummary {
         use finitechat_core::AppChatSummary;
         AppTopicSummary {
@@ -6536,65 +6586,6 @@ mod tests {
         assert!(!advance_agentd_inbox_cursor(&mut inbox, "room-a", 3));
         assert_eq!(agentd_inbox_cursor(&inbox, "room-a"), 5);
         assert_eq!(inbox.events.len(), 1, "cursor movement is not an ack");
-    }
-
-    #[test]
-    fn inbox_initialization_does_not_consume_first_counterparty_message() {
-        let home = tempfile::tempdir().unwrap();
-        let mut inbox = HermesInboxState::default();
-        let events = [
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 1,
-                message_id: "agent-setup".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
-                plaintext: b"agent setup".to_vec(),
-                timestamp_unix_seconds: 1,
-            },
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 2,
-                message_id: "user-first".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("user-account", "electron"),
-                plaintext: b"hello agent".to_vec(),
-                timestamp_unix_seconds: 2,
-            },
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 3,
-                message_id: "agent-after".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
-                plaintext: b"agent after".to_vec(),
-                timestamp_unix_seconds: 3,
-            },
-        ];
-
-        initialize_hermes_inbox_cursors_from_events(
-            home.path(),
-            &mut inbox,
-            "agent-account",
-            events.iter(),
-        )
-        .unwrap();
-        assert_eq!(
-            hermes_inbox_cursor(&inbox, "room-a"),
-            1,
-            "first run must not advance past unseen counterparty messages"
-        );
-
-        let user_event = HermesPollEventV1::finite_chat_text(
-            "room-a",
-            2,
-            "user-first",
-            "user-account",
-            "electron",
-            "hello agent",
-        )
-        .unwrap();
-        enqueue_hermes_inbox_event(home.path(), &mut inbox, user_event).unwrap();
-        let pending = pending_hermes_inbox_events(&inbox, None, 10);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].message_id, "user-first");
     }
 
     #[test]
